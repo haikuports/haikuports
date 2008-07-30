@@ -1,0 +1,196 @@
+diff --git a/configure.in b/configure.in
+index c7e457f..3af7f67 100644
+--- a/configure.in
++++ b/configure.in
+@@ -445,7 +445,7 @@ dnl ===========================================================================
+ 
+ CAIRO_BACKEND_ENABLE(beos, BeOS/Zeta, beos, BEOS_SURFACE, no, [
+   case "$host" in
+-    *-*-beos)
++    *-*-beos|*-*-haiku*)
+       dnl Add libbe and libzeta if available
+       AC_CHECK_LIB(be,main,beos_LIBS="$beos_LIBS -lbe")
+       AC_CHECK_LIB(zeta,main,beos_LIBS="$beos_LIBS -lzeta")
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 200867a..9890b36 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -242,7 +242,7 @@ if CAIRO_HAS_BEOS_SURFACE
+ cairo_headers += $(beos_headers)
+ # automake is stupid enough to always use c++ linker if we enable the
+ # following line, even if beos surface is not enabled.  Disable it for now.
+-#cairo_sources += $(beos_sources)
++cairo_sources += $(beos_sources)
+ backend_pkgconfigs += cairo-beos.pc
+ endif
+ 
+diff --git a/src/cairo-beos-surface.cpp b/src/cairo-beos-surface.cpp
+index 69dfd83..44ba8dd 100644
+--- a/src/cairo-beos-surface.cpp
++++ b/src/cairo-beos-surface.cpp
+@@ -36,7 +36,9 @@
+ 
+ // This is a C++ file in order to use the C++ BeOS API
+ 
++extern "C" {
+ #include "cairoint.h"
++}
+ 
+ #include "cairo-beos.h"
+ 
+@@ -102,17 +104,17 @@ _cairo_beos_surface_create_internal (BView*   view,
+ 				     bool     owns_bitmap_view = false);
+ 
+ static BRect
+-_cairo_rect_to_brect (const cairo_rectangle_int16_t* rect)
++_cairo_rect_to_brect (const cairo_rectangle_int_t* rect)
+ {
+     // A BRect is one pixel wider than you'd think
+     return BRect(rect->x, rect->y, rect->x + rect->width - 1,
+ 	    	 rect->y + rect->height - 1);
+ }
+ 
+-static cairo_rectangle_int16_t
++static cairo_rectangle_int_t
+ _brect_to_cairo_rect (const BRect& rect)
+ {
+-    cairo_rectangle_int16_t retval;
++    cairo_rectangle_int_t retval;
+     retval.x = int(rect.left + 0.5);
+     retval.y = int(rect.top + 0.5);
+     retval.width = rect.IntegerWidth() + 1;
+@@ -551,9 +553,9 @@ _cairo_beos_surface_release_source_image (void                  *abstract_surfac
+ 
+ static cairo_status_t
+ _cairo_beos_surface_acquire_dest_image (void			 *abstract_surface,
+-                                        cairo_rectangle_int16_t	 *interest_rect,
++                                        cairo_rectangle_int_t	 *interest_rect,
+                                         cairo_image_surface_t	**image_out,
+-                                        cairo_rectangle_int16_t	 *image_rect,
++                                        cairo_rectangle_int_t	 *image_rect,
+                                         void			**image_extra)
+ {
+     cairo_beos_surface_t *surface = reinterpret_cast<cairo_beos_surface_t*>(
+@@ -616,9 +618,9 @@ _cairo_beos_surface_acquire_dest_image (void			 *abstract_surface,
+ 
+ static void
+ _cairo_beos_surface_release_dest_image (void			*abstract_surface,
+-                                        cairo_rectangle_int16_t	*intersect_rect,
++                                        cairo_rectangle_int_t	*intersect_rect,
+                                         cairo_image_surface_t	*image,
+-                                        cairo_rectangle_int16_t	*image_rect,
++                                        cairo_rectangle_int_t	*image_rect,
+                                         void			*image_extra)
+ {
+     fprintf(stderr, "Fallback drawing\n");
+@@ -769,7 +771,7 @@ _cairo_beos_surface_composite (cairo_operator_t		op,
+ 
+ static void
+ _cairo_beos_surface_fill_rectangle (cairo_beos_surface_t	*surface,
+-				    cairo_rectangle_int16_t	*rect)
++				    cairo_rectangle_int_t	*rect)
+ {
+     BRect brect(_cairo_rect_to_brect(rect));
+     surface->view->FillRect(brect);
+@@ -779,7 +781,7 @@ static cairo_int_status_t
+ _cairo_beos_surface_fill_rectangles (void			*abstract_surface,
+ 				     cairo_operator_t		 op,
+ 				     const cairo_color_t	*color,
+-				     cairo_rectangle_int16_t	*rects,
++				     cairo_rectangle_int_t	*rects,
+ 				     int			 num_rects)
+ {
+     fprintf(stderr, "Drawing %i rectangles\n", num_rects);
+@@ -835,9 +837,10 @@ _cairo_beos_surface_fill_rectangles (void			*abstract_surface,
+ 
+ static cairo_int_status_t
+ _cairo_beos_surface_set_clip_region (void              *abstract_surface,
+-                                     pixman_region16_t *region)
++                                     cairo_region_t *reg)
+ {
+     fprintf(stderr, "Setting clip region\n");
++    pixman_region16_t* region = reinterpret_cast<pixman_region16_t*>(reg);
+     cairo_beos_surface_t *surface = reinterpret_cast<cairo_beos_surface_t*>(
+ 							abstract_surface);
+     AutoLockView locker(surface->view);
+@@ -850,8 +853,8 @@ _cairo_beos_surface_set_clip_region (void              *abstract_surface,
+ 	return CAIRO_INT_STATUS_SUCCESS;
+     }
+ 
+-    int count = pixman_region_num_rects(region);
+-    pixman_box16_t* rects = pixman_region_rects(region);
++    int count;
++    pixman_box16_t* rects = pixman_region_rectangles(region, &count);
+     BRegion bregion;
+     for (int i = 0; i < count; ++i) {
+ 	// Have to substract one, because for pixman, the second coordinate
+@@ -864,7 +867,7 @@ _cairo_beos_surface_set_clip_region (void              *abstract_surface,
+ 
+ static cairo_int_status_t
+ _cairo_beos_surface_get_extents (void				*abstract_surface,
+-				 cairo_rectangle_int16_t	*rectangle)
++				 cairo_rectangle_int_t	*rectangle)
+ {
+     cairo_beos_surface_t *surface = reinterpret_cast<cairo_beos_surface_t*>(
+ 							abstract_surface);
+@@ -914,6 +917,45 @@ static const struct _cairo_surface_backend cairo_beos_surface_backend = {
+     NULL  /* show_glyphs */
+ };
+ 
++#define DEFINE_NIL_SURFACE(status, name)			\
++const cairo_surface_t name = {					\
++    &cairo_image_surface_backend,	/* backend */		\
++    CAIRO_SURFACE_TYPE_IMAGE,					\
++    CAIRO_CONTENT_COLOR,					\
++    CAIRO_REFERENCE_COUNT_INVALID,	/* ref_count */		\
++    status,				/* status */		\
++    FALSE,				/* finished */		\
++    { 0,	/* size */					\
++      0,	/* num_elements */				\
++      0,	/* element_size */				\
++      NULL,	/* elements */					\
++    },					/* user_data */		\
++    { 1.0, 0.0,							\
++      0.0, 1.0,							\
++      0.0, 0.0							\
++    },					/* device_transform */	\
++    { 1.0, 0.0,							\
++      0.0, 1.0,							\
++      0.0, 0.0							\
++    },					/* device_transform_inverse */	\
++    0.0,				/* x_resolution */	\
++    0.0,				/* y_resolution */	\
++    0.0,				/* x_fallback_resolution */	\
++    0.0,				/* y_fallback_resolution */	\
++    NULL,				/* clip */		\
++    0,					/* next_clip_serial */	\
++    0,					/* current_clip_serial */	\
++    FALSE,				/* is_snapshot */	\
++    FALSE,				/* has_font_options */	\
++    { CAIRO_ANTIALIAS_DEFAULT,					\
++      CAIRO_SUBPIXEL_ORDER_DEFAULT,				\
++      CAIRO_HINT_STYLE_DEFAULT,					\
++      CAIRO_HINT_METRICS_DEFAULT				\
++    }					/* font_options */	\
++}
++
++static DEFINE_NIL_SURFACE(CAIRO_STATUS_NO_MEMORY, _cairo_surface_nil);
++
+ static cairo_surface_t *
+ _cairo_beos_surface_create_internal (BView*   view,
+ 				     BBitmap* bmp,
+diff --git a/test/Makefile.am b/test/Makefile.am
+index ec98a49..225b6d2 100644
+--- a/test/Makefile.am
++++ b/test/Makefile.am
+@@ -826,8 +826,10 @@ $(top_builddir)/test/pdiff/libpdiff.la:
+ 	cd $(top_builddir)/test/pdiff && $(MAKE) $(AM_MAKEFLAGS) libpdiff.la
+ 
+ if HAVE_PTHREAD
++if !CAIRO_HAS_BEOS_SURFACE
+ LDADD += -lpthread
+ endif
++endif
+ 
+ check_PROGRAMS += imagediff png-flatten
+ 
