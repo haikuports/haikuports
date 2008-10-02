@@ -1,0 +1,352 @@
+diff -urN --strip-trailing-cr coreutils-6.12/c99-to-c89.diff coreutils-6.12-haiku/c99-to-c89.diff
+--- coreutils-6.12/c99-to-c89.diff	1970-01-01 00:00:00.000000000 +0000
++++ coreutils-6.12-haiku/c99-to-c89.diff	2008-10-02 21:09:04.000000000 +0000
+@@ -0,0 +1,138 @@
++diff -upr src/remove.c src/remove.c
++--- src/remove.c	2007-07-23 12:56:20.000000000 +0200
+++++ src/remove.c	2007-07-23 13:03:12.000000000 +0200
++@@ -257,9 +257,10 @@ pop_dir (Dirstack_state *ds)
++ {
++   size_t n_lengths = obstack_object_size (&ds->len_stack) / sizeof (size_t);
++   size_t *length = obstack_base (&ds->len_stack);
+++  size_t top_len;
++
++   assert (n_lengths > 0);
++-  size_t top_len = length[n_lengths - 1];
+++  top_len = length[n_lengths - 1];
++   assert (top_len >= 2);
++
++   /* Pop the specified length of file name.  */
++@@ -391,10 +392,11 @@ AD_stack_top (Dirstack_state const *ds)
++ static void
++ AD_stack_pop (Dirstack_state *ds)
++ {
+++  struct AD_ent *top;
++   assert (0 < AD_stack_height (ds));
++
++   /* operate on Active_dir.  pop and free top entry */
++-  struct AD_ent *top = AD_stack_top (ds);
+++  top = AD_stack_top (ds);
++   if (top->unremovable)
++     hash_free (top->unremovable);
++   obstack_blank (&ds->Active_dir, -(int) sizeof (struct AD_ent));
++@@ -876,6 +878,7 @@ prompt (int fd_cwd, Dirstack_state const
++ 	    break;
++ 	  }
++
+++      {
++       char const *quoted_name = quote (full_filename (filename));
++
++       if (0 < write_protected)
++@@ -915,6 +918,7 @@ prompt (int fd_cwd, Dirstack_state const
++ 		    : _("%s: remove %s %s? ")),
++ 		   program_name, file_type (sbuf), quoted_name);
++ 	}
+++      }
++
++       if (!yesno ())
++ 	return RM_USER_DECLINED;
++@@ -1515,6 +1519,7 @@ rm_1 (Dirstack_state *ds, char const *fi
++       return RM_ERROR;
++     }
++
+++  {
++   struct stat st;
++   cache_stat_init (&st);
++   cycle_check_init (&ds->cycle_check_state);
++@@ -1537,6 +1542,7 @@ rm_1 (Dirstack_state *ds, char const *fi
++   AD_push_initial (ds);
++   AD_INIT_OTHER_MEMBERS ();
++
+++  {
++   enum RM_status status = remove_entry (AT_FDCWD, ds, filename,
++ 					DT_UNKNOWN, &st, x);
++   if (status == RM_NONEMPTY_DIR)
++@@ -1555,6 +1561,8 @@ rm_1 (Dirstack_state *ds, char const *fi
++   ds_clear (ds);
++   return status;
++ }
+++  }
+++}
++
++ /* Remove all files and/or directories specified by N_FILES and FILE.
++    Apply the options in X.  */
++diff -upr src/rm.c src/rm.c
++--- src/rm.c	2007-07-23 12:56:20.000000000 +0200
+++++ src/rm.c	2007-07-23 13:03:12.000000000 +0200
++@@ -354,6 +354,7 @@ main (int argc, char **argv)
++ 	       quote ("/"));
++     }
++
+++  {
++   size_t n_files = argc - optind;
++   char const *const *file = (char const *const *) argv + optind;
++
++@@ -367,7 +368,10 @@ main (int argc, char **argv)
++       if (!yesno ())
++ 	exit (EXIT_SUCCESS);
++     }
+++  {
++   enum RM_status status = rm (n_files, file, &x);
++   assert (VALID_STATUS (status));
++   exit (status == RM_ERROR ? EXIT_FAILURE : EXIT_SUCCESS);
+++  }
+++  }
++ }
++diff -upr src/seq.c src/seq.c
++--- src/seq.c	2007-07-23 12:56:20.000000000 +0200
+++++ src/seq.c	2007-07-23 13:03:12.000000000 +0200
++@@ -156,6 +156,7 @@ scan_arg (const char *arg)
++ 			: (decimal_point == arg                /* .#  -> 0.# */
++ 			   || ! ISDIGIT (decimal_point[-1]))); /* -.# -> 0.# */
++ 	}
+++      {
++       char const *e = strchr (arg, 'e');
++       if (! e)
++ 	e = strchr (arg, 'E');
++@@ -164,6 +165,7 @@ scan_arg (const char *arg)
++ 	  long exponent = strtol (e + 1, NULL, 10);
++ 	  ret.precision += exponent < 0 ? -exponent : 0;
++ 	}
+++      }
++     }
++
++   return ret;
++@@ -292,6 +294,7 @@ get_default_format (operand first, opera
++ 	  size_t last_width = last.width + (prec - last.precision);
++ 	  if (last.precision && prec == 0)
++ 	    last_width--;  /* don't include space for '.' */
+++	  {
++ 	  size_t width = MAX (first_width, last_width);
++ 	  if (width <= INT_MAX)
++ 	    {
++@@ -299,6 +302,7 @@ get_default_format (operand first, opera
++ 	      sprintf (format_buf, "%%0%d.%dLf", w, prec);
++ 	      return format_buf;
++ 	    }
+++	  }
++ 	}
++       else
++ 	{
++diff -upr src/shred.c src/shred.c
++--- src/shred.c	2007-07-23 12:56:20.000000000 +0200
+++++ src/shred.c	2007-07-23 13:03:12.000000000 +0200
++@@ -462,7 +462,7 @@ dopass (int fd, char const *qname, off_t
++ 		     out.  Thus, it shouldn't give up on bad blocks.  This
++ 		     code works because lim is always a multiple of
++ 		     SECTOR_SIZE, except at the end.  */
++-		  verify (sizeof r % SECTOR_SIZE == 0);
+++		  { verify (sizeof r % SECTOR_SIZE == 0); }
++ 		  if (errnum == EIO && 0 <= size && (soff | SECTOR_MASK) < lim)
++ 		    {
++ 		      size_t soff1 = (soff | SECTOR_MASK) + 1;
+diff -urN --strip-trailing-cr coreutils-6.12/lib/fpurge.c coreutils-6.12-haiku/lib/fpurge.c
+--- coreutils-6.12/lib/fpurge.c	2008-05-14 12:53:25.000000000 +0000
++++ coreutils-6.12-haiku/lib/fpurge.c	2008-10-02 12:28:05.000000000 +0000
+@@ -61,7 +61,7 @@
+   /* Most systems provide FILE as a struct and the necessary bitmask in
+      <stdio.h>, because they need it for implementing getc() and putc() as
+      fast macros.  */
+-# if defined _IO_ferror_unlocked || __GNU_LIBRARY__ == 1 /* GNU libc, BeOS, Linux libc5 */
++# if defined _IO_ferror_unlocked || __GNU_LIBRARY__ == 1 || defined __HAIKU__ /* GNU libc, BeOS, Linux libc5 */
+   fp->_IO_read_end = fp->_IO_read_ptr;
+   fp->_IO_write_ptr = fp->_IO_write_base;
+   /* Avoid memory leak when there is an active ungetc buffer.  */
+diff -urN --strip-trailing-cr coreutils-6.12/lib/freadahead.c coreutils-6.12-haiku/lib/freadahead.c
+--- coreutils-6.12/lib/freadahead.c	2008-05-14 12:53:25.000000000 +0000
++++ coreutils-6.12-haiku/lib/freadahead.c	2008-10-02 12:29:10.000000000 +0000
+@@ -24,7 +24,7 @@
+ size_t
+ freadahead (FILE *fp)
+ {
+-#if defined _IO_ferror_unlocked || __GNU_LIBRARY__ == 1 /* GNU libc, BeOS, Linux libc5 */
++#if defined _IO_ferror_unlocked || __GNU_LIBRARY__ == 1 || defined __HAIKU__ /* GNU libc, BeOS, Linux libc5 */
+   if (fp->_IO_write_ptr > fp->_IO_write_base)
+     return 0;
+   return (fp->_IO_read_end - fp->_IO_read_ptr)
+diff -urN --strip-trailing-cr coreutils-6.12/lib/freading.c coreutils-6.12-haiku/lib/freading.c
+--- coreutils-6.12/lib/freading.c	2008-05-14 12:53:25.000000000 +0000
++++ coreutils-6.12-haiku/lib/freading.c	2008-10-02 12:30:41.000000000 +0000
+@@ -31,7 +31,7 @@
+   /* Most systems provide FILE as a struct and the necessary bitmask in
+      <stdio.h>, because they need it for implementing getc() and putc() as
+      fast macros.  */
+-#if defined _IO_ferror_unlocked || __GNU_LIBRARY__ == 1 /* GNU libc, BeOS, Linux libc5 */
++#if defined _IO_ferror_unlocked || __GNU_LIBRARY__ == 1 || defined __HAIKU__ /* GNU libc, BeOS, Linux libc5 */
+   return ((fp->_flags & _IO_NO_WRITES) != 0
+ 	  || ((fp->_flags & (_IO_NO_READS | _IO_CURRENTLY_PUTTING)) == 0
+ 	      && fp->_IO_read_base != NULL));
+diff -urN --strip-trailing-cr coreutils-6.12/lib/freadptr.c coreutils-6.12-haiku/lib/freadptr.c
+--- coreutils-6.12/lib/freadptr.c	2008-05-14 12:53:25.000000000 +0000
++++ coreutils-6.12-haiku/lib/freadptr.c	2008-10-02 12:32:42.000000000 +0000
+@@ -29,7 +29,7 @@
+   size_t size;
+ 
+   /* Keep this code in sync with freadahead!  */
+-#if defined _IO_ferror_unlocked || __GNU_LIBRARY__ == 1 /* GNU libc, BeOS, Linux libc5 */
++#if defined _IO_ferror_unlocked || __GNU_LIBRARY__ == 1 || defined __HAIKU__ /* GNU libc, BeOS, Linux libc5 */
+   if (fp->_IO_write_ptr > fp->_IO_write_base)
+     return NULL;
+   size = fp->_IO_read_end - fp->_IO_read_ptr;
+diff -urN --strip-trailing-cr coreutils-6.12/lib/freadseek.c coreutils-6.12-haiku/lib/freadseek.c
+--- coreutils-6.12/lib/freadseek.c	2008-05-14 12:53:25.000000000 +0000
++++ coreutils-6.12-haiku/lib/freadseek.c	2008-10-02 12:35:31.000000000 +0000
+@@ -34,7 +34,7 @@
+ freadptrinc (FILE *fp, size_t increment)
+ {
+   /* Keep this code in sync with freadptr!  */
+-#if defined _IO_ferror_unlocked || __GNU_LIBRARY__ == 1 /* GNU libc, BeOS, Linux libc5 */
++#if defined _IO_ferror_unlocked || __GNU_LIBRARY__ == 1 || defined __HAIKU__ /* GNU libc, BeOS, Linux libc5 */
+   fp->_IO_read_ptr += increment;
+ #elif defined __sferror || defined __DragonFly__ /* FreeBSD, NetBSD, OpenBSD, DragonFly, MacOS X, Cygwin */
+   fp_->_p += increment;
+diff -urN --strip-trailing-cr coreutils-6.12/lib/fseterr.c coreutils-6.12-haiku/lib/fseterr.c
+--- coreutils-6.12/lib/fseterr.c	2008-05-14 12:53:25.000000000 +0000
++++ coreutils-6.12-haiku/lib/fseterr.c	2008-10-02 12:36:27.000000000 +0000
+@@ -29,7 +29,7 @@
+   /* Most systems provide FILE as a struct and the necessary bitmask in
+      <stdio.h>, because they need it for implementing getc() and putc() as
+      fast macros.  */
+-#if defined _IO_ferror_unlocked || __GNU_LIBRARY__ == 1 /* GNU libc, BeOS, Linux libc5 */
++#if defined _IO_ferror_unlocked || __GNU_LIBRARY__ == 1 || defined __HAIKU__ /* GNU libc, BeOS, Linux libc5 */
+   fp->_flags |= _IO_ERR_SEEN;
+ #elif defined __sferror || defined __DragonFly__ /* FreeBSD, NetBSD, OpenBSD, DragonFly, MacOS X, Cygwin */
+   fp_->_flags |= __SERR;
+diff -urN --strip-trailing-cr coreutils-6.12/src/remove.c coreutils-6.12-haiku/src/remove.c
+--- coreutils-6.12/src/remove.c	2008-05-06 09:28:24.000000000 +0000
++++ coreutils-6.12-haiku/src/remove.c	2008-10-02 14:13:30.000000000 +0000
+@@ -264,9 +264,10 @@
+ {
+   size_t n_lengths = obstack_object_size (&ds->len_stack) / sizeof (size_t);
+   size_t *length = obstack_base (&ds->len_stack);
++  size_t top_len;
+ 
+   assert (n_lengths > 0);
+-  size_t top_len = length[n_lengths - 1];
++  top_len = length[n_lengths - 1];
+   assert (top_len >= 2);
+ 
+   /* Pop the specified length of file name.  */
+@@ -424,10 +425,11 @@
+ static void
+ AD_stack_pop (Dirstack_state *ds)
+ {
++  struct AD_ent *top;
+   assert (0 < AD_stack_height (ds));
+ 
+   /* operate on Active_dir.  pop and free top entry */
+-  struct AD_ent *top = AD_stack_top (ds);
++  top = AD_stack_top (ds);
+   if (top->unremovable)
+     hash_free (top->unremovable);
+   obstack_blank (&ds->Active_dir, -(int) sizeof (struct AD_ent));
+@@ -891,6 +893,7 @@
+ 	    break;
+ 	  }
+ 
++      {
+       char const *quoted_name = quote (full_filename (filename));
+ 
+       if (write_protected < 0)
+@@ -930,6 +933,7 @@
+ 		    : _("%s: remove %s %s? ")),
+ 		   program_name, file_type (sbuf), quoted_name);
+ 	}
++      }
+ 
+       if (!yesno ())
+ 	return RM_USER_DECLINED;
+@@ -1549,6 +1553,7 @@
+       return RM_ERROR;
+     }
+ 
++  {
+   struct stat st;
+   cache_stat_init (&st);
+   cycle_check_init (&ds->cycle_check_state);
+@@ -1571,6 +1576,7 @@
+   AD_push_initial (ds);
+   AD_INIT_OTHER_MEMBERS ();
+ 
++  {
+   enum RM_status status = remove_entry (AT_FDCWD, ds, filename,
+ 					DT_UNKNOWN, &st, x);
+   if (status == RM_NONEMPTY_DIR)
+@@ -1589,6 +1595,8 @@
+   ds_clear (ds);
+   return status;
+ }
++  }
++}
+ 
+ /* Remove all files and/or directories specified by N_FILES and FILE.
+    Apply the options in X.  */
+diff -urN --strip-trailing-cr coreutils-6.12/src/rm.c coreutils-6.12-haiku/src/rm.c
+--- coreutils-6.12/src/rm.c	2008-05-26 06:40:33.000000000 +0000
++++ coreutils-6.12-haiku/src/rm.c	2008-10-02 14:13:30.000000000 +0000
+@@ -357,6 +357,7 @@
+ 	       quote ("/"));
+     }
+ 
++  {
+   size_t n_files = argc - optind;
+   char const *const *file = (char const *const *) argv + optind;
+ 
+@@ -370,7 +371,10 @@
+       if (!yesno ())
+ 	exit (EXIT_SUCCESS);
+     }
++  {
+   enum RM_status status = rm (n_files, file, &x);
+   assert (VALID_STATUS (status));
+   exit (status == RM_ERROR ? EXIT_FAILURE : EXIT_SUCCESS);
++  }
++  }
+ }
+diff -urN --strip-trailing-cr coreutils-6.12/src/seq.c coreutils-6.12-haiku/src/seq.c
+--- coreutils-6.12/src/seq.c	2008-05-26 06:40:32.000000000 +0000
++++ coreutils-6.12-haiku/src/seq.c	2008-10-02 14:13:30.000000000 +0000
+@@ -166,6 +166,7 @@
+ 			: (decimal_point == arg                /* .#  -> 0.# */
+ 			   || ! ISDIGIT (decimal_point[-1]))); /* -.# -> 0.# */
+ 	}
++      {
+       char const *e = strchr (arg, 'e');
+       if (! e)
+ 	e = strchr (arg, 'E');
+@@ -174,6 +175,7 @@
+ 	  long exponent = strtol (e + 1, NULL, 10);
+ 	  ret.precision += exponent < 0 ? -exponent : 0;
+ 	}
++      }
+     }
+ 
+   return ret;
+@@ -349,6 +351,7 @@
+ 	  size_t last_width = last.width + (prec - last.precision);
+ 	  if (last.precision && prec == 0)
+ 	    last_width--;  /* don't include space for '.' */
++	  {
+ 	  size_t width = MAX (first_width, last_width);
+ 	  if (width <= INT_MAX)
+ 	    {
+@@ -356,6 +359,7 @@
+ 	      sprintf (format_buf, "%%0%d.%dLf", w, prec);
+ 	      return format_buf;
+ 	    }
++	  }
+ 	}
+       else
+ 	{
+diff -urN --strip-trailing-cr coreutils-6.12/src/shred.c coreutils-6.12-haiku/src/shred.c
+--- coreutils-6.12/src/shred.c	2008-05-26 06:40:33.000000000 +0000
++++ coreutils-6.12-haiku/src/shred.c	2008-10-02 14:13:31.000000000 +0000
+@@ -461,7 +461,7 @@
+ 		     out.  Thus, it shouldn't give up on bad blocks.  This
+ 		     code works because lim is always a multiple of
+ 		     SECTOR_SIZE, except at the end.  */
+-		  verify (sizeof r % SECTOR_SIZE == 0);
++		  { verify (sizeof r % SECTOR_SIZE == 0); }
+ 		  if (errnum == EIO && 0 <= size && (soff | SECTOR_MASK) < lim)
+ 		    {
+ 		      size_t soff1 = (soff | SECTOR_MASK) + 1;
