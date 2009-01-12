@@ -1,0 +1,331 @@
+diff -Naur transmission-1.42-original/libtransmission/Makefile.am transmission-1.42/libtransmission/Makefile.am
+--- transmission-1.42-original/libtransmission/Makefile.am	2009-01-10 18:04:06.000000000 +0000
++++ transmission-1.42/libtransmission/Makefile.am	2009-01-10 18:56:45.000000000 +0000
+@@ -12,6 +12,7 @@
+ noinst_LIBRARIES = libtransmission.a
+ 
+ libtransmission_a_SOURCES = \
++    basename.c \
+     bandwidth.c \
+     bencode.c \
+     blocklist.c \
+@@ -95,6 +96,7 @@
+     tracker.h \
+     tr-getopt.h \
+     transmission.h \
++    trcompat.h \
+     trevent.h \
+     upnp.h \
+     utils.h \
+diff -Naur transmission-1.42-original/libtransmission/Makefile.in transmission-1.42/libtransmission/Makefile.in
+--- transmission-1.42-original/libtransmission/Makefile.in	2009-01-10 18:04:06.000000000 +0000
++++ transmission-1.42/libtransmission/Makefile.in	2009-01-10 18:56:45.000000000 +0000
+@@ -369,6 +369,7 @@
+ 
+ noinst_LIBRARIES = libtransmission.a
+ libtransmission_a_SOURCES = \
++    basename.c \
+     bandwidth.c \
+     bencode.c \
+     blocklist.c \
+@@ -452,6 +453,7 @@
+     tracker.h \
+     tr-getopt.h \
+     transmission.h \
++    trcompat.h \
+     trevent.h \
+     upnp.h \
+     utils.h \
+diff -Naur transmission-1.42-original/libtransmission/basename.c transmission-1.42/libtransmission/basename.c
+--- transmission-1.42-original/libtransmission/basename.c	1970-01-01 00:00:00.000000000 +0000
++++ transmission-1.42/libtransmission/basename.c	2009-01-10 18:56:45.000000000 +0000
+@@ -0,0 +1,68 @@
++/*  $Id: basename.c 2684 2007-08-08 23:33:23Z charles $            */
++/*	$OpenBSD: basename.c,v 1.14 2005/08/08 08:05:33 espie Exp $	*/
++
++/*
++ * Copyright (c) 1997, 2004 Todd C. Miller <Todd.Miller@courtesan.com>
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#if !defined(HAVE_BASENAME) || defined(__HAIKU__)
++
++#include <errno.h>
++#include <string.h>
++#include <unistd.h> /* for MAXPATHLEN */
++#include <sys/param.h>
++
++char *
++basename(const char *path)
++{
++	static char bname[MAXPATHLEN];
++	size_t len;
++	const char *endp, *startp;
++
++	/* Empty or NULL string gets treated as "." */
++	if (path == NULL || *path == '\0') {
++		bname[0] = '.';
++		bname[1] = '\0';
++		return (bname);
++	}
++
++	/* Strip any trailing slashes */
++	endp = path + strlen(path) - 1;
++	while (endp > path && *endp == '/')
++		endp--;
++
++	/* All slashes becomes "/" */
++	if (endp == path && *endp == '/') {
++		bname[0] = '/';
++		bname[1] = '\0';
++		return (bname);
++	}
++
++	/* Find the start of the base */
++	startp = endp;
++	while (startp > path && *(startp - 1) != '/')
++		startp--;
++
++	len = endp - startp + 1;
++	if (len >= sizeof(bname)) {
++		errno = ENAMETOOLONG;
++		return (NULL);
++	}
++	memcpy(bname, startp, len);
++	bname[len] = '\0';
++	return (bname);
++}
++
++#endif /* HAVE_BASENAME */
+diff -Naur transmission-1.42-original/libtransmission/platform.c transmission-1.42/libtransmission/platform.c
+--- transmission-1.42-original/libtransmission/platform.c	2009-01-10 18:04:07.000000000 +0000
++++ transmission-1.42/libtransmission/platform.c	2009-01-10 18:56:46.000000000 +0000
+@@ -22,6 +22,8 @@
+ #else
+  #ifdef SYS_DARWIN
+   #include <CoreFoundation/CoreFoundation.h>
++ #elif defined(__HAIKU__)
++  #include <FindDirectory.h>  
+  #endif
+ 
+  #define _XOPEN_SOURCE 500  /* needed for recursive locks. */
+@@ -298,7 +300,7 @@
+ 
+     if( !path )
+     {
+-#ifdef __BEOS__
++#if defined(__BEOS__) || defined(__HAIKU__)
+         char buf[MAX_PATH_LENGTH];
+         find_directory( B_USER_SETTINGS_DIRECTORY,
+                        dev_for_path( "/boot" ), true,
+@@ -348,7 +350,7 @@
+ 
+     if( !path )
+     {
+-#if defined( __BEOS__ ) || defined( WIN32 )
++#if defined( __BEOS__ ) || defined(__HAIKU__) || defined( WIN32 )
+         path = tr_buildPath( getOldConfigDir( ), "Cache", NULL );
+ #elif defined( SYS_DARWIN )
+         path = tr_buildPath( getHomeDir( ), "Library", "Caches", "Transmission", NULL );
+@@ -467,6 +469,9 @@
+ #ifdef SYS_DARWIN
+             s = tr_buildPath( getHomeDir( ), "Library",
+                               "Application Support", "Transmission", NULL );
++#elif defined(__HAIKU__)
++            s = tr_buildPath( getHomeDir( ), "config",
++                              "settings", "Transmission", NULL );
+ #elif defined( WIN32 )
+             char appdata[MAX_PATH]; /* SHGetFolderPath() requires MAX_PATH */
+             SHGetFolderPath( NULL, CSIDL_APPDATA, NULL, 0, appdata );
+diff -Naur transmission-1.42-original/libtransmission/trcompat.h transmission-1.42/libtransmission/trcompat.h
+--- transmission-1.42-original/libtransmission/trcompat.h	1970-01-01 00:00:00.000000000 +0000
++++ transmission-1.42/libtransmission/trcompat.h	2009-01-10 18:56:45.000000000 +0000
+@@ -0,0 +1,38 @@
++/******************************************************************************
++ * $Id: trcompat.h 3651 2007-10-30 19:16:06Z charles $
++ *
++ * Copyright (c) 2005-2007 Transmission authors and contributors
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
++ *****************************************************************************/
++#ifndef TRCOMPAT_H
++#define TRCOMPAT_H
++
++
++#ifdef __HAIKU__
++/* This is a work-around until libgen.h is added */
++/* see : http://dev.haiku-os.org/ticket/2093 for more information */
++#undef HAVE_BASENAME
++#endif
++
++#ifndef HAVE_BASENAME
++    char* basename(const char *path);
++#endif
++
++#endif /* TRCOMPAT_H */
+diff -Naur transmission-1.42-original/libtransmission/utils.c transmission-1.42/libtransmission/utils.c
+--- transmission-1.42-original/libtransmission/utils.c	2009-01-10 18:04:07.000000000 +0000
++++ transmission-1.42/libtransmission/utils.c	2009-01-10 18:56:45.000000000 +0000
+@@ -30,7 +30,12 @@
+ #include <stdlib.h>
+ #include <string.h> /* strerror, memset */
+ 
++#ifndef HAVE_BASENAME
++    char* basename(const char *path);
++#else
+ #include <libgen.h> /* basename */
++#endif
++
+ #include <sys/time.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+@@ -46,6 +51,7 @@
+ #endif
+ 
+ #include "transmission.h"
++#include "trcompat.h"
+ #include "utils.h"
+ #include "platform.h"
+ 
+diff -Naur transmission-1.42-original/third-party/libevent/test/bench.c transmission-1.42/third-party/libevent/test/bench.c
+--- transmission-1.42-original/third-party/libevent/test/bench.c	2009-01-10 18:03:59.000000000 +0000
++++ transmission-1.42/third-party/libevent/test/bench.c	2009-01-10 18:56:45.000000000 +0000
+@@ -44,7 +44,7 @@
+ #include <windows.h>
+ #else
+ #include <sys/socket.h>
+-#include <sys/signal.h>
++#include <signal.h>
+ #include <sys/resource.h>
+ #endif
+ #include <fcntl.h>
+diff -Naur transmission-1.42-original/third-party/libevent/test/regress.c transmission-1.42/third-party/libevent/test/regress.c
+--- transmission-1.42-original/third-party/libevent/test/regress.c	2009-01-10 18:03:59.000000000 +0000
++++ transmission-1.42/third-party/libevent/test/regress.c	2009-01-10 18:56:45.000000000 +0000
+@@ -43,7 +43,7 @@
+ #ifndef WIN32
+ #include <sys/socket.h>
+ #include <sys/wait.h>
+-#include <sys/signal.h>
++#include <signal.h>
+ #include <unistd.h>
+ #include <netdb.h>
+ #endif
+diff -Naur transmission-1.42-original/third-party/libevent/test/regress_dns.c transmission-1.42/third-party/libevent/test/regress_dns.c
+--- transmission-1.42-original/third-party/libevent/test/regress_dns.c	2009-01-10 18:03:59.000000000 +0000
++++ transmission-1.42/third-party/libevent/test/regress_dns.c	2009-01-10 18:56:45.000000000 +0000
+@@ -42,7 +42,7 @@
+ #include <sys/queue.h>
+ #ifndef WIN32
+ #include <sys/socket.h>
+-#include <sys/signal.h>
++#include <signal.h>
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
+ #include <unistd.h>
+@@ -89,7 +89,7 @@
+ 
+ 	switch (type) {
+ 	case DNS_IPv6_AAAA: {
+-#if defined(HAVE_STRUCT_IN6_ADDR) && defined(HAVE_INET_NTOP)
++#if defined(HAVE_STRUCT_IN6_ADDR) && defined(HAVE_INET_NTOP) && defined(INET6_ADDRSTRLEN)
+ 		struct in6_addr *in6_addrs = addresses;
+ 		char buf[INET6_ADDRSTRLEN+1];
+ 		int i;
+@@ -258,7 +258,7 @@
+ 		break;
+ 	}
+ 	case DNS_IPv6_AAAA: {
+-#if defined (HAVE_STRUCT_IN6_ADDR) && defined(HAVE_INET_NTOP)
++#if defined (HAVE_STRUCT_IN6_ADDR) && defined(HAVE_INET_NTOP) && defined(INET6_ADDRSTRLEN)
+ 		struct in6_addr *in6_addrs = addresses;
+ 		char buf[INET6_ADDRSTRLEN+1];
+ 		if (memcmp(&in6_addrs[0].s6_addr, "abcdefghijklmnop", 16)
+diff -Naur transmission-1.42-original/third-party/libevent/test/regress_http.c transmission-1.42/third-party/libevent/test/regress_http.c
+--- transmission-1.42-original/third-party/libevent/test/regress_http.c	2009-01-10 18:03:59.000000000 +0000
++++ transmission-1.42/third-party/libevent/test/regress_http.c	2009-01-10 18:56:45.000000000 +0000
+@@ -42,7 +42,7 @@
+ #include <sys/queue.h>
+ #ifndef WIN32
+ #include <sys/socket.h>
+-#include <sys/signal.h>
++#include <signal.h>
+ #include <unistd.h>
+ #include <netdb.h>
+ #endif
+diff -Naur transmission-1.42-original/third-party/libevent/test/regress_rpc.c transmission-1.42/third-party/libevent/test/regress_rpc.c
+--- transmission-1.42-original/third-party/libevent/test/regress_rpc.c	2009-01-10 18:03:59.000000000 +0000
++++ transmission-1.42/third-party/libevent/test/regress_rpc.c	2009-01-10 18:56:45.000000000 +0000
+@@ -42,7 +42,7 @@
+ #include <sys/queue.h>
+ #ifndef WIN32
+ #include <sys/socket.h>
+-#include <sys/signal.h>
++#include <signal.h>
+ #include <unistd.h>
+ #include <netdb.h>
+ #endif
+diff -Naur transmission-1.42-original/third-party/libnatpmp/getgateway.c transmission-1.42/third-party/libnatpmp/getgateway.c
+--- transmission-1.42-original/third-party/libnatpmp/getgateway.c	2009-01-10 18:03:59.000000000 +0000
++++ transmission-1.42/third-party/libnatpmp/getgateway.c	2009-01-10 19:34:17.000000000 +0000
+@@ -37,6 +37,18 @@
+ #undef USE_SYSCTL_NET_ROUTE
+ #endif
+ 
++#ifdef __HAIKU__
++#undef USE_PROC_NET_ROUTE
++#undef USE_SOCKET_ROUTE
++#undef USE_SYSCTL_NET_ROUTE
++/* Note: 2009-jan-10 
++ * 
++ * Haiku uses a BSD-like network stack.
++ * However its network stack is not yet feature complete.
++ * So for now, a workaround is needed */
++#define USE_HAIKU_WORKAROUND
++#endif
++
+ #ifdef __APPLE__
+ #undef USE_PROC_NET_ROUTE
+ #undef USE_SOCKET_ROUTE
+@@ -82,6 +94,14 @@
+ #define FAILED  (-1)
+ #endif
+ 
++
++#ifdef USE_HAIKU_WORKAROUND
++int getdefaultgateway(in_addr_t * addr) 
++{
++	return FAILED;
++}
++#endif
++
+ #ifdef USE_PROC_NET_ROUTE
+ int getdefaultgateway(in_addr_t * addr)
+ {
