@@ -1,0 +1,406 @@
+Index: mozilla/widget/src/beos/nsAppShell.cpp
+===================================================================
+RCS file: /cvsroot/mozilla/widget/src/beos/nsAppShell.cpp,v
+retrieving revision 1.29.8.2
+diff -u -8 -p -r1.29.8.2 nsAppShell.cpp
+--- mozilla/widget/src/beos/nsAppShell.cpp	3 Jul 2007 09:33:54 -0000	1.29.8.2
++++ mozilla/widget/src/beos/nsAppShell.cpp	19 Feb 2009 06:12:35 -0000
+@@ -113,20 +113,38 @@ nsAppShell::nsAppShell()  
+ //-------------------------------------------------------------------------
+ 
+ NS_IMETHODIMP nsAppShell::Create(int* argc, char ** argv)
+ {
+   // system wide unique names
+   // NOTE: this needs to be run from within the main application thread
+   char		portname[64];
+   char		semname[64];
+-  PR_snprintf(portname, sizeof(portname), "event%lx", 
+-              (long unsigned) PR_GetCurrentThread());
+-  PR_snprintf(semname, sizeof(semname), "sync%lx", 
+-              (long unsigned) PR_GetCurrentThread());
++  int32 cookie = 0;
++  image_info iinfo;
++  char *leaf = NULL;
++  do {
++    if (get_next_image_info(0, &cookie, &iinfo) == B_OK &&
++        strlen(iinfo.name) > 0 &&
++        (leaf = strrchr(iinfo.name, '/')) != NULL)
++    {
++      leaf++;
++      PR_snprintf(portname, sizeof(portname), "event%lx",
++                  (long unsigned) find_thread(leaf));
++      PR_snprintf(semname, sizeof(semname), "sync%lx", 
++                  (long unsigned) find_thread(leaf));
++    }
++    else
++    {
++      PR_snprintf(portname, sizeof(portname), "event%lx", 
++                  (long unsigned) find_thread(0));
++      PR_snprintf(semname, sizeof(semname), "sync%lx", 
++                  (long unsigned) find_thread(0));
++    }
++  } while(iinfo.type != B_APP_IMAGE);
+               
+ #ifdef DEBUG              
+   printf("nsAppShell::Create portname: %s, semname: %s\n", portname, semname);
+ #endif
+   /* 
+    * Set up the port for communicating. As restarts thru execv may occur
+    * and ports survive those (with faulty events as result). Combined with the fact
+    * that plevent.c can setup the port ahead of us we need to take extra
+@@ -337,19 +355,33 @@ NS_IMETHODIMP nsAppShell::GetNativeEvent
+ 
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP nsAppShell::DispatchNativeEvent(PRBool aRealEvent, void *aEvent)
+ {
+   // should we check for eventport initialization ?
+   char  portname[64];
+-  PR_snprintf(portname, sizeof(portname), "event%lx", 
+-              (long unsigned) PR_GetCurrentThread());
+-
++  int32 cookie = 0;
++  image_info iinfo;
++  char *leaf = NULL;
++  do {
++    if (get_next_image_info(0, &cookie, &iinfo) == B_OK &&
++        strlen(iinfo.name) > 0 &&
++        (leaf = strrchr(iinfo.name, '/')) != NULL)
++    {
++      leaf++;
++      PR_snprintf(portname, sizeof(portname), "event%lx",
++                  (long unsigned) find_thread(leaf));
++    }
++    else
++      PR_snprintf(portname, sizeof(portname), "event%lx", 
++                  (long unsigned) find_thread(0)/*PR_GetCurrentThread()*/);
++  } while(iinfo.type != B_APP_IMAGE);
++  
+   if((eventport = find_port(portname)) < 0) 
+   {
+     // not initialized
+ #ifdef DEBUG
+     printf("nsAppShell::DispatchNativeEvent() was called before init\n");
+ #endif
+     fflush(stdout);
+     return NS_ERROR_FAILURE;
+Index: mozilla/widget/src/beos/nsToolkit.cpp
+===================================================================
+RCS file: /cvsroot/mozilla/widget/src/beos/nsToolkit.cpp,v
+retrieving revision 1.23.8.1
+diff -u -8 -p -r1.23.8.1 nsToolkit.cpp
+--- mozilla/widget/src/beos/nsToolkit.cpp	3 Jul 2007 09:33:54 -0000	1.23.8.1
++++ mozilla/widget/src/beos/nsToolkit.cpp	19 Feb 2009 06:12:35 -0000
+@@ -37,16 +37,17 @@
+ 
+ #include "nsToolkit.h"
+ #include "prmon.h"
+ #include "prtime.h"
+ #include "nsGUIEvent.h"
+ #include "nsSwitchToUIThread.h"
+ #include "plevent.h"
+ #include "prprf.h"
++#include <image.h>
+ 
+ // 
+ // Static thread local storage index of the Toolkit 
+ // object associated with a given thread... 
+ // 
+ static PRUintn gToolkitTLSIndex = 0; 
+ 
+ //-------------------------------------------------------------------------
+@@ -84,20 +85,36 @@ void nsToolkit::RunPump(void* arg)
+   gThreadState = PR_TRUE;
+ 
+   PR_Notify(info->monitor);
+   PR_ExitMonitor(info->monitor);
+ 
+   delete info;
+ 
+   // system wide unique names
+-  PR_snprintf(portname, sizeof(portname), "event%lx", 
+-              (long unsigned) PR_GetCurrentThread());
+-
+-  port_id event = create_port(100, portname);
++  int32 cookie = 0;
++  image_info iinfo;
++  char *leaf = NULL;
++  do {
++    if (get_next_image_info(0, &cookie, &iinfo) == B_OK &&
++        strlen(iinfo.name) > 0 &&
++        (leaf = strrchr(iinfo.name, '/')) != NULL)
++    {
++      leaf++;
++      PR_snprintf(portname, sizeof(portname), "event%lx",
++                  (long unsigned) find_thread(leaf));
++    }
++    else
++    {
++      PR_snprintf(portname, sizeof(portname), "event%lx", 
++                  (long unsigned) find_thread(0));
++    }
++  } while(iinfo.type != B_APP_IMAGE);
++  
++  port_id event = create_port(200, portname);
+ 
+   while(read_port(event, &code, &id, sizeof(id)) >= 0)
+   {
+     switch(code)
+     {
+       case WM_CALLMETHOD :
+         {
+           MethodInfo *mInfo = (MethodInfo *)id.data;
+@@ -125,16 +142,17 @@ void nsToolkit::RunPump(void* arg)
+ //
+ // constructor
+ //
+ //-------------------------------------------------------------------------
+ nsToolkit::nsToolkit()  
+ {
+   localthread = false;
+   mGuiThread  = NULL;
++  mGUIThreadID = 0;
+ }
+ 
+ 
+ //-------------------------------------------------------------------------
+ //
+ // destructor
+ //
+ //-------------------------------------------------------------------------
+@@ -182,17 +200,33 @@ void nsToolkit::CreateUIThread()
+                                    0);
+ 
+     // wait for the gui thread to start
+     while(gThreadState == PR_FALSE)
+     {
+       PR_Wait(monitor, PR_INTERVAL_NO_TIMEOUT);
+     }
+   }
+-    
++
++  image_info iinfo;
++  int32 cookie = 0;
++  char *leaf = NULL;
++  do {
++    if (get_next_image_info(0, &cookie, &iinfo) == B_OK &&
++        strlen(iinfo.name) > 0 &&
++        (leaf = strrchr(iinfo.name, '/')) != NULL)
++    {
++      leaf++;
++      mGUIThreadID = find_thread(leaf);
++    }
++    else
++    {
++      mGUIThreadID = find_thread(0);
++    }    
++  } while(iinfo.type != B_APP_IMAGE);
+   // at this point the thread is running
+   PR_ExitMonitor(monitor);
+   PR_DestroyMonitor(monitor);
+ }
+ 
+ 
+ //-------------------------------------------------------------------------
+ //
+@@ -213,28 +247,42 @@ NS_METHOD nsToolkit::Init(PRThread *aThr
+   {
+     localthread = true;
+ 
+     // create a thread where the message pump will run
+     CreateUIThread();
+   }
+ 
+   cached = false;
+-
++  image_info iinfo;
++  int32 cookie = 0;
++  char *leaf = NULL;
++  do {
++    if (get_next_image_info(0, &cookie, &iinfo) == B_OK &&
++        strlen(iinfo.name) > 0 &&
++        (leaf = strrchr(iinfo.name, '/')) != NULL)
++    {
++      leaf++;
++      mGUIThreadID = find_thread(leaf);
++    }
++    else
++    {
++      mGUIThreadID = find_thread(0);
++    } 
++  } while(iinfo.type != B_APP_IMAGE);
+   return NS_OK;
+ }
+ 
+ void nsToolkit::GetInterface()
+ {
+   if(! cached)
+   {
+     char portname[64];
+-
+     PR_snprintf(portname, sizeof(portname), "event%lx", 
+-                (long unsigned) mGuiThread);
++                (long unsigned) mGUIThreadID);
+ 
+     eventport = find_port(portname);
+ 
+     cached = true;
+   }
+ }
+ 
+ void nsToolkit::CallMethod(MethodInfo *info)
+Index: mozilla/widget/src/beos/nsToolkit.h
+===================================================================
+RCS file: /cvsroot/mozilla/widget/src/beos/nsToolkit.h,v
+retrieving revision 1.5.8.1
+diff -u -8 -p -r1.5.8.1 nsToolkit.h
+--- mozilla/widget/src/beos/nsToolkit.h	3 Jul 2007 09:33:54 -0000	1.5.8.1
++++ mozilla/widget/src/beos/nsToolkit.h	19 Feb 2009 06:12:36 -0000
+@@ -66,16 +66,17 @@ public:
+ 			void			Kill();
+ private:
+             virtual         ~nsToolkit();
+             void            CreateUIThread(void);
+ 
+ protected:
+     // Thread Id of the "main" Gui thread.
+     PRThread    *mGuiThread;
++    thread_id   mGUIThreadID;
+ 	static void	RunPump(void* arg);
+ 	void		GetInterface();
+ 	bool		cached;
+ 	bool		localthread;
+ 	port_id		eventport;
+ };
+ 
+ #endif  // TOOLKIT_H
+Index: mozilla/xpcom/threads/plevent.c
+===================================================================
+RCS file: /cvsroot/mozilla/xpcom/threads/Attic/plevent.c,v
+retrieving revision 1.54.2.1
+diff -u -8 -p -r1.54.2.1 plevent.c
+--- mozilla/xpcom/threads/plevent.c	26 Sep 2005 19:43:34 -0000	1.54.2.1
++++ mozilla/xpcom/threads/plevent.c	19 Feb 2009 06:12:40 -0000
+@@ -61,16 +61,18 @@
+ #if defined(XP_UNIX)
+ /* for fcntl */
+ #include <sys/types.h>
+ #include <fcntl.h>
+ #endif
+ 
+ #if defined(XP_BEOS)
+ #include <kernel/OS.h>
++#include <image.h>
++#include <string.h>
+ #endif
+ 
+ #if defined(XP_MACOSX)
+ #if defined(MOZ_WIDGET_COCOA)
+ #include <CoreFoundation/CoreFoundation.h>
+ #define MAC_USE_CFRUNLOOPSOURCE
+ #elif defined(TARGET_CARBON)
+ /* #include <CarbonEvents.h> */
+@@ -903,21 +905,50 @@ failed:
+      * Otherwise we need to create the sem and the port, deleting any open ports before.
+      */
+      
+     sem_info info;
+     int32 cookie = 0;
+ 
+     char portname[64];
+     char semname[64];
+-    PR_snprintf(portname, sizeof(portname), "event%lx", 
+-                (long unsigned) self->handlerThread);
+-    PR_snprintf(semname, sizeof(semname), "sync%lx", 
+-                (long unsigned) self->handlerThread);
+ 
++struct _MDThread
++{
++    thread_id   tid;
++    sem_id          joinSem;
++    PRBool  is_joining;
++};
++    struct _MDThread md;
++    
++    
++//#include "private/primpl.h"
++    image_info iinfo;
++    int32 icookie = 0;
++    char *leaf = NULL;
++    do {
++      if (get_next_image_info(0, &icookie, &iinfo) == B_OK &&
++         strlen(iinfo.name) > 0 &&
++         (leaf = strrchr(iinfo.name, '/')) != NULL)
++      {
++        leaf++;
++        PR_snprintf(portname, sizeof(portname), "event%lx",
++                    (long unsigned) find_thread(leaf)); 
++        PR_snprintf(semname, sizeof(semname), "sync%lx", 
++                    (long unsigned) find_thread(leaf));
++      }
++      else
++      {
++        PR_snprintf(portname, sizeof(portname), "event%lx", 
++                    (long unsigned) find_thread(0));
++        PR_snprintf(semname, sizeof(semname), "sync%lx", 
++                    (long unsigned) find_thread(0));
++      }
++    } while(iinfo.type != B_APP_IMAGE);
++    
+     self->eventport = find_port(portname);
+     while(get_next_sem_info(0, &cookie, &info) == B_OK)
+     {
+       if(strcmp(semname, info.name) != 0) {
+         continue;
+       }
+ 
+       /* found semaphore */
+@@ -926,17 +957,17 @@ failed:
+       }
+       return PR_SUCCESS;
+     }
+     /* setup the port and semaphore */
+     if(self->eventport >= 0) 
+     {
+       delete_port( self->eventport );
+     }
+-    self->eventport = create_port(200, portname);
++    self->eventport = create_port(512, portname);
+         /* We don't use the sem, but it has to be there
+          */
+         create_sem(0, semname);
+     return PR_SUCCESS;
+ #else
+     return PR_SUCCESS;
+ #endif
+ }
+@@ -1259,26 +1290,28 @@ _pl_NativeNotify(PLEventQueue* self)
+ 
+ #if defined(XP_BEOS)
+ struct ThreadInterfaceData
+ {
+     void  *data;
+     thread_id waitingThread;
+ };
+ 
++
+ static PRStatus
+ _pl_NativeNotify(PLEventQueue* self)
+ {
+     struct ThreadInterfaceData id;
+     id.data = self;
+     id.waitingThread = 0;
+     write_port(self->eventport, 'natv', &id, sizeof(id));
+ 
+     return PR_SUCCESS;    /* Is this correct? */
+ }
++  
+ #endif /* XP_BEOS */
+ 
+ #if defined(XP_MACOSX)
+ static PRStatus
+ _pl_NativeNotify(PLEventQueue* self)
+ {
+ #if defined(MAC_USE_CFRUNLOOPSOURCE)
+   	CFRunLoopSourceSignal(self->mRunLoopSource);
