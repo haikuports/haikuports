@@ -5,7 +5,7 @@ VERSION="1.3.12"
 HOMEPAGE="http://www.gnu.org/software/gzip/"
 URL="http://ftp.gnu.org/gnu/gzip/"
 FILE="gzip-1.3.12.tar.gz"
-PATCH_URL="http://ports.haiku-files.org/export/279/haikuports/trunk/app-arch/gzip/patches/"
+PATCH_URL="http://ports.haiku-files.org/svn/haikuports/trunk/"
 PATCH_FILE="gzip-1.3.12-downstream.patch"
 
 PREFIX=/boot/common
@@ -21,7 +21,7 @@ fi
 cd ${PACKAGE}/${VERSION}
 tar xvf ${CWD}/${FILE}
 cd gzip-1.3.12
-wget ${PATCH_URL}${PATCH_FILE}
+svn export ${PATCH_URL}${PACKAGE}/${PATCH_FILE}
 patch -p1 -i ${PATCH_FILE}
 libtoolize --force --install
 configure --prefix=${PREFIX}

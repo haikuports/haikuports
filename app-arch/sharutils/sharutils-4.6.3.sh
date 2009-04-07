@@ -5,7 +5,7 @@ VERSION="4.6.3"
 HOMEPAGE="http://www.gnu.org/software/sharutils/"
 URL="ftp://ftp.gnu.org/gnu/sharutils/REL-4.6.3/"
 FILE="sharutils-4.6.3.tar.bz2"
-PATCH_URL="http://ports.haiku-files.org/export/282/haikuports/trunk/app-arch/sharutils/"
+PATCH_URL="http://ports.haiku-files.org/svn/haikuports/trunk/"
 PATCH_FILE="sharutils-4.6.3-downstream.patch"
 
 PREFIX=/boot/common
@@ -21,7 +21,7 @@ fi
 cd ${PACKAGE}/${VERSION}
 tar -jxvf ${CWD}/${FILE}
 cd sharutils-4.6.3
-wget ${PATCH_URL}${PATCH_FILE}
+svn export ${PATCH_URL}${PACKAGE}/${PATCH_FILE}
 patch -p1 -i ${PATCH_FILE}
 libtoolize --force --install
 configure --prefix=${PREFIX}
