@@ -17,7 +17,8 @@ DEP_URLS=( \
 # NOTE: currently andrewtv.org is down
 #'http://andrewtv.org/static/libIDL/libIDL-0.6.8.tar.gz' \
 
-AUTOCONF_CMD="/boot/apps/autoconf-2.13/bin/autoconf --macro-dir=/boot/apps/autoconf-2.13/share/autoconf"
+AUTOCONF_CMD="/boot/common/bin/autoconf-2.13"
+# --macro-dir=/boot/apps/autoconf-2.13/share/autoconf"
 
 PREFIX=--prefix=/boot/common
 
@@ -120,7 +121,7 @@ function build_autoconf213 ()
 {
 cd "$CWD"'/dependencies/autoconf-2.13'
 echo "`pwd`"
-./configure --prefix=/boot/apps/autoconf-2.13
+./configure --prefix=/boot/common/autoconf-2.13 --program-suffix=-2.13 --bindir=/boot/common/bin/
 make
 make install  
 cd "$CWD"
