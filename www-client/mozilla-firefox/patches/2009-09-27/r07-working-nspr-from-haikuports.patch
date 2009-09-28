@@ -1,0 +1,5411 @@
+Index: nsprpub/pr/include/prtypes.h
+===================================================================
+--- nsprpub/pr/include/prtypes.h	(revision 7)
++++ nsprpub/pr/include/prtypes.h	(working copy)
+@@ -98,6 +98,24 @@
+ 
+ #elif defined(XP_BEOS)
+ 
++/* GCC 3.3 and later support the visibility attribute. */
++#if (__GNUC__ >= 4) || \
++    (__GNUC__ == 3 && __GNUC_MINOR__ >= 3)
++#define PR_VISIBILITY_DEFAULT __attribute__((visibility("default")))
++#define PR_EXPORT(__type) extern PR_VISIBILITY_DEFAULT __type
++#define PR_EXPORT_DATA(__type) extern PR_VISIBILITY_DEFAULT __type
++#define PR_IMPORT(__type) extern PR_VISIBILITY_DEFAULT __type
++#define PR_IMPORT_DATA(__type) extern PR_VISIBILITY_DEFAULT __type
++
++#define PR_EXTERN(__type) extern PR_VISIBILITY_DEFAULT __type
++#define PR_IMPLEMENT(__type) PR_VISIBILITY_DEFAULT __type
++#define PR_EXTERN_DATA(__type) extern PR_VISIBILITY_DEFAULT __type
++#define PR_IMPLEMENT_DATA(__type) PR_VISIBILITY_DEFAULT __type
++#define PR_CALLBACK
++#define PR_CALLBACK_DECL
++#define PR_STATIC_CALLBACK(__x) static __x
++
++#else
+ #define PR_EXPORT(__type) extern __declspec(dllexport) __type
+ #define PR_EXPORT_DATA(__type) extern __declspec(dllexport) __type
+ #define PR_IMPORT(__type) extern __declspec(dllexport) __type
+@@ -111,6 +129,7 @@
+ #define PR_CALLBACK
+ #define PR_CALLBACK_DECL
+ #define PR_STATIC_CALLBACK(__x) static __x
++#endif
+ 
+ #elif defined(WIN16)
+ 
+Index: nsprpub/pr/include/prio.h
+===================================================================
+--- nsprpub/pr/include/prio.h	(revision 7)
++++ nsprpub/pr/include/prio.h	(working copy)
+@@ -174,20 +174,20 @@
+ union PRNetAddr {
+     struct {
+         PRUint16 family;                /* address family (0x00ff maskable) */
+-#ifdef XP_BEOS
+-        char data[10];                  /* Be has a smaller structure */
++#ifndef XP_BEOS
++        char data[14];                  /* raw address data */
+ #else
+-        char data[14];                  /* raw address data */
++        char data[30];
+ #endif
+     } raw;
+     struct {
+         PRUint16 family;                /* address family (AF_INET) */
+         PRUint16 port;                  /* port number */
+         PRUint32 ip;                    /* The actual 32 bits of address */
+-#ifdef XP_BEOS
+-        char pad[4];                    /* Be has a smaller structure */
++#ifndef XP_BEOS
++        char pad[8];
+ #else
+-        char pad[8];
++        char pad[24];
+ #endif
+     } inet;
+     struct {
+@@ -196,6 +196,9 @@
+         PRUint32 flowinfo;              /* routing information */
+         PRIPv6Addr ip;                  /* the actual 128 bits of address */
+         PRUint32 scope_id;              /* set of interfaces for a scope */
++#ifdef XP_BEOS
++        char pad[4];
++#endif
+     } ipv6;
+ #if defined(XP_UNIX) || defined(XP_OS2_EMX)
+     struct {                            /* Unix domain socket address */
+Index: nsprpub/pr/include/md/_beos.cfg
+===================================================================
+--- nsprpub/pr/include/md/_beos.cfg	(revision 7)
++++ nsprpub/pr/include/md/_beos.cfg	(working copy)
+@@ -20,6 +20,7 @@
+  * the Initial Developer. All Rights Reserved.
+  *
+  * Contributor(s):
++ * Fredrik Holmqvist <thesuckiestemail@yahoo.se>
+  *
+  * Alternatively, the contents of this file may be used under the terms of
+  * either the GNU General Public License Version 2 or later (the "GPL"), or
+@@ -40,7 +41,6 @@
+ 
+ #ifndef XP_BEOS
+ #define XP_BEOS
+-#undef XP_UNIX
+ #endif
+ 
+ #ifndef BEOS
+@@ -57,6 +57,12 @@
+ #undef  IS_BIG_ENDIAN
+ #endif
+ 
++/*
++ * Fixme: Should be done according to arch
++ * Currently only x86/ia64.
++ */
++#define PR_ALIGN_OF_WORD    4
++
+ #define PR_BYTES_PER_BYTE   1
+ #define PR_BYTES_PER_SHORT  2
+ #define PR_BYTES_PER_INT    4
+Index: nsprpub/pr/include/md/_beos.h
+===================================================================
+--- nsprpub/pr/include/md/_beos.h	(revision 7)
++++ nsprpub/pr/include/md/_beos.h	(working copy)
+@@ -20,6 +20,7 @@
+  * the Initial Developer. All Rights Reserved.
+  *
+  * Contributor(s):
++ * Fredrik Holmqvist <thesuckiestemail@yahoo.se>
+  *
+  * Alternatively, the contents of this file may be used under the terms of
+  * either the GNU General Public License Version 2 or later (the "GPL"), or
+@@ -38,19 +39,18 @@
+ #ifndef nspr_beos_defs_h___
+ #define nspr_beos_defs_h___
+ 
+-#include "prtypes.h"
+-#include "prio.h"
+-#include "prthread.h"
+-#include "prproces.h"
+-#include "prmem.h"
+-#include "obsolete/prsem.h"
+ #include <errno.h>
+-
+-#include <support/SupportDefs.h>
+-#include <kernel/OS.h>
+ #include <dirent.h>
++#include <OS.h>
+ 
+ /*
++ * Hack for Cross compile
++ */
++#define FD_SETSIZE 1024
++
++#undef bool
++
++/*
+  * Internal configuration macros
+  */
+ 
+@@ -67,37 +67,39 @@
+ #endif
+ #define PR_DLL_SUFFIX		".so"
+ 
+-#define _PR_VMBASE              0x30000000
+-#define _PR_STACK_VMBASE	0x50000000
+ #define _MD_DEFAULT_STACK_SIZE	65536L
+-#define _MD_MMAP_FLAGS          MAP_PRIVATE
+ 
+ #undef	HAVE_STACK_GROWING_UP
+ #define HAVE_DLL
+-#define _PR_NO_CLOCK_TIMER
+ 
+ /*
+  * The Atomic operations
+  */
+ 
+ #define _PR_HAVE_ATOMIC_OPS
++#ifdef __powerpc__
+ #define _MD_INIT_ATOMIC _MD_AtomicInit
++#else
++#define _MD_INIT_ATOMIC()
++#endif
+ #define _MD_ATOMIC_INCREMENT _MD_AtomicIncrement
+ #define _MD_ATOMIC_ADD _MD_AtomicAdd
+ #define _MD_ATOMIC_DECREMENT _MD_AtomicDecrement
+ #define _MD_ATOMIC_SET _MD_AtomicSet
+ 
++/* Makes sure to don't create cvar when creating sem */
+ #define HAVE_CVAR_BUILT_ON_SEM
++
++/* Not sure this is needed, but no harm. */
+ #define _PR_GLOBAL_THREADS_ONLY
++
+ #define _PR_BTHREADS
+-#define _PR_NEED_FAKE_POLL
+-#define _PR_HAVE_PEEK_BUFFER
+-#define _PR_PEEK_BUFFER_MAX (16 * 1024)
+-#define _PR_FD_NEED_EMULATE_MSG_PEEK(fd) 1
+-#define _PR_CONNECT_DOES_NOT_BIND
++
+ #define _PR_HAVE_O_APPEND
+ 
+-/* Define threading functions and objects as native BeOS */
++/* Define threading functions and objects as native BeOS 
++   Used by bthreads. */
++
+ struct _MDThread {
+     thread_id	tid;	/* BeOS thread handle */
+ 	sem_id		joinSem;	/* sems used to synchronzie joining */
+@@ -105,56 +107,16 @@
+ 						   join this thread */
+ };
+ 
+-struct _MDThreadStack {
+-    PRInt8	notused;
+-};
+-
+ /*
+- * Lock and Semaphore related definitions
+- */
+-
+-struct _MDLock {
+-    sem_id semaphoreID;
+-    int32  benaphoreCount;
+-};
+-
+-struct _MDCVar {
+-    sem_id sem1;
+-    sem_id sem2;
+-    int16  count;
+-};
+-
+-struct _MDSemaphore {
+-    sem_id sid;
+-};
+-
+-/*
+-** CPU-related definitions
+-*/
+-struct _MDCPU {
+-    int8		unused;
+-};
+-
+-/*
+ ** Process-related definitions
+ */
+ struct _MDProcess {
+     pid_t pid;
+ };
+ 
+-struct _MDSegment {
+-    PRInt8 notused;
+-};
+-
+ /*
+ ** File- and directory-related definitions
+ */
+-
+-#ifndef BONE_VERSION
+-#define BE_SOCK_SHUTDOWN_READ	0x01
+-#define BE_SOCK_SHUTDOWN_WRITE	0x02
+-#endif
+-
+ struct _MDFileDesc {
+     PRInt32	osfd;
+     PRInt32	sock_state;
+@@ -178,27 +140,21 @@
+ 
+ #define GETTIMEOFDAY(tp)	gettimeofday((tp), NULL)
+ 
+-/* --- Memory-mapped files stuff --- not implemented on BeOS */
+ 
+-struct _MDFileMap {
+-    PRInt8 unused;
+-};
+-
+ /*
+  * Network related definitions.
+  */
+ 
+ #ifndef BONE_VERSION
++#define BE_SOCK_SHUTDOWN_READ	0x01
++#define BE_SOCK_SHUTDOWN_WRITE	0x02
++
+ #define IPPROTO_IP 0
+ #define AF_UNIX 2
+ #define TCP_NODELAY SO_NONBLOCK
+ #define SO_LINGER -1
+ #define SO_ERROR 4
+-#endif
+ 
+-#define _PR_INTERRUPT_CHECK_INTERVAL_SECS 5
+-
+-#ifndef BONE_VERSION
+ /* these aren't actually used. if they are, we're screwed */
+ struct  protoent {
+     char    *p_name;        /* official protocol name */
+@@ -210,169 +166,58 @@
+ struct protoent* getprotobynumber(int number);
+ #endif
+ 
++/* Used by bnet.c */
++#define _PR_INTERRUPT_CHECK_INTERVAL_SECS 5
++
+ /*
+  * malloc() related definitions.
++ * Avoids prmalloc.c's and prmem's code
+  */
+-
+ #undef _PR_OVERRIDE_MALLOC
+ 
+ /* Miscellaneous */
+ 
+ #define _MD_ERRNO()             (errno)
+ 
+-#define _MD_CLEANUP_BEFORE_EXIT _MD_cleanup_before_exit
+-#define _MD_EXIT _MD_exit
++#define _MD_CLEANUP_BEFORE_EXIT()
++#define _MD_EXIT exit
+ 
+ #define _MD_GET_ENV getenv
+ #define _MD_PUT_ENV putenv
+ 
+-#define _MD_EARLY_INIT _MD_early_init
+-#define _MD_FINAL_INIT _MD_final_init
++#define _MD_EARLY_INIT()
++#ifdef BONE_VERSION
++#define _MD_FINAL_INIT()
++#else 
++#define _MD_FINAL_INIT _MD_final_init_netserver
++#endif
+ 
+-/* CPU Stuff */
+-
+-#define _MD_INIT_CPUS _MD_init_cpus
+-#define _MD_WAKEUP_CPUS _MD_wakeup_cpus
+-#define _MD_START_INTERRUPTS _MD_start_interrupts
+-#define _MD_STOP_INTERRUPTS _MD_stop_interrupts
+-#define _MD_DISABLE_CLOCK_INTERRUPTS _MD_disable_clock_interrupts
+-#define _MD_BLOCK_CLOCK_INTERRUPTS _MD_block_clock_interrupts
+-#define _MD_UNBLOCK_CLOCK_INTERRUPTS _MD_unblock_clock_interrupts
+-#define _MD_CLOCK_INTERRUPT _MD_clock_interrupt
+-#define _MD_INIT_STACK _MD_init_stack
+-#define _MD_CLEAR_STACK _MD_clear_stack
+-// #define _MD_GET_INTSOFF _MD_get_intsoff
+-// #define _MD_SET_INTSOFF _MD_set_intsoff
+-#define _MD_CURRENT_CPU _MD_current_cpu
+-#define _MD_SET_CURRENT_CPU _MD_set_current_cpu
+-#define _MD_INIT_RUNNING_CPU _MD_init_running_cpu
+-#define _MD_PAUSE_CPU _MD_pause_cpu
+-
+ /* Thread stuff */
+ 
+ #define _MD_CURRENT_THREAD() PR_GetCurrentThread()
+-// #define _MD_GET_ATTACHED_THREAD _MD_get_attached_thread
+-#define _MD_LAST_THREAD _MD_last_thread
+-#define _MD_SET_CURRENT_THREAD _MD_set_current_THREAD
+-#define _MD_SET_LAST_THREAD _MD_set_last_thread
+-#define _MD_INIT_THREAD _MD_init_thread
+-#define _MD_EXIT_THREAD _MD_exit_thread
+-#define _MD_INIT_ATTACHED_THREAD _MD_init_attached_thread
+ 
+-#define _MD_SUSPEND_THREAD _MD_suspend_thread
+-#define _MD_RESUME_THREAD _MD_resume_thread
+-#define _MD_SUSPEND_CPU _MD_suspend_cpu
+-#define _MD_RESUME_CPU _MD_resume_cpu
+-#define _MD_BEGIN_SUSPEND_ALL _MD_begin_suspend_all
+-#define _MD_END_SUSPEND_ALL _MD_end_suspend_all
+-#define _MD_BEGIN_RESUME_ALL _MD_begin_resume_all
+-#define _MD_END_RESUME_ALL _MD_end_resume_all
+ 
+-#define _MD_GET_SP _MD_get_sp
+-
+-#define _MD_CLEAN_THREAD _MD_clean_thread
+-#define _MD_CREATE_PRIMORDIAL_USER_THREAD _MD_create_primordial_user_thread
+-#define _MD_CREATE_USER_THREAD _MD_create_user_thread
+-#define _MD_INIT_PRIMORDIAL_THREAD _MD_init_primordial_thread
+-#define _MD_CREATE_THREAD _MD_create_thread
+-#define _MD_YIELD _MD_yield
+-#define _MD_SET_PRIORITY _MD_set_priority
+-
+-#define _MD_SUSPENDALL _MD_suspendall
+-#define _MD_RESUMEALL _MD_resumeall
+-
+-#define _MD_SWITCH_CONTEXT _MD_switch_context
+-#define _MD_RESTORE_CONTEXT _MD_restore_context
+-
+-#define _MD_WAIT _MD_wait
+-#define _MD_WAKEUP_WAITER _MD_wakeup_waiter
+-
+-#define _MD_SETTHREADAFFINITYMASK _MD_setthreadaffinitymask
+-#define _MD_GETTHREADAFFINITYMASK _MD_getthreadaffinitymask
+-
+-/* Thread Synchronization */
+-
+-#define _MD_INIT_LOCKS _MD_init_locks
+-#define _MD_NEW_LOCK _MD_new_lock
+-#define _MD_FREE_LOCK _MD_free_lock
+-#define _MD_LOCK _MD_lock
+-#define _MD_TEST_AND_LOCK _MD_test_and_lock
+-#define _MD_UNLOCK _MD_unlock
+-#define _MD_IOQ_LOCK _MD_ioq_lock
+-#define _MD_IOQ_UNLOCK _MD_ioq_unlock
+-#define _MD_NEW_SEM _MD_new_sem
+-#define _MD_DESTROY_SEM _MD_destroy_sem
+-#define _MD_TIMED_WAIT_SEM _MD_timed_wait_sem
+-#define _MD_WAIT_SEM _MD_wait_sem
+-#define _MD_POST_SEM _MD_post_sem
+-// #define _MD_NEW_CV _MD_new_cv
+-// #define _MD_FREE_CV _MD_free_cv
+-// #define _MD_WAIT_CV _MD_wait_cv
+-// #define _MD_NOTIFY_CV _MD_notify_cv
+-// #define _MD_NOTIFYALL_CV _MD_notifyall_cv
+-
+ /* File I/O */
+ 
+-/* don't need any I/O initializations */
+-#define _MD_INIT_IO()
+-#define _MD_INIT_FILEDESC(fd)
++#define _PR_MD_WRITE 
+ 
+-#define _MD_OPEN_DIR _MD_open_dir
+-#define _MD_READ_DIR _MD_read_dir
+-#define _MD_CLOSE_DIR _MD_close_dir
+-#define _MD_MAKE_NONBLOCK _MD_make_nonblock
+-#define _MD_SET_FD_INHERITABLE _MD_set_fd_inheritable
+-#define _MD_INIT_FD_INHERITABLE _MD_init_fd_inheritable
+-#define _MD_QUERY_FD_INHERITABLE _MD_query_fd_inheritable
+-#define _MD_OPEN _MD_open
+-#define _MD_OPEN_FILE _MD_open
+-#define _MD_CLOSE_FILE _MD_close_file
+-#define _MD_READ _MD_read
+-#define _MD_WRITE _MD_write
+-#define _MD_WRITEV _MD_writev
++/*
++These are defined in primpl.h so that they are avail for all, but we
++have no calls, and pthreads doesn't either.
+ #define _MD_LSEEK _MD_lseek
+ #define _MD_LSEEK64 _MD_lseek64
+-#define _MD_FSYNC _MD_fsync
+-#define _MD_DELETE _MD_delete
++
+ #define _MD_GETFILEINFO _MD_getfileinfo
+ #define _MD_GETFILEINFO64 _MD_getfileinfo64
+ #define _MD_GETOPENFILEINFO _MD_getopenfileinfo
+ #define _MD_GETOPENFILEINFO64 _MD_getopenfileinfo64
+-#define _MD_RENAME _MD_rename
+-#define _MD_ACCESS _MD_access
+-#define _MD_STAT stat
+-#define _MD_MKDIR _MD_mkdir
+-#define _MD_MAKE_DIR _MD_mkdir
+-#define _MD_RMDIR _MD_rmdir
+-#define _MD_PR_POLL _MD_pr_poll
++*/
+ 
+ /* Network I/O */
+ 
+-#define _MD_CLOSE_SOCKET _MD_close_socket
+-#define _MD_CONNECT _MD_connect
+-#define _MD_ACCEPT _MD_accept
+-#define _MD_BIND _MD_bind
+-#define _MD_LISTEN _MD_listen
+-#define _MD_SHUTDOWN _MD_shutdown
+-#define _MD_RECV _MD_recv
+-#define _MD_SEND _MD_send
+-#define _MD_ACCEPT_READ _MD_accept_read
+-#define _MD_GETSOCKNAME _MD_getsockname
+-#define _MD_GETPEERNAME _MD_getpeername
+-#define _MD_GETSOCKOPT _MD_getsockopt
+-#define _MD_SETSOCKOPT _MD_setsockopt
+-#define _MD_RECVFROM _MD_recvfrom
+-#define _MD_SENDTO _MD_sendto
+-#define _MD_SOCKETPAIR _MD_socketpair
+-#define _MD_SOCKET _MD_socket
+-#define _MD_SOCKETAVAILABLE _MD_socketavailable
+-#define _MD_PIPEAVAILABLE _MD_socketavailable
+-
+ #define _MD_GET_SOCKET_ERROR()	(errno)
+ #define _MD_GETHOSTNAME _MD_gethostname
+ 
+-#define _MD_SELECT select
+-
+ /* Process management */
+ 
+ #define _MD_CREATE_PROCESS _MD_create_process
+@@ -380,19 +225,6 @@
+ #define _MD_WAIT_PROCESS _MD_wait_process
+ #define _MD_KILL_PROCESS _MD_kill_process
+ 
+-/* Atomic data operations */
+-
+-// #define _MD_INIT_ATOMIC _MD_init_atomic
+-// #define _MD_ATOMIC_INCREMENT _MD_atomic_increment
+-// #define _MD_ATOMIC_DECREMENT _MD_atomic_decrement
+-// #define _MD_ATOMIC_SET _MD_atomic_set
+-
+-/* memory management */
+-
+-#define _MD_INIT_SEGS _MD_init_segs
+-#define _MD_ALLOC_SEGMENT _MD_alloc_segment
+-#define _MD_FREE_SEGMENT _MD_free_segment
+-
+ /* Memory mapped file I/O */
+ 
+ #define _MD_CREATE_FILE_MAP _MD_create_file_map
+@@ -403,8 +235,7 @@
+ 
+ /* Time related */
+ 
+-#define _MD_NOW _MD_now
+-#define _MD_INTERVAL_INIT _MD_interval_init
++#define _MD_INTERVAL_INIT()
+ #define _MD_GET_INTERVAL _MD_get_interval
+ #define _MD_INTERVAL_PER_SEC _MD_interval_per_sec
+ 
+@@ -414,200 +245,4 @@
+ #define _MD_TLOCKFILE _MD_tlockfile
+ #define _MD_UNLOCKFILE _MD_unlockfile
+ 
+-/**
+- * Prototypes for machine dependent function implementations. (Too bad
+- * NSPR's MD system blows so much that we have to reiterate every stinking
+- * thing we implement here in our MD header file.)
+- */
+-
+-/* Miscellaneous */
+-
+-NSPR_API(void) _MD_cleanup_before_exit(void);
+-NSPR_API(void) _MD_exit(PRIntn status);
+-
+-NSPR_API(char*) _MD_get_env(const char *name);
+-NSPR_API(PRIntn) _MD_put_env(const char *name);
+-
+-NSPR_API(void) _MD_early_init(void);
+-NSPR_API(void) _MD_final_init(void);
+-
+-/* CPU Stuff */
+-
+-NSPR_API(void) _MD_init_cpus();
+-NSPR_API(void) _MD_wakeup_cpus();
+-NSPR_API(void) _MD_start_interrupts(void);
+-NSPR_API(void) _MD_stop_interrupts(void);
+-NSPR_API(void) _MD_disable_clock_interrupts(void);
+-NSPR_API(void) _MD_block_clock_interrupts(void);
+-NSPR_API(void) _MD_unblock_clock_interrupts(void);
+-NSPR_API(void) _MD_clock_interrupt(void);
+-// NSPR_API(void) _MD_init_stack(PRThreadStack *ts, PRIntn redzone);
+-// NSPR_API(void) _MD_clear_stack(PRThreadStack* ts);
+-// NSPR_API(PRInt32) _MD_get_intsoff(void);
+-// NSPR_API(void) _MD_set_intsoff(PRInt32 _val);
+-// NSPR_API(_PRCPU*) _MD_current_cpu(void);
+-// NSPR_API(void) _MD_set_current_cpu(_PRCPU *cpu);
+-// NSPR_API(void) _MD_init_running_cpu(_PRCPU *cpu);
+-NSPR_API(PRInt32) _MD_pause_cpu(PRIntervalTime timeout);
+-
+-/* Thread stuff */
+-
+-// NSPR_API(PRThread*) _MD_current_thread(void);
+-NSPR_API(PRThread*) _MD_get_attached_thread(void);
+-NSPR_API(PRThread*) _MD_last_thread(void);
+-NSPR_API(void) _MD_set_current_thread(PRThread *thread);
+-NSPR_API(void) _MD_set_last_thread(PRThread *thread);
+-NSPR_API(PRStatus) _MD_init_thread(PRThread *thread);
+-NSPR_API(void) _MD_exit_thread(PRThread *thread);
+-NSPR_API(PRStatus) _MD_init_attached_thread(PRThread *thread);
+-
+-NSPR_API(void) _MD_suspend_thread(PRThread *thread);
+-NSPR_API(void) _MD_resume_thread(PRThread *thread);
+-// NSPR_API(void) _MD_suspend_cpu(_PRCPU  *cpu);
+-// NSPR_API(void) _MD_resume_cpu(_PRCPU  *cpu);
+-NSPR_API(void) _MD_begin_suspend_all(void);
+-NSPR_API(void) _MD_end_suspend_all(void);
+-NSPR_API(void) _MD_begin_resume_all(void);
+-NSPR_API(void) _MD_end_resume_all(void);
+-
+-NSPR_API(void *) _MD_get_sp(PRThread *thread);
+-
+-NSPR_API(void) _MD_clean_thread(PRThread *thread);
+-NSPR_API(void) _MD_create_primordial_user_thread(PRThread *);
+-NSPR_API(PRThread*) _MD_create_user_thread(PRUint32 stacksize, void (*start)(void *), void *arg);
+-NSPR_API(void) _MD_init_primordial_thread(PRThread *thread);
+-NSPR_API(PRStatus) _MD_create_thread(PRThread *thread, void (*start)(void *), PRThreadPriority priority, PRThreadScope scope, PRThreadState state, PRUint32 stackSize);
+-NSPR_API(void) _MD_yield(void);
+-NSPR_API(void) _MD_set_priority(struct _MDThread *md, PRThreadPriority newPri);
+-
+-NSPR_API(void) _MD_suspendall(void);
+-NSPR_API(void) _MD_resumeall(void);
+-
+-NSPR_API(void) _MD_init_context(PRThread *thread, char *top, void (*start) (void), PRBool *status);
+-NSPR_API(void) _MD_switch_context(PRThread *thread);
+-NSPR_API(void) _MD_restore_context(PRThread *thread);
+-
+-NSPR_API(PRStatus) _MD_wait(PRThread *, PRIntervalTime timeout);
+-NSPR_API(PRStatus) _MD_wakeup_waiter(PRThread *);
+-
+-NSPR_API(PRInt32) _MD_setthreadaffinitymask(PRThread *thread, PRUint32 mask );
+-NSPR_API(PRInt32) _MD_getthreadaffinitymask(PRThread *thread, PRUint32 *mask);
+-
+-/* Thread Synchronization */
+-
+-NSPR_API(void) _MD_init_locks(void);
+-NSPR_API(PRStatus) _MD_new_lock(struct _MDLock *md);
+-NSPR_API(void) _MD_free_lock(struct _MDLock *md);
+-NSPR_API(void) _MD_lock(struct _MDLock *md);
+-NSPR_API(PRIntn) _MD_test_and_lock(struct _MDLock *md);
+-NSPR_API(void) _MD_unlock(struct _MDLock *md);
+-NSPR_API(void) _MD_ioq_lock(void);
+-NSPR_API(void) _MD_ioq_unlock(void);
+-NSPR_API(void) _MD_new_sem(struct _MDSemaphore *md, PRUintn value);
+-NSPR_API(void) _MD_destroy_sem(struct _MDSemaphore *md);
+-NSPR_API(PRStatus) _MD_timed_wait_sem(struct _MDSemaphore *md, PRIntervalTime timeout);
+-NSPR_API(PRStatus) _MD_wait_sem(struct _MDSemaphore *md);
+-NSPR_API(void) _MD_post_sem(struct _MDSemaphore *md);
+-// NSPR_API(PRInt32) _MD_new_cv(struct _MDCVar *md);
+-// NSPR_API(void) _MD_free_cv(struct _MDCVar *md);
+-// NSPR_API(void) _MD_wait_cv(struct _MDCVar *mdCVar, struct _MDLock *mdLock, PRIntervalTime timeout);
+-// NSPR_API(void) _MD_notify_cv(struct _MDCVar *md, struct _MDLock *lock);
+-// NSPR_API(void) _MD_notifyall_cv(struct _MDCVar *md, struct _MDLock *lock);
+-
+-/* File I/O */
+-
+-// NSPR_API(void) _MD_init_io(void);
+-NSPR_API(PRStatus) _MD_open_dir(struct _MDDir *md,const char *name);
+-NSPR_API(char *) _MD_read_dir(struct _MDDir *md, PRIntn flags);
+-NSPR_API(PRInt32) _MD_close_dir(struct _MDDir *md);
+-NSPR_API(void) _MD_make_nonblock(PRFileDesc *fd);
+-NSPR_API(void) _MD_init_fd_inheritable(PRFileDesc *fd, PRBool imported);
+-NSPR_API(void) _MD_query_fd_inheritable(PRFileDesc *fd);
+-NSPR_API(PRInt32) _MD_open(const char *name, PRIntn osflags, PRIntn mode);
+-NSPR_API(PRInt32) _MD_close_file(PRInt32 osfd);
+-NSPR_API(PRInt32) _MD_read(PRFileDesc *fd, void *buf, PRInt32 amount);
+-NSPR_API(PRInt32) _MD_write(PRFileDesc *fd, const void *buf, PRInt32 amount);
+-NSPR_API(PRInt32) _MD_writev(PRFileDesc *fd, const PRIOVec *iov, PRInt32 iov_size, PRIntervalTime timeout);
+-NSPR_API(PRInt32) _MD_lseek(PRFileDesc *fd, PRInt32 offset, int whence);
+-NSPR_API(PRInt64) _MD_lseek64(PRFileDesc *fd, PRInt64 offset, int whence);
+-NSPR_API(PRInt32) _MD_fsync(PRFileDesc *fd);
+-NSPR_API(PRInt32) _MD_delete(const char *name);
+-NSPR_API(PRInt32) _MD_getfileinfo(const char *fn, PRFileInfo *info);
+-NSPR_API(PRInt32) _MD_getfileinfo64(const char *fn, PRFileInfo64 *info);
+-NSPR_API(PRInt32) _MD_getopenfileinfo(const PRFileDesc *fd, PRFileInfo *info);
+-NSPR_API(PRInt32) _MD_getopenfileinfo64(const PRFileDesc *fd, PRFileInfo64 *info);
+-NSPR_API(PRInt32) _MD_rename(const char *from, const char *to);
+-NSPR_API(PRInt32) _MD_access(const char *name, PRIntn how);
+-NSPR_API(PRInt32) _MD_stat(const char *name, struct stat *buf);
+-NSPR_API(PRInt32) _MD_mkdir(const char *name, PRIntn mode);
+-NSPR_API(PRInt32) _MD_rmdir(const char *name);
+-NSPR_API(PRInt32) _MD_pr_poll(PRPollDesc *pds, PRIntn npds, PRIntervalTime timeout);
+-
+-/* Network I/O */
+-NSPR_API(PRInt32) _MD_close_socket(PRInt32 osfd);
+-NSPR_API(PRInt32) _MD_connect(PRFileDesc *fd, const PRNetAddr *addr, PRUint32 addrlen, PRIntervalTime timeout);
+-NSPR_API(PRInt32) _MD_accept(PRFileDesc *fd, PRNetAddr *addr, PRUint32 *addrlen, PRIntervalTime timeout);
+-NSPR_API(PRInt32) _MD_bind(PRFileDesc *fd, const PRNetAddr *addr, PRUint32 addrlen);
+-NSPR_API(PRInt32) _MD_listen(PRFileDesc *fd, PRIntn backlog);
+-NSPR_API(PRInt32) _MD_shutdown(PRFileDesc *fd, PRIntn how);
+-NSPR_API(PRInt32) _MD_recv(PRFileDesc *fd, void *buf, PRInt32 amount, PRIntn flags, PRIntervalTime timeout);
+-NSPR_API(PRInt32) _MD_send(PRFileDesc *fd, const void *buf, PRInt32 amount, PRIntn flags, PRIntervalTime timeout);
+-NSPR_API(PRInt32) _MD_accept_read(PRFileDesc *sd, PRInt32 *newSock, PRNetAddr **raddr, void *buf, PRInt32 amount, PRIntervalTime timeout);
+-// NSPR_API(PRInt32) _MD_fast_accept(PRFileDesc *fd, PRNetAddr *addr, PRUint32 *addrlen, PRIntervalTime timeout, PRBool fast, _PR_AcceptTimeoutCallback callback, void *callbackArg);
+-// NSPR_API(PRInt32) _MD_fast_accept_read(PRFileDesc *sd, PRInt32 *newSock, PRNetAddr **raddr, void *buf, PRInt32 amount, PRIntervalTime timeout, PRBool fast, _PR_AcceptTimeoutCallback callback, void *callbackArg);
+-// NSPR_API(void) _MD_update_accept_context(PRInt32 s, PRInt32 ls);
+-NSPR_API(PRStatus) _MD_getsockname(PRFileDesc *fd, PRNetAddr *addr, PRUint32 *addrlen);
+-NSPR_API(PRStatus) _MD_getpeername(PRFileDesc *fd, PRNetAddr *addr, PRUint32 *addrlen);
+-NSPR_API(PRStatus) _MD_getsockopt(PRFileDesc *fd, PRInt32 level, PRInt32 optname, char* optval, PRInt32* optlen);
+-NSPR_API(PRStatus) _MD_setsockopt(PRFileDesc *fd, PRInt32 level, PRInt32 optname, const char* optval, PRInt32 optlen);
+-NSPR_API(PRInt32) _MD_recvfrom(PRFileDesc *fd, void *buf, PRInt32 amount, PRIntn flags, PRNetAddr *addr, PRUint32 *addrlen, PRIntervalTime timeout);
+-NSPR_API(PRInt32) _MD_sendto(PRFileDesc *fd, const void *buf, PRInt32 amount, PRIntn flags, const PRNetAddr *addr, PRUint32 addrlen, PRIntervalTime timeout);
+-NSPR_API(PRInt32) _MD_socketpair(int af, int type, int flags, PRInt32 *osfd);
+-NSPR_API(PRInt32) _MD_socket(int af, int type, int flags);
+-NSPR_API(PRInt32) _MD_socketavailable(PRFileDesc *fd);
+-
+-// NSPR_API(PRInt32) _MD_get_socket_error(void);
+-NSPR_API(PRStatus) _MD_gethostname(char *name, PRUint32 namelen);
+-
+-/* Process management */
+-
+-NSPR_API(PRProcess *) _MD_create_process(const char *path, char *const *argv, char *const *envp, const PRProcessAttr *attr);
+-NSPR_API(PRStatus) _MD_detach_process(PRProcess *process);
+-NSPR_API(PRStatus) _MD_wait_process(PRProcess *process, PRInt32 *exitCode);
+-NSPR_API(PRStatus) _MD_kill_process(PRProcess *process);
+-
+-/* Atomic data operations */
+-
+-// NSPR_API(void) _MD_init_atomic(void);
+-// NSPR_API(PRInt32) _MD_atomic_increment(PRInt32 *);
+-// NSPR_API(PRInt32) _MD_atomic_decrement(PRInt32 *);
+-// NSPR_API(PRInt32) _MD_atomic_set(PRInt32 *, PRInt32);
+-
+-/* Memory management */
+-
+-NSPR_API(void) _MD_init_segs(void);
+-NSPR_API(PRStatus) _MD_alloc_segment(PRSegment *seg, PRUint32 size, void *vaddr);
+-NSPR_API(void) _MD_free_segment(PRSegment *seg);
+-
+-/* Memory mapped file I/O */
+-
+-NSPR_API(PRStatus) _MD_create_file_map(PRFileMap *fmap, PRInt64 size);
+-NSPR_API(PRInt32) _MD_get_mem_map_alignment(void);
+-NSPR_API(void *) _MD_mem_map(PRFileMap *fmap, PRInt64 offset, PRUint32 len);
+-NSPR_API(PRStatus) _MD_mem_unmap(void *addr, PRUint32 size);
+-NSPR_API(PRStatus) _MD_close_file_map(PRFileMap *fmap);
+-
+-/* Time related */
+-
+-NSPR_API(PRTime) _MD_now(void);
+-NSPR_API(void) _MD_interval_init(void);
+-NSPR_API(PRIntervalTime) _MD_get_interval(void);
+-NSPR_API(PRIntervalTime) _MD_interval_per_sec(void);
+-
+-/* File locking */
+-
+-NSPR_API(PRStatus) _MD_lockfile(PRInt32 osfd);
+-NSPR_API(PRStatus) _MD_tlockfile(PRInt32 osfd);
+-NSPR_API(PRStatus) _MD_unlockfile(PRInt32 osfd);
+-
+ #endif /* _nspr_beos_defs_h___*/
+Index: nsprpub/pr/include/private/primpl.h
+===================================================================
+--- nsprpub/pr/include/private/primpl.h	(revision 7)
++++ nsprpub/pr/include/private/primpl.h	(working copy)
+@@ -50,10 +50,6 @@
+ #include <pthread.h>
+ #endif
+ 
+-#if defined(_PR_BTHREADS)
+-#include <kernel/OS.h>
+-#endif
+-
+ #ifdef WINNT
+ /* Need to force service-pack 3 extensions to be defined by
+ ** setting _WIN32_WINNT to NT 4.0 for winsock.h, winbase.h, winnt.h.
+@@ -228,6 +224,20 @@
+ 
+ #else /* defined(_PR_PTHREADS) */
+ 
++#ifdef _PR_BTHREADS
++#define _MD_GET_ATTACHED_THREAD()        (_PR_MD_CURRENT_THREAD())
++
++#define _PR_IS_NATIVE_THREAD(thread) 1
++#define _PR_IS_NATIVE_THREAD_SUPPORTED() 1
++/*
++extern PRInt32 _PR_MD_WRITE(PRFileDesc *fd, const void *buf, PRInt32 amount);
++#define    _PR_MD_WRITE _MD_WRITE
++*/
++NSPR_API(PRThread*) _PR_MD_CURRENT_THREAD(void);
++#define    _PR_MD_CURRENT_THREAD _MD_CURRENT_THREAD
++
++#else /* defined(_PR_BTHREADS) */
++
+ NSPR_API(void) PT_FPrintStats(PRFileDesc *fd, const char *msg);
+ 
+ /*
+@@ -1301,6 +1311,7 @@
+ extern void *_PR_MD_GET_SP(PRThread *thread);
+ #define    _PR_MD_GET_SP _MD_GET_SP
+ 
++#endif /* defined(_PR_BTHREADS) */
+ #endif /* defined(_PR_PTHREADS) */
+ 
+ /************************************************************************/
+@@ -1555,7 +1566,10 @@
+ 
+ #if defined(_PR_PTHREADS)
+ #else /* defined(_PR_PTHREADS) */
++#if defined(_PR_BTHREADS)
++#else /* defined(_PR_BTHREADS) */
+     _MDThreadStack md;
++#endif /* defined(_PR_BTHREADS) */
+ #endif /* defined(_PR_PTHREADS) */
+ };
+ 
+@@ -1608,9 +1622,6 @@
+ #elif defined(_PR_BTHREADS)
+     PRUint32 flags;
+     _MDThread md;
+-    PRBool io_pending;
+-    PRInt32 io_fd;
+-    PRBool io_suspended;
+ #else /* not pthreads or Be threads */
+     _MDLock threadLock;             /* Lock to protect thread state variables.
+                                      * Protects the following fields:
+@@ -1694,7 +1705,9 @@
+ struct PRFileMap {
+     PRFileDesc *fd;
+     PRFileMapProtect prot;
++#if !defined(XP_BEOS)
+     _MDFileMap md;
++#endif /* !defined(XP_BEOS) */
+ };
+ 
+ /************************************************************************/
+@@ -1777,8 +1790,10 @@
+ #endif /* MOZ_UNICODE */
+ 
+ extern void _PR_InitSegs(void);
++#if !defined(_PR_BTHREADS)
+ extern void _PR_InitStacks(void);
+ extern void _PR_InitTPD(void);
++#endif /* !defined(_PR_BTHREADS) */
+ extern void _PR_InitMem(void);
+ extern void _PR_InitEnv(void);
+ extern void _PR_InitCMon(void);
+@@ -1830,7 +1845,10 @@
+     PRUintn flags;
+ #if defined(_PR_PTHREADS)
+ #else  /* defined(_PR_PTHREADS) */
++#if defined(_PR_BTHREADS) 
++#else /* defined(_PR_BTHREADS) */
+     _MDSegment md;
++#endif /* defined(_PR_BTHREADS) */
+ #endif /* defined(_PR_PTHREADS) */
+ };
+ 
+@@ -2127,7 +2145,7 @@
+ 
+ /* end PR_GetRandomNoise() related */
+ 
+-#ifdef XP_BEOS
++#if defined(XP_BEOS) && !defined(BONE_VERSION)
+ 
+ extern PRLock *_connectLock;
+ 
+@@ -2142,7 +2160,7 @@
+ 
+ extern PRUint32 connectCount;
+ 
+-#endif /* XP_BEOS */
++#endif /* XP_BEOS && !BONE_VERSION */
+ 
+ PR_END_EXTERN_C
+ 
+Index: nsprpub/pr/src/Makefile.in
+===================================================================
+--- nsprpub/pr/src/Makefile.in	(revision 7)
++++ nsprpub/pr/src/Makefile.in	(working copy)
+@@ -281,15 +281,13 @@
+     pthreads/$(OBJDIR)/ptthread.$(OBJ_SUFFIX) \
+     pthreads/$(OBJDIR)/ptmisc.$(OBJ_SUFFIX)
+ else
++ifndef USE_BTHREADS
+ OBJS += \
+     io/$(OBJDIR)/prdir.$(OBJ_SUFFIX) \
+     io/$(OBJDIR)/prfile.$(OBJ_SUFFIX) \
+     io/$(OBJDIR)/prio.$(OBJ_SUFFIX) \
+     io/$(OBJDIR)/prsocket.$(OBJ_SUFFIX) \
+-    misc/$(OBJDIR)/pripcsem.$(OBJ_SUFFIX)
+-
+-ifndef USE_BTHREADS
+-OBJS += \
++    misc/$(OBJDIR)/pripcsem.$(OBJ_SUFFIX) \
+ 	threads/$(OBJDIR)/prcthr.$(OBJ_SUFFIX) \
+ 	threads/$(OBJDIR)/prdump.$(OBJ_SUFFIX) \
+ 	threads/$(OBJDIR)/prmon.$(OBJ_SUFFIX) \
+@@ -300,7 +298,6 @@
+ 	threads/combined/$(OBJDIR)/prustack.$(OBJ_SUFFIX) \
+ 	threads/combined/$(OBJDIR)/pruthr.$(OBJ_SUFFIX)
+ endif
+-
+ endif
+ 
+ ifeq ($(USE_CPLUS), 1)
+Index: nsprpub/pr/src/misc/Makefile.in
+===================================================================
+--- nsprpub/pr/src/misc/Makefile.in	(revision 7)
++++ nsprpub/pr/src/misc/Makefile.in	(working copy)
+@@ -71,10 +71,12 @@
+ 	$(NULL)
+ 
+ ifndef USE_PTHREADS
++ifndef USE_BTHREADS
+ CSRCS += \
+ 	pripcsem.c \
+ 	$(NULL)
+ endif
++endif
+ 
+ TARGETS	= $(OBJS)
+ 
+Index: nsprpub/pr/src/misc/prinit.c
+===================================================================
+--- nsprpub/pr/src/misc/prinit.c	(revision 7)
++++ nsprpub/pr/src/misc/prinit.c	(working copy)
+@@ -196,8 +196,10 @@
+     _PR_InitLocks();
+     _PR_InitAtomic();
+     _PR_InitSegs();
++#if !defined(_PR_BTHREADS)
+     _PR_InitStacks();
+ 	_PR_InitTPD();
++#endif /*!defined(_PR_BTHREADS) */
+     _PR_InitEnv();
+     _PR_InitLayerCache();
+     _PR_InitClock();
+Index: nsprpub/pr/src/misc/pripcsem.c
+===================================================================
+--- nsprpub/pr/src/misc/pripcsem.c	(revision 7)
++++ nsprpub/pr/src/misc/pripcsem.c	(working copy)
+@@ -46,9 +46,9 @@
+ 
+ #include "primpl.h"
+ 
+-#ifdef _PR_PTHREADS
++#if defined(_PR_PTHREADS) || defined(_PR_BTHREADS)
+ 
+-#error "This file should not be compiled for the pthreads version"
++#error "This file should not be compiled for the pthreads or bthreads version"
+ 
+ #else
+ 
+@@ -127,4 +127,4 @@
+     return _PR_MD_DELETE_SEMAPHORE(osname);
+ }
+ 
+-#endif /* _PR_PTHREADS */
++#endif /* _PR_PTHREADS || _PR_BTHREADS */
+Index: nsprpub/pr/src/linking/prlink.c
+===================================================================
+--- nsprpub/pr/src/linking/prlink.c	(revision 7)
++++ nsprpub/pr/src/linking/prlink.c	(working copy)
+@@ -199,8 +199,10 @@
+ 
+ #ifdef XP_BEOS
+     void*                       dlh;
++#ifndef XP_HAIKU
+     void*                       stub_dlh;
+ #endif
++#endif
+ };
+ 
+ static PRLibrary *pr_loadmap;
+@@ -863,6 +865,19 @@
+     result = pr_UnlockedFindLibrary(name);
+ #endif
+ 
++#ifdef XP_BEOS
++    /* Havn't seen this happen so far, but it doesn't slow anything
++       down so let's keep it */
++    for (result = pr_loadmap; result != NULL; result = result->next) {
++        /* hopefully, our caller will always use the same string
++           to refer to the same library */
++        if (strcmp(name, result->name) == 0) {
++            result->refCount++;
++            break;
++        }
++    }
++#endif
++
+     if (result != NULL) goto unlock;
+ 
+     lm = PR_NEWZAP(PRLibrary);
+@@ -1020,29 +1035,14 @@
+ #endif /* HAVE_DLL */
+ #endif /* XP_UNIX */
+ 
+-    lm->refCount = 1;
+-
+ #ifdef XP_BEOS
+-    {
+-        image_info info;
+-        int32 cookie = 0;
++    {	/* Code block to allow variable inits. :/ */
++        /* it appears the library isn't yet loaded - load it now */
++#ifdef XP_HAIKU
++        image_id imageid = load_add_on(name);
++#else
+         image_id imageid = B_ERROR;
+         image_id stubid = B_ERROR;
+-        PRLibrary *p;
+-
+-        for (p = pr_loadmap; p != NULL; p = p->next) {
+-            /* hopefully, our caller will always use the same string
+-               to refer to the same library */
+-            if (strcmp(name, p->name) == 0) {
+-                /* we've already loaded this library */
+-                imageid = info.id;
+-                lm->refCount++;
+-                break;
+-            }
+-        }
+-
+-        if(imageid == B_ERROR) {
+-            /* it appears the library isn't yet loaded - load it now */
+             char stubName [B_PATH_NAME_LENGTH + 1];
+ 
+             /* the following is a work-around to a "bug" in the beos -
+@@ -1069,36 +1069,37 @@
+             /* first, attempt to load the stub (thereby loading the
+                component as a shared library */
+             if ((stubid = load_add_on(stubName)) > B_ERROR) {
++
++            const char *endOfPassedName = strrchr(name, '/');
++            image_info info;
++            int32 cookie = 0;
++
+                 /* the stub was loaded successfully. */
+                 imageid = B_FILE_NOT_FOUND;
++            if( 0 == endOfPassedName )
++                endOfPassedName = name;
++            else
++                endOfPassedName++;
+ 
+-                cookie = 0;
+                 while (get_next_image_info(0, &cookie, &info) == B_OK) {
+                     const char *endOfSystemName = strrchr(info.name, '/');
+-                    const char *endOfPassedName = strrchr(name, '/');
+                     if( 0 == endOfSystemName ) 
+                         endOfSystemName = info.name;
+                     else
+                         endOfSystemName++;
+-                    if( 0 == endOfPassedName )
+-                        endOfPassedName = name;
+-                    else
+-                        endOfPassedName++;
+                     if (strcmp(endOfSystemName, endOfPassedName) == 0) {
+                         /* this is the actual component - remember it */
+                         imageid = info.id;
+                         break;
+                     }
+                 }
+-
+             } else {
+                 /* we failed to load the "stub" - try to load the
+                    component directly as an add-on */
+                 stubid = B_ERROR;
+                 imageid = load_add_on(name);
+             }
+-        }
+-
++#endif /* XP_HAIKU */
+         if (imageid <= B_ERROR) {
+             oserr = imageid;
+             PR_DELETE( lm );
+@@ -1106,12 +1107,15 @@
+         }
+         lm->name = strdup(name);
+         lm->dlh = (void*)imageid;
++#ifndef XP_HAIKU
+         lm->stub_dlh = (void*)stubid;
++#endif
+         lm->next = pr_loadmap;
+         pr_loadmap = lm;
+     }
+-#endif
++#endif /* XP_BEOS */
+ 
++    lm->refCount = 1;
+     result = lm;    /* success */
+     PR_LOG(_pr_linker_lm, PR_LOG_MIN, ("Loaded library %s (load lib)", lm->name));
+ 
+@@ -1272,11 +1276,15 @@
+     }
+ 
+ #ifdef XP_BEOS
++#ifdef XP_HAIKU
++    unload_add_on( (image_id) lib->dlh );
++#else
+     if(((image_id)lib->stub_dlh) == B_ERROR)
+         unload_add_on( (image_id) lib->dlh );
+     else
+         unload_add_on( (image_id) lib->stub_dlh);
+-#endif
++#endif /* XP_HAIKU */
++#endif /* XP_BEOS */
+ 
+ #ifdef XP_UNIX
+ #ifdef HAVE_DLL
+Index: nsprpub/pr/src/bthreads/bsrcs.mk
+===================================================================
+--- nsprpub/pr/src/bthreads/bsrcs.mk	(revision 7)
++++ nsprpub/pr/src/bthreads/bsrcs.mk	(working copy)
+@@ -20,6 +20,7 @@
+ # the Initial Developer. All Rights Reserved.
+ #
+ # Contributor(s):
++# Fredrik Holmqvist <thesuckiestemail@yahoo.se>
+ #
+ # Alternatively, the contents of this file may be used under the terms of
+ # either the GNU General Public License Version 2 or later (the "GPL"), or
+@@ -46,4 +47,6 @@
+ 	btmon.c \
+ 	btsem.c \
+ 	btmisc.c \
++	btfile.c \
++	btio.c \
+ 	$(NULL)
+Index: nsprpub/pr/src/bthreads/btcvar.c
+===================================================================
+--- nsprpub/pr/src/bthreads/btcvar.c	(revision 7)
++++ nsprpub/pr/src/bthreads/btcvar.c	(working copy)
+@@ -20,6 +20,7 @@
+  * the Initial Developer. All Rights Reserved.
+  *
+  * Contributor(s):
++ * Fredrik Holmqvist <thesuckiestemail@yahoo.se>
+  *
+  * Alternatively, the contents of this file may be used under the terms of
+  * either the GNU General Public License Version 2 or later (the "GPL"), or
+@@ -35,8 +36,6 @@
+  *
+  * ***** END LICENSE BLOCK ***** */
+ 
+-#include <kernel/OS.h>
+-
+ #include "primpl.h"
+ 
+ /*
+@@ -130,16 +129,16 @@
+         return PR_SUCCESS;
+     }
+ 
+-    if( atomic_add( &cvar->signalBenCount, 1 ) > 0 ) 
++    if( _MD_ATOMIC_INCREMENT( &cvar->signalBenCount ) > 1 )
+     {
+         if (acquire_sem(cvar->signalSem) == B_INTERRUPTED) 
+         {
+-            atomic_add( &cvar->signalBenCount, -1 );
++            _MD_ATOMIC_DECREMENT( &cvar->signalBenCount );
+             return PR_FAILURE;
+         }
+     }
+     cvar->nw += 1;
+-    if( atomic_add( &cvar->signalBenCount, -1 ) > 1 ) 
++    if( _MD_ATOMIC_DECREMENT( &cvar->signalBenCount ) > 0 )
+     {
+         release_sem_etc(cvar->signalSem, 1, B_DO_NOT_RESCHEDULE);
+     }
+@@ -154,7 +153,7 @@
+     	err = acquire_sem_etc(cvar->sem, 1, B_RELATIVE_TIMEOUT, PR_IntervalToMicroseconds(timeout) );
+     }
+ 
+-    if( atomic_add( &cvar->signalBenCount, 1 ) > 0 ) 
++    if( _MD_ATOMIC_INCREMENT( &cvar->signalBenCount ) > 1 )
+     {
+         while (acquire_sem(cvar->signalSem) == B_INTERRUPTED);
+     }
+@@ -165,18 +164,18 @@
+         cvar->ns -= 1;
+     }
+     cvar->nw -= 1;
+-    if( atomic_add( &cvar->signalBenCount, -1 ) > 1 ) 
++    if( _MD_ATOMIC_DECREMENT( &cvar->signalBenCount ) > 0 )
+     {
+         release_sem_etc(cvar->signalSem, 1, B_DO_NOT_RESCHEDULE);
+     }
+ 
+     PR_Lock( cvar->lock );
+-    if(err!=B_NO_ERROR) 
++    if(err==B_NO_ERROR  || (err == B_TIMED_OUT && timeout!=PR_INTERVAL_NO_TIMEOUT))
+     {
+-        return PR_FAILURE;
+-    }
+     return PR_SUCCESS;
+ }
++    return PR_FAILURE;
++}
+ 
+ /*
+ ** Notify ONE thread that is currently waiting on 'cvar'. Which thread is
+@@ -195,11 +194,11 @@
+     PR_NotifyCondVar (PRCondVar *cvar)
+ {
+     status_t err ;
+-    if( atomic_add( &cvar->signalBenCount, 1 ) > 0 ) 
++    if( _MD_ATOMIC_INCREMENT( &cvar->signalBenCount) > 1 )
+     {
+         if (acquire_sem(cvar->signalSem) == B_INTERRUPTED) 
+         {
+-            atomic_add( &cvar->signalBenCount, -1 );
++            _MD_ATOMIC_DECREMENT( &cvar->signalBenCount );
+             return PR_FAILURE;
+         }
+     }
+@@ -207,7 +206,7 @@
+     {
+         cvar->ns += 1;
+         release_sem_etc(cvar->sem, 1, B_DO_NOT_RESCHEDULE);
+-        if( atomic_add( &cvar->signalBenCount, -1 ) > 1 ) 
++        if( _MD_ATOMIC_DECREMENT( &cvar->signalBenCount) > 0 )
+         {
+             release_sem_etc(cvar->signalSem, 1, B_DO_NOT_RESCHEDULE);
+         }
+@@ -219,7 +218,7 @@
+     }
+     else
+     {
+-        if( atomic_add( &cvar->signalBenCount, -1 ) > 1 )
++        if( _MD_ATOMIC_DECREMENT( &cvar->signalBenCount ) > 0 )
+         {
+             release_sem_etc(cvar->signalSem, 1, B_DO_NOT_RESCHEDULE);
+         }
+@@ -241,11 +240,11 @@
+     int32 handshakes;
+     status_t err = B_OK;
+ 
+-    if( atomic_add( &cvar->signalBenCount, 1 ) > 0 ) 
++    if( _MD_ATOMIC_INCREMENT( &cvar->signalBenCount) > 1 )
+     {
+         if (acquire_sem(cvar->signalSem) == B_INTERRUPTED) 
+         {
+-            atomic_add( &cvar->signalBenCount, -1 );
++            _MD_ATOMIC_DECREMENT( &cvar->signalBenCount );
+             return PR_FAILURE;
+         }
+     }
+@@ -255,7 +254,7 @@
+         handshakes = cvar->nw - cvar->ns;
+         cvar->ns = cvar->nw;				
+         release_sem_etc(cvar->sem, handshakes, B_DO_NOT_RESCHEDULE);	
+-        if( atomic_add( &cvar->signalBenCount, -1 ) > 1 ) 
++        if( _MD_ATOMIC_DECREMENT( &cvar->signalBenCount ) > 0 )
+         {
+             release_sem_etc(cvar->signalSem, 1, B_DO_NOT_RESCHEDULE);
+         }
+@@ -267,7 +266,7 @@
+     }
+     else
+     {
+-        if( atomic_add( &cvar->signalBenCount, -1 ) > 1 ) 
++        if( _MD_ATOMIC_DECREMENT( &cvar->signalBenCount ) > 0 )
+         {
+             release_sem_etc(cvar->signalSem, 1, B_DO_NOT_RESCHEDULE);
+         }
+Index: nsprpub/pr/src/bthreads/btlocks.c
+===================================================================
+--- nsprpub/pr/src/bthreads/btlocks.c	(revision 7)
++++ nsprpub/pr/src/bthreads/btlocks.c	(working copy)
+@@ -43,9 +43,6 @@
+ 
+ #include "primpl.h"
+ 
+-#include <string.h>
+-#include <sys/time.h>
+-
+ void
+ _PR_InitLocks (void)
+ {
+@@ -61,16 +58,13 @@
+ 
+     lock = PR_NEWZAP(PRLock);
+     if (lock != NULL) {
+-
+ 	lock->benaphoreCount = 0;
+ 	lock->semaphoreID = create_sem( 0, "nsprLockSem" );
+ 	if( lock->semaphoreID < B_NO_ERROR ) {
+-
+ 	    PR_DELETE( lock );
+ 	    lock = NULL;
+ 	}
+     }
+-
+     return lock;
+ }
+ 
+@@ -88,17 +82,18 @@
+ PR_IMPLEMENT(void)
+     PR_Lock (PRLock* lock)
+ {
++    status_t result;
++
+     PR_ASSERT(lock != NULL);
+ 
+-    if( atomic_add( &lock->benaphoreCount, 1 ) > 0 ) {
+-
+-	if( acquire_sem(lock->semaphoreID ) != B_NO_ERROR ) {
+-
+-	    atomic_add( &lock->benaphoreCount, -1 );
++    if( _MD_ATOMIC_INCREMENT( &lock->benaphoreCount) > 1 ) {
++        result = acquire_sem(lock->semaphoreID );   
++        PR_ASSERT(result == B_NO_ERROR);
++        if( result != B_NO_ERROR ) {
++            _MD_ATOMIC_DECREMENT( &lock->benaphoreCount);
+ 	    return;
+ 	}
+     }
+-
+     lock->owner = find_thread( NULL );
+ }
+ 
+@@ -107,8 +102,7 @@
+ {
+     PR_ASSERT(lock != NULL);
+     lock->owner = NULL;
+-    if( atomic_add( &lock->benaphoreCount, -1 ) > 1 ) {
+-
++    if( _MD_ATOMIC_DECREMENT( &lock->benaphoreCount ) > 0 ) {
+ 	release_sem_etc( lock->semaphoreID, 1, B_DO_NOT_RESCHEDULE );
+     }
+ 
+Index: nsprpub/pr/src/bthreads/btmisc.c
+===================================================================
+--- nsprpub/pr/src/bthreads/btmisc.c	(revision 7)
++++ nsprpub/pr/src/bthreads/btmisc.c	(working copy)
+@@ -20,6 +20,7 @@
+  * the Initial Developer. All Rights Reserved.
+  *
+  * Contributor(s):
++ * Fredrik Holmqvist <thesuckiestemail@yahoo.se>
+  *
+  * Alternatively, the contents of this file may be used under the terms of
+  * either the GNU General Public License Version 2 or later (the "GPL"), or
+@@ -38,11 +39,11 @@
+ #include "primpl.h"
+ #include <stdio.h>
+ 
+-// void _PR_InitCPUs(void) {PT_LOG("_PR_InitCPUs")}
+-// void _MD_StartInterrupts(void) {PT_LOG("_MD_StartInterrupts")}
+-
+-/* this is a total hack.. */
+-
++/* this is a total hack.. 
++ * It's needed for netserver to compile.
++ * See nsprpub/pr/include/prnetdb.h
++ */
++#ifndef BONE_VERSION
+ struct protoent* getprotobyname(const char* name)
+ {
+     return 0;
+@@ -52,51 +53,17 @@
+ {
+     return 0;
+ }
++#endif
+ 
+-/* this is needed by prinit for some reason */
+-void
+-_PR_InitStacks (void)
+-{
+-}
+-
+-/* this is needed by prinit for some reason */
+-void
+-_PR_InitTPD (void)
+-{
+-}
+-
+ /*
+-** Create extra virtual processor threads. Generally used with MP systems.
+-*/
+-PR_IMPLEMENT(void)
+-    PR_SetConcurrency (PRUintn numCPUs)
+-{
+-}
+-
+-/*
+-** Set thread recycle mode to on (1) or off (0)
+-*/
+-PR_IMPLEMENT(void)
+-    PR_SetThreadRecycleMode (PRUint32 flag)
+-{
+-}
+-
+-/*
+ ** Get context registers, return with error for now.
+ */
+-
+ PR_IMPLEMENT(PRWord *)
+ _MD_HomeGCRegisters( PRThread *t, int isCurrent, int *np )
+ {
+      return 0;
+ }
+ 
+-PR_IMPLEMENT(void *)
+-PR_GetSP( PRThread *t )
+-{
+-    return 0;
+-}
+-
+ PR_IMPLEMENT(PRStatus)
+ PR_EnumerateThreads( PREnumerator func, void *arg )
+ {
+Index: nsprpub/pr/src/bthreads/btfile.c
+===================================================================
+--- nsprpub/pr/src/bthreads/btfile.c	(revision 0)
++++ nsprpub/pr/src/bthreads/btfile.c	(revision 0)
+@@ -0,0 +1,994 @@
++/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* ***** BEGIN LICENSE BLOCK *****
++ * Version: MPL 1.1/GPL 2.0/LGPL 2.1
++ *
++ * The contents of this file are subject to the Mozilla Public License Version
++ * 1.1 (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ * http://www.mozilla.org/MPL/
++ *
++ * Software distributed under the License is distributed on an "AS IS" basis,
++ * WITHOUT WARRANTY OF ANY KIND, either express or implied. See the License
++ * for the specific language governing rights and limitations under the
++ * License.
++ *
++ * The Original Code is the Netscape Portable Runtime (NSPR).
++ *
++ * The Initial Developer of the Original Code is
++ * Netscape Communications Corporation.
++ * Portions created by the Initial Developer are Copyright (C) 1998-2000
++ * the Initial Developer. All Rights Reserved.
++ *
++ * Contributor(s):
++ *   Roy Yokoyama <yokoyama@netscape.com>
++ *
++ * Alternatively, the contents of this file may be used under the terms of
++ * either the GNU General Public License Version 2 or later (the "GPL"), or
++ * the GNU Lesser General Public License Version 2.1 or later (the "LGPL"),
++ * in which case the provisions of the GPL or the LGPL are applicable instead
++ * of those above. If you wish to allow use of your version of this file only
++ * under the terms of either the GPL or the LGPL, and not to allow others to
++ * use your version of this file under the terms of the MPL, indicate your
++ * decision by deleting the provisions above and replace them with the notice
++ * and other provisions required by the GPL or the LGPL. If you do not delete
++ * the provisions above, a recipient may use your version of this file under
++ * the terms of any one of the MPL, the GPL or the LGPL.
++ *
++ * ***** END LICENSE BLOCK ***** */
++
++#include "primpl.h"
++
++static PRLock *_pr_flock_lock;  /* For PR_LockFile() etc. */
++static PRCondVar *_pr_flock_cv;  /* For PR_LockFile() etc. */
++
++PRErrorCode
++map_default_error(int err)
++{
++    switch (err) {
++        case EACCES:
++            return PR_NO_ACCESS_RIGHTS_ERROR;
++        case EADDRINUSE:
++            return PR_ADDRESS_IN_USE_ERROR;
++        case EADDRNOTAVAIL:
++            return PR_ADDRESS_NOT_AVAILABLE_ERROR;
++        case EAFNOSUPPORT:
++            return PR_ADDRESS_NOT_SUPPORTED_ERROR;
++        /*Same as EWOULDBLOCK*/
++        case EAGAIN:
++            return PR_WOULD_BLOCK_ERROR;
++#if EALREADY != EBUSY
++        case EALREADY:
++            return PR_ALREADY_INITIATED_ERROR;
++#endif
++        case EBADF:
++            return PR_BAD_DESCRIPTOR_ERROR;
++        case EBUSY:
++            return PR_FILESYSTEM_MOUNTED_ERROR;
++        case ECONNABORTED:
++            return PR_CONNECT_ABORTED_ERROR;
++        case ECONNREFUSED:
++            return PR_CONNECT_REFUSED_ERROR;
++        case EDEADLK:
++            return PR_DEADLOCK_ERROR;
++        case EEXIST:
++            return PR_FILE_EXISTS_ERROR;
++        case EFAULT:
++            return PR_ACCESS_FAULT_ERROR;
++        case EFBIG:
++            return PR_FILE_TOO_BIG_ERROR;
++        case EHOSTUNREACH:
++            return PR_HOST_UNREACHABLE_ERROR;
++        case EINPROGRESS:
++            return PR_IN_PROGRESS_ERROR;
++        case EINTR:
++            return PR_PENDING_INTERRUPT_ERROR;
++        case EINVAL:
++            return PR_INVALID_ARGUMENT_ERROR;
++        case EIO:
++            return PR_IO_ERROR;
++        case EISCONN:
++            return PR_IS_CONNECTED_ERROR;
++        case EISDIR:
++            return PR_IS_DIRECTORY_ERROR;
++        case ELOOP:
++            return PR_LOOP_ERROR;
++        case EMFILE:
++            return PR_PROC_DESC_TABLE_FULL_ERROR;
++        case EMLINK:
++            return PR_MAX_DIRECTORY_ENTRIES_ERROR;
++        case EMSGSIZE:
++            return PR_INVALID_ARGUMENT_ERROR;
++        case ENAMETOOLONG:
++            return PR_NAME_TOO_LONG_ERROR;
++        case ENETUNREACH:
++            return PR_NETWORK_UNREACHABLE_ERROR;
++        case ENFILE:
++            return PR_SYS_DESC_TABLE_FULL_ERROR;
++        case ENOBUFS:
++            return PR_INSUFFICIENT_RESOURCES_ERROR;
++        case ENODEV:
++        case ENOENT:
++            return PR_FILE_NOT_FOUND_ERROR;
++        case ENOLCK:
++            return PR_FILE_IS_LOCKED_ERROR;
++#if 0
++        case ENOLINK:
++            return PR_REMOTE_FILE_ERROR;
++#endif
++        case ENOMEM:
++            return PR_OUT_OF_MEMORY_ERROR;
++        case ENOPROTOOPT:
++            return PR_INVALID_ARGUMENT_ERROR;
++        case ENOSPC:
++            return PR_NO_DEVICE_SPACE_ERROR;
++        case ENOTCONN:
++            return PR_NOT_CONNECTED_ERROR;
++        case ENOTDIR:
++            return PR_NOT_DIRECTORY_ERROR;
++        case ENOTSOCK:
++            return PR_NOT_SOCKET_ERROR;
++        case ENXIO:
++            return PR_FILE_NOT_FOUND_ERROR;
++        case EOPNOTSUPP:
++            return PR_NOT_TCP_SOCKET_ERROR;
++        case EOVERFLOW:
++            return PR_BUFFER_OVERFLOW_ERROR;
++        case EPERM:
++            return PR_NO_ACCESS_RIGHTS_ERROR;
++        case EPIPE:
++            return PR_CONNECT_RESET_ERROR;
++        case EPROTONOSUPPORT:
++            return PR_PROTOCOL_NOT_SUPPORTED_ERROR;
++        case EPROTOTYPE:
++            return PR_ADDRESS_NOT_SUPPORTED_ERROR;
++        case ERANGE:
++            return PR_INVALID_METHOD_ERROR;
++        case EROFS:
++            return PR_READ_ONLY_FILESYSTEM_ERROR;
++        case ESPIPE:
++            return PR_INVALID_METHOD_ERROR;
++        case ETIMEDOUT:
++            return PR_IO_TIMEOUT_ERROR;
++        case EXDEV:
++            return PR_NOT_SAME_DEVICE_ERROR;
++        default:
++            return PR_UNKNOWN_ERROR;
++    }
++}
++
++
++inline void
++set_open_error(int err)
++{
++    PRErrorCode prError;
++    switch (err) {
++        case EAGAIN:
++        case ENOMEM:
++            prError = PR_INSUFFICIENT_RESOURCES_ERROR;
++            break;
++        case EBUSY:
++            prError = PR_IO_ERROR;
++            break;
++        case ENODEV:
++            prError = PR_FILE_NOT_FOUND_ERROR;
++            break;
++        case EOVERFLOW:
++            prError = PR_FILE_TOO_BIG_ERROR;
++            break;
++        case ETIMEDOUT:
++            prError = PR_REMOTE_FILE_ERROR;
++            break;
++        default:
++            prError = map_default_error(err);
++    }
++    PR_SetError(prError, err);
++}
++
++
++inline void
++set_rename_error(int err)
++{
++    PR_SetError(err == EEXIST ? PR_DIRECTORY_NOT_EMPTY_ERROR : map_default_error(err), err);
++}
++
++
++inline void
++set_unlink_error(int err)
++{
++    PR_SetError(err == EPERM ? PR_IS_DIRECTORY_ERROR : map_default_error(err), err);
++}
++
++
++inline void 
++set_opendir_error(int err)
++{
++    PR_SetError(map_default_error(err), err);
++}
++
++inline void
++set_closedir_error(int err)
++{
++    PR_SetError( err == EINVAL ? PR_BAD_DESCRIPTOR_ERROR : map_default_error(err), err);
++}
++
++inline void 
++set_readdir_error(int err)
++{
++    PRErrorCode prError;
++    switch (err) {
++        case 0:
++        case ENOENT:
++            prError = PR_NO_MORE_FILES_ERROR;
++            break;
++        case EOVERFLOW:
++        case EINVAL:
++        case ENXIO:
++            prError = PR_IO_ERROR;
++            break;
++        default:
++            prError = map_default_error(err);
++    }
++    PR_SetError(prError, err);
++}
++
++
++inline void
++set_mkdir_error(int err)
++{
++    PR_SetError(map_default_error(err), err);
++}
++
++
++inline void
++set_rmdir_error(int err)
++{
++    PRErrorCode prError;
++    switch (err) {
++        case ENOTEMPTY:
++        case EEXIST:
++        case EINVAL:
++            prError = PR_DIRECTORY_NOT_EMPTY_ERROR;
++            break;
++        case ETIMEDOUT:
++            prError = PR_REMOTE_FILE_ERROR;
++            break;
++        default:
++            prError = map_default_error(err);
++    }
++    PR_SetError(prError, err);
++}
++
++
++inline void
++set_close_error(int err)
++{
++    PR_SetError( err == ETIMEDOUT ? PR_REMOTE_FILE_ERROR : map_default_error(err), err);
++}
++
++
++inline void
++set_read_error(int err)
++{
++    PRErrorCode prError;
++    switch (err) {
++        case EINVAL:
++            prError = PR_INVALID_METHOD_ERROR;
++            break;
++        case ENXIO:
++            prError = PR_INVALID_ARGUMENT_ERROR;
++            break;
++        default:
++            prError = map_default_error(err);
++    }
++    PR_SetError(prError, err);
++}
++
++
++inline void
++set_write_error(int err)
++{
++    PRErrorCode prError;
++    switch (err) {
++        case EINVAL:
++            prError = PR_INVALID_METHOD_ERROR;
++            break;
++        case ENXIO:
++            prError = PR_INVALID_ARGUMENT_ERROR;
++            break;
++        case ETIMEDOUT:
++            prError = PR_REMOTE_FILE_ERROR;
++            break;
++        default:
++            prError = map_default_error(err);
++    }
++    PR_SetError(prError, err);
++}
++
++
++inline void 
++set_lseek_error(int err)
++{
++    PR_SetError(map_default_error(err), err);
++}
++
++
++inline void
++set_fsync_error(int err)
++{
++    PRErrorCode prError;
++    switch (err) {
++        case EINVAL:
++            prError = PR_INVALID_METHOD_ERROR;
++            break;
++        case ETIMEDOUT:
++            prError = PR_REMOTE_FILE_ERROR;
++            break;
++        default:
++            prError = map_default_error(err);
++    }
++    PR_SetError(prError, err);
++}
++
++
++inline void
++set_fstat_error(int err)
++{
++    PR_SetError(err == ETIMEDOUT ? PR_REMOTE_FILE_ERROR : map_default_error(err), err);
++}
++
++/* TODO: using uint8 instead of bool due to code that uses bool as var name in hard to change places
++   therefore we had to undef it. Or we need to change Haiku's headers around so we can include
++   everything we need except the bool decl. */
++PRFileDesc * bt_CreateFileDesc(PRIntn osfd, const PRIOMethods * methods, _PRTriStateBool inheritable, uint8 nonblocking) {
++    const int blocking = 1;
++    PRFileDesc *fd = _PR_Getfd();
++    if (fd == NULL)
++    {
++        PR_SetError(PR_OUT_OF_MEMORY_ERROR, 0);
++        return NULL;
++    }
++    fd->secret->md.osfd = osfd;
++    fd->secret->state = _PR_FILEDESC_OPEN;
++    fd->secret->inheritable = inheritable;
++    fd->methods = methods;
++    if (nonblocking)
++        setsockopt(osfd, SOL_SOCKET, SO_NONBLOCK, &blocking, sizeof(blocking));
++    return fd;
++}
++
++
++PR_IMPLEMENT(PRFileDesc*) PR_GetSpecialFD(PRSpecialFD osfd)
++{
++    PR_ASSERT(osfd >= PR_StandardInput && osfd <= PR_StandardError);
++
++    if (!_pr_initialized) _PR_ImplicitInitialization();
++
++    switch (osfd)
++    {
++        case PR_StandardInput: return _pr_stdin;
++        case PR_StandardOutput: return _pr_stdout;
++        case PR_StandardError: return _pr_stderr;
++        default:
++            PR_SetError(PR_INVALID_ARGUMENT_ERROR, 0);
++    }
++    return NULL;
++}  /* PR_GetSpecialFD */
++
++
++PR_IMPLEMENT(PRFileDesc*) PR_Open(const char *name, PRIntn flags, PRIntn mode)
++{
++    return PR_OpenFile(name, flags, mode);
++}  /* PR_Open */
++
++PR_IMPLEMENT(PRFileDesc*) PR_OpenFile(const char *name, PRIntn flags, PRIntn mode)
++{
++    PRFileDesc *fd = NULL;
++    PRInt32 osflags;
++    PRInt32 osfd, err;
++
++    if (flags & PR_RDWR) {
++        osflags = O_RDWR;
++    } else if (flags & PR_WRONLY) {
++        osflags = O_WRONLY;
++    } else {
++        osflags = O_RDONLY;
++    }
++
++    if (flags & PR_EXCL)
++        osflags |= O_EXCL;
++    if (flags & PR_APPEND)
++        osflags |= O_APPEND;
++    if (flags & PR_TRUNCATE)
++        osflags |= O_TRUNC;
++    if (flags & PR_SYNC) {
++/* Ummmm.  BeOS doesn't appear to
++   support sync in any way shape or
++   form. */
++        return PR_NOT_IMPLEMENTED_ERROR;
++    }
++
++    if (flags & PR_CREATE_FILE)
++    {
++        osflags |= O_CREAT;
++    }
++    
++    osfd = open(name, osflags, mode);
++    if (osfd < 0) {
++        err = _MD_ERRNO();
++        set_open_error(err);
++    }
++
++    if(osfd>=0) {
++        fd = bt_CreateFileDesc(osfd, PR_GetFileMethods(), _PR_TRI_TRUE, false);
++        if (fd == NULL) close(osfd);  /* $$$ whoops! this is bad $$$ */
++    }
++    return fd;
++} /* PR_OpenFile */
++
++/*
++** Import an existing OS file to NSPR
++*/
++PR_IMPLEMENT(PRFileDesc*) PR_ImportFile(PRInt32 osfd)
++{
++    PRFileDesc *fd = NULL;
++
++    if (!_pr_initialized) _PR_ImplicitInitialization();
++
++    fd = bt_CreateFileDesc(osfd, PR_GetFileMethods(), _PR_TRI_UNKNOWN, false);
++    if (NULL == fd) close(osfd);
++    return fd;
++}
++
++/*
++** Import an existing OS pipe to NSPR 
++*/
++PR_IMPLEMENT(PRFileDesc*) PR_ImportPipe(PRInt32 osfd)
++{
++    PRFileDesc *fd = NULL;
++
++    if (!_pr_initialized) _PR_ImplicitInitialization();
++    fd = bt_CreateFileDesc(osfd, PR_GetPipeMethods(), _PR_TRI_UNKNOWN, true);
++
++    if (NULL == fd) close(osfd);
++    return fd;
++}
++
++
++PR_IMPLEMENT(PRStatus) PR_Rename(const char *from, const char *to)
++{
++    PRInt32 rv = -1, err;
++
++    if (0 == access(to, F_OK))
++        PR_SetError(PR_FILE_EXISTS_ERROR, 0);
++    else
++    {
++        rv = rename(from, to);
++        if (rv < 0) {
++            err = _MD_ERRNO();
++            set_rename_error(err);
++        }
++    }
++    if (rv < 0) {
++        return PR_FAILURE;
++    } else {
++        return PR_SUCCESS;
++    }
++}
++
++PR_IMPLEMENT(PRStatus) PR_Delete(const char *name)
++{
++    PRInt32 rv, err;
++
++    rv = unlink(name);
++    if (rv < 0) {
++        err = _MD_ERRNO();
++        set_unlink_error(err);
++        return PR_FAILURE;
++    } else
++        return PR_SUCCESS;
++}
++
++
++PR_IMPLEMENT(PRDir*) PR_OpenDir(const char *name)
++{
++    PRDir *dir;
++    PRInt32 err;
++
++    dir = PR_NEW(PRDir);
++    if (dir) {
++        dir->md.d = opendir(name);
++        if (NULL == dir->md.d) {
++            err = _MD_ERRNO();
++            set_opendir_error(err);
++            PR_DELETE(dir);
++            return NULL;
++        }
++    } else {
++        PR_SetError(PR_OUT_OF_MEMORY_ERROR, 0);
++    }
++    return dir;
++}
++
++PR_IMPLEMENT(PRDirEntry*) PR_ReadDir(PRDir *dir, PRDirFlags flags)
++{
++    PRInt32 err;
++    struct dirent *de;
++    for (;;) {
++        /*
++         * XXX: readdir() is not MT-safe
++         */
++        _MD_ERRNO() = 0;
++        de = readdir(dir->md.d);
++
++        if (!de) {
++            err = _MD_ERRNO();
++            set_readdir_error(err);
++            return 0;
++        }
++
++        if ((flags & PR_SKIP_DOT) &&
++            (de->d_name[0] == '.') && (de->d_name[1] == 0))
++            continue;
++
++        if ((flags & PR_SKIP_DOT_DOT) &&
++            (de->d_name[0] == '.') && (de->d_name[1] == '.') &&
++            (de->d_name[2] == 0))
++            continue;
++
++        if ((flags & PR_SKIP_HIDDEN) && (de->d_name[1] == '.'))
++            continue;
++
++        break;
++    }
++
++    dir->d.name = de->d_name;
++    return de->d_name ? &dir->d : NULL;
++}
++
++PR_IMPLEMENT(PRStatus) PR_CloseDir(PRDir *dir)
++{
++    PRInt32 rv, err;
++
++    if (dir && dir->md.d) {
++        rv = closedir(dir->md.d);
++        PR_DELETE(dir);
++        if (rv < 0) {
++            err = _MD_ERRNO();
++            set_closedir_error(err);
++            return PR_FAILURE;
++        } 
++    }
++    return PR_SUCCESS;
++}
++
++PR_IMPLEMENT(PRStatus) PR_MkDir(const char *name, PRIntn mode)
++{
++    status_t rv;
++    int err;
++
++    rv = mkdir(name, mode);
++
++    if (rv < 0) {
++        err = _MD_ERRNO();
++        set_mkdir_error(err);
++        return PR_FAILURE;
++    }
++    return PR_SUCCESS; 
++}
++
++PR_IMPLEMENT(PRStatus) PR_MakeDir(const char *name, PRIntn mode)
++{
++    if (!_pr_initialized) _PR_ImplicitInitialization();
++    return PR_MkDir(name, mode);
++}
++
++PR_IMPLEMENT(PRStatus) PR_RmDir(const char *name)
++{
++    PRInt32 rv, err;
++
++    rv = rmdir(name);
++    if (rv < 0) {
++        err = _MD_ERRNO();
++        set_rmdir_error(err);
++        return PR_FAILURE;
++    } else
++        return PR_SUCCESS;
++}
++
++PR_IMPLEMENT(PRInt32)
++PR_FileDesc2NativeHandle(PRFileDesc *fd)
++{
++    if (fd) {
++        fd = PR_GetIdentitiesLayer(fd, PR_NSPR_IO_LAYER);
++    }
++    if (!fd) {
++        PR_SetError(PR_INVALID_ARGUMENT_ERROR, 0);
++        return -1;
++    }
++
++    return fd->secret->md.osfd;
++}
++
++#ifdef MOZ_UNICODE
++/*
++ *  UTF16 Interface
++ */
++PR_IMPLEMENT(PRDirUTF16*) PR_OpenDirUTF16(const PRUnichar *name)
++{
++    PRDirUTF16 *dir;
++    PRStatus sts;
++
++    dir = PR_NEW(PRDirUTF16);
++    if (dir) {
++        sts = _PR_MD_OPEN_DIR_UTF16(&dir->md,name);
++        if (sts != PR_SUCCESS) {
++            PR_DELETE(dir);
++            return NULL;
++        }
++    } else {
++        PR_SetError(PR_OUT_OF_MEMORY_ERROR, 0);
++    }
++    return dir;
++}
++
++PR_IMPLEMENT(PRDirEntryUTF16*) PR_ReadDirUTF16(PRDirUTF16 *dir, PRDirFlags flags)
++{
++    /*
++     * _MD_READ_DIR_UTF16 return a PRUnichar* to the name; allocation in
++     * machine-dependent code
++     */
++    PRUnichar* name = _PR_MD_READ_DIR_UTF16(&dir->md, flags);
++    dir->d.name = name;
++    return name ? &dir->d : NULL;
++}
++ 
++PR_IMPLEMENT(PRStatus) PR_CloseDirUTF16(PRDirUTF16 *dir)
++{
++    PRInt32 rv;
++
++    if (dir) {
++        rv = _PR_MD_CLOSE_DIR_UTF16(&dir->md);
++        PR_DELETE(dir);
++        if (rv < 0)
++            return PR_FAILURE;
++        else
++            return PR_SUCCESS;
++    } 
++    return PR_SUCCESS;
++}
++
++#endif /* MOZ_UNICODE */
++
++
++static PRStatus PR_CALLBACK FileClose(PRFileDesc *fd)
++{
++    PRInt32 err;
++    if (!fd || !fd->secret
++            || (fd->secret->state != _PR_FILEDESC_OPEN
++            && fd->secret->state != _PR_FILEDESC_CLOSED)) {
++        PR_SetError(PR_BAD_DESCRIPTOR_ERROR, 0);
++        return PR_FAILURE;
++    }
++
++    if (fd->secret->state == _PR_FILEDESC_OPEN) {
++        if (close(fd->secret->md.osfd) < 0) {
++            err = _MD_ERRNO();
++            set_close_error(err);
++            return PR_FAILURE;
++        }
++        fd->secret->state = _PR_FILEDESC_CLOSED;
++    }
++    PR_ASSERT(fd);
++    _PR_Putfd(fd);
++    return PR_SUCCESS;
++}
++
++static PRInt32 PR_CALLBACK FileRead(PRFileDesc *fd, void *buf, PRInt32 amount)
++{
++    PRInt32 rv,err = 0;
++
++    rv = read(fd->secret->md.osfd, buf, amount);
++    if (rv < 0) {
++        err = _MD_ERRNO();
++        set_read_error(err);
++        PR_ASSERT(rv == -1);
++    }
++    PR_LOG(_pr_io_lm, PR_LOG_MAX, ("read -> %d", rv));
++    return rv;
++}
++
++static PRInt32 PR_CALLBACK FileWrite(PRFileDesc *fd, const void *buf, PRInt32 amount)
++{
++    PRInt32 rv,err = 0;
++    PRInt32 temp, count;
++
++    count = 0;
++    while (amount > 0) {
++        temp = write(fd->secret->md.osfd, buf, amount);
++        if (temp < 0) {
++            err = _MD_ERRNO();
++            set_write_error(err);
++            count = -1;
++            break;
++        }
++        count += temp;
++        if (fd->secret->nonblocking) {
++            break;
++        }
++        buf = (const void*) ((const char*)buf + temp);
++        amount -= temp;
++    }
++    PR_LOG(_pr_io_lm, PR_LOG_MAX, ("write -> %d", count));
++    return count;
++}
++
++static PRInt32 PR_CALLBACK FileAvailable(PRFileDesc *fd)
++{
++    PRInt32 result, cur, end, err;
++
++    cur = lseek(fd->secret->md.osfd, 0, PR_SEEK_CUR);
++
++    if (cur >= 0)
++        end = lseek(fd->secret->md.osfd, 0, PR_SEEK_END);
++
++    if ((cur < 0) || (end < 0)) {
++        err = _MD_ERRNO();
++        set_lseek_error(err);
++        return -1;
++    }
++
++    result = end - cur;
++    lseek(fd->secret->md.osfd, cur, PR_SEEK_SET);
++    
++    return result;
++}
++
++static PRInt64 PR_CALLBACK FileAvailable64(PRFileDesc *fd)
++{
++    PRInt64 result, cur, end;
++    PRInt64 minus_one;
++    PRInt32 err;
++
++    cur = lseek(fd->secret->md.osfd, LL_ZERO, PR_SEEK_CUR);
++
++    if (LL_GE_ZERO(cur))
++        end = lseek(fd->secret->md.osfd, LL_ZERO, PR_SEEK_END);
++
++    if (!LL_GE_ZERO(cur) || !LL_GE_ZERO(end)) {
++        LL_I2L(minus_one, -1);
++        err = _MD_ERRNO();
++        set_lseek_error(err);
++        return minus_one;
++    }
++    LL_SUB(result, end, cur);
++    lseek(fd->secret->md.osfd, cur, PR_SEEK_SET);
++    return result;
++}
++
++static PRStatus PR_CALLBACK FileSync(PRFileDesc *fd)
++{
++    PRInt32 result, err;
++    result = fsync(fd->secret->md.osfd);
++    if (result < 0) {
++        err = _MD_ERRNO();
++        set_fsync_error(err);
++        return PR_FAILURE;
++    }
++    return PR_SUCCESS;
++}
++
++static PROffset32 PR_CALLBACK FileSeek(PRFileDesc *fd, PROffset32 offset, PRSeekWhence whence)
++{
++    PROffset32 result;
++    PRInt32 err;
++    result = lseek(fd->secret->md.osfd, offset, whence);
++    if(result<0) {
++        err = _MD_ERRNO();
++        set_lseek_error(err);
++    }
++    return result;
++}
++
++static PROffset64 PR_CALLBACK FileSeek64(PRFileDesc *fd, PROffset64 offset, PRSeekWhence whence)
++{
++    PROffset64 result;
++    PRInt32 err;
++    
++    result = lseek(fd->secret->md.osfd, offset, whence);
++    if(!LL_GE_ZERO(result)) {
++        err = _MD_ERRNO();
++        set_lseek_error(err);
++    }    
++    return result;
++}
++
++static PRStatus PR_CALLBACK FileGetInfo(PRFileDesc *fd, PRFileInfo *info)
++{
++    struct stat sb;
++    PRInt64 s, s2us;
++    PRInt32 rv, err;
++        
++    rv = fstat(fd->secret->md.osfd, &sb);
++    if (rv < 0) {
++        err = _MD_ERRNO();
++        set_fstat_error(err);
++        return PR_FAILURE;
++    }
++    if(info) {
++        if (S_IFREG & sb.st_mode)
++            info->type = PR_FILE_FILE ;
++        else if (S_IFDIR & sb.st_mode)
++            info->type = PR_FILE_DIRECTORY;
++        else
++            info->type = PR_FILE_OTHER;
++        /* Use lower 32 bits of file size */
++        info->size = ( sb.st_size & 0xffffffff);
++        LL_I2L(s, sb.st_mtime);
++        LL_I2L(s2us, PR_USEC_PER_SEC);
++        LL_MUL(s, s, s2us);
++        info->modifyTime = s;
++        LL_I2L(s, sb.st_ctime);
++        LL_MUL(s, s, s2us);
++        info->creationTime = s;
++    }
++    return PR_SUCCESS;
++}
++
++static PRStatus PR_CALLBACK FileGetInfo64(PRFileDesc *fd, PRFileInfo64 *info)
++{
++    struct stat sb;
++    PRInt64 s, s2us;
++    PRInt32 rv, err;
++
++    rv = fstat(fd->secret->md.osfd, &sb);
++    if (rv < 0) {
++        err = _MD_ERRNO();
++        set_fstat_error(err);
++        return PR_FAILURE;
++    }
++    if(info) {
++        if (S_IFREG & sb.st_mode)
++            info->type = PR_FILE_FILE ;
++        else if (S_IFDIR & sb.st_mode)
++            info->type = PR_FILE_DIRECTORY;
++        else
++            info->type = PR_FILE_OTHER;
++        info->size = sb.st_size;
++        LL_I2L(s, sb.st_mtime);
++        LL_I2L(s2us, PR_USEC_PER_SEC);
++        LL_MUL(s, s, s2us);
++        info->modifyTime = s;
++        LL_I2L(s, sb.st_ctime);
++        LL_MUL(s, s, s2us);
++        info->creationTime = s;
++    }
++    return PR_SUCCESS;
++}
++
++static PRInt16 PR_CALLBACK FilePoll(
++    PRFileDesc *fd, PRInt16 in_flags, PRInt16 *out_flags)
++{
++    *out_flags = 0;
++    return in_flags;
++}  /* FilePoll */
++
++
++static PRIOMethods _pr_fileMethods = {
++    PR_DESC_FILE,
++    FileClose,
++    FileRead,
++    FileWrite,
++    FileAvailable,
++    FileAvailable64,
++    FileSync,
++    FileSeek,
++    FileSeek64,
++    FileGetInfo,
++    FileGetInfo64,
++    (PRWritevFN)_PR_InvalidInt,
++    (PRConnectFN)_PR_InvalidStatus,
++    (PRAcceptFN)_PR_InvalidDesc,
++    (PRBindFN)_PR_InvalidStatus,
++    (PRListenFN)_PR_InvalidStatus,
++    (PRShutdownFN)_PR_InvalidStatus,
++    (PRRecvFN)_PR_InvalidInt,
++    (PRSendFN)_PR_InvalidInt,
++    (PRRecvfromFN)_PR_InvalidInt,
++    (PRSendtoFN)_PR_InvalidInt,
++    FilePoll,
++    (PRAcceptreadFN)_PR_InvalidInt,
++    (PRTransmitfileFN)_PR_InvalidInt,
++    (PRGetsocknameFN)_PR_InvalidStatus,
++    (PRGetpeernameFN)_PR_InvalidStatus,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRGetsocketoptionFN)_PR_InvalidStatus,
++    (PRSetsocketoptionFN)_PR_InvalidStatus,
++    (PRSendfileFN)_PR_InvalidInt,
++    (PRConnectcontinueFN)_PR_InvalidStatus,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt
++};
++
++PR_IMPLEMENT(const PRIOMethods*) PR_GetFileMethods(void)
++{
++    return &_pr_fileMethods;
++}
++
++
++static PRInt32 PR_CALLBACK PipeAvailable(PRFileDesc *fd)
++{
++    PRInt32 rv;
++    rv =  _bt_socketavailable(fd);
++    return rv;
++}
++
++static PRInt64 PR_CALLBACK PipeAvailable64(PRFileDesc *fd)
++{
++    PRInt64 rv;
++    LL_I2L(rv, _bt_socketavailable(fd));
++    return rv;
++}
++
++static PRStatus PR_CALLBACK PipeSync(PRFileDesc *fd)
++{
++    return PR_SUCCESS;
++}
++
++
++static PRIOMethods _pr_pipeMethods = {
++    PR_DESC_PIPE,
++    FileClose,
++    FileRead,
++    FileWrite,
++    PipeAvailable,
++    PipeAvailable64,
++    PipeSync,
++    (PRSeekFN)_PR_InvalidInt,
++    (PRSeek64FN)_PR_InvalidInt64,
++    (PRFileInfoFN)_PR_InvalidStatus,
++    (PRFileInfo64FN)_PR_InvalidStatus,
++    (PRWritevFN)_PR_InvalidInt,
++    (PRConnectFN)_PR_InvalidStatus,
++    (PRAcceptFN)_PR_InvalidDesc,
++    (PRBindFN)_PR_InvalidStatus,
++    (PRListenFN)_PR_InvalidStatus,
++    (PRShutdownFN)_PR_InvalidStatus,
++    (PRRecvFN)_PR_InvalidInt,
++    (PRSendFN)_PR_InvalidInt,
++    (PRRecvfromFN)_PR_InvalidInt,
++    (PRSendtoFN)_PR_InvalidInt,
++    FilePoll,
++    (PRAcceptreadFN)_PR_InvalidInt,
++    (PRTransmitfileFN)_PR_InvalidInt,
++    (PRGetsocknameFN)_PR_InvalidStatus,
++    (PRGetpeernameFN)_PR_InvalidStatus,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRGetsocketoptionFN)_PR_InvalidStatus,
++    (PRSetsocketoptionFN)_PR_InvalidStatus,
++    (PRSendfileFN)_PR_InvalidInt,
++    (PRConnectcontinueFN)_PR_InvalidStatus,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt
++};
++
++PR_IMPLEMENT(const PRIOMethods*) PR_GetPipeMethods(void)
++{
++    return &_pr_pipeMethods;
++}
++
++void _PR_InitIO(void) {
++    const PRIOMethods *methods = PR_GetFileMethods();
++    _PR_InitFdCache();
++    _pr_flock_lock = PR_NewLock();
++    _pr_flock_cv = PR_NewCondVar(_pr_flock_lock);
++    _pr_stdin = bt_CreateFileDesc(0, PR_GetFileMethods(), _PR_TRI_UNKNOWN, false);
++    _pr_stdout = bt_CreateFileDesc(1, PR_GetFileMethods(), _PR_TRI_UNKNOWN, false);
++    _pr_stderr = bt_CreateFileDesc(2, PR_GetFileMethods(), _PR_TRI_UNKNOWN, false);
++}
++
+Index: nsprpub/pr/src/bthreads/btsem.c
+===================================================================
+--- nsprpub/pr/src/bthreads/btsem.c	(revision 7)
++++ nsprpub/pr/src/bthreads/btsem.c	(working copy)
+@@ -38,6 +38,7 @@
+ #include <kernel/OS.h>
+ 
+ #include "primpl.h"
++#include "obsolete/prsem.h"
+ 
+ /*
+ ** Create a new semaphore object.
+Index: nsprpub/pr/src/bthreads/btio.c
+===================================================================
+--- nsprpub/pr/src/bthreads/btio.c	(revision 0)
++++ nsprpub/pr/src/bthreads/btio.c	(revision 0)
+@@ -0,0 +1,2424 @@
++/* -*- Mode: C++; c-basic-offset: 4 -*- */
++/* ***** BEGIN LICENSE BLOCK *****
++ * Version: MPL 1.1/GPL 2.0/LGPL 2.1
++ *
++ * The contents of this file are subject to the Mozilla Public License Version
++ * 1.1 (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ * http://www.mozilla.org/MPL/
++ *
++ * Software distributed under the License is distributed on an "AS IS" basis,
++ * WITHOUT WARRANTY OF ANY KIND, either express or implied. See the License
++ * for the specific language governing rights and limitations under the
++ * License.
++ *
++ * The Original Code is the Netscape Portable Runtime (NSPR).
++ *
++ * The Initial Developer of the Original Code is
++ * Netscape Communications Corporation.
++ * Portions created by the Initial Developer are Copyright (C) 1998-2000
++ * the Initial Developer. All Rights Reserved.
++ *
++ * Contributor(s):
++ *
++ * Alternatively, the contents of this file may be used under the terms of
++ * either the GNU General Public License Version 2 or later (the "GPL"), or
++ * the GNU Lesser General Public License Version 2.1 or later (the "LGPL"),
++ * in which case the provisions of the GPL or the LGPL are applicable instead
++ * of those above. If you wish to allow use of your version of this file only
++ * under the terms of either the GPL or the LGPL, and not to allow others to
++ * use your version of this file under the terms of the MPL, indicate your
++ * decision by deleting the provisions above and replace them with the notice
++ * and other provisions required by the GPL or the LGPL. If you do not delete
++ * the provisions above, a recipient may use your version of this file under
++ * the terms of any one of the MPL, the GPL or the LGPL.
++ *
++ * ***** END LICENSE BLOCK ***** */
++
++#include "primpl.h"
++#include <stdio.h>
++#include <sys/ioctl.h>
++#include <sys/time.h>
++
++#define READ_FD     1
++#define WRITE_FD    2
++
++#ifdef BONE_VERSION
++inline int closesocket(int socket) {
++    return close(socket);
++}
++#endif
++
++
++inline void 
++set_stat_error(int err)
++{
++    PR_SetError(err == ETIMEDOUT ? PR_REMOTE_FILE_ERROR : map_default_error(err), err);
++}
++
++inline void 
++set_access_error(int err)
++{
++    PR_SetError(err == ETIMEDOUT ? PR_REMOTE_FILE_ERROR : map_default_error(err), err);
++}
++
++inline void 
++set_select_error(int err)
++{
++    PR_SetError(map_default_error(err), err);
++}
++
++inline void
++set_writev_error(int err)
++{
++    PR_SetError(map_default_error(err), err);
++}
++
++inline void
++set_connect_error(int err)
++{
++    PRErrorCode prError;
++    switch (err) {
++        case EACCES:
++        case ELOOP:
++        case ENOENT:
++            prError = PR_ADDRESS_NOT_SUPPORTED_ERROR;        
++            break;
++        case ENXIO:
++            prError = PR_IO_ERROR;
++            break;
++        default:
++            prError = map_default_error(err);
++    }
++    PR_SetError(prError, err);
++
++}
++
++inline void 
++set_accept_error(int err)
++{
++    PR_SetError(err == ENODEV ? PR_NOT_TCP_SOCKET_ERROR : map_default_error(err), err);
++}
++
++
++inline void 
++set_bind_error(int err)
++{
++    PRErrorCode prError;
++    switch (err) {
++        case EINVAL:
++            prError = PR_SOCKET_ADDRESS_IS_BOUND_ERROR;
++            break;
++        case EIO:
++        case EISDIR:
++        case ELOOP:
++        case ENOENT:
++        case ENOTDIR:
++        case EROFS:
++            prError = PR_ADDRESS_NOT_SUPPORTED_ERROR;
++            break;
++        case ENXIO:
++            prError = PR_IO_ERROR;
++            break;
++        default:
++            prError = map_default_error(err);
++    }
++    PR_SetError(prError, err);
++}
++
++inline void
++set_listen_error(int err)
++{
++    PR_SetError(map_default_error(err), err);
++}
++
++inline void 
++set_shutdown_error(int err)
++{
++    PR_SetError(map_default_error(err), err);
++}
++
++inline void 
++set_socketpair_error(int err)
++{
++    PR_SetError(err == ENOMEM ? PR_INSUFFICIENT_RESOURCES_ERROR : map_default_error(err), err);
++}
++
++inline void
++set_recv_error(int err)
++{
++    PR_SetError(map_default_error(err), err);
++}
++
++inline void
++set_recvfrom_error(int err)
++{
++    PR_SetError(map_default_error(err), err);
++}
++
++
++inline void 
++set_send_error(int err)
++{
++    PR_SetError(map_default_error(err), err);
++}
++
++inline void 
++set_sendto_error(int err)
++{
++    PR_SetError(map_default_error(err), err);
++}
++
++inline void
++set_getsockname_error(int err)
++{
++    PR_SetError(err == ENOMEM ? PR_INSUFFICIENT_RESOURCES_ERROR : map_default_error(err), err);
++}
++
++
++inline void
++set_getpeername_error(int err)
++{
++    PR_SetError(err == ENOMEM ? PR_INSUFFICIENT_RESOURCES_ERROR : map_default_error(err), err);
++}
++
++
++inline void 
++set_getsockopt_error(int err)
++{
++    PRErrorCode prError;
++    switch (err) {
++        case EINVAL:
++            prError = PR_BUFFER_OVERFLOW_ERROR;
++            break;
++        case ENOMEM:
++            prError = PR_INSUFFICIENT_RESOURCES_ERROR;
++            break;
++        default:
++            prError = map_default_error(err);
++    }
++    PR_SetError(prError, err);
++}
++
++inline void 
++set_setsockopt_error(int err)
++{
++    PRErrorCode prError;
++    switch (err) {
++        case EINVAL:
++            prError = PR_BUFFER_OVERFLOW_ERROR;
++            break;
++        case ENOMEM:
++            prError = PR_INSUFFICIENT_RESOURCES_ERROR;
++            break;
++        default:
++            prError = map_default_error(err);
++    }
++    PR_SetError(prError, err);
++}
++
++
++inline void 
++set_socket_error(int err)
++{
++    PR_SetError( err == ENOMEM ? PR_INSUFFICIENT_RESOURCES_ERROR : map_default_error(err), err);
++}
++
++
++PR_IMPLEMENT(PRStatus) PR_GetFileInfo(const char *fn, PRFileInfo *info)
++{
++    struct stat sb;
++    PRInt32 rv, err;
++    PRInt64 s, s2us;
++
++    if (!_pr_initialized) _PR_ImplicitInitialization();
++    rv = stat(fn, &sb);
++    if (rv < 0) {
++        err = _MD_ERRNO();
++        set_stat_error(err);
++        return PR_FAILURE;
++    }
++    if (info) {
++        if (S_IFREG & sb.st_mode)
++            info->type = PR_FILE_FILE;
++        else if (S_IFDIR & sb.st_mode)
++            info->type = PR_FILE_DIRECTORY;
++        else
++            info->type = PR_FILE_OTHER;
++
++        /* Use lower 32 bits of file size */
++        info->size = sb.st_size  & 0xffffffff;
++        LL_I2L(s, sb.st_mtime);
++        LL_I2L(s2us, PR_USEC_PER_SEC);
++        LL_MUL(s, s, s2us);
++        info->modifyTime = s;
++        LL_I2L(s, sb.st_ctime);
++        LL_MUL(s, s, s2us);
++        info->creationTime = s;
++    }
++
++    return PR_SUCCESS;
++}
++
++
++PR_IMPLEMENT(PRStatus) PR_GetFileInfo64(const char *fn, PRFileInfo64 *info)
++{
++    struct stat sb;
++    PRInt32 rv, err;
++    PRInt64 s, s2us;
++
++    if (!_pr_initialized) _PR_ImplicitInitialization();
++    rv = stat(fn, &sb);
++    if (rv < 0) {
++        err = _MD_ERRNO();
++        set_stat_error(err);
++        return PR_FAILURE;
++    }
++    if (info) {
++        if (S_IFREG & sb.st_mode)
++            info->type = PR_FILE_FILE;
++        else if (S_IFDIR & sb.st_mode)
++            info->type = PR_FILE_DIRECTORY;
++        else
++            info->type = PR_FILE_OTHER;
++
++        /* For the 64 bit version we can use
++         * the native st_size without modification
++         */
++        info->size = sb.st_size;
++        LL_I2L(s, sb.st_mtime);
++        LL_I2L(s2us, PR_USEC_PER_SEC);
++        LL_MUL(s, s, s2us);
++        info->modifyTime = s;
++        LL_I2L(s, sb.st_ctime);
++        LL_MUL(s, s, s2us);
++        info->creationTime = s;
++    }
++
++    return PR_SUCCESS;
++}
++
++PR_IMPLEMENT(PRStatus) PR_Access(const char *name, PRAccessHow how)
++{
++    PRInt32 rv, err;
++    int checkFlags;
++    struct stat buf;
++
++    switch (how) {
++        case PR_ACCESS_WRITE_OK:
++            checkFlags = S_IWUSR | S_IWGRP | S_IWOTH;
++            break;
++        
++        case PR_ACCESS_READ_OK:
++            checkFlags = S_IRUSR | S_IRGRP | S_IROTH;
++            break;
++        
++        case PR_ACCESS_EXISTS:
++            /* we don't need to examine st_mode. */
++            break;
++        
++        default: {
++            PR_SetError(PR_INVALID_ARGUMENT_ERROR, 0);
++            return PR_FAILURE;
++        }
++    }
++
++    rv = stat(name, &buf);
++    if (rv == 0 && how != PR_ACCESS_EXISTS && (!(buf.st_mode & checkFlags))) {
++        PR_SetError(PR_NO_ACCESS_RIGHTS_ERROR, 0);
++        return PR_FAILURE;
++    }
++
++    if (rv < 0) {
++        err = _MD_ERRNO();
++        set_access_error(err);
++        return PR_FAILURE;
++    } else
++        return PR_SUCCESS;
++}
++
++
++PRInt32
++_bt_socketavailable (PRFileDesc *fd)
++{
++#ifdef BONE_VERSION
++    PRInt32 result;
++
++    if (ioctl(fd->secret->md.osfd, FIONREAD, &result) < 0) {
++        PR_SetError(PR_BAD_DESCRIPTOR_ERROR, _MD_ERRNO());
++        return -1;
++    }
++    return result;
++#else
++    return PR_NOT_IMPLEMENTED_ERROR;
++#endif
++}
++
++
++#if defined(DEBUG)
++
++PRBool IsValidNetAddr(const PRNetAddr *addr)
++{
++    if ((addr != NULL)
++        && (addr->raw.family != PR_AF_INET6)
++        && (addr->raw.family != PR_AF_INET)) {
++        return PR_FALSE;
++    }
++    return PR_TRUE;
++}
++
++static PRBool IsValidNetAddrLen(const PRNetAddr *addr, PRInt32 addr_len)
++{
++    /*
++     * The definition of the length of a Unix domain socket address
++     * is not uniform, so we don't check it.
++     */
++    if ((addr != NULL)
++            && (PR_NETADDR_SIZE(addr) != addr_len)) {
++         return PR_FALSE;
++    }
++    return PR_TRUE;
++}
++
++#endif /* DEBUG */
++
++static PRInt32 socket_io_wait(PRInt32 osfd, PRInt32 fd_type,
++                              PRIntervalTime timeout)
++{
++    PRInt32 rv = -1;
++    struct timeval tv;
++    PRIntervalTime epoch, now, elapsed, remaining;
++    PRBool wait_for_remaining;
++    PRInt32 syserror;
++    fd_set rd_wr;
++
++    switch (timeout) {
++    case PR_INTERVAL_NO_WAIT:
++        PR_SetError(PR_IO_TIMEOUT_ERROR, 0);
++        break;
++    case PR_INTERVAL_NO_TIMEOUT:
++        /*
++         * This is a special case of the 'default' case below.
++         * Please see the comments there.
++         */
++        tv.tv_sec = _PR_INTERRUPT_CHECK_INTERVAL_SECS;
++        tv.tv_usec = 0;
++        FD_ZERO(&rd_wr);
++        do {
++            FD_SET(osfd, &rd_wr);
++            if (fd_type == READ_FD)
++                rv = select(osfd + 1, &rd_wr, NULL, NULL, &tv);
++            else
++                rv = select(osfd + 1, NULL, &rd_wr, NULL, &tv);
++            if (rv == -1 && (syserror = _MD_ERRNO()) != EINTR) {
++#ifdef BONE_VERSION
++                set_select_error(syserror);
++#else
++                if (syserror == EBADF) {
++                    PR_SetError(PR_BAD_DESCRIPTOR_ERROR, EBADF);
++                } else {
++                    PR_SetError(PR_UNKNOWN_ERROR, syserror);
++                }
++#endif
++                break;
++            }
++        } while (rv == 0 || (rv == -1 && syserror == EINTR));
++        break;
++    default:
++        now = epoch = PR_IntervalNow();
++        remaining = timeout;
++        FD_ZERO(&rd_wr);
++        do {
++            /*
++             * We block in select for at most
++             * _PR_INTERRUPT_CHECK_INTERVAL_SECS seconds,
++             * so that there is an upper limit on the delay
++             * before the interrupt bit is checked.
++             */
++            wait_for_remaining = PR_TRUE;
++            tv.tv_sec = PR_IntervalToSeconds(remaining);
++            if (tv.tv_sec > _PR_INTERRUPT_CHECK_INTERVAL_SECS) {
++                wait_for_remaining = PR_FALSE;
++                tv.tv_sec = _PR_INTERRUPT_CHECK_INTERVAL_SECS;
++                tv.tv_usec = 0;
++            } else {
++                tv.tv_usec = PR_IntervalToMicroseconds(
++                                 remaining -
++                                 PR_SecondsToInterval(tv.tv_sec));
++            }
++            FD_SET(osfd, &rd_wr);
++            if (fd_type == READ_FD)
++                rv = select(osfd + 1, &rd_wr, NULL, NULL, &tv);
++            else
++                rv = select(osfd + 1, NULL, &rd_wr, NULL, &tv);
++            /*
++             * we don't consider EINTR a real error
++             */
++            if (rv == -1 && (syserror = _MD_ERRNO()) != EINTR) {
++#ifdef BONE_VERSION
++                set_select_error(syserror);
++#else
++                if (syserror == EBADF) {
++                    PR_SetError(PR_BAD_DESCRIPTOR_ERROR, EBADF);
++                } else {
++                    PR_SetError(PR_UNKNOWN_ERROR, syserror);
++                }
++#endif
++                break;
++            }
++            /*
++             * We loop again if select timed out or got interrupted
++             * by a signal, and the timeout deadline has not passed yet.
++             */
++            if (rv == 0 || (rv == -1 && syserror == EINTR)) {
++                /*
++                 * If select timed out, we know how much time
++                 * we spent in blocking, so we can avoid a
++                 * PR_IntervalNow() call.
++                 */
++                if (rv == 0) {
++                    if (wait_for_remaining) {
++                        now += remaining;
++                    } else {
++                        now += PR_SecondsToInterval(tv.tv_sec)
++                               + PR_MicrosecondsToInterval(tv.tv_usec);
++                    }
++                } else {
++                    now = PR_IntervalNow();
++                }
++                elapsed = (PRIntervalTime) (now - epoch);
++                if (elapsed >= timeout) {
++                    PR_SetError(PR_IO_TIMEOUT_ERROR, 0);
++                    rv = -1;
++                    break;
++                } else {
++                    remaining = timeout - elapsed;
++                }
++            }
++        } while (rv == 0 || (rv == -1 && syserror == EINTR));
++        break;
++    }
++    return(rv);
++}
++
++
++static PRInt32 PR_CALLBACK SocketWritev(PRFileDesc *fd, const PRIOVec *iov,
++PRInt32 iov_size, PRIntervalTime timeout)
++{
++#ifdef BONE_VERSION
++    int w, err = 0;
++    const PRIOVec *tmp_iov;
++#define LOCAL_MAXIOV    8
++    PRIOVec local_iov[LOCAL_MAXIOV];
++    PRIOVec *iov_copy = NULL;
++    int tmp_out;
++    int index, iov_cnt;
++    int count=0, sz = 0;    /* 'count' is the return value. */
++    int i, amount = 0;
++
++    /*
++     * Assume the first writev will succeed.  Copy iov's only on
++     * failure.
++     */
++    tmp_iov = iov;
++    for (index = 0; index < iov_size; index++)
++        sz += iov[index].iov_len;
++
++    iov_cnt = iov_size;
++
++    while (sz > 0) {
++/*
++    /*
++     * Calculate the total number of bytes to be sent; needed for
++     * optimization later.
++     * We could avoid this if this number was passed in; but it is
++     * probably not a big deal because iov_size is usually small (less than
++     * 3)
++     */
++    if (!fd->secret->nonblocking) {
++        for (i=0; i<iov_cnt; i++) {
++            amount += tmp_iov[i].iov_len;
++        }
++    }
++
++    while ((w = writev(fd->secret->md.osfd, (const struct iovec*)tmp_iov, iov_size)) == -1) {
++        err = _MD_ERRNO();
++        if ((err == EAGAIN) || (err == EWOULDBLOCK))    {
++            if (fd->secret->nonblocking) {
++                break;
++            }
++            if ((w = socket_io_wait(fd->secret->md.osfd, WRITE_FD, timeout))<0)
++                goto done;
++
++        } else if (err == EINTR) {
++            continue;
++        } else {
++            break;
++        }
++    }
++    /*
++     * optimization; if bytes sent is less than "amount" call
++     * select before returning. This is because it is likely that
++     * the next writev() call will return EWOULDBLOCK.
++     */
++    if ((!fd->secret->nonblocking) && (w > 0) && (w < amount)
++        && (timeout != PR_INTERVAL_NO_WAIT)) {
++        if (socket_io_wait(fd->secret->md.osfd, WRITE_FD, timeout) < 0) {
++            w = -1;
++            goto done;
++        }
++    }
++
++    if (w < 0) {
++        set_writev_error(err);
++    }
++done:
++
++
++        if (w < 0) {
++            count = -1;
++            break;
++        }
++        count += w;
++        if (fd->secret->nonblocking) {
++            break;
++        }
++        sz -= w;
++
++        if (sz > 0) {
++            /* find the next unwritten vector */
++            for ( index = 0, tmp_out = count;
++                tmp_out >= iov[index].iov_len;
++                tmp_out -= iov[index].iov_len, index++){;} /* nothing to execute */
++
++            if (tmp_iov == iov) {
++                /*
++                 * The first writev failed so we
++                 * must copy iov's around.
++                 * Avoid calloc/free if there
++                 * are few enough iov's.
++                 */
++                if (iov_size - index <= LOCAL_MAXIOV)
++                    iov_copy = local_iov;
++                else if ((iov_copy = (PRIOVec *) PR_CALLOC((iov_size - index) *
++                    sizeof *iov_copy)) == NULL) {
++                    PR_SetError(PR_OUT_OF_MEMORY_ERROR, 0);
++                    return -1;
++                }
++                tmp_iov = iov_copy;
++            }
++
++            PR_ASSERT(tmp_iov == iov_copy);
++
++            /* fill in the first partial read */
++            iov_copy[0].iov_base = &(((char *)iov[index].iov_base)[tmp_out]);
++            iov_copy[0].iov_len = iov[index].iov_len - tmp_out;
++            index++;
++
++            /* copy the remaining vectors */
++            for (iov_cnt=1; index<iov_size; iov_cnt++, index++) {
++                iov_copy[iov_cnt].iov_base = iov[index].iov_base;
++                iov_copy[iov_cnt].iov_len = iov[index].iov_len;
++            }
++        }
++    }
++
++    if (iov_copy != local_iov)
++        PR_DELETE(iov_copy);
++    return count;
++#else
++    return PR_NOT_IMPLEMENTED_ERROR;
++#endif    
++}
++
++PRInt32
++_bt_CONNECT (PRFileDesc *fd, const PRNetAddr *addr, PRUint32 addrlen,
++             PRIntervalTime timeout)
++{
++    PRInt32 rv, err;
++    PRInt32 osfd = fd->secret->md.osfd;
++
++#ifndef BONE_VERSION
++    fd->secret->md.connectValueValid = PR_FALSE;
++#endif
++#ifdef _PR_HAVE_SOCKADDR_LEN
++    PRNetAddr addrCopy;
++
++    addrCopy = *addr;
++    ((struct sockaddr *) &addrCopy)->sa_len = addrlen;
++    ((struct sockaddr *) &addrCopy)->sa_family = addr->raw.family;
++#endif
++
++    /* (Copied from unix.c)
++     * We initiate the connection setup by making a nonblocking connect()
++     * call.  If the connect() call fails, there are two cases we handle
++     * specially:
++     * 1. The connect() call was interrupted by a signal.  In this case
++     *    we simply retry connect().
++     * 2. The NSPR socket is nonblocking and connect() fails with
++     *    EINPROGRESS.  We first wait until the socket becomes writable.
++     *    Then we try to find out whether the connection setup succeeded
++     *    or failed.
++     */
++
++retry:
++#ifdef _PR_HAVE_SOCKADDR_LEN
++    if ((rv = connect(osfd, (struct sockaddr *)&addrCopy, addrlen)) == -1) {
++#else
++    if ((rv = connect(osfd, (struct sockaddr *)addr, addrlen)) == -1) {
++#endif
++        err = _MD_ERRNO();
++#ifndef BONE_VERSION
++        fd->secret->md.connectReturnValue = rv;
++        fd->secret->md.connectReturnError = err;
++        fd->secret->md.connectValueValid = PR_TRUE;
++#endif
++        if( err == EINTR ) {
++#ifndef BONE_VERSION
++            snooze( 100000L );
++#endif
++            goto retry;
++        }
++
++#ifndef BONE_VERSION
++        if(!fd->secret->nonblocking && ((err == EINPROGRESS) || (err==EAGAIN) || (err==EALREADY))) {
++
++            /*
++            ** There's no timeout on this connect, but that's not
++            ** a big deal, since the connect times out anyways
++            ** after 30 seconds.   Just sleep for 1/10th of a second
++            ** and retry until we go through or die.
++            */
++            goto retry;
++        }
++
++        if( fd->secret->nonblocking && ((err == EAGAIN) || (err == EINPROGRESS))) {
++            PR_Lock(_connectLock);
++            if (connectCount < sizeof(connectList)/sizeof(connectList[0])) {
++                connectList[connectCount].osfd = osfd;
++                memcpy(&connectList[connectCount].addr, addr, addrlen);
++                connectList[connectCount].addrlen = addrlen;
++                connectList[connectCount].timeout = timeout;
++                connectCount++;
++                PR_Unlock(_connectLock);
++                set_connect_error(err);
++            } else {
++                PR_Unlock(_connectLock);
++                PR_SetError(PR_INSUFFICIENT_RESOURCES_ERROR, 0);
++            }
++            return rv;
++        }
++#else /* BONE_VERSION */
++        if(!fd->secret->nonblocking && (err == EINTR)) {
++
++            rv = socket_io_wait(osfd, WRITE_FD, timeout);
++            if (rv == -1) {
++                return -1;
++            }
++
++            PR_ASSERT(rv == 1);
++/* _MD_beos_get_nonblocking_connect_error always return PR_NOT_IMPLEMENTED..
++            err = _MD_beos_get_nonblocking_connect_error(osfd);
++            if (err != 0) {
++                set_connect_error(err);
++                return -1;
++            }
++*/
++            return 0;
++        }
++#endif
++
++        set_connect_error(err);
++    }
++
++    return rv;
++}
++
++
++static PRStatus PR_CALLBACK SocketConnect(
++    PRFileDesc *fd, const PRNetAddr *addr, PRIntervalTime timeout)
++{
++    PRInt32 rv;    /* Return value of _PR_MD_CONNECT */
++    const PRNetAddr *addrp = addr;
++#if defined(_PR_INET6)
++    PRNetAddr addrCopy;
++    if (addr->raw.family == PR_AF_INET6) {
++        addrCopy = *addr;
++        addrCopy.raw.family = AF_INET6;
++        addrp = &addrCopy;
++    }
++#endif
++
++    rv = _bt_CONNECT(fd, addrp, PR_NETADDR_SIZE(addr), timeout);
++    PR_LOG(_pr_io_lm, PR_LOG_MAX, ("connect -> %d", rv));
++    if (rv == 0)
++        return PR_SUCCESS;
++    else
++        return PR_FAILURE;
++}
++
++static PRStatus PR_CALLBACK SocketConnectContinue(
++    PRFileDesc *fd, PRInt16 out_flags)
++{
++    PRInt32 osfd;
++    int err;
++    int rv;
++
++    if (out_flags & PR_POLL_NVAL) {
++        PR_SetError(PR_BAD_DESCRIPTOR_ERROR, 0);
++        return PR_FAILURE;
++    }
++    if ((out_flags & (PR_POLL_WRITE | PR_POLL_EXCEPT | PR_POLL_ERR)) == 0) {
++        PR_ASSERT(out_flags == 0);
++        PR_SetError(PR_IN_PROGRESS_ERROR, 0);
++        return PR_FAILURE;
++    }
++
++    osfd = fd->secret->md.osfd;
++
++
++#ifdef BONE_VERSION  /* bug 122364 */
++    /* temporary workaround until getsockopt(SO_ERROR) works in BONE */
++    if (out_flags & PR_POLL_EXCEPT) {
++        PR_SetError(PR_CONNECT_REFUSED_ERROR, 0);
++        return PR_FAILURE;
++    }
++    PR_ASSERT(out_flags & PR_POLL_WRITE);
++    return PR_SUCCESS;
++#else
++    rv = recv(fd->secret->md.osfd, NULL, 0, 0);
++    PR_ASSERT(-1 == rv || 0 == rv);
++
++    if (-1 == rv && 0 != errno && errno != EAGAIN && errno != EWOULDBLOCK ) {
++        set_connect_error(errno);
++        return PR_FAILURE;
++    }
++    else
++        return PR_SUCCESS;
++#endif
++}
++
++PRInt32
++_bt_accept (PRFileDesc *fd, PRNetAddr *addr, PRUint32 *addrlen,
++            PRIntervalTime timeout)
++{
++    PRInt32 osfd = fd->secret->md.osfd;
++    PRInt32 rv, err;
++
++    while ((rv = accept(osfd, (struct sockaddr *) addr,
++                        (int *)addrlen)) == -1) {
++        err = _MD_ERRNO();
++
++        if ((err == EAGAIN) || (err == EWOULDBLOCK)) {
++            if (fd->secret->nonblocking) {
++                break;
++            }
++            /* If it's SUPPOSED to be a blocking thread, wait
++             * a while to see if the triggering condition gets
++             * satisfied.
++             */
++            /* Assume that we're always using a native thread */
++            if ((rv = socket_io_wait(osfd, READ_FD, timeout)) < 0)
++                goto done;
++        } else if (err == EINTR) {
++            continue;
++        } else {
++            break;
++        }
++    }
++    if (rv < 0) {
++        set_accept_error(err);
++    } else if (addr != NULL) {
++        /* bug 134099 */
++        err = getpeername(rv, (struct sockaddr *) addr, (int *)addrlen);
++    }
++done:
++#ifdef _PR_HAVE_SOCKADDR_LEN
++    if (rv != -1) {
++        /* Mask off the first byte of struct sockaddr (the length field) */
++        if (addr) {
++            addr->raw.family = ((struct sockaddr *) addr)->sa_family;
++        }
++    }
++#endif /* _PR_HAVE_SOCKADDR_LEN */
++    return(rv);
++}
++
++
++
++static PRFileDesc* PR_CALLBACK SocketAccept(PRFileDesc *fd, PRNetAddr *addr,
++PRIntervalTime timeout)
++{
++    PRInt32 osfd;
++    PRFileDesc *fd2;
++    PRUint32 al;
++
++    al = sizeof(PRNetAddr);
++    osfd = _bt_accept(fd, addr, &al, timeout);
++    if (osfd == -1)
++        return 0;
++    fd2 = bt_CreateFileDesc(osfd, PR_GetTCPMethods(), _PR_TRI_TRUE, true);
++    if (!fd2) {
++        closesocket(osfd);
++
++        return NULL;
++    }
++
++    fd2->secret->nonblocking = fd->secret->nonblocking;
++    fd2->secret->inheritable = fd->secret->inheritable;
++
++#ifdef _PR_INET6
++    if (addr && (AF_INET6 == addr->raw.family))
++        addr->raw.family = PR_AF_INET6;
++#endif
++    PR_ASSERT(IsValidNetAddr(addr) == PR_TRUE);
++    PR_ASSERT(IsValidNetAddrLen(addr, al) == PR_TRUE);
++
++    return fd2;
++}
++
++
++static PRStatus PR_CALLBACK SocketBind(PRFileDesc *fd, const PRNetAddr *addr)
++{
++    PRInt32 result, err;
++    const PRNetAddr *addrp = addr;
++#if defined(_PR_INET6) || defined(_PR_HAVE_SOCKADDR_LEN)
++    PRNetAddr addrCopy;
++#endif
++
++    PR_ASSERT(IsValidNetAddr(addr) == PR_TRUE);
++#if defined(_PR_INET6)
++    if (addr->raw.family == PR_AF_INET6) {
++        addrCopy = *addr;
++        addrCopy.raw.family = AF_INET6;
++        addrp = &addrCopy;
++    }
++#endif
++
++#ifdef _PR_HAVE_SOCKADDR_LEN
++    addrCopy = *addrp;
++    ((struct sockaddr *) &addrCopy)->sa_len = PR_NETADDR_SIZE(addrp);
++    ((struct sockaddr *) &addrCopy)->sa_family = addr->raw.family;
++    result = bind(fd->secret->md.osfd, (struct sockaddr *) &addrCopy, PR_NETADDR_SIZE(addrp));
++#else
++    result = bind(fd->secret->md.osfd, (struct sockaddr *) addrp, PR_NETADDR_SIZE(addrp));
++#endif
++
++
++    if (result < 0) {
++        err = _MD_ERRNO();
++        set_bind_error(err);
++        return PR_FAILURE;
++    }
++    return PR_SUCCESS;
++}
++
++static PRStatus PR_CALLBACK SocketListen(PRFileDesc *fd, PRIntn backlog)
++{
++    PRInt32 result,err;
++#ifndef BONE_VERSION
++    /* Bug workaround!  Setting listen to 0 on Be accepts no connections.
++    ** On most UN*Xes this sets the default.
++    */
++
++    if( backlog == 0 ) backlog = 5;
++#endif
++    result = listen(fd->secret->md.osfd, backlog);
++    if (result < 0) {
++        err = _MD_ERRNO();
++                set_listen_error(err);
++        return PR_FAILURE;
++    }
++    return PR_SUCCESS;
++}
++
++static PRStatus PR_CALLBACK SocketShutdown(PRFileDesc *fd, PRIntn how)
++{
++    PRInt32 result,err;
++#ifndef BONE_VERSION
++    if (how == PR_SHUTDOWN_SEND)
++        fd->secret->md.sock_state = BE_SOCK_SHUTDOWN_WRITE;
++    else if (how == PR_SHUTDOWN_RCV)
++        fd->secret->md.sock_state = BE_SOCK_SHUTDOWN_READ;
++    else if (how == PR_SHUTDOWN_BOTH) {
++        fd->secret->md.sock_state = (BE_SOCK_SHUTDOWN_WRITE | BE_SOCK_SHUTDOWN_READ);
++    }
++#else /* BONE_VERSION */
++    result = shutdown(fd->secret->md.osfd, how);
++    if (result < 0) {
++        err = _MD_ERRNO();
++        set_shutdown_error(err);
++        return PR_FAILURE;
++    }
++#endif
++    return PR_SUCCESS;
++}
++
++PRInt32
++_bt_recv (PRFileDesc *fd, void *buf, PRInt32 amount, PRInt32 flags,
++          PRIntervalTime timeout)
++{
++    PRInt32 osfd = fd->secret->md.osfd;
++    PRInt32 rv, err;
++
++#ifndef BONE_VERSION
++    if (fd->secret->md.sock_state & BE_SOCK_SHUTDOWN_READ) {
++        set_recv_error(EPIPE);
++        return -1;
++    }
++#endif
++
++#ifdef BONE_VERSION
++    /*
++    ** Gah, stupid hack.  If reading a zero amount, instantly return success.
++    ** BONE beta 6 returns EINVAL for reads of zero bytes, which parts of
++    ** mozilla use to check for socket availability.
++    */
++
++    if( 0 == amount ) return(0);
++#endif
++
++    while ((rv = recv(osfd, buf, amount, flags)) == -1) {
++        err = _MD_ERRNO();
++
++        if ((err == EAGAIN) || (err == EWOULDBLOCK)) {
++            if (fd->secret->nonblocking) {
++                break;
++            }
++            /* If socket was supposed to be blocking,
++            wait a while for the condition to be
++            satisfied. */
++            if ((rv = socket_io_wait(osfd, READ_FD, timeout)) < 0)
++                goto done;
++        } else if (err == EINTR) {
++            continue;
++        } else
++            break;
++    }
++
++    if (rv < 0) {
++        set_recv_error(err);
++    }
++
++done:
++    return(rv);
++}
++
++static PRInt32 PR_CALLBACK SocketRecv(PRFileDesc *fd, void *buf, PRInt32 amount, PRIntn flags,
++PRIntervalTime timeout)
++{
++    PRInt32 rv;
++
++    if ((flags != 0) && (flags != PR_MSG_PEEK)) {
++        PR_SetError(PR_INVALID_ARGUMENT_ERROR, 0);
++        return -1;
++    }
++
++    PR_LOG(_pr_io_lm, PR_LOG_MAX, ("recv: fd=%p osfd=%d buf=%p amount=%d flags=%d",
++                                    fd, fd->secret->md.osfd, buf, amount, flags));
++
++
++    rv = _bt_recv(fd, buf, amount, flags, timeout);
++    PR_LOG(_pr_io_lm, PR_LOG_MAX, ("recv -> %d, error = %d, os error = %d",
++        rv, PR_GetError(), PR_GetOSError()));
++
++    return rv;
++}
++
++static PRInt32 PR_CALLBACK SocketRead(PRFileDesc *fd, void *buf, PRInt32 amount)
++{
++    return SocketRecv(fd, buf, amount, 0, PR_INTERVAL_NO_TIMEOUT);
++}
++
++PRInt32
++_bt_send (PRFileDesc *fd, const void *buf, PRInt32 amount, PRInt32 flags,
++          PRIntervalTime timeout)
++{
++    PRInt32 osfd = fd->secret->md.osfd;
++    PRInt32 rv, err;
++
++#ifndef BONE_VERSION
++    if (fd->secret->md.sock_state & BE_SOCK_SHUTDOWN_WRITE)
++    {
++        set_send_error(EPIPE);
++        return -1;
++    }
++#endif
++
++    while ((rv = send(osfd, buf, amount, flags)) == -1) {
++        err = _MD_ERRNO();
++
++        if ((err == EAGAIN) || (err == EWOULDBLOCK)) {
++            if (fd->secret->nonblocking) {
++                break;
++            }
++
++#ifndef BONE_VERSION
++
++            /* in UNIX implementations, you could do a socket_io_wait here.
++             * but since BeOS doesn't yet support WRITE notification in select,
++             * you're spanked.
++             */
++            snooze( 10000L );
++            continue;
++#else /* BONE_VERSION */
++            if ((rv = socket_io_wait(osfd, WRITE_FD, timeout))< 0)
++                goto done;
++#endif
++
++        } else if (err == EINTR) {
++            continue;
++        } else {
++            break;
++        }
++    }
++
++#ifdef BONE_VERSION
++    /*
++     * optimization; if bytes sent is less than "amount" call
++     * select before returning. This is because it is likely that
++     * the next writev() call will return EWOULDBLOCK.
++     */
++    if ((!fd->secret->nonblocking) && (rv > 0) && (rv < amount)
++        && (timeout != PR_INTERVAL_NO_WAIT)) {
++        if (socket_io_wait(osfd, WRITE_FD, timeout) < 0) {
++            rv = -1;
++            goto done;
++        }
++    }
++#endif /* BONE_VERSION */
++    
++    if (rv < 0) {
++        set_send_error(err);
++    }
++
++#ifdef BONE_VERSION
++done:
++#endif
++    return(rv);
++}
++
++
++static PRInt32 PR_CALLBACK SocketSend(PRFileDesc *fd, const void *buf, PRInt32 amount,
++PRIntn flags, PRIntervalTime timeout)
++{
++    PRInt32 temp, count;
++
++    count = 0;
++    while (amount > 0) {
++        PR_LOG(_pr_io_lm, PR_LOG_MAX,
++            ("send: fd=%p osfd=%d buf=%p amount=%d",
++            fd, fd->secret->md.osfd, buf, amount));
++        temp = _bt_send(fd, buf, amount, flags, timeout);
++        if (temp < 0) {
++                    count = -1;
++                    break;
++                }
++
++        count += temp;
++        if (fd->secret->nonblocking) {
++            break;
++        }
++        buf = (const void*) ((const char*)buf + temp);
++
++        amount -= temp;
++    }
++    PR_LOG(_pr_io_lm, PR_LOG_MAX, ("send -> %d", count));
++    return count;
++}
++
++static PRInt32 PR_CALLBACK SocketWrite(PRFileDesc *fd, const void *buf, PRInt32 amount)
++{
++    return SocketSend(fd, buf, amount, 0, PR_INTERVAL_NO_TIMEOUT);
++}
++
++static PRStatus PR_CALLBACK SocketClose(PRFileDesc *fd)
++{
++    if (!fd || !fd->secret
++            || (fd->secret->state != _PR_FILEDESC_OPEN
++            && fd->secret->state != _PR_FILEDESC_CLOSED)) {
++        PR_SetError(PR_BAD_DESCRIPTOR_ERROR, 0);
++        return PR_FAILURE;
++    }
++
++    if (fd->secret->state == _PR_FILEDESC_OPEN) {
++        if (closesocket(fd->secret->md.osfd) < 0) {
++            return PR_FAILURE;
++        }
++
++        fd->secret->state = _PR_FILEDESC_CLOSED;
++    }
++
++    PR_ASSERT(fd);
++    _PR_Putfd(fd);
++    return PR_SUCCESS;
++}
++
++static PRInt32 PR_CALLBACK SocketAvailable(PRFileDesc *fd)
++{
++    PRInt32 rv;
++    rv =  _bt_socketavailable(fd);
++    return rv;        
++}
++
++static PRInt64 PR_CALLBACK SocketAvailable64(PRFileDesc *fd)
++{
++    PRInt64 rv;
++    LL_I2L(rv, _bt_socketavailable(fd));
++    return rv;        
++}
++
++static PRStatus PR_CALLBACK SocketSync(PRFileDesc *fd)
++{
++    return PR_SUCCESS;
++}
++
++PRInt32
++_bt_sendto (PRFileDesc *fd, const void *buf, PRInt32 amount, PRIntn flags,
++            const PRNetAddr *addr, PRUint32 addrlen, PRIntervalTime timeout)
++{
++    PRInt32 osfd = fd->secret->md.osfd;
++    PRInt32 rv, err;
++
++#ifdef _PR_HAVE_SOCKADDR_LEN
++    PRNetAddr addrCopy;
++
++    addrCopy = *addr;
++    ((struct sockaddr *) &addrCopy)->sa_len = addrlen;
++    ((struct sockaddr *) &addrCopy)->sa_family = addr->raw.family;
++
++    while ((rv = sendto(osfd, buf, amount, flags,
++                        (struct sockaddr *) &addrCopy, addrlen)) == -1) {
++#else
++    while ((rv = sendto(osfd, buf, amount, flags,
++                        (struct sockaddr *) addr, addrlen)) == -1) {
++#endif
++        err = _MD_ERRNO();
++
++        if ((err == EAGAIN) || (err == EWOULDBLOCK)) {
++            if (fd->secret->nonblocking) {
++                break;
++            }
++
++#ifdef BONE_VERSION
++            if ((rv = socket_io_wait(osfd, WRITE_FD, timeout))< 0)
++                goto done;
++#endif
++        } else if (err == EINTR) {
++            continue;
++
++        } else {
++            break;
++        }
++    }
++
++    if (rv < 0) {
++        set_sendto_error(err);
++    }
++
++#ifdef BONE_VERSION
++done:
++#endif
++    return(rv);
++}
++
++
++static PRInt32 PR_CALLBACK SocketSendTo(
++    PRFileDesc *fd, const void *buf, PRInt32 amount,
++    PRIntn flags, const PRNetAddr *addr, PRIntervalTime timeout)
++{
++    PRInt32 temp, count;
++    const PRNetAddr *addrp = addr;
++#if defined(_PR_INET6)
++    PRNetAddr addrCopy;
++#endif
++
++    PR_ASSERT(IsValidNetAddr(addr) == PR_TRUE);
++#if defined(_PR_INET6)
++    if (addr->raw.family == PR_AF_INET6) {
++        addrCopy = *addr;
++        addrCopy.raw.family = AF_INET6;
++        addrp = &addrCopy;
++    }
++#endif
++
++    count = 0;
++    while (amount > 0) {
++        temp = _bt_sendto(fd, buf, amount, flags,
++            addrp, PR_NETADDR_SIZE(addr), timeout);
++        if (temp < 0) {
++                    count = -1;
++                    break;
++                }
++        count += temp;
++        if (fd->secret->nonblocking) {
++            break;
++        }
++        buf = (const void*) ((const char*)buf + temp);
++        amount -= temp;
++    }
++    return count;
++}
++
++PRInt32
++_bt_recvfrom (PRFileDesc *fd, void *buf, PRInt32 amount, PRIntn flags,
++              PRNetAddr *addr, PRUint32 *addrlen, PRIntervalTime timeout)
++{
++    PRInt32 osfd = fd->secret->md.osfd;
++    PRInt32 rv, err;
++
++    while ((*addrlen = PR_NETADDR_SIZE(addr)),
++            ((rv = recvfrom(osfd, buf, amount, flags,
++                            (struct sockaddr *) addr,
++                            (int *)addrlen)) == -1)) {
++        err = _MD_ERRNO();
++
++        if ((err == EAGAIN) || (err == EWOULDBLOCK)) {
++            if (fd->secret->nonblocking) {
++                break;
++            }
++            if ((rv = socket_io_wait(osfd, READ_FD, timeout)) < 0)
++                goto done;
++
++        } else if (err == EINTR) {
++            continue;
++        } else {
++            break;
++        }
++    }
++
++    if (rv < 0) {
++        set_recvfrom_error(err);
++    }
++
++done:
++#ifdef _PR_HAVE_SOCKADDR_LEN
++    if (rv != -1) {
++        /* ignore the sa_len field of struct sockaddr */
++        if (addr) {
++            addr->raw.family = ((struct sockaddr *) addr)->sa_family;
++        }
++    }
++#endif /* _PR_HAVE_SOCKADDR_LEN */
++    return(rv);
++}
++
++
++
++static PRInt32 PR_CALLBACK SocketRecvFrom(PRFileDesc *fd, void *buf, PRInt32 amount,
++PRIntn flags, PRNetAddr *addr, PRIntervalTime timeout)
++{
++    PRInt32 rv;
++    PRUint32 al;
++
++    al = sizeof(PRNetAddr);
++    rv = _bt_recvfrom(fd, buf, amount, flags, addr, &al, timeout);
++#ifdef _PR_INET6
++    if (addr && (AF_INET6 == addr->raw.family))
++        addr->raw.family = PR_AF_INET6;
++#endif
++    return rv;
++}
++
++static PRInt32 PR_CALLBACK SocketAcceptRead(PRFileDesc *sd, PRFileDesc **nd, 
++PRNetAddr **raddr, void *buf, PRInt32 amount,
++PRIntervalTime timeout)
++{
++    /* The socket must be in blocking mode. */
++    if (sd->secret->nonblocking) {
++        PR_SetError(PR_INVALID_ARGUMENT_ERROR, 0);
++        return -1;
++    }
++    *nd = NULL;
++
++    return PR_EmulateAcceptRead(sd, nd, raddr, buf, amount, timeout);
++}
++
++
++static PRInt32 PR_CALLBACK SocketSendFile(
++    PRFileDesc *sd, PRSendFileData *sfd,
++    PRTransmitFileFlags flags, PRIntervalTime timeout)
++{
++    /* The socket must be in blocking mode. */
++    if (sd->secret->nonblocking) {
++        PR_SetError(PR_INVALID_ARGUMENT_ERROR, 0);
++        return -1;
++    }
++    return PR_EmulateSendFile(sd, sfd, flags, timeout);
++}
++
++static PRInt32 PR_CALLBACK SocketTransmitFile(PRFileDesc *sd, PRFileDesc *fd, 
++const void *headers, PRInt32 hlen, PRTransmitFileFlags flags,
++PRIntervalTime timeout)
++{
++    PRSendFileData sfd;
++
++    sfd.fd = fd;
++    sfd.file_offset = 0;
++    sfd.file_nbytes = 0;
++    sfd.header = headers;
++    sfd.hlen = hlen;
++    sfd.trailer = NULL;
++    sfd.tlen = 0;
++
++    return(SocketSendFile(sd, &sfd, flags, timeout));
++}
++
++static PRStatus PR_CALLBACK SocketGetName(PRFileDesc *fd, PRNetAddr *addr)
++{
++    PRInt32 result, err;
++    PRUint32 addrlen;
++
++    addrlen = sizeof(PRNetAddr);
++    result = getsockname(fd->secret->md.osfd, (struct sockaddr *) addr, &addrlen);
++    if (result < 0) {
++        err = _MD_ERRNO();
++               set_getsockname_error(err);
++        return PR_FAILURE;
++    }
++#ifdef _PR_HAVE_SOCKADDR_LEN
++    if (result == 0) {
++        /* ignore the sa_len field of struct sockaddr */
++        if (addr) {
++            addr->raw.family = ((struct sockaddr *) addr)->sa_family;
++        }
++    }
++#endif /* _PR_HAVE_SOCKADDR_LEN */
++
++#ifdef _PR_INET6
++    if (AF_INET6 == addr->raw.family)
++        addr->raw.family = PR_AF_INET6;
++#endif
++    PR_ASSERT(IsValidNetAddr(addr) == PR_TRUE);
++    PR_ASSERT(IsValidNetAddrLen(addr, addrlen) == PR_TRUE);
++    return PR_SUCCESS;
++}
++
++static PRStatus PR_CALLBACK SocketGetPeerName(PRFileDesc *fd, PRNetAddr *addr)
++{
++    PRInt32 result, err;
++    PRUint32 addrlen;
++
++    addrlen = sizeof(PRNetAddr);
++    result = getpeername(fd->secret->md.osfd, (struct sockaddr *) addr, &addrlen);
++    if (result < 0) {
++        err = _MD_ERRNO();
++        set_getpeername_error(err);
++        return PR_FAILURE;
++    }
++#ifdef _PR_HAVE_SOCKADDR_LEN
++    if (result == 0) {
++        /* ignore the sa_len field of struct sockaddr */
++        if (addr) {
++            addr->raw.family = ((struct sockaddr *) addr)->sa_family;
++        }
++    }
++#endif /* _PR_HAVE_SOCKADDR_LEN */
++    
++#ifdef _PR_INET6
++    if (AF_INET6 == addr->raw.family)
++        addr->raw.family = PR_AF_INET6;
++#endif
++    PR_ASSERT(IsValidNetAddr(addr) == PR_TRUE);
++    PR_ASSERT(IsValidNetAddrLen(addr, addrlen) == PR_TRUE);
++    return PR_SUCCESS;
++}
++
++static PRInt16 PR_CALLBACK SocketPoll(
++    PRFileDesc *fd, PRInt16 in_flags, PRInt16 *out_flags)
++{
++    *out_flags = 0;
++    return in_flags;
++}  /* SocketPoll */
++
++
++PRStatus PR_CALLBACK SocketGetOption(PRFileDesc *fd, PRSocketOptionData *data)
++{
++    PRStatus rv;
++    PRInt32 level, name, length, err;
++
++    /*
++     * PR_SockOpt_Nonblocking is a special case that does not
++     * translate to a getsockopt() call
++     */
++    if (PR_SockOpt_Nonblocking == data->option)
++    {
++        data->value.non_blocking = fd->secret->nonblocking;
++        return PR_SUCCESS;
++    }
++
++    rv = _PR_MapOptionName(data->option, &level, &name);
++    if (PR_SUCCESS != rv) return rv;
++    
++    switch (data->option)
++    {
++        case PR_SockOpt_Linger:
++        {
++#ifdef BONE_VERSION
++            struct linger linger;
++            length = sizeof(linger);
++            if (0 == getsockopt(
++                fd->secret->md.osfd, level, name, (char *) &linger, &length))
++            {
++                PR_ASSERT(sizeof(linger) == length);
++                data->value.linger.polarity =
++                    (linger.l_onoff) ? PR_TRUE : PR_FALSE;
++                data->value.linger.linger =
++                    PR_SecondsToInterval(linger.l_linger);
++                return PR_SUCCESS;
++            }
++            break;
++#else
++                PR_SetError( PR_NOT_IMPLEMENTED_ERROR, 0 );
++                return PR_FAILURE;
++#endif
++        }
++        case PR_SockOpt_Reuseaddr:
++        case PR_SockOpt_Keepalive:
++        case PR_SockOpt_NoDelay:
++        case PR_SockOpt_Broadcast:
++        {
++            PRIntn value;
++            length = sizeof(value);
++            if (0 == getsockopt(
++                fd->secret->md.osfd, level, name, (char *) &value, &length))
++            {
++                data->value.reuse_addr = (0 == value) ? PR_FALSE : PR_TRUE;
++                return PR_SUCCESS;
++            }        
++            break;
++        }
++        case PR_SockOpt_McastLoopback:
++        {
++            PRUint8 bool;
++            length = sizeof(bool);
++            if (0 == getsockopt(
++                fd->secret->md.osfd, level, name, (char*)&bool, &length))
++            {
++                data->value.mcast_loopback = (0 == bool) ? PR_FALSE : PR_TRUE;
++                return PR_SUCCESS;
++            }
++            break;
++        }
++        case PR_SockOpt_RecvBufferSize:
++        case PR_SockOpt_SendBufferSize:
++        case PR_SockOpt_MaxSegment:
++        {
++            PRIntn value;
++            length = sizeof(value);
++            if (0 == getsockopt(
++                fd->secret->md.osfd, level, name, (char*)&value, &length))
++            {
++                data->value.recv_buffer_size = value;
++                return PR_SUCCESS;
++            }
++            break;
++        }
++        case PR_SockOpt_IpTimeToLive:
++        case PR_SockOpt_IpTypeOfService:
++        {
++            /* These options should really be an int (or PRIntn). */
++            length = sizeof(PRUintn);
++            if (0 == getsockopt(
++                fd->secret->md.osfd, level, name, (char*)&data->value.ip_ttl, &length))
++                return PR_SUCCESS;
++            break;
++        }
++        case PR_SockOpt_McastTimeToLive:
++        {
++            PRUint8 ttl;
++            length = sizeof(ttl);
++            if (0 == getsockopt(
++                fd->secret->md.osfd, level, name, (char*)&ttl, &length))
++            {
++                data->value.mcast_ttl = ttl;
++                return PR_SUCCESS;
++            }
++            break;
++        }
++#ifdef IP_ADD_MEMBERSHIP
++        case PR_SockOpt_AddMember:
++        case PR_SockOpt_DropMember:
++        {
++            struct ip_mreq mreq;
++            length = sizeof(mreq);
++            if (0 == getsockopt(
++                fd->secret->md.osfd, level, name, (char*)&mreq, &length))
++            {
++                data->value.add_member.mcaddr.inet.ip =
++                    mreq.imr_multiaddr.s_addr;
++                data->value.add_member.ifaddr.inet.ip =
++                    mreq.imr_interface.s_addr;
++                return PR_SUCCESS;
++            }
++            break;
++        }
++#endif /* IP_ADD_MEMBERSHIP */
++        case PR_SockOpt_McastInterface:
++        {
++            /* This option is a struct in_addr. */
++            length = sizeof(data->value.mcast_if.inet.ip);
++            if (0 == getsockopt(
++                fd->secret->md.osfd, level, name,
++                (char*)&data->value.mcast_if.inet.ip, &length))
++                return PR_SUCCESS;
++            break;
++        }
++        default:
++            PR_NOT_REACHED("Unknown socket option");
++            break;
++    }  
++    err = _MD_ERRNO();
++    set_getsockopt_error(err);
++    return PR_FAILURE;
++}  /* SocketGetOption */
++
++PRStatus PR_CALLBACK SocketSetOption(PRFileDesc *fd, const PRSocketOptionData *data)
++{
++    PRStatus rv;
++    PRInt32 level, name, result, err;
++
++    /*
++     * PR_SockOpt_Nonblocking is a special case that does not
++     * translate to a setsockopt call.
++     */
++    if (PR_SockOpt_Nonblocking == data->option)
++    {
++        fd->secret->nonblocking = data->value.non_blocking;
++        return PR_SUCCESS;
++    }
++    
++    rv = _PR_MapOptionName(data->option, &level, &name);
++    if (PR_SUCCESS != rv) return rv;
++
++    switch (data->option)
++    {
++        case PR_SockOpt_Linger:
++        {
++#ifdef BONE_VERSION
++            struct linger linger;
++            linger.l_onoff = data->value.linger.polarity;
++            linger.l_linger = PR_IntervalToSeconds(data->value.linger.linger);
++            result = setsockopt(
++                fd->secret->md.osfd, level, name, (char*)&linger, sizeof(linger));
++            break;
++#else
++            PR_SetError( PR_NOT_IMPLEMENTED_ERROR, 0 );
++            return PR_FAILURE;
++#endif
++        }
++        case PR_SockOpt_Reuseaddr:
++        case PR_SockOpt_Keepalive:
++        case PR_SockOpt_NoDelay:
++        case PR_SockOpt_Broadcast:
++        {
++            PRIntn value;
++            value = (data->value.reuse_addr) ? 1 : 0;
++            result = setsockopt(
++                fd->secret->md.osfd, level, name, (char*)&value, sizeof(value));
++            break;
++        }
++        case PR_SockOpt_McastLoopback:
++        {
++            PRUint8 bool;
++            bool = data->value.mcast_loopback ? 1 : 0;
++            result = setsockopt(
++                fd->secret->md.osfd, level, name, (char*)&bool, sizeof(bool));
++            break;
++        }
++        case PR_SockOpt_RecvBufferSize:
++        case PR_SockOpt_SendBufferSize:
++        case PR_SockOpt_MaxSegment:
++        {
++            PRIntn value = data->value.recv_buffer_size;
++            result = setsockopt(
++                fd->secret->md.osfd, level, name, (char*)&value, sizeof(value));
++            break;
++        }
++        case PR_SockOpt_IpTimeToLive:
++        case PR_SockOpt_IpTypeOfService:
++        {
++            /* These options should really be an int (or PRIntn). */
++            result = setsockopt(
++                fd->secret->md.osfd, level, name, (char*)&data->value.ip_ttl, sizeof(PRUintn));
++            break;
++        }
++        case PR_SockOpt_McastTimeToLive:
++        {
++            PRUint8 ttl;
++            ttl = data->value.mcast_ttl;
++            result = setsockopt(
++                fd->secret->md.osfd, level, name, (char*)&ttl, sizeof(ttl));
++            break;
++        }
++#ifdef IP_ADD_MEMBERSHIP
++        case PR_SockOpt_AddMember:
++        case PR_SockOpt_DropMember:
++        {
++            struct ip_mreq mreq;
++            mreq.imr_multiaddr.s_addr =
++                data->value.add_member.mcaddr.inet.ip;
++            mreq.imr_interface.s_addr =
++                data->value.add_member.ifaddr.inet.ip;
++            result = setsockopt(
++                fd->secret->md.osfd, level, name, (char*)&mreq, sizeof(mreq));
++            break;
++        }
++#endif /* IP_ADD_MEMBERSHIP */
++        case PR_SockOpt_McastInterface:
++        {
++            /* This option is a struct in_addr. */
++            result = setsockopt(
++                fd->secret->md.osfd, level, name, (char*)&data->value.mcast_if.inet.ip,
++                sizeof(data->value.mcast_if.inet.ip));
++            break;
++        }
++        default:
++            PR_NOT_REACHED("Unknown socket option");
++            break;
++    }
++    if (0 == result)
++        return PR_SUCCESS;
++    err = _MD_ERRNO();
++    set_setsockopt_error(err);
++    return PR_FAILURE;
++}  /* SocketSetOption */
++
++
++
++static PRIOMethods tcpMethods = {
++    PR_DESC_SOCKET_TCP,
++    SocketClose,
++    SocketRead,
++    SocketWrite,
++    SocketAvailable,
++    SocketAvailable64,
++    SocketSync,
++    (PRSeekFN)_PR_InvalidInt,
++    (PRSeek64FN)_PR_InvalidInt64,
++    (PRFileInfoFN)_PR_InvalidStatus,
++    (PRFileInfo64FN)_PR_InvalidStatus,
++    SocketWritev,
++    SocketConnect,
++    SocketAccept,
++    SocketBind,
++    SocketListen,
++    SocketShutdown,
++    SocketRecv,
++    SocketSend,
++    (PRRecvfromFN)_PR_InvalidInt,
++    (PRSendtoFN)_PR_InvalidInt,
++    SocketPoll,
++    SocketAcceptRead,
++    SocketTransmitFile,
++    SocketGetName,
++    SocketGetPeerName,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt,
++    SocketGetOption,
++    SocketSetOption,
++    SocketSendFile, 
++    SocketConnectContinue,
++    (PRReservedFN)_PR_InvalidInt, 
++    (PRReservedFN)_PR_InvalidInt, 
++    (PRReservedFN)_PR_InvalidInt, 
++    (PRReservedFN)_PR_InvalidInt
++};
++
++static PRIOMethods udpMethods = {
++    PR_DESC_SOCKET_UDP,
++    SocketClose,
++    SocketRead,
++    SocketWrite,
++    SocketAvailable,
++    SocketAvailable64,
++    SocketSync,
++    (PRSeekFN)_PR_InvalidInt,
++    (PRSeek64FN)_PR_InvalidInt64,
++    (PRFileInfoFN)_PR_InvalidStatus,
++    (PRFileInfo64FN)_PR_InvalidStatus,
++    SocketWritev,
++    SocketConnect,
++    (PRAcceptFN)_PR_InvalidDesc,
++    SocketBind,
++    SocketListen,
++    SocketShutdown,
++    SocketRecv,
++    SocketSend,
++    SocketRecvFrom,
++    SocketSendTo,
++    SocketPoll,
++    (PRAcceptreadFN)_PR_InvalidInt,
++    (PRTransmitfileFN)_PR_InvalidInt,
++    SocketGetName,
++    SocketGetPeerName,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt,
++    SocketGetOption,
++    SocketSetOption,
++    (PRSendfileFN)_PR_InvalidInt, 
++    (PRConnectcontinueFN)_PR_InvalidStatus, 
++    (PRReservedFN)_PR_InvalidInt, 
++    (PRReservedFN)_PR_InvalidInt, 
++    (PRReservedFN)_PR_InvalidInt, 
++    (PRReservedFN)_PR_InvalidInt
++};
++
++
++static PRIOMethods socketpollfdMethods = {
++    (PRDescType) 0,
++    (PRCloseFN)_PR_InvalidStatus,
++    (PRReadFN)_PR_InvalidInt,
++    (PRWriteFN)_PR_InvalidInt,
++    (PRAvailableFN)_PR_InvalidInt,
++    (PRAvailable64FN)_PR_InvalidInt64,
++    (PRFsyncFN)_PR_InvalidStatus,
++    (PRSeekFN)_PR_InvalidInt,
++    (PRSeek64FN)_PR_InvalidInt64,
++    (PRFileInfoFN)_PR_InvalidStatus,
++    (PRFileInfo64FN)_PR_InvalidStatus,
++    (PRWritevFN)_PR_InvalidInt,
++    (PRConnectFN)_PR_InvalidStatus,
++    (PRAcceptFN)_PR_InvalidDesc,
++    (PRBindFN)_PR_InvalidStatus,
++    (PRListenFN)_PR_InvalidStatus,
++    (PRShutdownFN)_PR_InvalidStatus,
++    (PRRecvFN)_PR_InvalidInt,
++    (PRSendFN)_PR_InvalidInt,
++    (PRRecvfromFN)_PR_InvalidInt,
++    (PRSendtoFN)_PR_InvalidInt,
++    SocketPoll,
++    (PRAcceptreadFN)_PR_InvalidInt,
++    (PRTransmitfileFN)_PR_InvalidInt,
++    (PRGetsocknameFN)_PR_InvalidStatus,
++    (PRGetpeernameFN)_PR_InvalidStatus,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRGetsocketoptionFN)_PR_InvalidStatus,
++    (PRSetsocketoptionFN)_PR_InvalidStatus,
++    (PRSendfileFN)_PR_InvalidInt,
++    (PRConnectcontinueFN)_PR_InvalidStatus,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt
++};
++
++static PRIOMethods _pr_socketpollfd_methods = {
++    (PRDescType) 0,
++    (PRCloseFN)_PR_InvalidStatus,
++    (PRReadFN)_PR_InvalidInt,
++    (PRWriteFN)_PR_InvalidInt,
++    (PRAvailableFN)_PR_InvalidInt,
++    (PRAvailable64FN)_PR_InvalidInt64,
++    (PRFsyncFN)_PR_InvalidStatus,
++    (PRSeekFN)_PR_InvalidInt,
++    (PRSeek64FN)_PR_InvalidInt64,
++    (PRFileInfoFN)_PR_InvalidStatus,
++    (PRFileInfo64FN)_PR_InvalidStatus,
++    (PRWritevFN)_PR_InvalidInt,
++    (PRConnectFN)_PR_InvalidStatus,
++    (PRAcceptFN)_PR_InvalidDesc,
++    (PRBindFN)_PR_InvalidStatus,
++    (PRListenFN)_PR_InvalidStatus,
++    (PRShutdownFN)_PR_InvalidStatus,
++    (PRRecvFN)_PR_InvalidInt,
++    (PRSendFN)_PR_InvalidInt,
++    (PRRecvfromFN)_PR_InvalidInt,
++    (PRSendtoFN)_PR_InvalidInt,
++    SocketPoll,
++    (PRAcceptreadFN)_PR_InvalidInt,
++    (PRTransmitfileFN)_PR_InvalidInt,
++    (PRGetsocknameFN)_PR_InvalidStatus,
++    (PRGetpeernameFN)_PR_InvalidStatus,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRGetsocketoptionFN)_PR_InvalidStatus,
++    (PRSetsocketoptionFN)_PR_InvalidStatus,
++    (PRSendfileFN)_PR_InvalidInt,
++    (PRConnectcontinueFN)_PR_InvalidStatus,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt,
++    (PRReservedFN)_PR_InvalidInt
++};
++
++PR_IMPLEMENT(const PRIOMethods*) PR_GetTCPMethods()
++{
++    return &tcpMethods;
++}
++
++PR_IMPLEMENT(const PRIOMethods*) PR_GetUDPMethods()
++{
++    return &udpMethods;
++}
++
++static const PRIOMethods* PR_GetSocketPollFdMethods(void)
++{
++    return &_pr_socketpollfd_methods;
++}  /* PR_GetSocketPollFdMethods */
++
++PR_IMPLEMENT(PRInt32) PR_Poll(PRPollDesc *pds, PRIntn npds, PRIntervalTime timeout)
++{
++    PRInt32 rv = 0;
++    /*
++     * This code is almost a duplicate of w32poll.c's _PR_MD_PR_POLL().
++     */
++    fd_set rd, wt, ex;
++    PRFileDesc *bottom;
++    PRPollDesc *pd, *epd;
++    PRInt32 maxfd = -1, ready, err;
++    PRIntervalTime remaining, elapsed, start;
++
++    struct timeval tv, *tvp = NULL;
++
++    if (0 == npds) {
++        PR_Sleep(timeout);
++        return rv;
++    }
++
++    FD_ZERO(&rd);
++    FD_ZERO(&wt);
++    FD_ZERO(&ex);
++
++    ready = 0;
++    for (pd = pds, epd = pd + npds; pd < epd; pd++)
++    {
++        PRInt16 in_flags_read = 0, in_flags_write = 0;
++        PRInt16 out_flags_read = 0, out_flags_write = 0; 
++        
++        if ((NULL != pd->fd) && (0 != pd->in_flags))
++        {
++            if (pd->in_flags & PR_POLL_READ)
++            {
++                in_flags_read = (pd->fd->methods->poll)(pd->fd, pd->in_flags & ~PR_POLL_WRITE, &out_flags_read);
++            }
++            if (pd->in_flags & PR_POLL_WRITE)
++            {
++                in_flags_write = (pd->fd->methods->poll)(pd->fd, pd->in_flags & ~PR_POLL_READ, &out_flags_write);
++            }
++            if ((0 != (in_flags_read & out_flags_read))
++                || (0 != (in_flags_write & out_flags_write)))
++            {
++                /* this one's ready right now */
++                if (0 == ready)
++                {
++                    /*
++                     * We will have to return without calling the
++                     * system poll/select function.  So zero the
++                     * out_flags fields of all the poll descriptors
++                     * before this one. 
++                     */
++                    PRPollDesc *prev;
++                    for (prev = pds; prev < pd; prev++)
++                    {
++                        prev->out_flags = 0;
++                    }
++                }
++                ready += 1;
++                pd->out_flags = out_flags_read | out_flags_write;
++            }
++            else
++            {
++                pd->out_flags = 0;  /* pre-condition */
++                
++                /* make sure this is an NSPR supported stack */
++                bottom = PR_GetIdentitiesLayer(pd->fd, PR_NSPR_IO_LAYER);
++                PR_ASSERT(NULL != bottom);  /* what to do about that? */
++                if ((NULL != bottom)
++                    && (_PR_FILEDESC_OPEN == bottom->secret->state))
++                {
++                    if (0 == ready)
++                    {
++                        PRInt32 osfd = bottom->secret->md.osfd; 
++                        if (osfd > maxfd) maxfd = osfd;
++                        if (in_flags_read & PR_POLL_READ)
++                        {
++                            pd->out_flags |= _PR_POLL_READ_SYS_READ;
++                            FD_SET(osfd, &rd);
++                        }
++                        if (in_flags_read & PR_POLL_WRITE)
++                        {
++                            pd->out_flags |= _PR_POLL_READ_SYS_WRITE;
++                            FD_SET(osfd, &wt);
++                        }
++                        if (in_flags_write & PR_POLL_READ)
++                        {
++                            pd->out_flags |= _PR_POLL_WRITE_SYS_READ;
++                            FD_SET(osfd, &rd);
++                        }
++                        if (in_flags_write & PR_POLL_WRITE)
++                        {
++                            pd->out_flags |= _PR_POLL_WRITE_SYS_WRITE;
++                            FD_SET(osfd, &wt);
++                        }
++                        if (pd->in_flags & PR_POLL_EXCEPT) FD_SET(osfd, &ex);
++                    }
++                }
++                else
++                {
++                    if (0 == ready)
++                    {
++                        PRPollDesc *prev;
++                        for (prev = pds; prev < pd; prev++)
++                        {
++                            prev->out_flags = 0;
++                        }
++                    }
++                    ready += 1;  /* this will cause an abrupt return */
++                    pd->out_flags = PR_POLL_NVAL;  /* bogii */
++                }
++            }
++        }
++        else
++        {
++            pd->out_flags = 0;
++        }
++    }
++
++    if (0 != ready) return ready;  /* no need to block */
++
++    remaining = timeout;
++    start = PR_IntervalNow(); 
++
++ retry:
++    if (timeout != PR_INTERVAL_NO_TIMEOUT)
++    {
++        PRInt32 ticksPerSecond = PR_TicksPerSecond();
++        tv.tv_sec = remaining / ticksPerSecond;
++        tv.tv_usec = PR_IntervalToMicroseconds( remaining % ticksPerSecond );
++        tvp = &tv;
++    }
++    
++    ready = select(maxfd + 1, &rd, &wt, &ex, tvp);
++    
++    if (ready == -1 && errno == EINTR)
++    {
++        if (timeout == PR_INTERVAL_NO_TIMEOUT) goto retry;
++        else
++        {
++            elapsed = (PRIntervalTime) (PR_IntervalNow() - start);
++            if (elapsed > timeout) ready = 0;  /* timed out */
++            else
++            {
++                remaining = timeout - elapsed;
++                goto retry; 
++            }
++        }
++    } 
++
++    /*
++    ** Now to unravel the select sets back into the client's poll
++    ** descriptor list. Is this possibly an area for pissing away
++    ** a few cycles or what?
++    */
++    if (ready > 0)
++    {
++        ready = 0;
++        for (pd = pds, epd = pd + npds; pd < epd; pd++)
++        {
++            PRInt16 out_flags = 0;
++            if ((NULL != pd->fd) && (0 != pd->in_flags))
++            {
++                PRInt32 osfd;
++                bottom = PR_GetIdentitiesLayer(pd->fd, PR_NSPR_IO_LAYER);
++                PR_ASSERT(NULL != bottom);
++                
++                osfd = bottom->secret->md.osfd; 
++                
++                if (FD_ISSET(osfd, &rd))
++                {
++                    if (pd->out_flags & _PR_POLL_READ_SYS_READ)
++                        out_flags |= PR_POLL_READ;
++                    if (pd->out_flags & _PR_POLL_WRITE_SYS_READ)
++                        out_flags |= PR_POLL_WRITE;
++                }
++                if (FD_ISSET(osfd, &wt))
++                {
++                    if (pd->out_flags & _PR_POLL_READ_SYS_WRITE)
++                        out_flags |= PR_POLL_READ;
++                    if (pd->out_flags & _PR_POLL_WRITE_SYS_WRITE)
++                        out_flags |= PR_POLL_WRITE;
++                }
++                if (FD_ISSET(osfd, &ex)) out_flags |= PR_POLL_EXCEPT;
++
++/* Workaround for nonblocking connects under net_server */
++#ifndef BONE_VERSION         
++                if (out_flags)
++                {
++                    /* check if it is a pending connect */
++                    int i = 0, j = 0;
++                    PR_Lock( _connectLock );
++                    for( i = 0; i < connectCount; i++ ) 
++                    {
++                        if(connectList[i].osfd == osfd)
++                        {
++                            int connectError;
++                            int connectResult;
++
++                            connectResult = connect(connectList[i].osfd,
++                                                    &connectList[i].addr,
++                                                    connectList[i].addrlen);
++                            connectError = errno;
++
++                            if(connectResult < 0 ) 
++                            {
++                                if(connectError == EINTR || connectError == EWOULDBLOCK ||
++                                 connectError == EINPROGRESS || connectError == EALREADY)
++                                {
++                                    break;
++                                }
++                            }
++
++                            if(i == (connectCount - 1))
++                            {
++                                connectList[i].osfd = -1;
++                            } else {
++                                for(j = i; j < connectCount; j++ )
++                                {
++                                    memcpy( &connectList[j], &connectList[j+1],
++                                            sizeof(connectList[j]));
++                                }
++                            }
++                            connectCount--;
++
++                            bottom->secret->md.connectReturnValue = connectResult;
++                            bottom->secret->md.connectReturnError = connectError;
++                            bottom->secret->md.connectValueValid = PR_TRUE;
++                            break;
++                        }
++                    }
++                    PR_Unlock( _connectLock );
++                }
++#endif
++            }
++            pd->out_flags = out_flags;
++            if (out_flags) ready++;
++        }
++        PR_ASSERT(ready > 0);
++    }
++    else if (ready < 0)
++    { 
++        err = _MD_ERRNO();
++        if (err == EBADF)
++        {
++            /* Find the bad fds */
++            ready = 0;
++            for (pd = pds, epd = pd + npds; pd < epd; pd++)
++            {
++                pd->out_flags = 0;
++                if ((NULL != pd->fd) && (0 != pd->in_flags))
++                {
++                    bottom = PR_GetIdentitiesLayer(pd->fd, PR_NSPR_IO_LAYER);
++                    if (fcntl(bottom->secret->md.osfd, F_GETFL, 0) == -1)
++                    {
++                        pd->out_flags = PR_POLL_NVAL;
++                        ready++;
++                    }
++                }
++            }
++            PR_ASSERT(ready > 0);
++        }
++        else set_select_error(err);
++    }
++    
++    return ready;
++}  /* PR_POLL */
++
++PR_IMPLEMENT(PRFileDesc*) PR_CreateSocketPollFd(PRInt32 osfd)
++{
++    PRFileDesc *fd;
++
++    if (!_pr_initialized) _PR_ImplicitInitialization();
++
++    fd = _PR_Getfd();
++
++    if (fd == NULL) PR_SetError(PR_OUT_OF_MEMORY_ERROR, 0);
++    else
++    {
++        fd->secret->md.osfd = osfd;
++        fd->secret->inheritable = _PR_TRI_FALSE;
++        fd->secret->state = _PR_FILEDESC_OPEN;
++        fd->methods = PR_GetSocketPollFdMethods();
++    }
++
++    return fd;
++}  /* PR_CreateSocketPollFD */
++
++PR_IMPLEMENT(PRStatus) PR_DestroySocketPollFd(PRFileDesc *fd)
++{
++    if (NULL == fd)
++    {
++        PR_SetError(PR_BAD_DESCRIPTOR_ERROR, 0);
++        return PR_FAILURE;
++    }
++    fd->secret->state = _PR_FILEDESC_CLOSED;
++    _PR_Putfd(fd);
++    return PR_SUCCESS;
++}  /* PR_DestroySocketPollFd */
++
++
++PR_IMPLEMENT(PRFileDesc *) PR_ImportTCPSocket(PRInt32 osfd)
++{
++    PRFileDesc *fd;
++
++    if (!_pr_initialized) _PR_ImplicitInitialization();
++    fd = bt_CreateFileDesc(osfd, PR_GetTCPMethods(), _PR_TRI_UNKNOWN, true);
++    if (fd == NULL)
++        closesocket(osfd);
++    return(fd);
++}
++
++PR_IMPLEMENT(PRFileDesc *) PR_ImportUDPSocket(PRInt32 osfd)
++{
++    PRFileDesc *fd;
++
++    if (!_pr_initialized) _PR_ImplicitInitialization();
++    fd = bt_CreateFileDesc(osfd, PR_GetUDPMethods(), _PR_TRI_UNKNOWN, true);
++    if (fd == NULL)
++        closesocket(osfd);
++    return(fd);
++}
++
++
++#ifndef XP_HAIKU
++int socketpair (int family, int type, int protocol, int sv[2])
++{
++    int insock, outsock, acceptedsock;
++    struct sockaddr_in addrs[2];
++    int alen;
++    /* that's really only so we can build... */
++    /*fprintf(stderr, "socketpair(%d, %d, %d)\n", family, type, protocol);*/
++    if (family != AF_INET) {
++        /*fatal*/fprintf(stderr, "socketpair(%d, %d, %d): family not supported\n", family, type, protocol);
++        errno = EPFNOSUPPORT;
++        return -1;
++    }
++    if (type != SOCK_DGRAM && type != SOCK_STREAM) {
++        errno = EPROTONOSUPPORT;
++        return -1;
++    }
++    addrs[0].sin_family = AF_INET;
++    addrs[0].sin_port = 0;
++    addrs[0].sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    addrs[1].sin_family = AF_INET;
++    addrs[1].sin_port = 0;
++    addrs[1].sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    alen = sizeof(struct sockaddr_in);
++
++    insock = socket(family, type, protocol);
++    if (insock < 0)
++        goto err1;
++    if (bind(insock, (struct sockaddr *)&addrs[0], alen) < 0)
++        goto err2;
++    if (getsockname(insock, (struct sockaddr *)&addrs[0], &alen) < 0)
++        goto err2;
++    if (type == SOCK_STREAM)
++        listen(insock, 2);
++
++    outsock = socket(family, type, protocol);
++    if (outsock < 0)
++        goto err2;
++    alen = sizeof(struct sockaddr_in);
++    if (bind(outsock, (struct sockaddr *)&addrs[1], alen) < 0)
++        goto err2;
++    if (getsockname(outsock, (struct sockaddr *)&addrs[1], &alen) < 0)
++        goto err3;
++    addrs[0].sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    addrs[1].sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    /*fprintf(stderr, "socketpair: %08lx:%d <-> %08lx:%d\n", 
++        ((struct sockaddr_in *)&addrs[0])->sin_addr.s_addr,
++        ((struct sockaddr_in *)&addrs[0])->sin_port,
++        ((struct sockaddr_in *)&addrs[1])->sin_addr.s_addr,
++        ((struct sockaddr_in *)&addrs[1])->sin_port);*/
++
++    if (connect(outsock, (struct sockaddr *)&addrs[0], alen) < 0)
++        goto err3;
++    if (type == SOCK_DGRAM) {
++        if (connect(insock, (struct sockaddr *)&addrs[1], alen) < 0)
++            goto err3;
++        sv[0] = insock;
++    } else {
++        acceptedsock = accept(insock, (struct sockaddr *)&addrs[1], &alen);
++        if (acceptedsock < 0)
++            goto err3;
++        closesocket(insock);
++        sv[0] = acceptedsock;
++    }
++    sv[1] = outsock;
++    return 0;
++err3:
++    closesocket(outsock);
++err2:
++    closesocket(insock);
++err1:
++    fprintf(stderr,"socketpair: error 0x%08x\n", errno);
++    return -1;
++}
++#endif
++
++PR_IMPLEMENT(PRStatus) PR_NewTCPSocketPair(PRFileDesc *f[])
++{
++    PRInt32 rv, osfd[2];
++
++    if (!_pr_initialized) _PR_ImplicitInitialization();
++#ifdef XP_HAIKU
++    rv = socketpair(AF_UNIX, SOCK_STREAM, 0, osfd);
++#else
++    rv = socketpair(AF_INET, SOCK_STREAM, 0, osfd);
++#endif
++    if (rv == -1) {
++        return PR_FAILURE;
++    }
++    f[0] = bt_CreateFileDesc(osfd[0], PR_GetTCPMethods(), _PR_TRI_TRUE, true);
++    if (NULL == f[0]) {
++        closesocket(osfd[0]);
++        closesocket(osfd[1]);
++        /* PR_AllocFileDesc() has invoked PR_SetError(). */
++        return PR_FAILURE;
++    }
++    f[1] = bt_CreateFileDesc(osfd[1], PR_GetTCPMethods(), _PR_TRI_TRUE, true);
++    if (NULL == f[1]) {
++        PR_Close(f[0]);
++        closesocket(osfd[1]);
++        /* PR_AllocFileDesc() has invoked PR_SetError(). */
++        return PR_FAILURE;
++    }
++    return PR_SUCCESS;
++}
++
++
++PR_IMPLEMENT(PRStatus) PR_GetConnectStatus(const PRPollDesc *pd) {
++    PRInt32 osfd;
++#ifndef BONE_VERSION
++    int rv;
++#endif
++    PRFileDesc *bottom;
++
++    if (pd->out_flags & PR_POLL_NVAL) {
++        PR_SetError(PR_BAD_DESCRIPTOR_ERROR, 0);
++        return PR_FAILURE;
++    }
++
++    if ((pd->out_flags & (PR_POLL_WRITE | PR_POLL_EXCEPT | PR_POLL_ERR)) == 0) {
++        PR_ASSERT(pd->out_flags == 0);
++        PR_SetError(PR_IN_PROGRESS_ERROR, 0);
++        return PR_FAILURE;
++    }
++
++
++    /* Find the NSPR layer and invoke its connectcontinue method */
++    bottom = PR_GetIdentitiesLayer(pd->fd, PR_NSPR_IO_LAYER);
++    if (NULL == bottom) 
++    {
++        PR_SetError(PR_INVALID_ARGUMENT_ERROR, 0);
++        return PR_FAILURE;
++    }
++
++    osfd = bottom->secret->md.osfd;
++#ifdef BONE_VERSION  /* bug 122364 */
++    /* temporary workaround until getsockopt(SO_ERROR) works in BONE */
++    if (pd->out_flags & PR_POLL_EXCEPT) {
++        PR_SetError(PR_CONNECT_REFUSED_ERROR, 0);
++        return PR_FAILURE;
++    }
++    PR_ASSERT(pd->out_flags & PR_POLL_WRITE);
++    return PR_SUCCESS;
++#else
++    rv = recv(bottom->secret->md.osfd, NULL, 0, 0);
++    PR_ASSERT(-1 == rv || 0 == rv);
++
++    if (-1 == rv && 0 != errno && errno != EAGAIN && errno != EWOULDBLOCK ) {
++        set_connect_error(errno);
++        return PR_FAILURE;
++    }
++    else
++        return PR_SUCCESS;
++#endif /* BONE_VERSION */
++}
++
++PR_IMPLEMENT(PRFileDesc*) PR_Socket(PRInt32 domain, PRInt32 type, PRInt32 proto)
++{
++    PRInt32 osfd, err;
++    PRFileDesc *fd;
++    PRInt32 tmp_domain = domain;
++
++    if (!_pr_initialized) _PR_ImplicitInitialization();
++    if (PR_AF_INET != domain
++        && PR_AF_INET6 != domain
++    ) {
++        PR_SetError(PR_ADDRESS_NOT_SUPPORTED_ERROR, 0);
++        return NULL;
++    }
++    if( type != SOCK_STREAM && type != SOCK_DGRAM )
++    {
++        PR_SetError(PR_ADDRESS_NOT_SUPPORTED_ERROR, 0);
++        return NULL;
++    }
++
++#if defined(_PR_INET6_PROBE)
++    if (PR_AF_INET6 == domain) {
++        if (_pr_ipv6_is_present == PR_FALSE) 
++            domain = AF_INET;
++        else
++            domain = AF_INET6;
++    }
++#elif defined(_PR_INET6)
++    if (PR_AF_INET6 == domain)
++        domain = AF_INET6;
++#else
++    if (PR_AF_INET6 == domain)
++        domain = AF_INET;
++#endif    /* _PR_INET6 */
++#ifndef BONE_VERSION
++    osfd = socket(domain, type, 0);
++#else
++    osfd = socket(domain, type, proto);
++#endif
++    if (osfd == -1) {
++        err = _MD_ERRNO();
++        set_socket_error(err);
++        return 0;
++    }
++    fd = bt_CreateFileDesc(osfd, SOCK_STREAM == type?PR_GetTCPMethods() : PR_GetUDPMethods(), _PR_TRI_TRUE, true);
++
++    if (fd != NULL) {
++#if defined(_PR_INET6_PROBE) || !defined(_PR_INET6)
++        /*
++         * For platforms with no support for IPv6 
++         * create layered socket for IPv4-mapped IPv6 addresses
++         */
++        if (PR_AF_INET6 == tmp_domain && PR_AF_INET == domain) {
++            if (PR_FAILURE == _pr_push_ipv6toipv4_layer(fd)) {
++                PR_Close(fd);
++                fd = NULL;
++            }
++        }
++#endif
++    } else
++        closesocket(osfd);
++
++    return fd;
++}
++
++
++PR_IMPLEMENT(PRFileDesc *) PR_NewTCPSocket(void)
++{
++    return PR_Socket(AF_INET, SOCK_STREAM, 0);
++}
++
++PR_IMPLEMENT(PRFileDesc*) PR_NewUDPSocket(void)
++{
++    return PR_Socket(AF_INET, SOCK_DGRAM, 0);
++}
++
++PR_IMPLEMENT(PRFileDesc *) PR_OpenTCPSocket(PRIntn af)
++{
++    return PR_Socket(af, SOCK_STREAM, 0);
++}
++
++PR_IMPLEMENT(PRFileDesc*) PR_OpenUDPSocket(PRIntn af)
++{
++    return PR_Socket(af, SOCK_DGRAM, 0);
++}
++
+Index: nsprpub/pr/src/bthreads/btthread.c
+===================================================================
+--- nsprpub/pr/src/bthreads/btthread.c	(revision 7)
++++ nsprpub/pr/src/bthreads/btthread.c	(working copy)
+@@ -120,12 +120,9 @@
+     */
+ 
+     beThreadPriority = _bt_MapNSPRToNativePriority( priority );
+-    
+     set_thread_priority( find_thread( NULL ), beThreadPriority );
+-    
+     primordialThread->priority = priority;
+ 
+-
+ 	/* set the thread's state - note that the thread is not joinable */
+     primordialThread->state |= BT_THREAD_PRIMORD;
+ 	if (type == PR_SYSTEM_THREAD)
+@@ -219,9 +216,7 @@
+ 			   allocated a joinSem for us) - let them know we're
+ 			   ready */
+ 			delete_sem(me->md.joinSem);
+-
+ 			PR_Unlock(joinSemLock);
+-
+ 		}
+ 		else
+     {
+@@ -229,10 +224,8 @@
+ 			   is our responsibility to allocate the joinSem
+ 			   and block on it */
+ 			me->md.joinSem = create_sem(0, "join sem");
+-
+ 			/* we're done accessing our joinSem */
+ 			PR_Unlock(joinSemLock);
+-
+ 			/* wait for someone to join us */
+ 			while (acquire_sem(me->md.joinSem) == B_INTERRUPTED);
+ 	    }
+@@ -243,10 +236,8 @@
+ 	{
+ 		/* synchronize access to bt_book */
+     PR_Lock( bt_book.ml );
+-
+ 		/* decrement the number of currently-alive user threads */
+ 	bt_book.threadCount--;
+-
+ 		if (bt_book.threadCount == 0 && bt_book.cleanUpSem != B_ERROR) {
+ 			/* we are the last user thread, and the primordial thread is
+ 			   blocked in PR_Cleanup() waiting for us to finish - notify
+@@ -277,9 +268,7 @@
+ 
+ 	/* save our PRThread object into our TLS */
+ 	tls_set(tls_prThreadSlot, thred);
+-
+     thred->startFunc(thred->arg);  /* run the dang thing */
+-
+ 	/* clean up */
+ 	_bt_CleanupThread(NULL);
+ 
+@@ -292,7 +281,6 @@
+                      PRThreadState state, PRUint32 stackSize)
+ {
+     PRUint32 bePriority;
+-
+     PRThread* thred;
+ 
+     if (!_pr_initialized) _PR_ImplicitInitialization();
+@@ -305,7 +293,6 @@
+     }
+ 
+     thred->md.joinSem = B_ERROR;
+-
+         thred->arg = arg;
+         thred->startFunc = start;
+         thred->priority = priority;
+@@ -316,7 +303,6 @@
+ 	}
+ 
+         /* keep some books */
+-
+ 	PR_Lock( bt_book.ml );
+ 
+ 	if (type == PR_USER_THREAD)
+@@ -325,9 +311,7 @@
+         }
+ 
+ 	PR_Unlock( bt_book.ml );
+-
+ 	bePriority = _bt_MapNSPRToNativePriority( priority );
+-
+         thred->md.tid = spawn_thread((thread_func)_bt_root, "moz-thread",
+                                      bePriority, thred);
+         if (thred->md.tid < B_OK) {
+@@ -433,6 +417,13 @@
+     return thred;
+ }
+ 
++PR_IMPLEMENT(void*)PR_GetSP(PRThread *thred)
++{
++    thread_info tInfo;
++    get_thread_info(thred->md.tid, &tInfo);
++    return tInfo.stack_base;  /* or should it be _end? */
++}
++
+ PR_IMPLEMENT(PRThreadScope)
+     PR_GetThreadScope (const PRThread* thred)
+ {
+Index: nsprpub/pr/src/io/prmapopt.c
+===================================================================
+--- nsprpub/pr/src/io/prmapopt.c	(revision 7)
++++ nsprpub/pr/src/io/prmapopt.c	(working copy)
+@@ -74,7 +74,7 @@
+ #include <netinet/tcp.h>  /* TCP_NODELAY, TCP_MAXSEG */
+ #endif
+ 
+-#ifndef _PR_PTHREADS
++#if !defined(_PR_PTHREADS) && !defined(_PR_BTHREADS)
+ 
+ PRStatus PR_CALLBACK _PR_SocketGetSocketOption(PRFileDesc *fd, PRSocketOptionData *data)
+ {
+@@ -99,7 +99,6 @@
+         {
+             case PR_SockOpt_Linger:
+             {
+-#if !defined(XP_BEOS) || defined(BONE_VERSION)
+                 struct linger linger;
+                 length = sizeof(linger);
+                 rv = _PR_MD_GETSOCKOPT(
+@@ -113,10 +112,6 @@
+                         PR_SecondsToInterval(linger.l_linger);
+                 }
+                 break;
+-#else
+-                PR_SetError( PR_NOT_IMPLEMENTED_ERROR, 0 );
+-                return PR_FAILURE;
+-#endif
+             }
+             case PR_SockOpt_Reuseaddr:
+             case PR_SockOpt_Keepalive:
+@@ -257,17 +252,12 @@
+         {
+             case PR_SockOpt_Linger:
+             {
+-#if !defined(XP_BEOS) || defined(BONE_VERSION)
+                 struct linger linger;
+                 linger.l_onoff = data->value.linger.polarity;
+                 linger.l_linger = PR_IntervalToSeconds(data->value.linger.linger);
+                 rv = _PR_MD_SETSOCKOPT(
+                     fd, level, name, (char*)&linger, sizeof(linger));
+                 break;
+-#else
+-                PR_SetError( PR_NOT_IMPLEMENTED_ERROR, 0 );
+-                return PR_FAILURE;
+-#endif
+             }
+             case PR_SockOpt_Reuseaddr:
+             case PR_SockOpt_Keepalive:
+@@ -355,7 +345,7 @@
+     return rv;
+ }  /* _PR_SocketSetSocketOption */
+ 
+-#endif /* ! _PR_PTHREADS */
++#endif /* ! _PR_PTHREADS && ! _PR_BTHREADS */
+ 
+ /*
+  *********************************************************************
+Index: nsprpub/pr/src/md/beos/bsrcs.mk
+===================================================================
+--- nsprpub/pr/src/md/beos/bsrcs.mk	(revision 7)
++++ nsprpub/pr/src/md/beos/bsrcs.mk	(working copy)
+@@ -20,6 +20,7 @@
+ # the Initial Developer. All Rights Reserved.
+ #
+ # Contributor(s):
++# Fredrik Holmqvist <thesuckiestemail@yahoo.se>
+ #
+ # Alternatively, the contents of this file may be used under the terms of
+ # either the GNU General Public License Version 2 or later (the "GPL"), or
+@@ -42,13 +43,6 @@
+ 
+ MDCSRCS =             \
+ 	beos.c        \
+-	beos_errors.c \
+-	bfile.c       \
+-	bmisc.c       \
+-	bnet.c        \
+ 	bproc.c       \
+-	brng.c        \
+-	bseg.c        \
+-	btime.c       \
+ 	bmmap.c       \
+ 	$(NULL)
+Index: nsprpub/pr/src/md/beos/bproc.c
+===================================================================
+--- nsprpub/pr/src/md/beos/bproc.c	(revision 7)
++++ nsprpub/pr/src/md/beos/bproc.c	(working copy)
+@@ -36,8 +36,10 @@
+  * ***** END LICENSE BLOCK ***** */
+ 
+ #include "primpl.h"
++#include <errno.h>
++#include <signal.h>
+ #include <stdio.h>
+-#include <signal.h>
++#include <sys/wait.h>
+ 
+ #define _PR_SIGNALED_EXITSTATUS 256
+ 
+Index: nsprpub/pr/src/md/beos/beos.c
+===================================================================
+--- nsprpub/pr/src/md/beos/beos.c	(revision 7)
++++ nsprpub/pr/src/md/beos/beos.c	(working copy)
+@@ -37,58 +37,87 @@
+ 
+ #include "primpl.h"
+ 
+-#include <signal.h>
+-#include <unistd.h>
+-#include <memory.h>
+-#include <fcntl.h>
+-#include <sys/types.h>
+-#include <sys/socket.h>
+ #include <sys/time.h>
+-#include <sys/ioctl.h>
+-#include <errno.h>
+-
+ /*
+  * Make sure _PRSockLen_t is 32-bit, because we will cast a PRUint32* or
+  * PRInt32* pointer to a _PRSockLen_t* pointer.
+  */
+ #define _PRSockLen_t int
+ 
+-/*
+-** Global lock variable used to bracket calls into rusty libraries that
+-** aren't thread safe (like libc, libX, etc).
+-*/
+-static PRLock *_pr_rename_lock = NULL;
+-static PRMonitor *_pr_Xfe_mon = NULL;
+ 
++#ifndef BONE_VERSION
++PRLock *_connectLock = NULL;
++
++/* Workaround for nonblocking connects under net_server */
++PRUint32 connectCount = 0;
++ConnectListNode connectList[64];
++
++void
++_MD_final_init_netserver(void)
++{
++    _connectLock = PR_NewLock();
++    PR_ASSERT(NULL != _connectLock); 
++    /* Workaround for nonblocking connects under net_server */
++    connectCount = 0;
++}
++#endif /* !BONE_VERSION */
++
++
++#ifdef __powerpc__
++static PRLock *monitor = NULL;
++
++void
++_MD_AtomicInit(void)
++{
++    if (monitor == NULL) {
++        monitor = PR_NewLock();
++    }
++}
++#endif /* __powerpc__ */
++
+ /*
+- * Variables used by the GC code, initialized in _MD_InitSegs().
+- * _pr_zero_fd should be a static variable.  Unfortunately, there is
+- * still some Unix-specific code left in function PR_GrowSegment()
+- * in file memory/prseg.c that references it, so it needs
+- * to be a global variable for now.
++** This is exceedingly messy.  atomic_add returns the last value, NSPR
++** expects the new value. We just add or subtract 1 from the result.
++** The actual memory update is atomic.
+  */
+-PRInt32 _pr_zero_fd = -1;
+-static PRLock *_pr_md_lock = NULL;
+ 
+-sigset_t timer_set;
++PRInt32
++_MD_AtomicAdd( PRInt32 *ptr, PRInt32 val )
++{
++    return atomic_add( (long *)ptr, val ) + val;
++}
+ 
+-void _PR_UnixInit()
++PRInt32
++_MD_AtomicIncrement( PRInt32 *val )
+ {
+-	struct sigaction sigact;
+-	int rv;
++    return atomic_add( (long *)val, 1 ) + 1;
++}
+ 
+-	sigemptyset(&timer_set);
++PRInt32
++_MD_AtomicDecrement( PRInt32 *val )
++{
++    return atomic_add( (long *)val, -1 ) - 1;
++}
+ 
+-	sigact.sa_handler = SIG_IGN;
+-	sigemptyset(&sigact.sa_mask);
+-	sigact.sa_flags = 0;
+-	rv = sigaction(SIGPIPE, &sigact, 0);
+-	PR_ASSERT(0 == rv);
++PRInt32
++_MD_AtomicSet( PRInt32 *val, PRInt32 newval )
++{
++    PRInt32 result;
++#ifdef __powerpc__
++    if (!_pr_initialized) {
++        _PR_ImplicitInitialization();
++    }
++    PR_Lock(monitor);
++    result = *val;
++    *val = newval;
++    PR_Unlock(monitor);
++#else
++    asm volatile ("xchgl %0, %1" 
++                : "=r"(result), "=m"(*val)
++                : "0"(newval), "m"(*val));
+ 
+-	_pr_rename_lock = PR_NewLock();
+-	PR_ASSERT(NULL != _pr_rename_lock);
+-	_pr_Xfe_mon = PR_NewMonitor();
+-	PR_ASSERT(NULL != _pr_Xfe_mon);
++#endif /* __powerpc__ */
++  return result;
+ }
+ 
+ /*
+@@ -98,9 +127,7 @@
+  *
+  *     Returns the current time in microseconds since the epoch.
+  *     The epoch is midnight January 1, 1970 GMT.
+- *     The implementation is machine dependent.  This is the Unix
+- *     implementation.
+- *     Cf. time_t time(time_t *tp)
++ *     The implementation is machine dependent.  
+  *
+  *-----------------------------------------------------------------------
+  */
+@@ -108,157 +135,75 @@
+ PR_IMPLEMENT(PRTime)
+ PR_Now(void)
+ {
+-	struct timeval tv;
+-	PRInt64 s, us, s2us;
+-
+-	GETTIMEOFDAY(&tv);
+-	LL_I2L(s2us, PR_USEC_PER_SEC);
+-	LL_I2L(s, tv.tv_sec);
+-	LL_I2L(us, tv.tv_usec);
+-	LL_MUL(s, s, s2us);
+-	LL_ADD(s, s, us);
+-	return s;
++    return (PRTime) real_time_clock_usecs();
+ }
+ 
+ PRIntervalTime
+-_PR_UNIX_GetInterval()
++_MD_get_interval(void)
+ {
+-	struct timeval time;
+-	PRIntervalTime ticks;
+-
+-	(void)GETTIMEOFDAY(&time);  /* fallicy of course */
+-	ticks = (PRUint32)time.tv_sec * PR_MSEC_PER_SEC;  /* that's in milliseconds */
+-	ticks += (PRUint32)time.tv_usec / PR_USEC_PER_MSEC;  /* so's that */
+-	return ticks;
+-}  /* _PR_SUNOS_GetInterval */
+-
+-PRIntervalTime _PR_UNIX_TicksPerSecond()
+-{
+-	return 1000;  /* this needs some work :) */
++    return (PRIntervalTime) real_time_clock_usecs() / 10;
+ }
+ 
+-/************************************************************************/
+-
+-/*
+-** Special hacks for xlib. Xlib/Xt/Xm is not re-entrant nor is it thread
+-** safe.  Unfortunately, neither is mozilla. To make these programs work
+-** in a pre-emptive threaded environment, we need to use a lock.
+-*/
+-
+-void PR_XLock()
++PRIntervalTime
++_MD_interval_per_sec(void)
+ {
+-	PR_EnterMonitor(_pr_Xfe_mon);
++    return 100000L;
+ }
+ 
+-void PR_XUnlock()
++PRSize
++_PR_MD_GetRandomNoise( void *buf, PRSize size )
+ {
+-	PR_ExitMonitor(_pr_Xfe_mon);
+-}
++    struct timeval tv;
++    int n = 0;
++    int s;
+ 
+-PRBool PR_XIsLocked()
+-{
+-	return (PR_InMonitor(_pr_Xfe_mon)) ? PR_TRUE : PR_FALSE;
+-}
++    GETTIMEOFDAY(&tv);
+ 
+-void PR_XWait(int ms)
+-{
+-	PR_Wait(_pr_Xfe_mon, PR_MillisecondsToInterval(ms));
++    if ( size >= 0 ) {
++        s = _pr_CopyLowBits((char*)buf+n, size, &tv.tv_usec, sizeof(tv.tv_usec));
++        size -= s;
++        n += s;
+ }
+-
+-void PR_XNotify(void)
+-{
+-	PR_Notify(_pr_Xfe_mon);
++    if ( size >= 0 ) {
++        s = _pr_CopyLowBits((char*)buf+n, size, &tv.tv_sec, sizeof(tv.tv_sec));
++        size -= s;
++        n += s;
+ }
++    return n;
++} /* end _PR_MD_GetRandomNoise() */
+ 
+-void PR_XNotifyAll(void)
+-{
+-	PR_NotifyAll(_pr_Xfe_mon);
+-}
+ 
+-#if !defined(BEOS)
+-#ifdef HAVE_BSD_FLOCK
+-
+-#include <sys/file.h>
+-
+-PR_IMPLEMENT(PRStatus)
+-_MD_LOCKFILE (PRInt32 f)
++/* Needed by prinit.c:612 */
++void
++_PR_MD_QUERY_FD_INHERITABLE(PRFileDesc *fd)
+ {
+-	PRInt32 rv;
+-	rv = flock(f, LOCK_EX);
+-	if (rv == 0)
+-		return PR_SUCCESS;
+-	_PR_MD_MAP_FLOCK_ERROR(_MD_ERRNO());
+-	return PR_FAILURE;
+-}
++    int flags;
+ 
+-PR_IMPLEMENT(PRStatus)
+-_MD_TLOCKFILE (PRInt32 f)
+-{
+-	PRInt32 rv;
+-	rv = flock(f, LOCK_EX|LOCK_NB);
+-	if (rv == 0)
+-		return PR_SUCCESS;
+-	_PR_MD_MAP_FLOCK_ERROR(_MD_ERRNO());
+-	return PR_FAILURE;
++    PR_ASSERT(_PR_TRI_UNKNOWN == fd->secret->inheritable);
++    flags = fcntl(fd->secret->md.osfd, F_GETFD, 0);
++    PR_ASSERT(-1 != flags);
++    fd->secret->inheritable = (flags & FD_CLOEXEC) ?
++        _PR_TRI_FALSE : _PR_TRI_TRUE;
+ }
+ 
+-PR_IMPLEMENT(PRStatus)
+-_MD_UNLOCKFILE (PRInt32 f)
++PRStatus
++_MD_gethostname(char *name, PRUint32 namelen)
+ {
+-	PRInt32 rv;
+-	rv = flock(f, LOCK_UN);
+-	if (rv == 0)
+-		return PR_SUCCESS;
+-	_PR_MD_MAP_FLOCK_ERROR(_MD_ERRNO());
+-	return PR_FAILURE;
+-}
+-#else
++    PRInt32 rv, err;
+ 
+-PR_IMPLEMENT(PRStatus)
+-_MD_LOCKFILE (PRInt32 f)
+-{
+-	PRInt32 rv;
+-	rv = lockf(f, F_LOCK, 0);
++    rv = gethostname(name, namelen);
+ 	if (rv == 0)
+-		return PR_SUCCESS;
+-	_PR_MD_MAP_LOCKF_ERROR(_MD_ERRNO());
+-	return PR_FAILURE;
+-}
+-
+-PR_IMPLEMENT(PRStatus)
+-_MD_TLOCKFILE (PRInt32 f)
+ {
+-	PRInt32 rv;
+-	rv = lockf(f, F_TLOCK, 0);
+-	if (rv == 0)
+-		return PR_SUCCESS;
+-	_PR_MD_MAP_LOCKF_ERROR(_MD_ERRNO());
+-	return PR_FAILURE;
++        err = _MD_ERRNO();
++        switch (err) {
++            case EFAULT:
++                PR_SetError(PR_ACCESS_FAULT_ERROR, err);
++                break;
++            default:
++                PR_SetError(PR_UNKNOWN_ERROR, err);
++                break;
+ }
+-
+-PR_IMPLEMENT(PRStatus)
+-_MD_UNLOCKFILE (PRInt32 f)
+-{
+-	PRInt32 rv;
+-	rv = lockf(f, F_ULOCK, 0);
+-	if (rv == 0)
+-		return PR_SUCCESS;
+-	_PR_MD_MAP_LOCKF_ERROR(_MD_ERRNO());
+ 	return PR_FAILURE;
+ }
+-#endif
+-
+-PR_IMPLEMENT(PRStatus)
+-  _MD_GETHOSTNAME (char *name, PRUint32 namelen)
+-{
+-    PRIntn rv;
+-
+-    rv = gethostname(name, namelen);
+-    if (0 == rv) {
+ 		return PR_SUCCESS;
+     }
+-	_PR_MD_MAP_GETHOSTNAME_ERROR(_MD_ERRNO());
+-    return PR_FAILURE;
+-}
+-
+-#endif
+Index: nsprpub/pr/src/io/Makefile.in
+===================================================================
+--- nsprpub/pr/src/io/Makefile.in	(revision 7)
++++ nsprpub/pr/src/io/Makefile.in	(working copy)
+@@ -69,6 +69,7 @@
+ 	$(NULL)
+ 
+ ifndef USE_PTHREADS
++ifndef USE_BTHREADS
+     CSRCS += \
+ 	    prdir.c \
+ 	    prfile.c \
+@@ -76,6 +77,7 @@
+ 	    prsocket.c \
+ 	    $(NULL)
+ endif
++endif
+ 
+ TARGETS	= $(OBJS)
+ 
+Index: nsprpub/pr/src/io/prsocket.c
+===================================================================
+--- nsprpub/pr/src/io/prsocket.c	(revision 7)
++++ nsprpub/pr/src/io/prsocket.c	(working copy)
+@@ -64,7 +64,7 @@
+      * is not uniform, so we don't check it.
+      */
+     if ((addr != NULL)
+-#if defined(XP_UNIX) || defined(XP_OS2_EMX)
++#if defined(XP_UNIX) || defined(XP_OS2_EMX) || defined(XP_BEOS)
+             && (addr->raw.family != AF_UNIX)
+ #endif
+             && (PR_NETADDR_SIZE(addr) != addr_len)) {
+Index: nsprpub/pr/src/memory/prseg.c
+===================================================================
+--- nsprpub/pr/src/memory/prseg.c	(revision 7)
++++ nsprpub/pr/src/memory/prseg.c	(working copy)
+@@ -37,7 +37,7 @@
+ 
+ #include "primpl.h"
+ 
+-#if defined(_PR_PTHREADS)
++#if defined(_PR_PTHREADS) || defined(_PR_BTHREADS)
+ 
+ /*
+ ** The pthreads version doesn't use these functions.
+@@ -46,7 +46,7 @@
+ {
+ }
+ 
+-#else /* _PR_PTHREADS */
++#else /* _PR_PTHREADS || defined(_PR_BTHREADS) */
+ 
+ void _PR_InitSegs(void)
+ {
+@@ -90,4 +90,4 @@
+     PR_DELETE(seg);
+ }
+ 
+-#endif /* _PR_PTHREADS */
++#endif /* _PR_PTHREADS || defined(_PR_BTHREADS) */
