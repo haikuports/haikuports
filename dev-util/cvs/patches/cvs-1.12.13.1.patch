@@ -1,0 +1,190 @@
+diff -ur cvs-1.12.13.1/configure cvs-1.12.13.1-haiku/configure
+--- cvs-1.12.13.1/configure	2006-07-07 15:31:08.000000000 -0600
++++ cvs-1.12.13.1-haiku/configure	2009-11-24 15:37:33.000000000 -0700
+@@ -45920,7 +45920,7 @@
+   return 0;
+ }
+ _ACEOF
+-for ac_lib in '' xnet socket inet; do
++for ac_lib in '' xnet network socket inet; do
+   if test -z "$ac_lib"; then
+     ac_res="none required"
+   else
+diff -ur cvs-1.12.13.1/configure.in cvs-1.12.13.1-haiku/configure.in
+--- cvs-1.12.13.1/configure.in	2006-06-29 09:13:10.000000000 -0600
++++ cvs-1.12.13.1-haiku/configure.in	2009-11-24 15:37:33.000000000 -0700
+@@ -541,7 +541,7 @@
+ 
+ # Try to find connect and gethostbyname.
+ AC_CHECK_LIB(nsl, main)
+-AC_SEARCH_LIBS(connect, xnet socket inet,
++AC_SEARCH_LIBS(connect, xnet network socket inet,
+   AC_DEFINE(HAVE_CONNECT, 1,
+ [Define if you have the connect function.]))
+ dnl no need to search nsl for gethostbyname here since we should have
+diff -ur cvs-1.12.13.1/src/cvs.h cvs-1.12.13.1-haiku/src/cvs.h
+--- cvs-1.12.13.1/src/cvs.h	2006-04-25 14:01:47.000000000 -0600
++++ cvs-1.12.13.1-haiku/src/cvs.h	2009-11-24 15:37:33.000000000 -0700
+@@ -181,8 +181,13 @@
+ #define CVSRFLPAT	"#cvs.rfl.*"	/* wildcard expr to match read locks */
+ #define	CVSEXT_LOG	",t"
+ #define	CVSPREFIX	",,"
++#ifdef __HAIKU__
++#define CVSDOTIGNORE	"cvsignore"
++#define CVSDOTWRAPPER   "cvswrappers"
++#else
+ #define CVSDOTIGNORE	".cvsignore"
+ #define CVSDOTWRAPPER   ".cvswrappers"
++#endif
+ 
+ /* Command attributes -- see function lookup_command_attribute(). */
+ #define CVS_CMD_IGNORE_ADMROOT        1
+diff -ur cvs-1.12.13.1/src/cvsrc.c cvs-1.12.13.1-haiku/src/cvsrc.c
+--- cvs-1.12.13.1/src/cvsrc.c	2006-03-31 14:54:57.000000000 -0700
++++ cvs-1.12.13.1-haiku/src/cvsrc.c	2009-11-24 15:37:33.000000000 -0700
+@@ -20,7 +20,11 @@
+ /* this file is to be found in the user's home directory */
+ 
+ #ifndef	CVSRC_FILENAME
+-#define	CVSRC_FILENAME	".cvsrc"
++# ifdef __HAIKU__
++#  define	CVSRC_FILENAME "cvsrc"
++# else
++#  define	CVSRC_FILENAME	".cvsrc"
++# endif
+ #endif
+ char cvsrc[] = CVSRC_FILENAME;
+ 
+@@ -64,7 +68,7 @@
+ 
+     /* determine filename for ~/.cvsrc */
+ 
+-    homedir = get_homedir ();
++    homedir = get_rcdir ();
+     /* If we can't find a home directory, ignore ~/.cvsrc.  This may
+        make tracking down problems a bit of a pain, but on the other
+        hand it might be obnoxious to complain when CVS will function
+diff -ur cvs-1.12.13.1/src/filesubr.c cvs-1.12.13.1-haiku/src/filesubr.c
+--- cvs-1.12.13.1/src/filesubr.c	2006-07-05 20:14:08.000000000 -0600
++++ cvs-1.12.13.1-haiku/src/filesubr.c	2009-11-24 15:51:02.000000000 -0700
+@@ -32,6 +32,11 @@
+ /* CVS */
+ #include "cvs.h"
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#include <StorageDefs.h>
++#endif
++
+ static int deep_remove_dir (const char *path);
+ 
+ 
+@@ -859,6 +864,36 @@
+     return home;
+ }
+ 
++/* Compose a path to the settings directory for systems that don't store data
++ * in $HOME. Returns a pointer to storage managed by this function or its
++ * callees.  This function will return the same thing every time it is called.
++ * Returns NULL if there is no rc directory.
++ */
++char *
++get_rcdir (void)
++{
++    static char *rcdir = NULL;
++
++    if (rcdir == NULL)
++    {
++#ifdef __HAIKU__
++    char path[B_PATH_NAME_LENGTH+B_FILE_NAME_LENGTH];
++    dev_t volume = dev_for_path("/boot");
++
++    if (find_directory(B_USER_SETTINGS_DIRECTORY, volume, true, path, sizeof(path)) != B_OK)
++    return 0;
++
++    rcdir = Xasprintf ("%s/cvs", &path);
++
++    mkdir_if_needed(rcdir);
++#else
++    rcdir = get_homedir();
++#endif
++    }
++
++	return rcdir;
++}
++
+ /* Compose a path to a file in the home directory.  This is necessary because
+  * of different behavior on UNIX and VMS.  See the notes in vms/filesubr.c.
+  *
+diff -ur cvs-1.12.13.1/src/filesubr.h cvs-1.12.13.1-haiku/src/filesubr.h
+--- cvs-1.12.13.1/src/filesubr.h	2006-07-05 20:14:08.000000000 -0600
++++ cvs-1.12.13.1-haiku/src/filesubr.h	2009-11-24 15:37:33.000000000 -0700
+@@ -33,6 +33,7 @@
+ bool iswritable (const char *file);
+ bool isaccessible (const char *file, const int mode);
+ char *get_homedir (void);
++char *get_rcdir (void);
+ char *strcat_filename_onto_homedir (const char *, const char *);
+ char *cvs_temp_name (void);
+ FILE *cvs_temp_file (char **filename);
+diff -ur cvs-1.12.13.1/src/history.c cvs-1.12.13.1-haiku/src/history.c
+--- cvs-1.12.13.1/src/history.c	2006-06-09 15:28:17.000000000 -0600
++++ cvs-1.12.13.1-haiku/src/history.c	2009-11-24 15:37:33.000000000 -0700
+@@ -807,7 +807,7 @@
+     {
+ 	char *pwdir;
+ 
+-	pwdir = get_homedir ();
++	pwdir = get_rcdir ();
+ 	PrCurDir = CurDir;
+ 	if (pwdir != NULL)
+ 	{
+diff -ur cvs-1.12.13.1/src/ignore.c cvs-1.12.13.1-haiku/src/ignore.c
+--- cvs-1.12.13.1/src/ignore.c	2006-04-24 12:50:26.000000000 -0600
++++ cvs-1.12.13.1-haiku/src/ignore.c	2009-11-24 15:37:33.000000000 -0700
+@@ -98,7 +98,7 @@
+     }
+ 
+     /* Then add entries found in home dir, (if user has one) and file exists */
+-    home_dir = get_homedir ();
++    home_dir = get_rcdir ();
+     /* If we can't find a home directory, ignore ~/.cvsignore.  This may
+        make tracking down problems a bit of a pain, but on the other
+        hand it might be obnoxious to complain when CVS will function
+diff -ur cvs-1.12.13.1/src/login.c cvs-1.12.13.1-haiku/src/login.c
+--- cvs-1.12.13.1/src/login.c	2006-06-28 08:25:26.000000000 -0600
++++ cvs-1.12.13.1-haiku/src/login.c	2009-11-24 15:37:33.000000000 -0700
+@@ -28,7 +28,11 @@
+ 
+ 
+ #ifndef CVS_PASSWORD_FILE 
+-#define CVS_PASSWORD_FILE ".cvspass"
++# ifdef __HAIKU__
++#  define CVS_PASSWORD_FILE "cvspass"
++# else
++#  define CVS_PASSWORD_FILE ".cvspass"
++# endif
+ #endif
+ 
+ /* If non-NULL, get_cvs_password() will just return this. */
+@@ -49,7 +53,7 @@
+ 
+     /* Construct absolute pathname to user's password file. */
+     /* todo: does this work under OS/2 ? */
+-    homedir = get_homedir ();
++    homedir = get_rcdir ();
+     if (! homedir)
+     {
+ 	/* FIXME?  This message confuses a lot of users, at least
+diff -ur cvs-1.12.13.1/src/wrapper.c cvs-1.12.13.1-haiku/src/wrapper.c
+--- cvs-1.12.13.1/src/wrapper.c	2006-04-24 12:50:27.000000000 -0600
++++ cvs-1.12.13.1-haiku/src/wrapper.c	2009-11-24 15:37:33.000000000 -0700
+@@ -125,7 +125,7 @@
+ 
+     /* Then add entries found in home dir, (if user has one) and file
+        exists.  */
+-    homedir = get_homedir ();
++    homedir = get_rcdir ();
+     /* If we can't find a home directory, ignore ~/.cvswrappers.  This may
+        make tracking down problems a bit of a pain, but on the other
+        hand it might be obnoxious to complain when CVS will function
