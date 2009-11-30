@@ -95,7 +95,7 @@ int dos2u (char *path)
 		unlink (temppath);
 		return TRUE;
 	}
-	if (link (temppath,path) == -1)
+	if (rename (temppath,path) == -1)
 	{
 		fprintf (stderr, "Dos2Unix: Problems renaming '%s' to '%s'\n", temppath, path);
 		fprintf (stderr, "          However, file '%s' remains\n", temppath);

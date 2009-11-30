@@ -93,7 +93,7 @@ int u2dos (char *path)
 		unlink (temppath);
 		return TRUE;
 	}
-	if (link (temppath,path) == -1)
+	if (rename (temppath,path) == -1)
 	{
 		fprintf (stderr, "Unix2Dos: Problems renaming '%s' to '%s'\n", temppath, path);
 		fprintf (stderr, "          However, file '%s' remains\n", temppath);
