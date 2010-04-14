@@ -2,10 +2,10 @@
 
 # generate SSH host keys
 
-ETCSSHDIR=`finddir B_COMMON_ETC_DIRECTORY`/ssh
-mkdir -p ${ETCSSHDIR}
+SETTINGSSSHDIR=`finddir B_COMMON_SETTINGS_DIRECTORY`/ssh
+mkdir -p ${SETTINGSSSHDIR}
 
-hostKeyDir=${ETCSSHDIR}
+hostKeyDir=${SETTINGSSSHDIR}
 
 if [ ! -f "$hostKeyDir/ssh_host_key" ] ; then
 	ssh-keygen -t rsa1 -f "$hostKeyDir/ssh_host_key" -N ""

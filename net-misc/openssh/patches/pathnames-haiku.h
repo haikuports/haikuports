@@ -13,14 +13,14 @@
  */
 
 #define HAIKU_USER_SETTINGS_DIRECTORY	"/boot/home/config/settings"
-#define HAIKU_COMMON_ETC_DIRECTORY		"/boot/common/etc"
+#define HAIKU_COMMON_SETTINGS_DIRECTORY		"/boot/common/settings"
 #define HAIKU_COMMON_BIN_DIRECTORY		"/boot/common/bin"
 #define HAIKU_COMMON_VAR_DIRECTORY		"/boot/common/var"
 #define HAIKU_COMMON_SERVERS_DIRECTORY	"/boot/common/servers"
 #define HAIKU_SYSTEM_BIN_DIRECTORY		"/boot/system/bin"
 
 
-#define ETCDIR				HAIKU_COMMON_ETC_DIRECTORY
+#define ETCDIR				HAIKU_COMMON_SETTINGS_DIRECTORY
 
 #ifndef SSHDIR
 #define SSHDIR				ETCDIR "/ssh"
