@@ -12,7 +12,7 @@
  * called by a name other than "ssh" or "Secure Shell".
  */
 
-#define HAIKU_USER_SETTINGS_DIRECTORY	"/boot/home/config/settings"
+#define HAIKU_USER_SETTINGS_DIRECTORY	"~/config/settings"
 #define HAIKU_COMMON_SETTINGS_DIRECTORY		"/boot/common/settings"
 #define HAIKU_COMMON_BIN_DIRECTORY		"/boot/common/bin"
 #define HAIKU_COMMON_VAR_DIRECTORY		"/boot/common/var"
@@ -72,9 +72,9 @@
  * readable by anyone except the user him/herself, though this does not
  * contain anything particularly secret.
  */
-#define _PATH_SSH_USER_HOSTFILE		_PATH_SSH_USER_DIR "/known_hosts"
+#define _PATH_SSH_USER_HOSTFILE		"/boot/home/config/settings/ssh/known_hosts"
 /* backward compat for protocol 2 */
-#define _PATH_SSH_USER_HOSTFILE2	_PATH_SSH_USER_DIR "/known_hosts2"
+#define _PATH_SSH_USER_HOSTFILE2	"/boot/home/settings/ssh/known_hosts2"
 
 /*
  * Name of the default file containing client-side authentication key. This
