@@ -74,7 +74,7 @@
  */
 #define _PATH_SSH_USER_HOSTFILE		"/boot/home/config/settings/ssh/known_hosts"
 /* backward compat for protocol 2 */
-#define _PATH_SSH_USER_HOSTFILE2	"/boot/home/settings/ssh/known_hosts2"
+#define _PATH_SSH_USER_HOSTFILE2	"/boot/home/config/settings/ssh/known_hosts2"
 
 /*
  * Name of the default file containing client-side authentication key. This
