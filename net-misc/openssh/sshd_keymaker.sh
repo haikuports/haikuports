@@ -15,19 +15,24 @@ mkdir -p ${SETTINGSSSHDIR}
 
 hostKeyDir=${SETTINGSSSHDIR}
 
-_progress 0.0 "rsa1"
+
 if [ ! -f "$hostKeyDir/ssh_host_key" ] ; then
+	_progress 0.2 "rsa1"
 	ssh-keygen -t rsa1 -f "$hostKeyDir/ssh_host_key" -N ""
 fi
 
-_progress 0.3 "dsa"
 if [ ! -f "$hostKeyDir/ssh_host_dsa_key" ] ; then
+	_progress 0.4 "dsa"
 	ssh-keygen -t dsa -f "$hostKeyDir/ssh_host_dsa_key" -N ""
 fi
 
-_progress 0.6 "rsa"
-if [ ! -f "$hostKeyDir/ssh_host_rsa_key" ] ; then
-	ssh-keygen -t rsa -f "$hostKeyDir/ssh_host_rsa_key" -N ""
+if [ ! -f "$hostKeyDir/ssh_host_ecdsa_key" ] ; then
+	_progress 0.6 "ecdsa"
+	ssh-keygen -t ecdsa -f "$hostKeyDir/ssh_host_ecdsa_key" -N ""
 fi
 
-_progress 1.0 ""
+if [ ! -f "$hostKeyDir/ssh_host_rsa_key" ] ; then
+	_progress 0.8 "rsa"
+	ssh-keygen -t rsa -f "$hostKeyDir/ssh_host_rsa_key" -N ""
+	_progress 1.0 ""
+fi
