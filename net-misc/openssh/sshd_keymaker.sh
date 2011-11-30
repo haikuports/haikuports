@@ -1,7 +1,7 @@
 #!/bin/sh
 
 _progress () {
-	notify --type progress --app ssh-keygen \
+	notify --type progress --group ssh-keygen \
 		--icon /boot/system/kernel_x86 \
 		--messageID $0_$$ \
 		--title "Generating ssh keys..." \
