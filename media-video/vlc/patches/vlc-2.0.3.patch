@@ -1,0 +1,177 @@
+--- vlc-2.0.3-orig/src/modules/bank.c	2011-12-08 18:00:28.032243712 +0000
++++ vlc-2.0.3/src/modules/bank.c	2012-07-30 22:00:12.285736960 +0000
+@@ -71,28 +71,30 @@
+     modules.head = module;
+ }
+ 
+-#ifdef __ELF__
+-# ifdef __GNUC__
+-__attribute__((weak))
+-# else
+-#  pragma weak vlc_static_modules
+-# endif
+-extern vlc_plugin_cb vlc_static_modules[];
+-
+-static void module_InitStaticModules(void)
+-{
+-    if (!vlc_static_modules)
+-        return;
+-
+-    for (unsigned i = 0; vlc_static_modules[i]; i++) {
+-        module_t *module = module_InitStatic (vlc_static_modules[i]);
+-        if (likely(module != NULL))
+-            module_StoreBank (module);
+-    }
+-}
+-#else
++//Haiku bug #8288
++//#ifdef __ELF__ 
++//# ifdef __GNUC__
++//__attribute__((weak))
++//# else
++//#  pragma weak vlc_static_modules
++//# endif
++//extern vlc_plugin_cb vlc_static_modules[];
++//
++//static void module_InitStaticModules(void)
++//{
++//    if (!vlc_static_modules)
++//        return;
++//
++//    for (unsigned i = 0; vlc_static_modules[i]; i++) {
++//        module_t *module = module_InitStatic (vlc_static_modules[i]);
++//        if (likely(module != NULL))
++//            module_StoreBank (module);
++//    }
++//}
++//#else
+ static void module_InitStaticModules(void) { }
+-#endif
++//#endif
++
+ 
+ /**
+  * Init bank
+--- vlc-2.0.3-orig/include/vlc_threads.h	2012-01-27 23:03:32.051904512 +0000
++++ vlc-2.0.3/include/vlc_threads.h	2012-07-30 22:08:53.845414400 +0000
+@@ -124,7 +124,13 @@
+ typedef pthread_cond_t  vlc_cond_t;
+ #define VLC_STATIC_COND  PTHREAD_COND_INITIALIZER
+ typedef pthread_rwlock_t vlc_rwlock_t;
++// Haiku bug #8798
++#ifdef __HAIKU__
++#define VLC_STATIC_RWLOCK \
++	{ VLC_STATIC_MUTEX, VLC_STATIC_COND, 0, 0, 0 }
++#else
+ #define VLC_STATIC_RWLOCK PTHREAD_RWLOCK_INITIALIZER
++#endif
+ typedef pthread_key_t   vlc_threadvar_t;
+ typedef struct vlc_timer *vlc_timer_t;
+ 
+--- vlc-2.0.3-orig/configure.ac	2012-07-03 22:55:34.062652416 +0000
++++ vlc-2.0.3/configure.ac	2012-07-31 20:34:45.277610496 +0000
+@@ -279,11 +279,16 @@
+     SYS=os2
+     LDFLAGS_save="${LDFLAGS_save} -Zomf -Zbin-files -Zargs-wild"; LDFLAGS="${LDFLAGS_save}"
+     ;;
++  *haiku*)
++  	SYS=haiku
++  	VLC_ADD_LIBS([libvlccore libvlc vlc],[-lnetwork])
++  	;;
+   *)
+     SYS="${host_os}"
+     ;;
+ esac
+ AM_CONDITIONAL(HAVE_DARWIN,  test "${SYS}" = "darwin")
++AM_CONDITIONAL(HAVE_HAIKU,	 test "${SYS}" = "haiku")
+ AM_CONDITIONAL(HAVE_LINUX,   test "${SYS}" = "linux")
+ AM_CONDITIONAL(HAVE_OS2,     test "${SYS}" = "os2")
+ AM_CONDITIONAL(HAVE_WIN32,   test "${SYS}" = "mingw32")
+@@ -513,10 +518,13 @@
+ dnl Check for system libs needed
+ need_libc=false
+ 
++#this fails to detect that we have if_nameindex and if_nametoindex on haiku
++#and then it dails to detect that we don't have tdestroy...
++
+ dnl Check for usual libc functions
+ AC_CHECK_DECLS([nanosleep],,,[#include <time.h>])
+ AC_CHECK_FUNCS([daemon fcntl fstatvfs fork getenv getpwuid_r if_nameindex if_nametoindex isatty lstat memalign mmap openat pread posix_fadvise posix_madvise setlocale stricmp strnicmp strptime uselocale])
+-AC_REPLACE_FUNCS([atof atoll dirfd fdopendir flockfile fsync getdelim getpid gmtime_r inet_pton lldiv localtime_r nrand48 rewind setenv strcasecmp strcasestr strdup strlcpy strncasecmp strndup strnlen strsep strtof strtok_r strtoll swab tdestroy])
++AC_REPLACE_FUNCS([atof atoll dirfd fdopendir flockfile fsync getdelim getpid gmtime_r inet_pton lldiv localtime_r nrand48 rewind setenv strcasecmp strcasestr strdup strlcpy strncasecmp strndup strnlen strsep strtof strtok_r strtoll swab])
+ AC_CHECK_FUNCS(fdatasync,,
+   [AC_DEFINE(fdatasync, fsync, [Alias fdatasync() to fsync() if missing.])
+ ])
+@@ -578,6 +586,9 @@
+   AS_IF([test "${SYS}" = "mingwce"], [
+     SOCKET_LIBS="-lws2"
+   ])
++  AS_IF([test "${SYS}" = "haiku"], [
++    SOCKET_LIBS="-lnetwork"
++  ])
+ ])
+ LIBS="$LIBS_save"
+ AS_IF([test -n "$SOCKET_LIBS"], [
+@@ -4162,7 +4173,7 @@
+ dnl  Stuff used by the program
+ dnl
+ VERSION_MESSAGE="${VERSION} ${CODENAME}"
+-COPYRIGHT_MESSAGE="Copyright © ${COPYRIGHT_YEARS} VLC authors and VideoLAN"
++COPYRIGHT_MESSAGE="Copyright (C) ${COPYRIGHT_YEARS} VLC authors and VideoLAN"
+ AC_DEFINE_UNQUOTED(VERSION_MESSAGE, "${VERSION_MESSAGE}", [Simple version string])
+ AC_DEFINE_UNQUOTED(COPYRIGHT_MESSAGE, "${COPYRIGHT_MESSAGE}", [Copyright string])
+ AC_DEFINE_UNQUOTED(COPYRIGHT_YEARS, "${COPYRIGHT_YEARS}", [The copyright years])
+
+--- vlc-2.0.3-orig/include/vlc_fixups.h	2012-01-30 21:37:14.052428800 +0000
++++ vlc-2.0.3/include/vlc_fixups.h	2012-07-30 22:21:46.086245376 +0000
+@@ -246,10 +246,13 @@
+ #endif
+ 
+ /* Socket stuff */
++// configure doesn't detect these, likely not linking to -lnetwork, must investigate
++#ifndef __HAIKU__
+ #ifndef HAVE_INET_PTON
+ int inet_pton(int, const char *, void *);
+ const char *inet_ntop(int, const void *, char *, int);
+ #endif
++#endif
+ 
+ #ifndef HAVE_STRUCT_POLLFD
+ enum
+@@ -276,6 +279,8 @@
+ # define poll(a, b, c) vlc_poll(a, b, c)
+ #endif
+ 
++// or these
++#ifndef __HAIKU__
+ #ifndef HAVE_IF_NAMEINDEX
+ #include <errno.h>
+ struct if_nameindex
+@@ -289,6 +294,7 @@
+ # define if_nameindex()         (errno = ENOBUFS, NULL)
+ # define if_freenameindex(list) (void)0
+ #endif
++#endif
+ 
+ /* search.h */
+ #ifndef HAVE_SEARCH_H
+--- vlc-2.0.3-orig/bin/override.c	2011-12-08 18:00:25.033554432 +0000
++++ vlc-2.0.3/bin/override.c	2012-07-31 20:19:54.136314880 +0000
+@@ -124,6 +124,8 @@
+  *
+  * Some evil libraries modify the environment. We currently ignore the calls as
+  * they could crash the process. This may cause funny behaviour though. */
++#ifndef __HAIKU__
++//not working
+ int putenv (char *str)
+ {
+     if (override)
+@@ -133,7 +135,7 @@
+     }
+     return CALL(putenv, str);
+ }
+-
++#endif
+ int setenv (const char *name, const char *value, int overwrite)
+ {
+     if (override)
