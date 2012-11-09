@@ -12,7 +12,7 @@ index c80378c..428aa74 100644
  	$(Q)$(BEOS_MIMESET) $(EXETARGET)
  endif
 diff --git a/beos/Makefile.target b/beos/Makefile.target
-index b1d1eaa..958fc62 100644
+index b1d1eaa..4df489a 100644
 --- a/beos/Makefile.target
 +++ b/beos/Makefile.target
 @@ -9,8 +9,10 @@
@@ -33,7 +33,7 @@ index b1d1eaa..958fc62 100644
      NETLDFLAGS := -lnetwork
    endif
 -  LDFLAGS += -lbe -ltranslation $(NETLDFLAGS)
-+  LDFLAGS += -lbe -ltranslation $(NETLDFLAGS) -lstdc++ -lsupc++
++  LDFLAGS += -lbe -ltranslation -ltracker $(NETLDFLAGS) -lstdc++ -lsupc++
  
 -  $(eval $(call feature_enabled,NSSVG,-DWITH_NS_SVG,-lsvgtiny,SVG (libsvgtiny)))
    ifeq ($(HOST),beos)
@@ -72,6 +72,278 @@ index b1d1eaa..958fc62 100644
  
  # ----------------------------------------------------------------------------
  # Package target
+diff --git a/beos/download.cpp b/beos/download.cpp
+index d7a848d..e1a0c8c 100644
+--- a/beos/download.cpp
++++ b/beos/download.cpp
+@@ -21,17 +21,160 @@ extern "C" {
+ }
+ #include "beos/download.h"
+ 
++#include <File.h>
++#include <FilePanel.h>
++#include <Locker.h>
++#include <Messenger.h>
+ #include <StatusBar.h>
+ #include <Window.h>
+ 
++class NSDownloadWindow: public BWindow
++{
++	public:
++		NSDownloadWindow(download_context* ctx);
++		~NSDownloadWindow();
++
++		void MessageReceived(BMessage* message);
++
++		void Progress(int size);
++		void Failure(const char* error);
++		void Success();
++	private:
++		download_context* ctx;
++		BStatusBar* bar;
++		unsigned long progress;
++		bool success;
++};
++
++
+ struct gui_download_window {
+ 	download_context* ctx;
+-	BWindow* window;
+-	BStatusBar* bar;
+-	unsigned long progress;
++	NSDownloadWindow* window;
++
++	BLocker* storageLock;
++	BDataIO* storage;
+ };
+ 
+ 
++NSDownloadWindow::NSDownloadWindow(download_context* ctx)
++	: BWindow(BRect(30, 30, 400, 200), "Downloads", B_TITLED_WINDOW,
++		B_NOT_RESIZABLE)
++	, ctx(ctx)
++	, progress(0)
++	, success(false)
++{
++	unsigned long dlsize = download_context_get_total_length(ctx);
++	char* buffer = human_friendly_bytesize(dlsize);
++
++	// Create the status bar
++	BRect rect = Bounds();
++	rect.InsetBy(3, 3);
++	bar = new BStatusBar(rect, "progress",
++		download_context_get_filename(ctx), buffer);
++	bar->SetMaxValue(dlsize);
++
++	// Create the backgroundview (just so that the area around the progress bar
++	// is B_PANEL_BACKGROUND_COLOR instead of white)
++	BView* back = new BView(Bounds(), "back", B_FOLLOW_ALL_SIDES, B_WILL_DRAW);
++	back->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));
++
++	// Add the views to the window
++	back->AddChild(bar);
++	AddChild(back);
++
++	// Resize the window to leave a margin around the progress bar
++	BRect size = bar->Bounds();
++	ResizeTo(size.Width() + 6, size.Height() + 6);
++	Show();
++}
++
++
++NSDownloadWindow::~NSDownloadWindow()
++{
++	download_context_abort(ctx);
++	download_context_destroy(ctx);
++}
++
++
++void
++NSDownloadWindow::MessageReceived(BMessage* message)
++{
++	switch(message->what)
++	{
++		case B_SAVE_REQUESTED:
++		{
++			entry_ref directory;
++			const char* name;
++			struct gui_download_window* dw;
++			BFilePanel* source;
++
++			message->FindRef("directory", &directory);
++			message->FindString("name", &name);
++			message->FindPointer("dw", (void**)&dw);
++
++			BDirectory dir(&directory);
++			BFile* storage = new BFile(&dir, name,
++				B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
++			dw->storageLock->Lock();
++
++			BMallocIO* tempstore = dynamic_cast<BMallocIO*>(dw->storage);
++
++			storage->Write(tempstore->Buffer(), tempstore->BufferLength());
++			delete dw->storage;
++
++			if (success)
++				delete storage; // File is already finished downloading !
++			else
++				dw->storage = storage;
++			dw->storageLock->Unlock();
++
++			message->FindPointer("source", (void**)&source);
++			delete source;			
++
++			break;
++		}
++		default:
++			BWindow::MessageReceived(message);
++	}
++}
++
++
++void
++NSDownloadWindow::Progress(int size)
++{
++	progress += size;
++
++	char* buffer = human_friendly_bytesize(progress);
++	strcat(buffer, "/");
++
++	bar->LockLooper();
++	bar->Update(size, NULL, buffer);
++	bar->Invalidate();
++	bar->UnlockLooper();
++}
++
++
++void
++NSDownloadWindow::Success()
++{
++	bar->LockLooper();
++	bar->SetBarColor(ui_color(B_SUCCESS_COLOR));
++	bar->UnlockLooper();
++
++	success = true;
++}
++
++
++void
++NSDownloadWindow::Failure(const char* error)
++{
++	bar->LockLooper();
++	bar->Update(0, NULL, error);
++	bar->SetBarColor(ui_color(B_FAILURE_COLOR));
++	bar->UnlockLooper();
++}
++
++
+ struct gui_download_window *gui_download_window_create(download_context *ctx,
+ 		struct gui_window *parent)
+ {
+@@ -39,33 +182,24 @@ struct gui_download_window *gui_download_window_create(download_context *ctx,
+ 	if (download == NULL)
+ 		return NULL;
+ 
++	download->storageLock = new BLocker("storage_lock");
++	download->storage = new BMallocIO();
+ 	download->ctx = ctx;
+ 
+-	// TODO need to cancel the download (if not finished) on window close
+-	download->window = new BWindow(BRect(30, 30, 400, 200), "Downloads",
+-		B_TITLED_WINDOW, B_NOT_H_RESIZABLE);
+-
+-	unsigned long dlsize = download_context_get_total_length(ctx);
+-	char buffer[256];
+-	sprintf(buffer, "%lu bytes", dlsize); // TODO be smarter and add unit and all
+-
+-	BRect rect = download->window->Bounds();
+-	rect.InsetBy(3, 3);
+-	download->bar = new BStatusBar(rect, "progress",
+-		download_context_get_filename(ctx), buffer);
+-	download->bar->SetMaxValue(dlsize);
+-
+-	BView* back = new BView(download->window->Bounds(), "back", B_FOLLOW_ALL_SIDES, B_WILL_DRAW);
+-	back->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));
+-
+-	back->AddChild(download->bar);
+-	download->window->AddChild(back);
++	download->window = new NSDownloadWindow(ctx);
+ 
+-	BRect size = download->bar->Bounds();
++	// Also ask the user where to save the file
++	// TODO inject the suggested name somehow
++	BMessage* msg = new BMessage(B_SAVE_REQUESTED);
+ 
+-	download->window->ResizeTo(size.Width() + 6, size.Height() + 6);
++	BFilePanel* panel = new BFilePanel(B_SAVE_PANEL,
++		new BMessenger(download->window), NULL, 0, false);
+ 
+-	download->window->Show();
++	msg->AddPointer("source", panel);
++	msg->AddPointer("dw", download);
++	panel->SetMessage(msg);
++	
++	panel->Show();
+ 
+ 	return download;
+ }
+@@ -74,18 +208,11 @@ struct gui_download_window *gui_download_window_create(download_context *ctx,
+ nserror gui_download_window_data(struct gui_download_window *dw, 
+ 		const char *data, unsigned int size)
+ {
+-	dw->progress += size;
++	dw->window->Progress(size);
+ 
+-	unsigned long dlsize = download_context_get_total_length(dw->ctx);
+-	char buffer[256];
+-	sprintf(buffer, "%lu/", dw->progress); // TODO be smarter and add unit and all
+-
+-	dw->bar->LockLooper();
+-	dw->bar->Update(size, NULL, buffer);
+-	dw->bar->Invalidate();
+-	dw->bar->UnlockLooper();
+-
+-	// TOOD actually buffer/save the data to disk !
++	dw->storageLock->Lock();
++	dw->storage->Write(data, size);
++	dw->storageLock->Unlock();
+ 
+ 	return NSERROR_OK;
+ }
+@@ -94,17 +221,26 @@ nserror gui_download_window_data(struct gui_download_window *dw,
+ void gui_download_window_error(struct gui_download_window *dw,
+ 		const char *error_msg)
+ {
+-	dw->bar->LockLooper();
+-	dw->bar->Update(0, NULL, error_msg);
+-	dw->bar->SetBarColor(ui_color(B_FAILURE_COLOR));
+-	dw->bar->UnlockLooper();
++	dw->window->Failure(error_msg);
++
++	delete dw->storageLock;
++	delete dw->storage;
+ }
+ 
+ 
+ void gui_download_window_done(struct gui_download_window *dw)
+ {
+-	dw->bar->LockLooper();
+-	dw->bar->SetBarColor(ui_color(B_SUCCESS_COLOR));
+-	dw->bar->UnlockLooper();
++	dw->window->Success();
++
++	dw->storageLock->Lock();
++
++	// Only delete if the storage is already a file. Else, we must wait for the
++	// user to select something in the BFilePanel!
++	BFile* file = dynamic_cast<BFile*>(dw->storage);
++	delete file;
++	if (file)
++		delete dw->storageLock;
++	else
++		dw->storageLock->Unlock();
+ }
+ 
 diff --git a/beos/fetch_rsrc.cpp b/beos/fetch_rsrc.cpp
 index 79dea4e..563f431 100644
 --- a/beos/fetch_rsrc.cpp
@@ -100,7 +372,7 @@ index 79dea4e..563f431 100644
  		return false;
  	}
 diff --git a/beos/gui.cpp b/beos/gui.cpp
-index b275616..c8ff5c2 100644
+index b275616..c4e7feb 100644
 --- a/beos/gui.cpp
 +++ b/beos/gui.cpp
 @@ -450,7 +450,6 @@ static void gui_init2(int argc, char** argv)
@@ -186,38 +458,64 @@ index b275616..c8ff5c2 100644
  #endif
  #endif
  
-@@ -689,14 +687,16 @@ void gui_poll(bool active)
+@@ -681,46 +679,32 @@ void nsbeos_pipe_message_top(BMessage *message, BWindow *_this, struct beos_scaf
+ void gui_poll(bool active)
+ {
+ 	//CALLED();
+-	CURLMcode code;
+-
+ 	fd_set read_fd_set, write_fd_set, exc_fd_set;
+-	int max_fd = 0;
+ 	struct timeval timeout;
  	unsigned int fd_count = 0;
- 	bool block = true;
+-	bool block = true;
++	bigtime_t next_schedule = 0;
  
+-	if (browser_reformat_pending)
+-		block = false;
 +	schedule_run();
-+
- 	if (browser_reformat_pending)
- 		block = false;
  
--	FD_ZERO(&read_fd_set);
--	FD_ZERO(&write_fd_set);
--	FD_ZERO(&exc_fd_set);
+ 	FD_ZERO(&read_fd_set);
+ 	FD_ZERO(&write_fd_set);
+ 	FD_ZERO(&exc_fd_set);
+ 
+-	if (active) {
+-		code = curl_multi_fdset(fetch_curl_multi,
+-				&read_fd_set,
+-				&write_fd_set,
+-				&exc_fd_set,
+-				&max_fd);
+-		assert(code == CURLM_OK);
+-	}
 -
- 	if (active) {
-+		block = false; // there is network activity going on
-+		FD_ZERO(&read_fd_set);
-+		FD_ZERO(&write_fd_set);
-+		FD_ZERO(&exc_fd_set);
- 		code = curl_multi_fdset(fetch_curl_multi,
- 				&read_fd_set,
- 				&write_fd_set,
-@@ -709,7 +709,8 @@ void gui_poll(bool active)
+ 	// our own event pipe
  	FD_SET(sEventPipe[0], &read_fd_set);
- 	max_fd = MAX(max_fd, sEventPipe[0] + 1);
+-	max_fd = MAX(max_fd, sEventPipe[0] + 1);
  
--
-+	// earliest_callback_timeout is set by the scheduler and tells us when the
-+	// next UI event should happen.
- 	bigtime_t next_schedule = earliest_callback_timeout - system_time();
- 	if (!block)
- 		next_schedule = 0LL; // now
-@@ -730,8 +731,6 @@ void gui_poll(bool active)
+ 
+-	bigtime_t next_schedule = earliest_callback_timeout - system_time();
+-	if (!block)
+-		next_schedule = 0LL; // now
+-	if (block && earliest_callback_timeout != B_INFINITE_TIMEOUT)
+-		block = false;
++	// If there are pending events elsewhere, we should not be blocking
++	if ((!browser_reformat_pending) && (!active)) {
++		next_schedule = earliest_callback_timeout - system_time();
++
++	} // else, we're not allowed to sleep, there is other activity going on.
++
+ 	timeout.tv_sec = (long)(next_schedule / 1000000LL);
+ 	timeout.tv_usec = (long)(next_schedule % 1000000LL);
+-	LOG(("gui_poll: select(%d, ..., %Ldus", max_fd, next_schedule));
+ 
+-	fd_count = select(max_fd, &read_fd_set, &write_fd_set, &exc_fd_set, 
+-		block ? NULL : &timeout);
++	fd_count = select(sEventPipe[0] + 1, &read_fd_set, &write_fd_set, &exc_fd_set, 
++		&timeout);
+ 
+ 	if (fd_count > 0 && FD_ISSET(sEventPipe[0], &read_fd_set)) {
+ 		BMessage *message;
+@@ -730,8 +714,6 @@ void gui_poll(bool active)
  			nsbeos_dispatch_event(message);
  	}
  
@@ -226,7 +524,7 @@ index b275616..c8ff5c2 100644
  	if (browser_reformat_pending)
  		nsbeos_window_process_reformats();
  }
-@@ -751,31 +750,6 @@ void gui_quit(void)
+@@ -751,31 +733,6 @@ void gui_quit(void)
  }
  
  
@@ -404,7 +702,7 @@ index b047bd0..b41130a 100644
 +};
 +
 diff --git a/beos/scaffolding.cpp b/beos/scaffolding.cpp
-index 4003b09..e0c6e6a 100644
+index 4003b09..74c3c81 100644
 --- a/beos/scaffolding.cpp
 +++ b/beos/scaffolding.cpp
 @@ -22,7 +22,9 @@
@@ -439,7 +737,15 @@ index 4003b09..e0c6e6a 100644
  #include <fs_attr.h>
  extern "C" {
  #include "content/content.h"
-@@ -458,7 +468,7 @@ NSBaseView::MessageReceived(BMessage *message)
+@@ -320,6 +330,7 @@ void
+ NSThrobber::SetBitmap(const BBitmap *bitmap)
+ {
+ 	fBitmap = bitmap;
++	Invalidate();
+ }
+ 
+ 
+@@ -458,7 +469,7 @@ NSBaseView::MessageReceived(BMessage *message)
  			nsbeos_pipe_message_top(message, NULL, fScaffolding);
  			break;
  		default:
@@ -448,7 +754,7 @@ index 4003b09..e0c6e6a 100644
  			BView::MessageReceived(message);
  	}
  }
-@@ -539,6 +549,7 @@ void
+@@ -539,6 +550,7 @@ void
  NSBaseView::AllAttached()
  {
  	BView::AllAttached();
@@ -456,7 +762,7 @@ index 4003b09..e0c6e6a 100644
  	struct beos_scaffolding *g = fScaffolding;
  	if (!g)
  		return;
-@@ -576,6 +587,8 @@ NSBrowserWindow::NSBrowserWindow(BRect frame, struct beos_scaffolding *scaf)
+@@ -576,6 +588,8 @@ NSBrowserWindow::NSBrowserWindow(BRect frame, struct beos_scaffolding *scaf)
  
  NSBrowserWindow::~NSBrowserWindow()
  {
@@ -465,7 +771,7 @@ index 4003b09..e0c6e6a 100644
  }
  
  
-@@ -621,6 +634,16 @@ NSBrowserWindow::QuitRequested(void)
+@@ -621,6 +635,16 @@ NSBrowserWindow::QuitRequested(void)
  }
  
  
@@ -482,7 +788,7 @@ index 4003b09..e0c6e6a 100644
  // #pragma mark - implementation
  
  int32 nsbeos_replicant_main_thread(void *_arg)
-@@ -686,6 +709,10 @@ void nsbeos_scaffolding_update_colors(nsbeos_scaffolding *g)
+@@ -686,6 +710,10 @@ void nsbeos_scaffolding_update_colors(nsbeos_scaffolding *g)
  }
  
  
@@ -493,7 +799,7 @@ index 4003b09..e0c6e6a 100644
  void nsbeos_scaffolding_dispatch_event(nsbeos_scaffolding *scaffold, BMessage *message)
  {
  	int width, height;
-@@ -907,6 +934,7 @@ void nsbeos_scaffolding_dispatch_event(nsbeos_scaffolding *scaffold, BMessage *m
+@@ -907,6 +935,7 @@ void nsbeos_scaffolding_dispatch_event(nsbeos_scaffolding *scaffold, BMessage *m
  			text = scaffold->url_bar->Text();
  			scaffold->url_bar->UnlockLooper();
  
@@ -501,7 +807,7 @@ index 4003b09..e0c6e6a 100644
  			browser_window_create(text.String(), bw, NULL, false, false);
  			break;
  		}
-@@ -1570,7 +1598,19 @@ void nsbeos_attach_toplevel_view(nsbeos_scaffolding *g, BView *view)
+@@ -1570,7 +1599,19 @@ void nsbeos_attach_toplevel_view(nsbeos_scaffolding *g, BView *view)
  		message->AddPointer("scaffolding", g);
  		g->window->AddShortcut('H', 0, message, view);
  
@@ -521,7 +827,7 @@ index 4003b09..e0c6e6a 100644
  	} else {
  		if (g->top_view->Looper())
  			g->top_view->UnlockLooper();
-@@ -1659,6 +1699,97 @@ static BMenuItem *make_menu_item(const char *name, BMessage *message)
+@@ -1659,6 +1700,97 @@ static BMenuItem *make_menu_item(const char *name, BMessage *message)
  	return item;
  }
  
@@ -619,7 +925,7 @@ index 4003b09..e0c6e6a 100644
  nsbeos_scaffolding *nsbeos_new_scaffolding(struct gui_window *toplevel)
  {
  	struct beos_scaffolding *g = (struct beos_scaffolding *)malloc(sizeof(*g));
-@@ -1676,7 +1807,6 @@ nsbeos_scaffolding *nsbeos_new_scaffolding(struct gui_window *toplevel)
+@@ -1676,7 +1808,6 @@ nsbeos_scaffolding *nsbeos_new_scaffolding(struct gui_window *toplevel)
  
  	g->window = NULL;
  	g->menu_bar = NULL;
@@ -627,7 +933,7 @@ index 4003b09..e0c6e6a 100644
  
  	if (replicated && !replicant_view) {
  		warn_user("Error: No subwindow allowed when replicated.", NULL);
-@@ -1685,7 +1815,6 @@ nsbeos_scaffolding *nsbeos_new_scaffolding(struct gui_window *toplevel)
+@@ -1685,7 +1816,6 @@ nsbeos_scaffolding *nsbeos_new_scaffolding(struct gui_window *toplevel)
  
  
  	if (!replicant_view) {
@@ -635,7 +941,7 @@ index 4003b09..e0c6e6a 100644
  		BRect frame(0, 0, 600-1, 500-1);
  		if (nsoption_int(window_width) > 0) {
  			frame.Set(0, 0, nsoption_int(window_width) - 1, nsoption_int(window_height) - 1);
-@@ -1696,7 +1825,7 @@ nsbeos_scaffolding *nsbeos_new_scaffolding(struct gui_window *toplevel)
+@@ -1696,7 +1826,7 @@ nsbeos_scaffolding *nsbeos_new_scaffolding(struct gui_window *toplevel)
  			NSBrowserWindow *win = nsbeos_find_last_window();
  			if (win) {
  				pos = win->Frame().LeftTop();
@@ -644,7 +950,7 @@ index 4003b09..e0c6e6a 100644
  			}
  			pos += BPoint(20, 20);
  			BScreen screen;
-@@ -2038,14 +2167,13 @@ nsbeos_scaffolding *nsbeos_new_scaffolding(struct gui_window *toplevel)
+@@ -2038,14 +2168,13 @@ nsbeos_scaffolding *nsbeos_new_scaffolding(struct gui_window *toplevel)
  	rect = g->top_view->Bounds();
  	rect.bottom = rect.top + TOOLBAR_HEIGHT - 1;
  	rect.right = rect.right - DRAGGER_WIDTH;
@@ -660,7 +966,7 @@ index 4003b09..e0c6e6a 100644
  	rect = g->tool_bar->Bounds();
  	rect.right = TOOLBAR_HEIGHT;
  	rect.InsetBySelf(5, 5);
-@@ -2054,35 +2182,35 @@ nsbeos_scaffolding *nsbeos_new_scaffolding(struct gui_window *toplevel)
+@@ -2054,35 +2183,35 @@ nsbeos_scaffolding *nsbeos_new_scaffolding(struct gui_window *toplevel)
  
  	message = new BMessage('back');
  	message->AddPointer("scaffolding", g);
@@ -701,7 +1007,7 @@ index 4003b09..e0c6e6a 100644
  	g->tool_bar->AddChild(g->home_button);
  	nButtons++;
  
-@@ -2407,3 +2535,4 @@ void nsbeos_scaffolding_popup_menu(nsbeos_scaffolding *g, BPoint where)
+@@ -2407,3 +2536,4 @@ void nsbeos_scaffolding_popup_menu(nsbeos_scaffolding *g, BPoint where)
  {
  	g->popup_menu->Go(where);
  }
@@ -727,10 +1033,21 @@ index ae78391..bd13230 100644
  
  
 diff --git a/beos/schedule.cpp b/beos/schedule.cpp
-index 3f82235..2499159 100644
+index 3f82235..db0992e 100644
 --- a/beos/schedule.cpp
 +++ b/beos/schedule.cpp
-@@ -104,11 +104,12 @@ bool
+@@ -95,8 +95,9 @@ schedule(int t, void (*callback)(void *p), void *p)
+ 	cb->context = p;
+ 	cb->callback_killed = cb->callback_fired = false;
+ 	cb->timeout = timeout;
+-	if (earliest_callback_timeout > timeout)
++	if (earliest_callback_timeout > timeout) {
+ 		earliest_callback_timeout = timeout;
++	}
+ 	callbacks->AddItem(cb);
+ }
+ 
+@@ -104,11 +105,12 @@ bool
  schedule_run(void)
  {
  	LOG(("schedule_run()"));
@@ -745,7 +1062,7 @@ index 3f82235..2499159 100644
  
  	LOG(("Checking %ld callbacks to for deadline.", this_run->CountItems()));
 diff --git a/beos/window.cpp b/beos/window.cpp
-index 253b5d1..729d7b1 100644
+index 253b5d1..3e6b2f5 100644
 --- a/beos/window.cpp
 +++ b/beos/window.cpp
 @@ -131,7 +131,7 @@ static GdkCursor *nsbeos_create_menu_cursor(void);
@@ -756,6 +1073,15 @@ index 253b5d1..729d7b1 100644
 +		B_WILL_DRAW | B_NAVIGABLE | B_FRAME_EVENTS ),
  	fGuiWindow(gui)
  {
+ }
+@@ -250,7 +250,7 @@ NSBrowserFrameView::MessageReceived(BMessage *message)
+ 			nsbeos_pipe_message_top(message, NULL, fGuiWindow->scaffold);
+ 			break;
+ 		default:
+-		message->PrintToStream();
++			//message->PrintToStream();
+ 			BView::MessageReceived(message);
+ 	}
  }
 @@ -756,18 +756,25 @@ void nsbeos_dispatch_event(BMessage *message)
  			break;
