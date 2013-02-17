@@ -28,16 +28,17 @@ fi
 
 if [[ -z $1 ]]; then
 	echo ""
-	echo "Usage: $0 <compiled mesa location>"
+	echo "Usage: $0 <mesa version> <compiled mesa location>"
 	echo ""
 	exit 1
 fi
 
-MESA_TOP="$1"
+MESA_VER="$1"
+MESA_TOP="$2"
 GCC_VER=`gcc -v 2>&1 | tail -1 | awk '{print $3}' | cut -d. -f1`
 DATESTAMP=`date +"%Y-%m-%d"`
 
-echo "Bundling gcc$GCC_VER build of Mesa 9.0..."
+echo "Bundling gcc$GCC_VER build of Mesa $MESA_VER..."
 
 cd $MESA_TOP
 
@@ -68,7 +69,7 @@ fi
 
 echo "Creating Mesa OptionalPackage..."
 PLATFORM=$( uname -m )
-ZIP_FILENAME="/boot/home/mesa-9.0${MESADBG}-x86-gcc${GCC_VER}-${DATESTAMP}.zip"
+ZIP_FILENAME="/boot/home/mesa-${MESA_VER}${MESADBG}-x86-gcc${GCC_VER}-${DATESTAMP}.zip"
 zip -r -9 $ZIP_FILENAME $ZIP_HEADERS ./lib.haiku/*
 
 echo "Great Success! $ZIP_FILENAME created."
