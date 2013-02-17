@@ -12,7 +12,7 @@ echo ""
 # These are the Mesa headers and libraries used by the opengl kit
 #   Headers are probed for dependencies, only specify ones referenced
 #   by the opengl kit.
-MESA_PRIVATE_HEADERS="glheader.h glapi.h glapitable.h glapitemp.h glapi_priv.h context.h driverfuncs.h meta.h colormac.h buffers.h framebuffer.h renderbuffer.h state.h version.h swrast.h swrast_setup.h tnl.h t_context.h t_pipeline.h vbo.h extensions.h s_spantemp.h s_renderbuffer.h s_context.h formats.h cpuinfo.h"
+MESA_PRIVATE_HEADERS="glheader.h glapi.h glapitable.h glapitemp.h context.h driverfuncs.h meta.h colormac.h buffers.h framebuffer.h renderbuffer.h state.h version.h swrast.h swrast_setup.h tnl.h t_context.h t_pipeline.h vbo.h extensions.h s_spantemp.h s_context.h formats.h cpuinfo.h"
 
 DEBUG=0
 
@@ -101,7 +101,7 @@ fi
 
 echo "Creating Mesa OptionalPackage..."
 PLATFORM=$( uname -m )
-ZIP_FILENAME="../mesa-${MESA_VER}${MESADBG}-x86-gcc${GCC_VER}-${DATESTAMP}.zip"
+ZIP_FILENAME="/boot/home/mesa-${MESA_VER}${MESADBG}-x86-gcc${GCC_VER}-${DATESTAMP}.zip"
 zip -r -9 $ZIP_FILENAME $ZIP_HEADERS ./include/GL/* ./lib.haiku/*
 
 echo "Great Success! $ZIP_FILENAME created."
