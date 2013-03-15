@@ -64,12 +64,12 @@ echo "Stripping debug symbols from Mesa libraries..."
 find lib.haiku -exec strip --strip-debug {} \; ;
 MESADBG=""
 else
-MESADBG="-dbg"
+MESADBG="dbg"
 fi
 
 echo "Creating Mesa OptionalPackage..."
 PLATFORM=$( uname -m )
-ZIP_FILENAME="/boot/home/mesa-${MESA_VER}${MESADBG}-x86-gcc${GCC_VER}-${DATESTAMP}.zip"
+ZIP_FILENAME="/boot/home/mesa-${MESA_VER}-x86${MESADBG}-gcc${GCC_VER}-${DATESTAMP}.zip"
 zip -r -9 $ZIP_FILENAME $ZIP_HEADERS ./lib.haiku/*
 
 echo "Great Success! $ZIP_FILENAME created."
