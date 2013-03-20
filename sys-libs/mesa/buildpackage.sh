@@ -13,7 +13,11 @@ echo " Welcome to Mesa-O-Matic!"
 echo "-=-=-=-=-=-=-=-=-=-=-=-=-="
 echo ""
 
-DEBUG=0
+if [[ $DEBUG -eq 1 ]]; then
+	echo "Debugging: enabled"
+else
+	echo "Debugging: disabled"
+fi
 
 #######################################################################
 # END CONFIG DATA, Dragons below!
