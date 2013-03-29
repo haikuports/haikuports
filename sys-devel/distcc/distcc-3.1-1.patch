@@ -1,0 +1,100 @@
+diff -Naur distcc-3.1/Makefile.in distcc-3.1-haiku/Makefile.in
+--- distcc-3.1/Makefile.in	2008-12-02 21:50:31.066060288 +0000
++++ distcc-3.1-haiku/Makefile.in	2011-05-21 01:10:21.995098624 +0000
+@@ -554,7 +554,7 @@
+ 
+ # The include-server is a python app, so we use Python's build system.  We pass
+ # the distcc version, the source location, the CPP flags (for location of the
+-# includes), and the build location.
++# includes), LD flags and the build location.
+ include-server:
+ 	if test -z "$(INCLUDESERVER_PYTHON)"; then	\
+ 	  echo "Not building $@: No suitable python found"; \
+@@ -564,6 +564,7 @@
+ 	  SRCDIR="$(srcdir)"                            \
+ 	  CFLAGS="$(CFLAGS) $(PYTHON_CFLAGS)"           \
+ 	  CPPFLAGS="$(CPPFLAGS)"                        \
++	  LDFLAGS="$(LDFLAGS)"                        \
+ 	  $(INCLUDESERVER_PYTHON) "$(srcdir)/include_server/setup.py" \
+ 	      build 					\
+ 	        --build-base="$(include_server_builddir)"  \
+diff -Naur distcc-3.1/configure.ac distcc-3.1-haiku/configure.ac
+--- distcc-3.1/configure.ac	2008-12-02 21:50:31.066846720 +0000
++++ distcc-3.1-haiku/configure.ac	2011-05-21 01:10:34.207618048 +0000
+@@ -329,9 +329,12 @@
+ # only looks in /etc/hosts), so we only look for -lsocket if we need
+ # it.
+ AC_SEARCH_LIBS(gethostent, [nsl])
+-AC_SEARCH_LIBS(setsockopt, [socket])
++AC_SEARCH_LIBS(setsockopt, [socket network])
+ AC_SEARCH_LIBS(hstrerror, [resolv])
+ AC_SEARCH_LIBS(inet_aton, [resolv])
++AC_SEARCH_LIBS(strsep, [bsd])
++AC_SEARCH_LIBS(wait3, [bsd])
++AC_SEARCH_LIBS(wait4, [bsd])
+ 
+ if test x"$with_included_popt" != x"yes"  && test x"$with_included_popt" != xno
+ then
+@@ -379,6 +382,7 @@
+ AC_CHECK_FUNCS([getrusage strsignal gettimeofday])
+ AC_CHECK_FUNCS([getaddrinfo getnameinfo inet_ntop inet_ntoa])
+ AC_CHECK_FUNCS([strndup strsep mmap strlcpy])
++AC_CHECK_FUNCS([nice])
+ 
+ AC_CHECK_FUNCS([getloadavg])
+ 
+@@ -471,6 +475,8 @@
+     AC_DEFINE(HAVE_SOCKADDR_STORAGE, 1, [define if you have struct sockaddr_storage]),,
+     [#include <sys/socket.h>])
+ 
++AC_CHECK_MEMBERS([struct rusage.ru_minflt, struct rusage.ru_majflt])
++
+ AC_ARG_WITH(avahi,
+         AC_HELP_STRING([--without-avahi], [build without avahi]))
+ 
+diff -Naur distcc-3.1/src/daemon.c distcc-3.1-haiku/src/daemon.c
+--- distcc-3.1/src/daemon.c	2008-12-02 21:50:25.053739520 +0000
++++ distcc-3.1-haiku/src/daemon.c	2011-05-21 01:11:07.709361664 +0000
+@@ -172,15 +172,19 @@
+     if ((ret = dcc_set_lifetime()) != 0)
+         dcc_exit(ret);
+ 
++#ifdef HAVE_NICE
+     /* do this before giving away root */
+     if (nice(opt_niceness) == -1) {
+         rs_log_warning("nice %d failed: %s", opt_niceness,
+                        strerror(errno));
+         /* continue anyhow */
+     }
++#endif
+ 
++#ifndef __HAIKU__
+     if ((ret = dcc_discard_root()) != 0)
+         dcc_exit(ret);
++#endif
+ 
+     /* Discard privileges before opening log so that if it's created, it has
+      * the right ownership. */
+diff -Naur distcc-3.1/src/exec.c distcc-3.1-haiku/src/exec.c
+--- distcc-3.1/src/exec.c	2008-12-02 21:50:24.054263808 +0000
++++ distcc-3.1-haiku/src/exec.c	2011-05-21 01:10:57.257687552 +0000
+@@ -488,12 +488,19 @@
+          * critique_status(). */
+         rs_trace("%s child %ld terminated with status %#x",
+                  what, (long) ret_pid, *wait_status);
++#if defined HAVE_RUSAGE_RU_MINFLT && defined HAVE_RUSAGE_RU_MAJFLT
+         rs_log_info("%s times: user %ld.%06lds, system %ld.%06lds, "
+                     "%ld minflt, %ld majflt",
+                     what,
+                     ru.ru_utime.tv_sec, (long) ru.ru_utime.tv_usec,
+                     ru.ru_stime.tv_sec, (long) ru.ru_stime.tv_usec,
+                     ru.ru_minflt, ru.ru_majflt);
++#else
++        rs_log_info("%s times: user %ld.%06lds, system %ld.%06lds",
++                    what,
++                    ru.ru_utime.tv_sec, (long) ru.ru_utime.tv_usec,
++                    ru.ru_stime.tv_sec, (long) ru.ru_stime.tv_usec);
++#endif
+ 
+         return 0;
+     }

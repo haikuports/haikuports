@@ -1,0 +1,229 @@
+diff -urN cmake-2.8-git-orig/Modules/Platform/Haiku.cmake cmake-2.8-git/Modules/Platform/Haiku.cmake
+--- cmake-2.8-git-orig/Modules/Platform/Haiku.cmake	2012-12-03 12:11:47.804519936 -0800
++++ cmake-2.8-git/Modules/Platform/Haiku.cmake	2012-12-03 12:02:17.652738560 -0800
+@@ -1,20 +1,25 @@
++set(HAIKU 1)
++set(UNIX 1)
++  
++set(CMAKE_DL_LIBS "")
+-set(BEOS 1)
+-
+-set(CMAKE_DL_LIBS root be)
+-set(CMAKE_C_COMPILE_OPTIONS_PIC "-fPIC")
+-set(CMAKE_C_COMPILE_OPTIONS_PIE "-fPIE")
+ set(CMAKE_SHARED_LIBRARY_C_FLAGS "-fPIC")
++set(CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS "-shared")
+-set(CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS "-nostart")
+ set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG "-Wl,-rpath,")
+ set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG_SEP ":")
++set(CMAKE_SHARED_LIBRARY_RPATH_LINK_C_FLAG "-Wl,-rpath-link,")
+ set(CMAKE_SHARED_LIBRARY_SONAME_C_FLAG "-Wl,-soname,")
++set(CMAKE_EXE_EXPORTS_C_FLAG "-Wl,--export-dynamic")
++  
++list(APPEND CMAKE_SYSTEM_PREFIX_PATH
++  /boot/common/non-packaged
++  /boot/common
++  /boot/system
++  )
++list(APPEND CMAKE_PLATFORM_IMPLICIT_LINK_DIRECTORIES
++  /boot/common/non-packaged/lib
++  /boot/common/lib
++  /boot/develop/lib/x86
++  )
+-
+-include(Platform/UnixPaths)
+-list(APPEND CMAKE_SYSTEM_PREFIX_PATH /boot/common)
+-list(APPEND CMAKE_SYSTEM_INCLUDE_PATH /boot/common/include)
+-list(APPEND CMAKE_SYSTEM_LIBRARY_PATH /boot/common/lib)
+-list(APPEND CMAKE_SYSTEM_PROGRAM_PATH /boot/common/bin)
+-list(APPEND CMAKE_PLATFORM_IMPLICIT_LINK_DIRECTORIES /boot/common/lib)
+ list(APPEND CMAKE_SYSTEM_INCLUDE_PATH /boot/develop/headers/3rdparty)
+ list(APPEND CMAKE_SYSTEM_LIBRARY_PATH /boot/develop/lib/x86)
+ 
+diff -urN cmake-2.8-git-orig/Source/cmExportCommand.cxx cmake-2.8-git/Source/cmExportCommand.cxx
+--- cmake-2.8-git-orig/Source/cmExportCommand.cxx	2012-11-27 05:26:33.039059456 -0800
++++ cmake-2.8-git/Source/cmExportCommand.cxx	2012-12-03 12:02:17.665059328 -0800
+@@ -20,7 +20,8 @@
+ #include "cmExportBuildFileGenerator.h"
+ 
+ #if defined(__HAIKU__)
+-#include <StorageKit.h>
++#include <FindDirectory.h>
++#include <StorageDefs.h>
+ #endif
+ 
+ cmExportCommand::cmExportCommand()
+@@ -305,14 +306,15 @@
+                                               const char* hash)
+ {
+ #if defined(__HAIKU__)
+-  BPath dir;
+-  if (find_directory(B_USER_SETTINGS_DIRECTORY, &dir) != B_OK)
++  char dir[B_PATH_NAME_LENGTH];
++  if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, false, dir, sizeof(dir)) !=
++      B_OK)
+     {
+     return;
+     }
+-  dir.Append("cmake/packages");
+-  dir.Append(package.c_str());
+-  std::string fname = dir.Path();
++  std::string fname = dir;
++  fname += "/cmake/packages/";
++  fname += package;
+ #else
+   const char* home = cmSystemTools::GetEnv("HOME");
+   if(!home)
+diff -urN cmake-2.8-git-orig/Source/cmFindPackageCommand.cxx cmake-2.8-git/Source/cmFindPackageCommand.cxx
+--- cmake-2.8-git-orig/Source/cmFindPackageCommand.cxx	2012-11-27 05:26:33.059768832 -0800
++++ cmake-2.8-git/Source/cmFindPackageCommand.cxx	2012-12-03 12:02:17.666107904 -0800
+@@ -19,7 +19,9 @@
+ #endif
+ 
+ #if defined(__HAIKU__)
+-#include <StorageKit.h>
++#include <string.h>
++#include <FindDirectory.h>
++#include <StorageDefs.h>
+ #endif
+ 
+ void cmFindPackageNeedBackwardsCompatibility(const std::string& variable,
+@@ -1583,12 +1585,13 @@
+ #if defined(_WIN32) && !defined(__CYGWIN__)
+   this->LoadPackageRegistryWinUser();
+ #elif defined(__HAIKU__)
+-  BPath dir;
+-  if (find_directory(B_USER_SETTINGS_DIRECTORY, &dir) == B_OK)
++  char dir[B_PATH_NAME_LENGTH];
++  if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, false, dir, sizeof(dir)) ==
++      B_OK)
+     {
+-    dir.Append("cmake/packages");
+-    dir.Append(this->Name.c_str());
+-    this->LoadPackageRegistryDir(dir.Path());
++    strlcat(dir, "/cmake/packages/", sizeof(dir));
++    strlcat(dir, this->Name.c_str(), sizeof(dir));
++    this->LoadPackageRegistryDir(dir);
+     }
+ #else
+   if(const char* home = cmSystemTools::GetEnv("HOME"))
+diff -urN cmake-2.8-git-orig/Source/cmLocalGenerator.cxx cmake-2.8-git/Source/cmLocalGenerator.cxx
+--- cmake-2.8-git-orig/Source/cmLocalGenerator.cxx	2012-11-27 05:26:33.035389440 -0800
++++ cmake-2.8-git/Source/cmLocalGenerator.cxx	2012-12-03 12:02:17.672399360 -0800
+@@ -37,7 +37,8 @@
+ #include <assert.h>
+ 
+ #if defined(__HAIKU__)
+-#include <StorageKit.h>
++#include <FindDirectory.h>
++#include <StorageDefs.h>
+ #endif
+ 
+ cmLocalGenerator::cmLocalGenerator()
+@@ -354,12 +355,12 @@
+     prefix = prefix_win32.c_str();
+     }
+ #elif defined(__HAIKU__)
++  char dir[B_PATH_NAME_LENGTH];
+   if (!prefix)
+     {
+-    BPath dir;
+-    if (find_directory(B_COMMON_DIRECTORY, &dir) == B_OK)
++    if (find_directory(B_COMMON_DIRECTORY, -1, false, dir, sizeof(dir)) == B_OK)
+       {
+-      prefix = dir.Path();
++      prefix = dir;
+       }
+     else
+       {
+diff -urN cmake-2.8-git-orig/Source/CPack/cmCPackGenerator.cxx cmake-2.8-git/Source/CPack/cmCPackGenerator.cxx
+--- cmake-2.8-git-orig/Source/CPack/cmCPackGenerator.cxx	2012-11-27 05:26:32.015466496 -0800
++++ cmake-2.8-git/Source/CPack/cmCPackGenerator.cxx	2012-12-03 12:02:17.677904384 -0800
+@@ -27,7 +27,8 @@
+ #include <algorithm>
+ 
+ #if defined(__HAIKU__)
+-#include <StorageKit.h>
++#include <FindDirectory.h>
++#include <StorageDefs.h>
+ #endif
+ 
+ //----------------------------------------------------------------------
+@@ -1265,10 +1266,10 @@
+   this->InstallPath += "-";
+   this->InstallPath += this->GetOption("CPACK_PACKAGE_VERSION");
+ #elif defined(__HAIKU__)
+-  BPath dir;
+-  if (find_directory(B_COMMON_DIRECTORY, &dir) == B_OK)
++  char dir[B_PATH_NAME_LENGTH];
++  if (find_directory(B_COMMON_DIRECTORY, -1, false, dir, sizeof(dir)) == B_OK)
+     {
+-    this->InstallPath = dir.Path();
++    this->InstallPath = dir;
+     }
+   else
+     {
+diff -urN cmake-2.8-git-orig/Tests/ComplexOneConfig/Library/CMakeLists.txt cmake-2.8-git/Tests/ComplexOneConfig/Library/CMakeLists.txt
+--- cmake-2.8-git-orig/Tests/ComplexOneConfig/Library/CMakeLists.txt	2012-11-27 05:26:34.013369344 -0800
++++ cmake-2.8-git/Tests/ComplexOneConfig/Library/CMakeLists.txt	2012-12-03 12:02:42.181665792 -0800
+@@ -51,7 +51,7 @@
+   FULL_DOCS "A simple etst proerty that means nothign and is used for nothing"
+   )
+ set_target_properties(CMakeTestCLibraryShared PROPERTIES FOO BAR)
+-if(NOT BEOS AND NOT WIN32)  # No libm on BeOS.
++if(NOT BEOS AND NOT WIN32 AND NOT HAIKU)  # No libm on BeOS.
+   set_target_properties(CMakeTestCLibraryShared PROPERTIES LINK_FLAGS "-lm")
+ endif()
+ get_target_property(FOO_BAR_VAR CMakeTestCLibraryShared FOO)
+diff -urN cmake-2.8-git-orig/Utilities/cmcurl/CMake/CurlTests.c cmake-2.8-git/Utilities/cmcurl/CMake/CurlTests.c
+--- cmake-2.8-git-orig/Utilities/cmcurl/CMake/CurlTests.c	2012-11-27 05:26:34.045350912 -0800
++++ cmake-2.8-git/Utilities/cmcurl/CMake/CurlTests.c	2012-12-03 12:02:42.189005824 -0800
+@@ -38,7 +38,7 @@
+ # define PLATFORM_AIX_V3
+ #endif
+ 
+-#if defined(PLATFORM_SUNOS4) || defined(PLATFORM_AIX_V3) || (defined(__BEOS__) && !defined(__HAIKU__))
++#if defined(PLATFORM_SUNOS4) || defined(PLATFORM_AIX_V3) || defined(__BEOS__)
+ #error "O_NONBLOCK does not work on this platform"
+ #endif
+   int socket;
+diff -urN cmake-2.8-git-orig/Utilities/cmcurl/select.c cmake-2.8-git/Utilities/cmcurl/select.c
+--- cmake-2.8-git-orig/Utilities/cmcurl/select.c	2012-11-27 05:26:34.055312384 -0800
++++ cmake-2.8-git/Utilities/cmcurl/select.c	2012-12-03 12:02:42.189792256 -0800
+@@ -39,7 +39,7 @@
+ #error "We can't compile without select() support!"
+ #endif
+ 
+-#if defined(__BEOS__) && !defined(__HAIKU__)
++#if defined(__BEOS__)
+ /* BeOS has FD_SET defined in socket.h */
+ #include <socket.h>
+ #endif
+diff -urN cmake-2.8-git-orig/Utilities/cmzlib/zconf.h cmake-2.8-git/Utilities/cmzlib/zconf.h
+--- cmake-2.8-git-orig/Utilities/cmzlib/zconf.h	2012-11-27 05:26:34.022020096 -0800
++++ cmake-2.8-git/Utilities/cmzlib/zconf.h	2012-12-03 12:02:42.190578688 -0800
+@@ -237,7 +237,7 @@
+ #  endif
+ #endif
+ 
+-#if defined (__BEOS__) && !defined (__HAIKU__)
++#if defined (__BEOS__)
+ #  ifdef ZLIB_DLL
+ #    ifdef ZLIB_INTERNAL
+ #      define ZEXPORT   __declspec(dllexport)
+diff -urN cmake-2.8-git-orig/Utilities/cmzlib/zutil.h cmake-2.8-git/Utilities/cmzlib/zutil.h
+--- cmake-2.8-git-orig/Utilities/cmzlib/zutil.h	2012-11-27 05:26:34.022806528 -0800
++++ cmake-2.8-git/Utilities/cmzlib/zutil.h	2012-12-03 12:02:42.195559424 -0800
+@@ -147,12 +147,6 @@
+ #  define OS_CODE  0x0f
+ #endif
+ 
+-/* Haiku defines both __HAIKU__ and __BEOS__ (for now) */
+-/* many BeOS workarounds are no longer needed in Haiku */
+-#if defined(__HAIKU__) && defined(__BEOS__)
+-#undef __BEOS__
+-#endif
+-
+ #if defined(_BEOS_) || defined(RISCOS) 
+ #  define fdopen(fd,mode) NULL /* No fdopen() */
+ #endif

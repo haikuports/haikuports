@@ -1,0 +1,552 @@
+--- vlc-2.0.5-orig/configure.ac	2012-10-22 09:03:51.049545216 +0000
++++ vlc-2.0.5/configure.ac	2012-12-25 23:08:34.519045120 +0000
+@@ -279,11 +279,18 @@
+     SYS=os2
+     LDFLAGS_save="${LDFLAGS_save} -Zomf -Zbin-files -Zargs-wild"; LDFLAGS="${LDFLAGS_save}"
+     ;;
++  *haiku*)
++  	SYS=haiku
++  	VLC_ADD_LIBS([libvlccore libvlc vlc],[-lnetwork -lbe])
++	VLC_ADD_PLUGIN([haiku_aout])  	
++	VLC_ADD_LIBS([haiku_aout],[-lmedia])
++  	;;
+   *)
+     SYS="${host_os}"
+     ;;
+ esac
+ AM_CONDITIONAL(HAVE_DARWIN,  test "${SYS}" = "darwin")
++AM_CONDITIONAL(HAVE_HAIKU,	 test "${SYS}" = "haiku")
+ AM_CONDITIONAL(HAVE_LINUX,   test "${SYS}" = "linux")
+ AM_CONDITIONAL(HAVE_OS2,     test "${SYS}" = "os2")
+ AM_CONDITIONAL(HAVE_WIN32,   test "${SYS}" = "mingw32")
+@@ -513,10 +520,13 @@
+ dnl Check for system libs needed
+ need_libc=false
+ 
++#this fails to detect that we have if_nameindex and if_nametoindex on haiku
++#and then it dails to detect that we don't have tdestroy...
++
+ dnl Check for usual libc functions
+ AC_CHECK_DECLS([nanosleep],,,[#include <time.h>])
+ AC_CHECK_FUNCS([daemon fcntl fstatvfs fork getenv getpwuid_r if_nameindex if_nametoindex isatty lstat memalign mmap openat pread posix_fadvise posix_madvise setlocale stricmp strnicmp strptime uselocale])
+-AC_REPLACE_FUNCS([atof atoll dirfd fdopendir flockfile fsync getdelim getpid gmtime_r inet_pton lldiv localtime_r nrand48 rewind setenv strcasecmp strcasestr strdup strlcpy strncasecmp strndup strnlen strsep strtof strtok_r strtoll swab tdestroy])
++AC_REPLACE_FUNCS([atof atoll dirfd fdopendir flockfile fsync getdelim getpid gmtime_r inet_pton lldiv localtime_r nrand48 rewind setenv strcasecmp strcasestr strdup strlcpy strncasecmp strndup strnlen strsep strtof strtok_r strtoll swab])
+ AC_CHECK_FUNCS(fdatasync,,
+   [AC_DEFINE(fdatasync, fsync, [Alias fdatasync() to fsync() if missing.])
+ ])
+@@ -578,6 +588,9 @@
+   AS_IF([test "${SYS}" = "mingwce"], [
+     SOCKET_LIBS="-lws2"
+   ])
++  AS_IF([test "${SYS}" = "haiku"], [
++    SOCKET_LIBS="-lnetwork"
++  ])
+ ])
+ LIBS="$LIBS_save"
+ AS_IF([test -n "$SOCKET_LIBS"], [
+@@ -3110,7 +3123,7 @@
+       if test "${SYS}" != "darwin"; then
+         VLC_ADD_PLUGIN([vout_sdl])
+       fi
+-      if test "${SYS}" != "mingw32" -a "${SYS}" != "os2"; then
++      if test "${SYS}" != "mingw32" -a "${SYS}" != "haiku"; then
+         VLC_ADD_LIBS([vout_sdl],[${X_LIBS} ${X_PRE_LIBS} -lX11])
+       fi
+       VLC_ADD_CFLAGS([vout_sdl],[${SDL_CFLAGS}])
+@@ -4155,7 +4168,7 @@
+ dnl  Stuff used by the program
+ dnl
+ VERSION_MESSAGE="${VERSION} ${CODENAME}"
+-COPYRIGHT_MESSAGE="Copyright © ${COPYRIGHT_YEARS} VLC authors and VideoLAN"
++COPYRIGHT_MESSAGE="Copyright (C) ${COPYRIGHT_YEARS} VLC authors and VideoLAN"
+ AC_DEFINE_UNQUOTED(VERSION_MESSAGE, "${VERSION_MESSAGE}", [Simple version string])
+ AC_DEFINE_UNQUOTED(COPYRIGHT_MESSAGE, "${COPYRIGHT_MESSAGE}", [Copyright string])
+ AC_DEFINE_UNQUOTED(COPYRIGHT_YEARS, "${COPYRIGHT_YEARS}", [The copyright years])
+
+--- vlc-2.0.3-orig/src/modules/bank.c	2011-12-08 18:00:28.032243712 +0000
++++ vlc-2.0.5/src/modules/bank.c	2012-07-30 22:00:12.285736960 +0000
+@@ -71,28 +71,30 @@
+     modules.head = module;
+ }
+ 
+-#ifdef __ELF__
+-# ifdef __GNUC__
+-__attribute__((weak))
+-# else
+-#  pragma weak vlc_static_modules
+-# endif
+-extern vlc_plugin_cb vlc_static_modules[];
+-
+-static void module_InitStaticModules(void)
+-{
+-    if (!vlc_static_modules)
+-        return;
+-
+-    for (unsigned i = 0; vlc_static_modules[i]; i++) {
+-        module_t *module = module_InitStatic (vlc_static_modules[i]);
+-        if (likely(module != NULL))
+-            module_StoreBank (module);
+-    }
+-}
+-#else
++//Haiku bug #8288
++//#ifdef __ELF__ 
++//# ifdef __GNUC__
++//__attribute__((weak))
++//# else
++//#  pragma weak vlc_static_modules
++//# endif
++//extern vlc_plugin_cb vlc_static_modules[];
++//
++//static void module_InitStaticModules(void)
++//{
++//    if (!vlc_static_modules)
++//        return;
++//
++//    for (unsigned i = 0; vlc_static_modules[i]; i++) {
++//        module_t *module = module_InitStatic (vlc_static_modules[i]);
++//        if (likely(module != NULL))
++//            module_StoreBank (module);
++//    }
++//}
++//#else
+ static void module_InitStaticModules(void) { }
+-#endif
++//#endif
++
+ 
+ /**
+  * Init bank
+--- vlc-2.0.3-orig/include/vlc_threads.h	2012-01-27 23:03:32.051904512 +0000
++++ vlc-2.0.5/include/vlc_threads.h	2012-07-30 22:08:53.845414400 +0000
+@@ -124,7 +124,13 @@
+ typedef pthread_cond_t  vlc_cond_t;
+ #define VLC_STATIC_COND  PTHREAD_COND_INITIALIZER
+ typedef pthread_rwlock_t vlc_rwlock_t;
++// Haiku bug #8798
++#ifdef __HAIKU__
++#define VLC_STATIC_RWLOCK \
++	{ VLC_STATIC_MUTEX, VLC_STATIC_COND, 0, 0, 0 }
++#else
+ #define VLC_STATIC_RWLOCK PTHREAD_RWLOCK_INITIALIZER
++#endif
+ typedef pthread_key_t   vlc_threadvar_t;
+ typedef struct vlc_timer *vlc_timer_t;
+
+--- vlc-2.0.3-orig/include/vlc_fixups.h	2012-01-30 21:37:14.052428800 +0000
++++ vlc-2.0.5/include/vlc_fixups.h	2012-07-30 22:21:46.086245376 +0000
+@@ -246,10 +246,13 @@
+ #endif
+ 
+ /* Socket stuff */
++// configure doesn't detect these, likely not linking to -lnetwork, must investigate
++#ifndef __HAIKU__
+ #ifndef HAVE_INET_PTON
+ int inet_pton(int, const char *, void *);
+ const char *inet_ntop(int, const void *, char *, int);
+ #endif
++#endif
+ 
+ #ifndef HAVE_STRUCT_POLLFD
+ enum
+@@ -276,6 +279,8 @@
+ # define poll(a, b, c) vlc_poll(a, b, c)
+ #endif
+ 
++// or these
++#ifndef __HAIKU__
+ #ifndef HAVE_IF_NAMEINDEX
+ #include <errno.h>
+ struct if_nameindex
+@@ -289,6 +294,7 @@
+ # define if_nameindex()         (errno = ENOBUFS, NULL)
+ # define if_freenameindex(list) (void)0
+ #endif
++#endif
+ 
+ /* search.h */
+ #ifndef HAVE_SEARCH_H
+--- vlc-2.0.3-orig/bin/override.c	2011-12-08 18:00:25.033554432 +0000
++++ vlc-2.0.5/bin/override.c	2012-07-31 20:19:54.136314880 +0000
+@@ -124,6 +124,8 @@
+  *
+  * Some evil libraries modify the environment. We currently ignore the calls as
+  * they could crash the process. This may cause funny behaviour though. */
++#ifndef __HAIKU__
++//not working
+ int putenv (char *str)
+ {
+     if (override)
+@@ -133,7 +135,7 @@
+     }
+     return CALL(putenv, str);
+ }
+-
++#endif
+ int setenv (const char *name, const char *value, int overwrite)
+ {
+     if (override)
+--- vlc-2.0.3-orig/modules/text_renderer/freetype.c	2012-06-20 18:07:49.059244544 +0000
++++ vlc-2.0.5/modules/text_renderer/freetype.c	2012-08-04 15:22:01.509870080 +0000
+@@ -58,6 +58,9 @@
+ #elif defined( HAVE_MAEMO )
+ # define DEFAULT_FONT_FILE "/usr/share/fonts/nokia/nosnb.ttf"
+ # define DEFAULT_FAMILY "Nokia Sans Bold"
++#elif defined(__HAIKU__)
++# define DEFAULT_FONT_FILE "/boot/system/data/fonts/ttfonts/DejaVuSans.ttf"
++# define DEFAULT_FAMILY "DejaVu Sans"
+ #else
+ # define DEFAULT_FONT_FILE "/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf"
+ # define DEFAULT_FAMILY "Serif Bold"
+--- vlc-2.0.3-orig/modules/audio_output/haiku.cpp	1970-01-01 00:00:00.000000000 +0000
++++ vlc-2.0.5/modules/audio_output/haiku.cpp	2012-08-06 23:15:46.251396096 +0000
+@@ -0,0 +1,197 @@
++/*****************************************************************************
++ * Haiku.cpp - Haiku Media Kit audio output
++ *****************************************************************************
++ * Copyright (C) 1999, 2000, 2001, 2012 the VideoLAN team
++ *
++ * Authors: Jean-Marc Dressler <polux@via.ecp.fr>
++ *          Samuel Hocevar <sam@zoy.org>
++ *          Eric Petit <titer@videolan.org>
++ *			Cian Duffy <myob87@gmail.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
++ *****************************************************************************/
++
++/*****************************************************************************
++ * Preamble
++ *****************************************************************************/
++#include <stdio.h>
++#include <stdlib.h>                                      /* malloc(), free() */
++#include <malloc.h>
++#include <string.h>
++
++#include <iostream>
++#include <queue>
++using namespace std;
++
++#include <SoundPlayer.h>
++#include <media/MediaDefs.h>
++
++#ifdef HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <vlc_aout.h>
++#include <vlc_common.h>
++#include <vlc_plugin.h>
++
++/*****************************************************************************
++ * aout_sys_t: BeOS audio output method descriptor
++ *****************************************************************************/
++
++queue<uint8> 		a_queue;
++
++struct aout_sys_t
++{
++   BSoundPlayer * 			p_player;
++   mtime_t      			latency;
++   media_raw_audio_format * p_format;
++};
++
++/*****************************************************************************
++ * Local prototypes.
++ *****************************************************************************/
++static void Close        ( vlc_object_t * );
++static void Pause (audio_output_t *, bool, mtime_t);
++static void Play  (audio_output_t *, block_t *);
++
++static void Flush (audio_output_t *, bool);static int  Open         ( vlc_object_t * );
++static void BufferProc   ( void * p_aout, void * p_buffer, size_t size,
++                         const media_raw_audio_format & format );                         
++
++/*****************************************************************************
++ * Module descriptor
++ *****************************************************************************/
++vlc_module_begin ()
++    set_shortname( "haiku_aout" )
++    set_description( N_("Haiku Media Kit audio output") )
++    set_capability( "audio output", 100 )
++    set_category( CAT_AUDIO )
++    set_subcategory( SUBCAT_AUDIO_AOUT )
++ 	set_callbacks( Open, Close )
++vlc_module_end ()
++/*****************************************************************************
++ * OpenAudio
++ *****************************************************************************/
++static int Open( vlc_object_t * p_this )
++{
++    audio_output_t *p_aout = (audio_output_t *)p_this;
++    p_aout->sys = (aout_sys_t*)malloc( sizeof( aout_sys_t ) );
++        if( p_aout->sys == NULL )
++    {
++		return VLC_ENOMEM;
++    }
++    
++  	aout_sys_t * p_sys =  p_aout->sys;
++  	
++    audio_format_t format =  p_aout->format;
++
++   int i_nb_channels = aout_FormatNbChannels( &format );
++
++// media_raw_audio_format must be passed to BSoundPlayer
++    p_sys->p_format = (media_raw_audio_format*)
++        malloc( sizeof( media_raw_audio_format ) );
++
++    p_aout->format.i_format = VLC_CODEC_FI32;
++    p_aout->format.i_physical_channels = AOUT_CHAN_LEFT | AOUT_CHAN_RIGHT;
++    p_aout->format.i_rate = 44100;
++
++    p_sys->p_format->channel_count = i_nb_channels;
++    p_sys->p_format->frame_rate = p_aout->format.i_rate;
++    p_sys->p_format->format = media_raw_audio_format::B_AUDIO_INT;
++    p_sys->p_format->byte_order = B_MEDIA_LITTLE_ENDIAN;
++    // 'magic' number obtained from checking what size the buffers being 
++    // passed by the callback were
++    // in theory, any buffer size should work
++    p_sys->p_format->buffer_size = 9216;
++	
++    aout_VolumeSoftInit( p_aout );
++    
++	//BSoundPlayer init - format, name, buffer producer, notifier, cookie
++
++    p_sys->p_player = new BSoundPlayer( p_sys->p_format, "player", BufferProc, NULL, NULL );
++    if( p_sys->p_player->InitCheck() != B_OK )
++    {
++        msg_Err( p_aout, "BSoundPlayer InitCheck failed" );
++        delete p_sys->p_player;
++        free( p_sys );
++    }
++    p_sys->latency = p_sys->p_player->Latency();
++
++    p_aout->pf_play = Play;
++    p_aout->pf_pause = Pause;
++    p_aout->pf_flush = Flush;
++
++	return VLC_SUCCESS;
++
++}
++
++/*****************************************************************************
++ * BufferProc- buffer producer function 
++ *****************************************************************************/
++static void BufferProc( void * _p_aout, void * _p_buffer, size_t i_size,
++                  const media_raw_audio_format &format )
++{	
++// Load buffer 
++	for (size_t i = 0; i < i_size; i++)
++		{
++			uint8 data = a_queue.front();
++			vlc_memset(_p_buffer + i, data, 1);
++			a_queue.pop();
++		}
++
++}
++/*****************************************************************************
++ * CloseAudio
++ *****************************************************************************/
++static void Close( vlc_object_t * p_this )
++{
++	printf("Close Called");
++	audio_output_t *p_aout = (audio_output_t *)p_this;
++    struct aout_sys_t *p_sys;
++    p_aout->sys = p_sys;
++
++    /* Clean up */
++    p_sys->p_player->Stop();
++    delete p_sys->p_player;
++    free( p_sys );
++}
++
++
++static void Play (audio_output_t *aout, block_t *block)
++{
++  	aout_sys_t * p_sys =  aout->sys;
++
++// load buffer to STL queue, sample by sample
++	for (size_t i = 0; i < block->i_buffer; i++)
++	{
++		a_queue.push(block->p_buffer[i]);
++	}
++
++    p_sys->p_player->Start();
++    p_sys->p_player->SetHasData( true );
++// release buffer
++	block_Release (block);
++}
++
++
++static void Pause (audio_output_t *aout, bool pause, mtime_t date)
++{
++}
++
++
++static void Flush (audio_output_t *aout, bool wait)
++{
++}
++
+--- vlc-2.0.3-orig/modules/audio_output/Modules.am	2011-12-08 18:00:26.046923776 +0000
++++ vlc-2.0.5/modules/audio_output/Modules.am	2012-08-04 15:40:24.463208448 +0000
+@@ -6,6 +6,7 @@
+ SOURCES_jack = jack.c
+ SOURCES_audioqueue = audioqueue.c
+ SOURCES_opensles_android = opensles_android.c
++SOURCES_haiku_aout = haiku.cpp
+ 
+ libadummy_plugin_la_SOURCES = adummy.c
+ libadummy_plugin_la_CFLAGS = $(AM_CFLAGS)
+--- vlc-2.0.3-orig/src/haiku/specific.cpp	1970-01-01 00:00:00.000000000 +0000
++++ vlc-2.0.5/src/haiku/specific.cpp	2012-08-05 12:18:40.333185024 +0000
+@@ -0,0 +1,57 @@
++/*****************************************************************************
++ * specific.c: stubs for POSIX OS-specific initialization
++ *****************************************************************************
++ * Copyright © 2008 Rémi Denis-Courmont
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU Lesser General Public License as published by
++ * the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with this program; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
++ *****************************************************************************/
++
++#ifdef HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <Application.h>
++
++
++#include <vlc_common.h>
++extern "C"
++{
++#include "../libvlc.h"
++#include <pthread.h>
++
++
++static void set_libvlc_path (void)
++{
++    psz_vlcpath = (char *)PKGLIBDIR;
++}
++
++void system_Init (void)
++{
++	BApplication app("application/x-vnd.videolan");
++    pthread_once_t once = PTHREAD_ONCE_INIT;
++
++    pthread_once (&once, set_libvlc_path);
++}
++
++void system_Configure (libvlc_int_t *libvlc,
++                       int argc, const char *const argv[])
++{
++    (void)libvlc; (void)argc; (void)argv;
++}
++
++void system_End (void)
++{
++}
++}
+--- vlc-2.0.3-orig/src/Makefile.am	2012-05-15 12:41:19.024641536 +0000
++++ vlc-2.0.5/src/Makefile.am	2012-08-05 01:50:39.982253568 +0000
+@@ -221,6 +221,9 @@
+ if HAVE_OS2
+ libvlccore_la_SOURCES += $(SOURCES_libvlc_os2)
+ else
++if HAVE_HAIKU
++libvlccore_la_SOURCES += $(SOURCES_libvlc_haiku)
++else
+ libvlccore_la_SOURCES += $(SOURCES_libvlc_other)
+ endif
+ endif
+@@ -228,6 +231,7 @@
+ endif
+ endif
+ endif
++endif
+ if BUILD_HTTPD
+ libvlccore_la_SOURCES += $(SOURCES_libvlc_httpd)
+ endif
+@@ -287,6 +291,16 @@
+ 	os2/specific.c \
+ 	$(NULL)
+ 
++SOURCES_libvlc_haiku = \
++	posix/dirs.c \
++	misc/atomic.c \
++	posix/filesystem.c \
++	network/poll.c \
++	posix/thread.c \
++	posix/plugin.c \
++	haiku/specific.cpp \
++	$(NULL)
++
+ SOURCES_libvlc_other = \
+ 	posix/dirs.c \
+ 	misc/atomic.c \
+
+--- vlc-2.0.3-orig/modules/gui/qt4/qt4.cpp	2012-07-02 00:47:23.031457280 +0000
++++ vlc-2.0.5/modules/gui/qt4/qt4.cpp	2012-12-11 21:52:28.551288832 +0000
+@@ -628,7 +628,7 @@
+     if( !p_wnd->handle.hwnd )
+         return VLC_EGENERIC;
+ 
+-#elif defined (Q_WS_MAC)
++#elif defined (Q_WS_MAC) || defined(Q_WS_HAIKU)
+     p_wnd->handle.nsobject = (void *)p_mi->getVideo( &i_x, &i_y, &i_width, &i_height );
+     if( !p_wnd->handle.nsobject )
+         return VLC_EGENERIC;
+
+--- vlc-2.0.3-orig/src/network/io.c	2012-04-27 17:14:57.020709376 +0000
++++ vlc-2.0.5/src/network/io.c	2012-12-11 21:34:34.143392768 +0000
+@@ -215,7 +215,9 @@
+         switch (ptr->ai_socktype)
+         {
+             case SOCK_STREAM:
++#ifdef SOCK_RDM
+             case SOCK_RDM:
++#endif            
+             case SOCK_SEQPACKET:
+ #ifdef SOCK_DCCP
+             case SOCK_DCCP:
+--- vlc-2.0.5-orig/modules/video_output/sdl.c	2011-12-08 18:00:27.022282240 +0000
++++ vlc-2.0.5/modules/video_output/sdl.c	2012-12-20 21:47:16.280494080 +0000
+@@ -40,7 +40,7 @@
+ 
+ #include <SDL.h>
+ 
+-#if !defined(WIN32) && !defined(__OS2__)
++#if !defined(WIN32) && !defined(__OS2__) && !defined(__HAIKU__)
+ # ifdef X_DISPLAY_MISSING
+ #  error Xlib required due to XInitThreads
+ # endif
+@@ -116,7 +116,7 @@
+     vout_display_t *vd = (vout_display_t *)object;
+     vout_display_sys_t *sys;
+ 
+-#if !defined(WIN32) && !defined(__OS2__)
++#if !defined(WIN32) && !defined(__OS2__) && !defined(__HAIKU__)
+     if (!vlc_xlib_init (object))
+         return VLC_EGENERIC;
+ #endif
