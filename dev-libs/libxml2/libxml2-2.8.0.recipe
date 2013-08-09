@@ -4,11 +4,17 @@ LICENSE="MIT"
 COPYRIGHT="1998-2003 Daniel Veillard.  All Rights Reserved."
 SRC_URI="ftp://xmlsoft.org/libxml2/libxml2-2.8.0.tar.gz"
 CHECKSUM_MD5="c62106f02ee00b6437f0fb9d370c1093"
-REVISION="4"
+REVISION="5"
 ARCHITECTURES="x86_gcc2 x86"
 SECONDARY_ARCHITECTURES="x86_gcc2 x86"
 
-PATCHES="libxml2-2.8.0.patch"
+PATCHES="libxml2-2.8.0.patchset"
+
+# build the python module only for the primary architecture
+pythonModuleEnabled=false
+if [ -z "$secondaryArchSuffix" ]; then
+	pythonModuleEnabled=true
+fi
 
 PROVIDES="
 	libxml2$secondaryArchSuffix = $portVersion compat >= 2
@@ -28,6 +34,14 @@ REQUIRES="
 BUILD_REQUIRES="
 	devel:libz$secondaryArchSuffix
 	"
+if $pythonModuleEnabled; then
+	BUILD_REQUIRES="$BUILD_REQUIRES
+		python
+		"
+			# Note: We don't use "cmd:python" here to avoid issues with the
+			# python search path.
+fi
+
 BUILD_PREREQUIRES="
 	haiku${secondaryArchSuffix}_devel >= $haikuVersion
 	cmd:aclocal
@@ -37,6 +51,7 @@ BUILD_PREREQUIRES="
 	cmd:ld$secondaryArchSuffix
 	cmd:libtoolize
 	cmd:make
+	cmd:sed
 	"
 
 PATCH()
@@ -54,21 +69,52 @@ BUILD()
 	aclocal
 	autoconf
 	automake
+
+	withPython=
+	if $pythonModuleEnabled; then
+		# We symlink python's directories into our packaging directory and tell
+		# configure that it can find python there. This way the correct
+		# installation directory for the python module is determined.
+		pythonDir="$portPackageLinksDir/python"
+		ln -s $pythonDir/bin $pythonDir/develop $pythonDir/lib $prefix
+		withPython="--with-python=$prefix"
+	fi
+
 	runConfigure ./configure LDFLAGS="-lnetwork"  \
 		--with-html-dir=$docDir/html \
-		--with-html-subdir=""
+		--with-html-subdir="" \
+		$withPython
 	make $jobArgs
 }
 
 INSTALL()
 {
-	make install
+	if $pythonModuleEnabled; then
+		# Unfortunately we can't just remove the in symlinks we created in
+		# BUILD() and install normally, since then make detects that the
+		# Python.h is missing and tries to rebuild the module. So we leave
+		# things as is and use DESTDIR to install the everything in a subdir.
+		# Then we remove the symlinks and move everything where it belongs.
+		make DESTDIR=$prefix install
+		rm -f $prefix/bin $prefix/develop $prefix/lib
+		mv $prefix/$prefix/* $prefix
+		rm -r $prefix/packages
+	else
+		make install
+	fi
 
 	# prepare develop/lib
 	prepareInstalledDevelLibs libxml2
 	fixPkgconfig
 	mv $libDir/xml2Conf.sh $developLibDir/
 	fixDevelopLibDirReferences $developLibDir/xml2Conf.sh $binDir/xml2-config
+
+	# python package
+	if $pythonModuleEnabled; then
+		packageEntries python \
+			$libDir/python* \
+			${docDir}_python*
+	fi
 
 	# devel package
 	packageEntries devel \
@@ -83,6 +129,9 @@ INSTALL()
 	if [ -n "$secondaryArchSuffix" ]; then
 		rm -rf $binDir
 		rm -rf $documentationDir
+	else
+		# left-over since all contents has been moved to other packages
+		rmdir $(dirname $docDir)
 	fi
 }
 
@@ -90,6 +139,32 @@ TEST()
 {
 	make tests
 }
+
+# ----- devel package ---------------------------------------------------------
+
+PROVIDES_devel="
+	libxml2${secondaryArchSuffix}_devel = $portVersion
+	cmd:xml2_config$secondaryArchSuffix = $portVersion compat >= 2
+	devel:libxml2$secondaryArchSuffix = $portVersion compat >= 2
+	"
+REQUIRES_devel="
+	libxml2$secondaryArchSuffix == $portVersion base
+	"
+
+# ----- python package -------------------------------------------------------
+
+if $pythonModuleEnabled; then
+	SUMMARY_python="The python module for libxml2"
+	PROVIDES_python="
+		libxml2_python = $portVersion
+		"
+	REQUIRES_python="
+		libxml2 == $portVersion base
+		cmd:python
+		"
+fi
+
+# ----- DESCRIPTION -----------------------------------------------------------
 
 DESCRIPTION="
 	Libxml2 is the XML C parser and toolkit developed for the Gnome project 
@@ -143,15 +218,4 @@ DESCRIPTION="
 	A partial implementation of XML Schemas Part 1: Structure is being worked 
 	on but it would be far too early to make any conformance statement about 
 	it at the moment.
-	"
-
-# ----- devel package -------------------------------------------------------
-
-PROVIDES_devel="
-	libxml2${secondaryArchSuffix}_devel = $portVersion
-	cmd:xml2_config$secondaryArchSuffix = $portVersion compat >= 2
-	devel:libxml2$secondaryArchSuffix = $portVersion compat >= 2
-	"
-REQUIRES_devel="
-	libxml2$secondaryArchSuffix == $portVersion base
 	"
