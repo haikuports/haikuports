@@ -4,7 +4,7 @@ SRC_URI="http://ftp.gnu.org/pub/gnu/ncurses/ncurses-5.9.tar.gz"
 CHECKSUM_MD5="8cb9c412e5f2d96bc6f459aa8c6282a1"
 LICENSE="MIT"
 COPYRIGHT="1998-2011 Free Software Foundation, Inc."
-REVISION="9"
+REVISION="10"
 ARCHITECTURES="x86_gcc2 x86"
 SECONDARY_ARCHITECTURES="x86_gcc2 x86"
 
@@ -69,6 +69,27 @@ doBuild()
 	targetDir=$(pwd)/$1
 	shift 1
 
+	# Parse additional arguments. "--libs-only" means we only want the
+	# libraries, nothing else. "--without-progs" means no programs and no
+	# terminfo DB (requires tic).
+	local noData
+	local libsOnly
+	local configureArgs
+	local arg
+	for arg in $@; do
+		case "$arg" in
+			--libs-only)
+				noData=1
+				libsOnly=1
+				arg="--without-progs"
+				;;
+			--without-progs)
+				noData=1
+				;;
+		esac
+		configureArgs="$configureArgs $arg"
+	done
+
 	rm -rf $targetDir
 	mkdir $targetDir
 
@@ -77,21 +98,44 @@ doBuild()
 		--with-libtool \
 		--enable-termcap \
 		--enable-hard-tabs \
-		$@
+		$configureArgs
 	make $jobArgs
-	make install DESTDIR=$targetDir
+
+	if [ -z "$noData" ]; then
+		# We need LIBRARY_PATH to include the library installation directory,
+		# since the installation process for the terminfo database will run tic
+		# and the built-in rpath doesn't consider the DESTDIR we're using.
+		LIBRARY_PATH="$targetDir/$prefix/lib:$LIBRARY_PATH" \
+		make install DESTDIR=$targetDir
+	else
+		make install.libs DESTDIR=$targetDir
+		if [ -z "$libsOnly" ]; then
+			make install.includes DESTDIR=$targetDir
+			make install.man DESTDIR=$targetDir
+		fi
+	fi
+
+	# clean up for the next build
+	make clean
 }
 
 BUILD()
 {
 	# Unfortunately building only works in the source directory. So we build
-	# two times, installing in temporary directories from which we copy to the
-	# actual installation directory in INSTALL().
-	doBuild build-nowidec
-		# Note: For the secondary architecture we discard the programs later,
-		# but since building the terminfo DB can't be disabled, we need to build
-		# the anyway.
-	doBuild build-widec --enable-widec --without-progs
+	# two times -- once without and once with wide-char support -- installing in
+	# temporary directories from which we copy to the actual installation
+	# directory in INSTALL().
+
+	# For the secondary architecture we don't want the programs nor the
+	# terminfo DB. The main package will depend on the primary package which
+	# provides all this.
+	local withoutProgramArgs
+	if [ -n "$secondaryArchSuffix" ]; then
+		withoutProgramArgs="--without-progs"
+	fi
+
+	doBuild build-nowidec $withoutProgramArgs
+	doBuild build-widec --enable-widec --libs-only
 }
 
 INSTALL()
@@ -107,7 +151,6 @@ INSTALL()
 	# fix ncurses[w]5-config
 	fixDevelopLibDirReferences $binDir/ncurses5-config $binDir/ncursesw5-config
 
-
 	# devel package
 	packageEntries devel \
 		$binDir/ncurses5-config \
@@ -119,7 +162,6 @@ INSTALL()
 	# we make it depend on the primary architecture package.
 	if [ -n "$secondaryArchSuffix" ]; then
 		rm -rf $binDir
-		rm -rf $dataDir
 		rm -rf $documentationDir
 	fi
 }
