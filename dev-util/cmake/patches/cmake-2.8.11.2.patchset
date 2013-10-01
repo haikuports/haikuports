@@ -1,0 +1,258 @@
+From 9e15fe26a3a573bbe68face114d682b98a45c875 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Tue, 1 Oct 2013 10:36:36 +0200
+Subject: Convert existing patch to patchset format.
+
+ * This will need cleanup, but it will do for now.
+
+diff --git a/Modules/FindFreetype.cmake b/Modules/FindFreetype.cmake
+index 1df2399..2a68616 100644
+--- a/Modules/FindFreetype.cmake
++++ b/Modules/FindFreetype.cmake
+@@ -50,6 +50,7 @@ find_path(FREETYPE_INCLUDE_DIR_ft2build ft2build.h
+     /usr/local/X11R6
+     /usr/local/X11
+     /usr/freeware
++    /boot/common/develop/headers
+   PATH_SUFFIXES include/freetype2 include
+ )
+ 
+@@ -61,6 +62,7 @@ find_path(FREETYPE_INCLUDE_DIR_freetype2 freetype/config/ftheader.h
+     /usr/local/X11R6
+     /usr/local/X11
+     /usr/freeware
++    /boot/common/develop/headers
+   PATH_SUFFIXES include/freetype2 include
+ )
+ 
+@@ -74,6 +76,7 @@ find_library(FREETYPE_LIBRARY
+   /usr/local/X11R6
+   /usr/local/X11
+   /usr/freeware
++  /boot/develop/lib
+ )
+ 
+ # set the user variables
+diff --git a/Modules/Platform/Haiku.cmake b/Modules/Platform/Haiku.cmake
+index 8987783..3236b58 100644
+--- a/Modules/Platform/Haiku.cmake
++++ b/Modules/Platform/Haiku.cmake
+@@ -1,20 +1,25 @@
+-set(BEOS 1)
++set(HAIKU 1)
++set(UNIX 1)
+ 
+-set(CMAKE_DL_LIBS root be)
+-set(CMAKE_C_COMPILE_OPTIONS_PIC "-fPIC")
+-set(CMAKE_C_COMPILE_OPTIONS_PIE "-fPIE")
++set(CMAKE_DL_LIBS "")
+ set(CMAKE_SHARED_LIBRARY_C_FLAGS "-fPIC")
+-set(CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS "-nostart")
++set(CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS "-shared")
+ set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG "-Wl,-rpath,")
+ set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG_SEP ":")
++set(CMAKE_SHARED_LIBRARY_RPATH_LINK_C_FLAG "-Wl,-rpath-link,")
+ set(CMAKE_SHARED_LIBRARY_SONAME_C_FLAG "-Wl,-soname,")
++set(CMAKE_EXE_EXPORTS_C_FLAG "-Wl,--export-dynamic")
+ 
+-include(Platform/UnixPaths)
+-list(APPEND CMAKE_SYSTEM_PREFIX_PATH /boot/common)
+-list(APPEND CMAKE_SYSTEM_INCLUDE_PATH /boot/common/include)
+-list(APPEND CMAKE_SYSTEM_LIBRARY_PATH /boot/common/lib)
+-list(APPEND CMAKE_SYSTEM_PROGRAM_PATH /boot/common/bin)
+-list(APPEND CMAKE_PLATFORM_IMPLICIT_LINK_DIRECTORIES /boot/common/lib)
++list(APPEND CMAKE_SYSTEM_PREFIX_PATH
++  /boot/common/non-packaged
++  /boot/common
++  /boot/system
++  )
++list(APPEND CMAKE_PLATFORM_IMPLICIT_LINK_DIRECTORIES
++  /boot/common/non-packaged/lib
++  /boot/common/lib
++  /boot/develop/lib/x86
++  )
+ list(APPEND CMAKE_SYSTEM_INCLUDE_PATH /boot/develop/headers/3rdparty)
+ list(APPEND CMAKE_SYSTEM_LIBRARY_PATH /boot/develop/lib/x86)
+ 
+diff --git a/Source/CPack/cmCPackGenerator.cxx b/Source/CPack/cmCPackGenerator.cxx
+index 7cc1522..5d66522 100644
+--- a/Source/CPack/cmCPackGenerator.cxx
++++ b/Source/CPack/cmCPackGenerator.cxx
+@@ -26,7 +26,8 @@
+ #include <algorithm>
+ 
+ #if defined(__HAIKU__)
+-#include <StorageKit.h>
++#include <FindDirectory.h>
++#include <StorageDefs.h>
+ #endif
+ 
+ //----------------------------------------------------------------------
+@@ -1263,10 +1264,10 @@ const char* cmCPackGenerator::GetInstallPath()
+   this->InstallPath += "-";
+   this->InstallPath += this->GetOption("CPACK_PACKAGE_VERSION");
+ #elif defined(__HAIKU__)
+-  BPath dir;
+-  if (find_directory(B_COMMON_DIRECTORY, &dir) == B_OK)
++  char dir[B_PATH_NAME_LENGTH];
++  if (find_directory(B_COMMON_DIRECTORY, -1, false, dir, sizeof(dir)) == B_OK)
+     {
+-    this->InstallPath = dir.Path();
++    this->InstallPath = dir;
+     }
+   else
+     {
+diff --git a/Source/cmExportCommand.cxx b/Source/cmExportCommand.cxx
+index 1cc1754..fcb66a7 100644
+--- a/Source/cmExportCommand.cxx
++++ b/Source/cmExportCommand.cxx
+@@ -20,7 +20,8 @@
+ #include "cmExportBuildFileGenerator.h"
+ 
+ #if defined(__HAIKU__)
+-#include <StorageKit.h>
++#include <FindDirectory.h>
++#include <StorageDefs.h>
+ #endif
+ 
+ cmExportCommand::cmExportCommand()
+@@ -305,14 +306,15 @@ void cmExportCommand::StorePackageRegistryDir(std::string const& package,
+                                               const char* hash)
+ {
+ #if defined(__HAIKU__)
+-  BPath dir;
+-  if (find_directory(B_USER_SETTINGS_DIRECTORY, &dir) != B_OK)
++  char dir[B_PATH_NAME_LENGTH];
++  if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, false, dir, sizeof(dir)) !=
++      B_OK)
+     {
+     return;
+     }
+-  dir.Append("cmake/packages");
+-  dir.Append(package.c_str());
+-  std::string fname = dir.Path();
++  std::string fname = dir;
++  fname += "/cmake/packages/";
++  fname += package;
+ #else
+   const char* home = cmSystemTools::GetEnv("HOME");
+   if(!home)
+diff --git a/Source/cmFindPackageCommand.cxx b/Source/cmFindPackageCommand.cxx
+index aa3a73d..a09958b 100644
+--- a/Source/cmFindPackageCommand.cxx
++++ b/Source/cmFindPackageCommand.cxx
+@@ -19,7 +19,9 @@
+ #endif
+ 
+ #if defined(__HAIKU__)
+-#include <StorageKit.h>
++#include <string.h>
++#include <FindDirectory.h>
++#include <StorageDefs.h>
+ #endif
+ 
+ void cmFindPackageNeedBackwardsCompatibility(const std::string& variable,
+@@ -1584,12 +1586,13 @@ void cmFindPackageCommand::AddPrefixesUserRegistry()
+ #if defined(_WIN32) && !defined(__CYGWIN__)
+   this->LoadPackageRegistryWinUser();
+ #elif defined(__HAIKU__)
+-  BPath dir;
+-  if (find_directory(B_USER_SETTINGS_DIRECTORY, &dir) == B_OK)
++  char dir[B_PATH_NAME_LENGTH];
++  if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, false, dir, sizeof(dir)) ==
++      B_OK)
+     {
+-    dir.Append("cmake/packages");
+-    dir.Append(this->Name.c_str());
+-    this->LoadPackageRegistryDir(dir.Path());
++    strlcat(dir, "/cmake/packages/", sizeof(dir));
++    strlcat(dir, this->Name.c_str(), sizeof(dir));
++    this->LoadPackageRegistryDir(dir);
+     }
+ #else
+   if(const char* home = cmSystemTools::GetEnv("HOME"))
+diff --git a/Source/cmLocalGenerator.cxx b/Source/cmLocalGenerator.cxx
+index ee5b9d8..ba8faf3 100644
+--- a/Source/cmLocalGenerator.cxx
++++ b/Source/cmLocalGenerator.cxx
+@@ -37,7 +37,8 @@
+ #include <assert.h>
+ 
+ #if defined(__HAIKU__)
+-#include <StorageKit.h>
++#include <FindDirectory.h>
++#include <StorageDefs.h>
+ #endif
+ 
+ cmLocalGenerator::cmLocalGenerator()
+@@ -354,12 +355,12 @@ void cmLocalGenerator::GenerateInstallRules()
+     prefix = prefix_win32.c_str();
+     }
+ #elif defined(__HAIKU__)
++  char dir[B_PATH_NAME_LENGTH];
+   if (!prefix)
+     {
+-    BPath dir;
+-    if (find_directory(B_COMMON_DIRECTORY, &dir) == B_OK)
++    if (find_directory(B_COMMON_DIRECTORY, -1, false, dir, sizeof(dir)) == B_OK)
+       {
+-      prefix = dir.Path();
++      prefix = dir;
+       }
+     else
+       {
+diff --git a/Tests/ComplexOneConfig/Library/CMakeLists.txt b/Tests/ComplexOneConfig/Library/CMakeLists.txt
+index 5c43052..f00cbd6 100644
+--- a/Tests/ComplexOneConfig/Library/CMakeLists.txt
++++ b/Tests/ComplexOneConfig/Library/CMakeLists.txt
+@@ -51,7 +51,7 @@ define_property(
+   FULL_DOCS "A simple etst proerty that means nothign and is used for nothing"
+   )
+ set_target_properties(CMakeTestCLibraryShared PROPERTIES FOO BAR)
+-if(NOT BEOS AND NOT WIN32)  # No libm on BeOS.
++if(NOT BEOS AND NOT WIN32 AND NOT HAIKU)  # No libm on BeOS.
+   set_target_properties(CMakeTestCLibraryShared PROPERTIES LINK_FLAGS "-lm")
+ endif()
+ get_target_property(FOO_BAR_VAR CMakeTestCLibraryShared FOO)
+diff --git a/Utilities/cmcurl/CMake/CurlTests.c b/Utilities/cmcurl/CMake/CurlTests.c
+index d74a4f0..c5ba7c2 100644
+--- a/Utilities/cmcurl/CMake/CurlTests.c
++++ b/Utilities/cmcurl/CMake/CurlTests.c
+@@ -38,7 +38,7 @@ main ()
+ # define PLATFORM_AIX_V3
+ #endif
+ 
+-#if defined(PLATFORM_SUNOS4) || defined(PLATFORM_AIX_V3) || (defined(__BEOS__) && !defined(__HAIKU__))
++#if defined(PLATFORM_SUNOS4) || defined(PLATFORM_AIX_V3) || defined(__BEOS__)
+ #error "O_NONBLOCK does not work on this platform"
+ #endif
+   int socket;
+diff --git a/Utilities/cmcurl/select.c b/Utilities/cmcurl/select.c
+index 51adbcf..82f9dc2 100644
+--- a/Utilities/cmcurl/select.c
++++ b/Utilities/cmcurl/select.c
+@@ -39,7 +39,7 @@
+ #error "We can't compile without select() support!"
+ #endif
+ 
+-#if defined(__BEOS__) && !defined(__HAIKU__)
++#if defined(__BEOS__)
+ /* BeOS has FD_SET defined in socket.h */
+ #include <socket.h>
+ #endif
+diff --git a/Utilities/cmzlib/zconf.h b/Utilities/cmzlib/zconf.h
+index 6eb52d1..7a3b6fd 100644
+--- a/Utilities/cmzlib/zconf.h
++++ b/Utilities/cmzlib/zconf.h
+@@ -237,7 +237,7 @@
+ #  endif
+ #endif
+ 
+-#if defined (__BEOS__) && !defined (__HAIKU__)
++#if defined (__BEOS__)
+ #  ifdef ZLIB_DLL
+ #    ifdef ZLIB_INTERNAL
+ #      define ZEXPORT   __declspec(dllexport)
+-- 
+1.8.3.4
+
