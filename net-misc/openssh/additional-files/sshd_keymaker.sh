@@ -10,7 +10,7 @@ _progress () {
 
 # generate SSH host keys
 
-SETTINGSSSHDIR=`finddir B_COMMON_SETTINGS_DIRECTORY`/ssh
+SETTINGSSSHDIR=`finddir B_SYSTEM_SETTINGS_DIRECTORY`/ssh
 mkdir -p ${SETTINGSSSHDIR}
 
 hostKeyDir=${SETTINGSSSHDIR}
