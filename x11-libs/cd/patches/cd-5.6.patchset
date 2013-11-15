@@ -1,0 +1,824 @@
+From 1274927462310ff54a257900076c5deed9559a13 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Fri, 15 Nov 2013 21:59:25 +0100
+Subject: Import Haiku port sources.
+
+
+diff --git a/include/cd_private.h b/include/cd_private.h
+index 4062cca..4887b2e 100644
+--- a/include/cd_private.h
++++ b/include/cd_private.h
+@@ -240,7 +240,7 @@ struct _cdCanvas
+   cdContext* context;
+ };
+ 
+-enum{CD_BASE_WIN, CD_BASE_X, CD_BASE_GDK};
++enum{CD_BASE_WIN, CD_BASE_X, CD_BASE_GDK, CD_BASE_HAIKU};
+ int cdBaseDriver(void);
+ 
+ /***************/
+diff --git a/src/config.mak b/src/config.mak
+index b3fe8e2..6eddc29 100644
+--- a/src/config.mak
++++ b/src/config.mak
+@@ -2,6 +2,9 @@ PROJNAME = cd
+ LIBNAME = cd
+ OPT = YES   
+ 
++ifeq "$(TEC_SYSNAME)" "Haiku"
++  USE_HAIKU = Yes
++else
+ ifdef GTK_DEFAULT
+   ifdef USE_X11
+     # Build X11 version in Linux and BSD
+@@ -23,6 +26,7 @@ else
+     endif
+   endif
+ endif
++endif
+ 
+ DEFINES = CD_NO_OLD_INTERFACE
+ 
+@@ -36,6 +40,9 @@ SRCINTCGM  := $(addprefix intcgm/, $(SRCINTCGM))
+ SRCSIM := cdfontex.c sim.c cd_truetype.c sim_primitives.c sim_text.c sim_linepolyfill.c
+ SRCSIM  := $(addprefix sim/, $(SRCSIM))
+ 
++SRCHAIKU = cdhaiku.cpp cdhaikunative.cpp cdhaikudbuf.cpp
++SRCHAIKU  := $(addprefix haiku/, $(SRCHAIKU))
++
+ SRCWIN32 = cdwclp.c cdwemf.c cdwimg.c cdwin.c cdwnative.c cdwprn.c \
+            cdwwmf.c wmf_emf.c cdwdbuf.c cdwdib.c
+ SRCWIN32  := $(addprefix win32/, $(SRCWIN32))
+@@ -95,13 +102,13 @@ ifdef USE_GDK
+       LIBS += fontconfig
+     endif
+   endif
+-else 
++else
+   ifdef USE_X11
+     SRC += $(SRCX11) $(SRCNULL)
+     LIBS += freetype
+-    ifneq ($(findstring cygw, $(TEC_UNAME)), )
+-      LIBS += fontconfig
+-    endif
++  else ifdef USE_HAIKU
++    SRC += $(SRCHAIKU) $(SRCNULL)
++    LIBS += freetype fontconfig
+   else
+     SRC += $(SRCWIN32)
+     ifneq ($(findstring cygw, $(TEC_UNAME)), )
+diff --git a/src/haiku/cdhaiku.cpp b/src/haiku/cdhaiku.cpp
+new file mode 100644
+index 0000000..eb76815
+--- /dev/null
++++ b/src/haiku/cdhaiku.cpp
+@@ -0,0 +1,304 @@
++/*
++ Canvas Draw - CD_Haiku Driver
++*/
++
++#include "cd.h"
++#include "cdhaiku.h"
++#include "cd_private.h"
++#include <stdlib.h> 
++#include <stdio.h> 
++#include <memory.h> 
++
++#include <Bitmap.h>
++#include <View.h>
++
++#define UNIMPLEMENTED printf("%s (%s %d) UNIMPLEMENTED\n",__func__,__FILE__,__LINE__);
++
++
++static rgb_color cdColorToHaiku(unsigned long rgb)
++{
++  rgb_color clrRGB;
++
++  clrRGB.red   = cdRed(rgb);
++  clrRGB.green = cdGreen(rgb);
++  clrRGB.blue  = cdBlue(rgb);
++
++  return clrRGB;
++}
++
++
++static void cdpixel(cdCtxCanvas *ctxcanvas, int x, int y, long int color)
++{
++  ctxcanvas->view->LockLooper();
++  ctxcanvas->view->SetHighColor(cdColorToHaiku(color));
++  ctxcanvas->view->StrokeLine(BPoint(x, y), BPoint(x, y));
++  ctxcanvas->view->UnlockLooper();
++}
++
++static void cdline(cdCtxCanvas *ctxcanvas, int x1, int y1, int x2, int y2)
++{
++  ctxcanvas->view->LockLooper();
++  ctxcanvas->view->StrokeLine(BPoint(x1, y1), BPoint(x2, y2));
++  ctxcanvas->view->UnlockLooper();
++}
++
++static void cdpoly(cdCtxCanvas *ctxcanvas, int mode, cdPoint* poly, int n)
++{
++  BPoint points[n];
++  for(int i = 0; i < n; i++)
++  {
++	points[i] = BPoint(poly[i].x, poly[i].y);
++  }
++  ctxcanvas->view->LockLooper();
++  ctxcanvas->view->FillPolygon(points, n);
++  ctxcanvas->view->UnlockLooper();
++}
++
++static void cdrect(cdCtxCanvas *ctxcanvas, int xmin, int xmax, int ymin, int ymax)
++{
++  ctxcanvas->view->LockLooper();
++  ctxcanvas->view->StrokeRect(BRect(xmin, ymin, xmax, ymax));
++  ctxcanvas->view->UnlockLooper();
++}
++
++static void cdbox(cdCtxCanvas *ctxcanvas, int xmin, int xmax, int ymin, int ymax)
++{
++  ctxcanvas->view->LockLooper();
++  ctxcanvas->view->FillRect(BRect(xmin, ymin, xmax, ymax));
++  ctxcanvas->view->UnlockLooper();
++}
++
++static void cdarc(cdCtxCanvas *ctxcanvas, int xc, int yc, int w, int h, double a1, double a2)
++{
++  ctxcanvas->view->LockLooper();
++  ctxcanvas->view->StrokeArc(BPoint(xc, yc), w, h, a1, a1 + a2);
++  ctxcanvas->view->UnlockLooper();
++}
++
++static void cdsector(cdCtxCanvas *ctxcanvas, int xc, int yc, int w, int h, double a1, double a2)
++{
++  UNIMPLEMENTED
++}
++
++static void cdtext(cdCtxCanvas *ctxcanvas, int x, int y, const char *s, int len)
++{
++  ctxcanvas->view->LockLooper();
++  ctxcanvas->view->DrawString(s, len, BPoint(x,y));
++  ctxcanvas->view->UnlockLooper();
++}
++
++static int cdfont(cdCtxCanvas *ctxcanvas, const char *typeface, int style, int size)
++{
++  int face = 0;
++
++  // Recognize Windows fonts and map them to something we have.
++  if (cdStrEqualNoCase(typeface, "Courier") || cdStrEqualNoCase(typeface, "Courier New"))
++    typeface = "Monospace";
++  else if (cdStrEqualNoCase(typeface, "Times") || cdStrEqualNoCase(typeface, "Times New Roman"))
++    typeface = "Serif";
++  else if (cdStrEqualNoCase(typeface, "Helvetica") || cdStrEqualNoCase(typeface, "Arial"))
++    typeface = "Sans";
++  
++  if (style & CD_BOLD)
++    face |= B_BOLD_FACE;
++
++  if (style & CD_ITALIC)
++    face |= B_ITALIC_FACE;
++
++  if (style & CD_UNDERLINE)
++    face |= B_UNDERSCORE_FACE;
++
++  if (style & CD_STRIKEOUT)
++    face |= B_STRIKEOUT_FACE;
++
++  size = cdGetFontSizePoints(ctxcanvas->canvas, size);
++  
++  BFont font;
++  font.SetFace(style);
++  // TODO SetFamilyAndStyle() (see what we did in IUP, may be reuseable ?)
++  font.SetSize(size);
++
++  if (ctxcanvas->view->LockLooper()) {
++    ctxcanvas->view->SetFont(&font);
++    ctxcanvas->view->UnlockLooper();
++  }
++
++  return 1;
++}
++
++static void cdgetfontdim(cdCtxCanvas *ctxcanvas, int *max_width, int *height, int *ascent, int *descent)
++{
++  font_height metrics;
++  ctxcanvas->view->GetFontHeight(&metrics);
++
++  if (max_width) { *max_width = 8; UNIMPLEMENTED }
++  if (height)    *height    = (int)(metrics.ascent + metrics.descent + metrics.leading);
++  if (ascent)    *ascent    = (int)metrics.ascent;
++  if (descent)   *descent   = (int)metrics.descent;
++}
++
++static void cdgettextsize(cdCtxCanvas *ctxcanvas, const char *s, int len, int *width, int *height)
++{
++  // TODO maybe needs to handle newlines ?
++  if (width) *width = (int)ctxcanvas->view->StringWidth(s, len);
++  cdgetfontdim(ctxcanvas, NULL, height, NULL, NULL);
++}
++
++
++
++void cdhaikuKillCanvas(cdCtxCanvas* ctxcanvas)
++{
++  // FIXME how are the canvas_dbuffer and image_dbuffer freed ? gdk version does not do it ?
++  if (ctxcanvas->view->LockLooper()) {
++    if (ctxcanvas->view->RemoveSelf())
++      delete ctxcanvas->view;
++    ctxcanvas->view->UnlockLooper();
++	ctxcanvas->view = NULL; // be extra safe to make sure we won't reuse it...
++  }
++  free(ctxcanvas);
++}
++
++
++static long int cdbackground(cdCtxCanvas *ctxcanvas, long int color)
++{
++  if (ctxcanvas->view->LockLooper()) {
++	rgb_color c = cdColorToHaiku(color);
++    ctxcanvas->view->SetLowColor(c);
++    ctxcanvas->view->SetViewColor(c);
++    ctxcanvas->view->UnlockLooper();
++  }
++  return color;
++}
++
++static long int cdforeground(cdCtxCanvas *ctxcanvas, long int color)
++{
++  if (ctxcanvas->view->LockLooper()) {
++    ctxcanvas->view->SetHighColor(cdColorToHaiku(color));
++    ctxcanvas->view->UnlockLooper();
++  }
++  return color;
++}
++
++static cdCtxImage *cdcreateimage (cdCtxCanvas *ctxcanvas, int w, int h)
++{
++  // TODO we need to get the colorspace from cdCtxCanvas
++  BBitmap* bitmap = new BBitmap(BRect(0, 0, w, h), B_RGB32, true);
++  cdCtxImage *ctximage = (cdCtxImage *)malloc(sizeof(cdCtxImage));
++
++  /*
++  ctximage->w = w;
++  ctximage->h = h;
++  ctximage->depth = ctxcanvas->depth;
++  ctximage->scr   = ctxcanvas->scr;
++  ctximage->vis   = ctxcanvas->vis;
++*/
++  ctximage->bitmap = bitmap;
++
++  if (!ctximage->bitmap)
++  {
++    free(ctximage);
++    return NULL;
++  }
++
++  return ctximage;
++}
++
++static void cdputimagerect (cdCtxCanvas *ctxcanvas, cdCtxImage *ctximage, int x, int y, int xmin, int xmax, int ymin, int ymax)
++{
++  /* y is the bottom-left of the image region in CD */
++  y -= (ymax-ymin+1)-1;
++
++  int w = xmax - xmin;
++  int h = ymax - ymin;
++  if (ctxcanvas->view->LockLooper()) {
++    ctxcanvas->view->DrawBitmapAsync(ctximage->bitmap, BRect(xmin, ymin, xmax, ymax),
++	  BRect(x, y, x + w, y + h));
++    ctxcanvas->view->UnlockLooper();
++  }
++}
++
++static void cdkillimage (cdCtxImage *ctximage)
++{
++  delete ctximage->bitmap;
++  free(ctximage);
++}
++
++
++void cdhaikuInitTable(cdCanvas* canvas)
++{
++//  canvas->cxFlush = cdflush;
++//  canvas->cxClear = cdclear;
++
++  canvas->cxPixel  = cdpixel;
++  canvas->cxLine   = cdline;
++  canvas->cxPoly   = cdpoly;
++  canvas->cxRect   = cdrect;
++  canvas->cxBox    = cdbox;
++  canvas->cxArc    = cdarc;
++  canvas->cxSector = cdsector;
++  canvas->cxChord  = cdSimChord;
++  canvas->cxText   = cdtext;
++
++  canvas->cxFont   = cdfont;
++
++  // TODO optional
++  canvas->cxGetFontDim = cdgetfontdim;
++  canvas->cxGetTextSize = cdgettextsize;
++  // cxFLine, cxFPoly, cxFRect,
++  // cxFBox, cxFArc, cxFSector, cxFChord, cxFText, cxClip, cxClipArea,
++  // cxFClipArea, cxBackOpacity, cxWriteMode, cxLineStyle, cxLineWidth,
++  // cxLineJoin, cxLineCap, cxInteriorStyle, cxHatch, cxStipple, cxPattern,
++  // cxNativeFont, cxTextAlignment, cxTextOrientation, cxPalette, cxTransform, 
++  // cxIsPointInRegion, cxOffsetRegion, cxGetRegionBox, cxActivate, cxDeactivate
++  // FIXME can we LockLooper and UnlockLooper in cxActivate and cxDeactivate ?
++  canvas->cxBackground = cdbackground;
++  canvas->cxForeground = cdforeground;
++
++  // cxScrollArea, cxGetImage, cxNewRegion,
++  canvas->cxCreateImage = cdcreateimage;
++  canvas->cxPutImageRect = cdputimagerect;
++  canvas->cxKillImage = cdkillimage;
++
++  // cxGetImageRGB, cxPutImageRectRGBA, cxPutImageRectMap, cxPutImageRectRGB
++}
++
++
++cdCtxCanvas* cdhaikuCreateCanvas(cdCanvas* canvas, BView* destination)
++{
++  cdCtxCanvas *ctxcanvas = (cdCtxCanvas *)malloc(sizeof(cdCtxCanvas));
++  memset(ctxcanvas, 0, sizeof(cdCtxCanvas));
++
++  ctxcanvas->view = destination;
++
++  ctxcanvas->canvas = canvas;
++  canvas->ctxcanvas = ctxcanvas;
++
++  if (destination->LockLooper())
++  {
++    BRect rect = destination->Bounds();
++    destination->UnlockLooper();
++    ctxcanvas->canvas->w = (int)(rect.Width());
++    ctxcanvas->canvas->h = (int)(rect.Height());
++  }
++
++  // TODO
++  // canvas->bpp, xres, yres, w_mm, h_mm, colormap
++  // ctxcanvas->depth
++  canvas->invert_yaxis = 1;
++
++  /*
++  cdRegisterAttribute(canvas, &gc_attrib);
++  cdRegisterAttribute(canvas, &rotate_attrib);
++  cdRegisterAttribute(canvas, &pangoversion_attrib);
++  cdRegisterAttribute(canvas, &imgdither_attrib);
++  cdRegisterAttribute(canvas, &interp_attrib);
++  */
++  
++  return ctxcanvas;
++}
++
++extern "C" int cdBaseDriver(void)
++{
++  return CD_BASE_HAIKU;
++}
++
+diff --git a/src/haiku/cdhaiku.h b/src/haiku/cdhaiku.h
+new file mode 100644
+index 0000000..4deb865
+--- /dev/null
++++ b/src/haiku/cdhaiku.h
+@@ -0,0 +1,37 @@
++#ifndef __CD_HAIKU_H
++#define __CD_HAIKU_H
++
++#include "cd_private.h"
++
++class BBitmap;
++class BView;
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct _cdCtxCanvas {
++  cdCanvas* canvas;
++  BView* view;
++
++  cdImage* image_dbuffer;       /* Used by double buffer driver */
++  cdCanvas* canvas_dbuffer;
++};
++
++struct _cdCtxImage {
++  BBitmap * bitmap;
++};
++
++cdContext* cdContextHaiku(void);
++
++#define CD_HAIKU cdContextHaiku()
++
++void cdhaikuInitTable(cdCanvas* canvas);
++cdCtxCanvas* cdhaikuCreateCanvas(cdCanvas* canvas, BView* destination);
++void cdhaikuKillCanvas(cdCtxCanvas *ctxcanvas);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/src/haiku/cdhaikudbuf.cpp b/src/haiku/cdhaikudbuf.cpp
+new file mode 100644
+index 0000000..6e764d3
+--- /dev/null
++++ b/src/haiku/cdhaikudbuf.cpp
+@@ -0,0 +1,154 @@
++/** \file
++ * \brief Haiku Double Buffer Driver
++ *
++ * See Copyright Notice in cd.h
++ */
++
++#include "cd.h"
++#include "cd_private.h"
++#include "cdhaiku.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++
++#include <Bitmap.h>
++#include <View.h>
++
++#define UNIMPLEMENTED printf("%s (%s %d) UNIMPLEMENTED\n",__func__,__FILE__,__LINE__);
++
++static void cdkillcanvas (cdCtxCanvas* ctxcanvas)
++{
++  cdKillImage(ctxcanvas->image_dbuffer);
++  cdhaikuKillCanvas(ctxcanvas);
++}
++
++static void cddeactivate(cdCtxCanvas* ctxcanvas)
++{
++  cdCanvas* canvas_dbuffer = ctxcanvas->canvas_dbuffer;
++  /* this is done in the canvas_dbuffer context */
++  cdCanvasDeactivate(canvas_dbuffer);
++}
++
++static void cdflush(cdCtxCanvas* ctxcanvas)
++{
++  int old_writemode;
++  cdImage* image_dbuffer = ctxcanvas->image_dbuffer;
++  cdCanvas* canvas_dbuffer = ctxcanvas->canvas_dbuffer;
++
++  /* flush the writing in the image */
++  ctxcanvas->view->LockLooper();
++  ctxcanvas->view->Sync();
++  ctxcanvas->view->UnlockLooper();
++
++  /* this is done in the canvas_dbuffer context */
++  /* Flush can be affected by Origin and Clipping, but not WriteMode */
++  old_writemode = cdCanvasWriteMode(canvas_dbuffer, CD_REPLACE);
++  cdCanvasPutImageRect(canvas_dbuffer, image_dbuffer, 0, 0, 0, 0, 0, 0);
++  cdCanvasWriteMode(canvas_dbuffer, old_writemode);
++}
++
++static void cdcreatecanvas(cdCanvas* canvas, void* backbuffer)
++{
++  cdCanvas* canvas_dbuffer = (cdCanvas*)backbuffer;
++  int w, h;
++  cdCtxCanvas* ctxcanvas;
++  cdImage* image_dbuffer;
++  cdCtxImage* ctximage;
++
++  cdCanvasActivate(canvas_dbuffer);
++  w = canvas_dbuffer->w;
++  h = canvas_dbuffer->h;
++  if (w==0) w=1;
++  if (h==0) h=1;
++
++  /* this is done in the canvas_dbuffer context */
++  image_dbuffer = cdCanvasCreateImage(canvas_dbuffer, w, h);
++  if (!image_dbuffer) { 
++    return;
++  }
++
++  ctximage = image_dbuffer->ctximage;
++
++  /* Init the driver DBuffer */
++  BView* view = new BView(ctximage->bitmap->Bounds(), "backbuffer", B_FOLLOW_NONE, B_WILL_DRAW);
++  ctximage->bitmap->AddChild(view);
++  ctxcanvas = cdhaikuCreateCanvas(canvas, view);
++
++  if (!ctxcanvas)
++    return;
++
++  ctxcanvas->image_dbuffer = image_dbuffer;
++  ctxcanvas->canvas_dbuffer = canvas_dbuffer;
++}
++
++static int cdactivate(cdCtxCanvas* ctxcanvas)
++{
++  int w, h;
++  cdCanvas* canvas_dbuffer = ctxcanvas->canvas_dbuffer;
++
++  /* this is done in the canvas_dbuffer context */
++  /* this will update canvas size */
++  cdCanvasActivate(canvas_dbuffer);
++  w = canvas_dbuffer->w;
++  h = canvas_dbuffer->h;
++  if (w==0) w=1;
++  if (h==0) h=1;
++
++  /* check if the size changed */
++  if (w != ctxcanvas->image_dbuffer->w ||
++      h != ctxcanvas->image_dbuffer->h)
++  {
++    cdCanvas* canvas = ctxcanvas->canvas;
++    /* save the current, if the rebuild fail */
++    cdImage* old_image_dbuffer = ctxcanvas->image_dbuffer;
++    cdCtxCanvas* old_ctxcanvas = ctxcanvas;
++
++    /* if the image is rebuild, the canvas that uses the image must be also rebuild */
++
++    /* rebuild the image and the canvas */
++    canvas->ctxcanvas = NULL;
++    canvas->context->cxCreateCanvas(canvas, canvas_dbuffer);
++    if (!canvas->ctxcanvas)
++    {
++      canvas->ctxcanvas = old_ctxcanvas;
++      return CD_ERROR;
++    }
++
++    /* remove the old image and canvas */
++    cdKillImage(old_image_dbuffer);
++    cdhaikuKillCanvas(old_ctxcanvas);
++
++    ctxcanvas = canvas->ctxcanvas;
++
++    /* update canvas attributes */
++    cdUpdateAttributes(canvas);
++  }
++
++  return CD_OK;
++}
++
++static void cdinittable(cdCanvas* canvas)
++{
++  cdhaikuInitTable(canvas);
++
++  canvas->cxActivate = cdactivate;
++  canvas->cxDeactivate = cddeactivate;
++  canvas->cxFlush = cdflush;
++  canvas->cxKillCanvas = cdkillcanvas;
++}
++
++static cdContext cdDBufferContext =
++{
++  CD_CAP_ALL & ~(CD_CAP_PLAY | CD_CAP_YAXIS | CD_CAP_PATH | CD_CAP_BEZIER | CD_CAP_FPRIMTIVES ),
++  CD_CTX_IMAGE,
++  cdcreatecanvas,  
++  cdinittable,
++  NULL,             
++  NULL, 
++};
++
++extern "C" cdContext* cdContextDBuffer(void)
++{
++  return &cdDBufferContext;
++}
++
+diff --git a/src/haiku/cdhaikunative.cpp b/src/haiku/cdhaikunative.cpp
+new file mode 100644
+index 0000000..96073e1
+--- /dev/null
++++ b/src/haiku/cdhaikunative.cpp
+@@ -0,0 +1,85 @@
++/** \file
++ * \brief Gdk Native Window Driver
++ *
++ * See Copyright Notice in cd.h
++ */
++
++#include "cd.h"
++#include "cd_private.h"
++#include "cdhaiku.h"
++
++#include <Looper.h>
++#include <View.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define UNIMPLEMENTED printf("%s (%s %d) UNIMPLEMENTED\n",__func__,__FILE__,__LINE__);
++
++static void cdkillcanvas(cdCtxCanvas *ctxcanvas)
++{
++  cdhaikuKillCanvas(ctxcanvas);
++}
++
++static int cdactivate(cdCtxCanvas *ctxcanvas)
++{
++  BView* view = ctxcanvas->view;
++
++  BLooper* looper = view->Looper();
++  const char* ln = "";
++  if (looper != NULL) {
++	  ln = looper->Name();
++  }
++  printf("CD Activate view %p (%s), looper is %s\n", view, view->Name(), ln);
++
++  BRect rect = view->Bounds();
++
++  ctxcanvas->canvas->w = (int)(rect.Width());
++  ctxcanvas->canvas->h = (int)(rect.Height());
++
++  ctxcanvas->canvas->w_mm = ((double)ctxcanvas->canvas->w) / ctxcanvas->canvas->xres;
++  ctxcanvas->canvas->h_mm = ((double)ctxcanvas->canvas->h) / ctxcanvas->canvas->yres;
++
++  if (ctxcanvas->canvas->use_matrix)
++    ctxcanvas->canvas->cxTransform(ctxcanvas, ctxcanvas->canvas->matrix);
++  return CD_OK;
++}
++
++static void cdcreatecanvas(cdCanvas* canvas, void *data)
++{
++  BView* view = (BView*)data;
++  if(!view) {
++	  return;
++  }
++
++  cdhaikuCreateCanvas(canvas, view);
++}
++
++static void cdinittable(cdCanvas* canvas)
++{
++  cdhaikuInitTable(canvas);
++
++  canvas->cxKillCanvas = cdkillcanvas;
++  canvas->cxActivate = cdactivate;
++}
++
++
++
++static cdContext cdNativeWindowContext =
++{
++  CD_CAP_ALL & ~(CD_CAP_PLAY | CD_CAP_YAXIS | CD_CAP_FPRIMTIVES | CD_CAP_PATH | CD_CAP_BEZIER ),
++  CD_CTX_WINDOW,
++  cdcreatecanvas,
++  cdinittable,
++  NULL,
++  NULL,
++};
++
++
++extern "C" {
++cdContext* cdContextNativeWindow(void)
++{
++  return &cdNativeWindowContext;
++}
++}
+diff --git a/tec_uname b/tec_uname
+index cc89349..fc982e0 100644
+--- a/tec_uname
++++ b/tec_uname
+@@ -148,6 +148,11 @@ ComputeSystemPaths()
+ 
+   TEC_SYSTEM_INC=/usr/include
+   
++  if [ $TEC_SYSNAME == Haiku ]; then
++  	TEC_SYSTEM_LIB=`finddir B_SYSTEM_LIB_DIRECTORY`
++  	TEC_SYSTEM_INC=`finddir B_SYSTEM_HEADERS_DIRECTORY`
++  fi
++
+   TEC_LUA_LIB=$TEC_SYSTEM_LIB/lua/$LUA_VER
+ }
+ 
+diff --git a/tecmake.mak b/tecmake.mak
+index e5f5efd..169d45f 100644
+--- a/tecmake.mak
++++ b/tecmake.mak
+@@ -6,7 +6,7 @@
+ 
+ #---------------------------------#
+ # Tecmake Version
+-VERSION = 4.7
++VERSION = 4.6
+ 
+ 
+ #---------------------------------#
+@@ -505,6 +505,11 @@ else
+   endif
+ endif
+ 
++ifeq "$(TEC_SYSNAME)" "Haiku"
++	STDFLAGS += -Wno-multichar
++	LIBS += be textencoding
++endif
++
+ ifneq ($(findstring Linux, $(TEC_UNAME)), )
+   UNIX_LINUX = Yes
+   ifdef BUILD_64
+@@ -852,6 +857,7 @@ endif
+ ifdef USE_IUP
+   IUP_SUFFIX ?=
+   ifdef USE_IUP3
++	ifndef USE_HAIKU
+     ifdef GTK_DEFAULT
+       ifdef USE_MOTIF
+         IUP_SUFFIX := mot
+@@ -869,6 +875,7 @@ ifdef USE_IUP
+         endif
+       endif
+     endif
++    endif
+   else
+     ifndef NO_OVERRIDE
+       override USE_MOTIF = Yes
+@@ -902,17 +909,21 @@ endif
+ 
+ ifdef USE_CD
+   CD_SUFFIX ?=
+-  ifndef NO_OVERRIDE
+-    override USE_X11 = Yes
+-  endif
+-  ifndef USE_CD_OLD
+-    ifdef GTK_DEFAULT
+-      ifdef USE_MOTIF
+-        CD_SUFFIX := x11
+-      endif
+-    else
+-      ifdef USE_GTK
+-        CD_SUFFIX := gdk
++  ifdef USE_HAIKU
++    CD_SUFFIX := haiku
++  else
++    ifndef NO_OVERRIDE
++      override USE_X11 = Yes
++    endif
++    ifndef USE_CD_OLD
++      ifdef GTK_DEFAULT
++        ifdef USE_MOTIF
++          CD_SUFFIX := x11
++        endif
++      else
++        ifdef USE_GTK
++          CD_SUFFIX := gdk
++        endif
+       endif
+     endif
+   endif
+@@ -993,7 +1004,6 @@ endif
+ ifdef LINK_FREETYPE
+   FREETYPE = freetype
+   ifneq ($(findstring cygw, $(TEC_UNAME)), )
+-    # To be compatible with the existing DLLs of cygwin
+     FREETYPE = freetype-6
+   endif
+   
+@@ -1138,23 +1148,21 @@ ifdef USE_GTK
+       ifndef USE_GTK3
+         STDINCS += $(GTK)/lib/x86_64-linux-gnu/gtk-2.0/include
+       endif
+-    else 
+-      ifeq ($(TEC_SYSARCH), ia64)
+-        STDINCS += $(GTK)/lib64/glib-2.0/include 
+-        ifndef USE_GTK3
+-          STDINCS += $(GTK)/lib64/gtk-2.0/include
+-        endif
+-      else
+-        STDINCS += $(GTK)/lib/glib-2.0/include 
+-        ifndef USE_GTK3
+-          STDINCS += $(GTK)/lib/gtk-2.0/include
+-        endif
+-        
+-        # Add also support for newer instalations
+-        STDINCS += $(GTK)/lib/i386-linux-gnu/glib-2.0/include
+-        ifndef USE_GTK3
+-          STDINCS += $(GTK)/lib/i386-linux-gnu/gtk-2.0/include
+-        endif
++    else ifeq ($(TEC_SYSARCH), ia64)
++      STDINCS += $(GTK)/lib64/glib-2.0/include 
++      ifndef USE_GTK3
++        STDINCS += $(GTK)/lib64/gtk-2.0/include
++      endif
++    else
++      STDINCS += $(GTK)/lib/glib-2.0/include 
++      ifndef USE_GTK3
++        STDINCS += $(GTK)/lib/gtk-2.0/include
++      endif
++      
++      # Add also support for newer instalations
++      STDINCS += $(GTK)/lib/i386-linux-gnu/glib-2.0/include
++      ifndef USE_GTK3
++        STDINCS += $(GTK)/lib/i386-linux-gnu/gtk-2.0/include
+       endif
+     endif
+     
+@@ -1180,7 +1188,9 @@ ifdef USE_X11
+   STDINCS += $(X11_INC)
+ endif
+ 
+-LIBS += m
++ifneq "$(TEC_SYSNAME)" "Haiku"
++  LIBS += m
++endif
+ 
+ ifneq ($(findstring cygw, $(TEC_UNAME)), )
+   WIN_OTHER := Yes
+-- 
+1.8.3.4
+
