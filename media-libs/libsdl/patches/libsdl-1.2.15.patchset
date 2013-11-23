@@ -1,0 +1,148 @@
+From db1b7894554a9d3460483d278b8dd50595e43135 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Fri, 22 Nov 2013 23:38:56 +0100
+Subject: Remove Alsa and ESD detection
+
+These will fail on Haiku, and we don't need them anyway.
+
+diff --git a/configure.in b/configure.in
+index 08c8e1e..84d9a55 100644
+--- a/configure.in
++++ b/configure.in
+@@ -361,7 +361,7 @@ CheckALSA()
+ AC_HELP_STRING([--enable-alsa], [support the ALSA audio API [[default=yes]]]),
+                   , enable_alsa=yes)
+     if test x$enable_audio = xyes -a x$enable_alsa = xyes; then
+-        AM_PATH_ALSA(0.9.0, have_alsa=yes, have_alsa=no)
++        have_alsa=no
+         # Restore all flags from before the ALSA detection runs
+         CFLAGS="$alsa_save_CFLAGS"
+         LDFLAGS="$alsa_save_LDFLAGS"
+@@ -460,7 +460,7 @@ CheckESD()
+ AC_HELP_STRING([--enable-esd], [support the Enlightened Sound Daemon [[default=yes]]]),
+                   , enable_esd=yes)
+     if test x$enable_audio = xyes -a x$enable_esd = xyes; then
+-        AM_PATH_ESD(0.2.8, have_esd=yes, have_esd=no)
++        have_esd=no
+         if test x$have_esd = xyes; then
+             AC_ARG_ENABLE(esd-shared,
+ AC_HELP_STRING([--enable-esd-shared], [dynamically load ESD audio support [[default=yes]]]),
+@@ -2963,3 +2963,4 @@ AC_OUTPUT([
+     : >build-deps
+     if test x"$MAKE" = x; then MAKE=make; fi; $MAKE depend
+ ])
++AC_CONFIG_MACRO_DIR([acinclude])
+-- 
+1.8.3.4
+
+
+From 4243b5c80de7a51abb05d6f4eb5a82984607024e Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Fri, 22 Nov 2013 23:39:26 +0100
+Subject: Fix samples vs bytes issues
+
+This was particularly noticeable in Milkytracker (SDL version) and
+Hivelytracker, where all the audio timing relies on the buffer being
+played during the right time.
+
+diff --git a/src/audio/baudio/SDL_beaudio.cc b/src/audio/baudio/SDL_beaudio.cc
+index de635f8..7faf571 100644
+--- a/src/audio/baudio/SDL_beaudio.cc
++++ b/src/audio/baudio/SDL_beaudio.cc
+@@ -199,11 +199,11 @@ int BE_OpenAudio(_THIS, SDL_AudioSpec *spec)
+         return (-1);
+     }
+ 
+-    format.buffer_size = spec->samples;
+-
+ 	/* Calculate the final parameters for this audio specification */
+ 	SDL_CalculateAudioSpec(spec);
+ 
++    format.buffer_size = spec->samples;
++
+ 	/* Subscribe to the audio stream (creates a new thread) */
+ 	{ sigset_t omask;
+ 		SDL_MaskSignals(&omask);
+-- 
+1.8.3.4
+
+
+From 03c94f6b8dbaec508da9ec16fecbb3411f70c0c7 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Fri, 22 Nov 2013 23:40:12 +0100
+Subject: Various fixes to the video code
+
+* Do not center the window each time it is resized
+* Do not reset video mode if we didn't enter fullscreen
+* remove annoying debug print
+
+diff --git a/src/video/bwindow/SDL_sysvideo.cc b/src/video/bwindow/SDL_sysvideo.cc
+index c32b661..a26f18b 100644
+--- a/src/video/bwindow/SDL_sysvideo.cc
++++ b/src/video/bwindow/SDL_sysvideo.cc
+@@ -406,6 +406,7 @@ static int BE_SetFullScreen(_THIS, SDL_Surface *screen, int fullscreen)
+ {
+ 	// printf("SetFullScreen(%d)\n", fullscreen);
+ 	BScreen bscreen;
++	static bool firstTime = true;
+ 
+ 	// SetFullSscreen() does not work as expected if called in a window
+ 	// that was never shown. This is probably a bug in the Haiku Game Kit that needs
+@@ -425,6 +426,8 @@ static int BE_SetFullScreen(_THIS, SDL_Surface *screen, int fullscreen)
+ 	int width = screen->w;
+ 	int height = screen->h;
+ 	
++	bool wasFullScreen = SDL_Win->IsFullScreen();
++
+ 	if (fullscreen) {
+ 		// Set resolution to the closest available one that matches the
+ 		// current SDL resolution.
+@@ -444,7 +447,8 @@ static int BE_SetFullScreen(_THIS, SDL_Surface *screen, int fullscreen)
+ 	} else {
+ 		// Reset to the previous known resolution as we are now in window
+ 		// mode.
+-		bscreen.SetMode(&saved_mode);	
++		if(wasFullScreen)
++			bscreen.SetMode(&saved_mode);	
+ 	}
+ 	
+ 	// Effectivelly set/reset full screen mode. If we are already in
+@@ -456,14 +460,6 @@ static int BE_SetFullScreen(_THIS, SDL_Surface *screen, int fullscreen)
+ 		// printf("Going windowed\n"); 
+ 	SDL_Win->SetFullScreen(fullscreen);
+ 	
+-	// Calculate offsets for centering the window (in window mode) and for
+-	// dentering the bitmap (in full screen mode).
+-	BRect bounds = bscreen.Frame();
+-	bounds.PrintToStream();
+-	int32 cx = (bounds.IntegerWidth() - width)/2;
+-	int32 cy = (bounds.IntegerHeight() - height)/2;
+-	
+-	// printf ("cx = %d, cy = %d\n", cx, cy);
+ 	if (!SDL_Win->IsFullScreen()) {
+ 		// printf("Doing not fullscreen stuff.\n");
+ 		// We are not in full screen mode, so we want to change the window
+@@ -471,10 +467,18 @@ static int BE_SetFullScreen(_THIS, SDL_Surface *screen, int fullscreen)
+ 		SDL_Win->ResizeTo(width, height);
+ 		
+ 		// And also center the window and reset the drawing offset.
+-		SDL_Win->MoveTo(cx, cy);
++		if(firstTime || wasFullScreen) {
++			SDL_Win->CenterOnScreen();
++			firstTime = false;
++		}
+ 		SDL_Win->SetXYOffset(0, 0);
+ 	} else {
+-		// printf("Doing fullscreen stuff.");
++		// Calculate offsets for centering the bitmap.
++
++		BRect bounds = bscreen.Frame();
++		int cx = (bounds.Width() - width) / 2;
++		int cy = (bounds.Height() - height) / 2;
++
+ 		// Center the bitmap whenever we are in full screen mode.
+ 		SDL_Win->SetXYOffset(cx, cy);
+ 	}
+-- 
+1.8.3.4
+
