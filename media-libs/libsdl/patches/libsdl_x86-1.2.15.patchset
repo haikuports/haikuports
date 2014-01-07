@@ -1,0 +1,249 @@
+From ca09de99c346e44cdd1f578848b4958067b5fb06 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Fri, 22 Nov 2013 23:38:56 +0100
+Subject: Remove Alsa and ESD detection
+
+These will fail on Haiku, and we don't need them anyway.
+
+diff --git a/configure.in b/configure.in
+index 08c8e1e..84d9a55 100644
+--- a/configure.in
++++ b/configure.in
+@@ -361,7 +361,7 @@ CheckALSA()
+ AC_HELP_STRING([--enable-alsa], [support the ALSA audio API [[default=yes]]]),
+                   , enable_alsa=yes)
+     if test x$enable_audio = xyes -a x$enable_alsa = xyes; then
+-        AM_PATH_ALSA(0.9.0, have_alsa=yes, have_alsa=no)
++        have_alsa=no
+         # Restore all flags from before the ALSA detection runs
+         CFLAGS="$alsa_save_CFLAGS"
+         LDFLAGS="$alsa_save_LDFLAGS"
+@@ -460,7 +460,7 @@ CheckESD()
+ AC_HELP_STRING([--enable-esd], [support the Enlightened Sound Daemon [[default=yes]]]),
+                   , enable_esd=yes)
+     if test x$enable_audio = xyes -a x$enable_esd = xyes; then
+-        AM_PATH_ESD(0.2.8, have_esd=yes, have_esd=no)
++        have_esd=no
+         if test x$have_esd = xyes; then
+             AC_ARG_ENABLE(esd-shared,
+ AC_HELP_STRING([--enable-esd-shared], [dynamically load ESD audio support [[default=yes]]]),
+@@ -2963,3 +2963,4 @@ AC_OUTPUT([
+     : >build-deps
+     if test x"$MAKE" = x; then MAKE=make; fi; $MAKE depend
+ ])
++AC_CONFIG_MACRO_DIR([acinclude])
+-- 
+1.8.3.4
+
+
+From 735586f7d0600476b0b02206daa76926193da957 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Fri, 22 Nov 2013 23:39:26 +0100
+Subject: Fix samples vs bytes issues
+
+This was particularly noticeable in Milkytracker (SDL version) and
+Hivelytracker, where all the audio timing relies on the buffer being
+played during the right time.
+
+diff --git a/src/audio/baudio/SDL_beaudio.cc b/src/audio/baudio/SDL_beaudio.cc
+index de635f8..7faf571 100644
+--- a/src/audio/baudio/SDL_beaudio.cc
++++ b/src/audio/baudio/SDL_beaudio.cc
+@@ -199,11 +199,11 @@ int BE_OpenAudio(_THIS, SDL_AudioSpec *spec)
+         return (-1);
+     }
+ 
+-    format.buffer_size = spec->samples;
+-
+ 	/* Calculate the final parameters for this audio specification */
+ 	SDL_CalculateAudioSpec(spec);
+ 
++    format.buffer_size = spec->samples;
++
+ 	/* Subscribe to the audio stream (creates a new thread) */
+ 	{ sigset_t omask;
+ 		SDL_MaskSignals(&omask);
+-- 
+1.8.3.4
+
+
+From 164201f49d1310bdd229feaf33c1f0e988a89f49 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Fri, 22 Nov 2013 23:40:12 +0100
+Subject: Various fixes to the video code
+
+* Do not center the window each time it is resized
+* Do not reset video mode if we didn't enter fullscreen
+* remove annoying debug print
+
+diff --git a/src/video/bwindow/SDL_sysvideo.cc b/src/video/bwindow/SDL_sysvideo.cc
+index c32b661..a26f18b 100644
+--- a/src/video/bwindow/SDL_sysvideo.cc
++++ b/src/video/bwindow/SDL_sysvideo.cc
+@@ -406,6 +406,7 @@ static int BE_SetFullScreen(_THIS, SDL_Surface *screen, int fullscreen)
+ {
+ 	// printf("SetFullScreen(%d)\n", fullscreen);
+ 	BScreen bscreen;
++	static bool firstTime = true;
+ 
+ 	// SetFullSscreen() does not work as expected if called in a window
+ 	// that was never shown. This is probably a bug in the Haiku Game Kit that needs
+@@ -425,6 +426,8 @@ static int BE_SetFullScreen(_THIS, SDL_Surface *screen, int fullscreen)
+ 	int width = screen->w;
+ 	int height = screen->h;
+ 	
++	bool wasFullScreen = SDL_Win->IsFullScreen();
++
+ 	if (fullscreen) {
+ 		// Set resolution to the closest available one that matches the
+ 		// current SDL resolution.
+@@ -444,7 +447,8 @@ static int BE_SetFullScreen(_THIS, SDL_Surface *screen, int fullscreen)
+ 	} else {
+ 		// Reset to the previous known resolution as we are now in window
+ 		// mode.
+-		bscreen.SetMode(&saved_mode);	
++		if(wasFullScreen)
++			bscreen.SetMode(&saved_mode);	
+ 	}
+ 	
+ 	// Effectivelly set/reset full screen mode. If we are already in
+@@ -456,14 +460,6 @@ static int BE_SetFullScreen(_THIS, SDL_Surface *screen, int fullscreen)
+ 		// printf("Going windowed\n"); 
+ 	SDL_Win->SetFullScreen(fullscreen);
+ 	
+-	// Calculate offsets for centering the window (in window mode) and for
+-	// dentering the bitmap (in full screen mode).
+-	BRect bounds = bscreen.Frame();
+-	bounds.PrintToStream();
+-	int32 cx = (bounds.IntegerWidth() - width)/2;
+-	int32 cy = (bounds.IntegerHeight() - height)/2;
+-	
+-	// printf ("cx = %d, cy = %d\n", cx, cy);
+ 	if (!SDL_Win->IsFullScreen()) {
+ 		// printf("Doing not fullscreen stuff.\n");
+ 		// We are not in full screen mode, so we want to change the window
+@@ -471,10 +467,18 @@ static int BE_SetFullScreen(_THIS, SDL_Surface *screen, int fullscreen)
+ 		SDL_Win->ResizeTo(width, height);
+ 		
+ 		// And also center the window and reset the drawing offset.
+-		SDL_Win->MoveTo(cx, cy);
++		if(firstTime || wasFullScreen) {
++			SDL_Win->CenterOnScreen();
++			firstTime = false;
++		}
+ 		SDL_Win->SetXYOffset(0, 0);
+ 	} else {
+-		// printf("Doing fullscreen stuff.");
++		// Calculate offsets for centering the bitmap.
++
++		BRect bounds = bscreen.Frame();
++		int cx = (bounds.Width() - width) / 2;
++		int cy = (bounds.Height() - height) / 2;
++
+ 		// Center the bitmap whenever we are in full screen mode.
+ 		SDL_Win->SetXYOffset(cx, cy);
+ 	}
+-- 
+1.8.3.4
+
+
+From ae129e6505148189a3d73fc085f20e214c0d6446 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sat, 23 Nov 2013 11:59:00 +0100
+Subject: Actually fix the sample vs bytes problem in audio driver.
+
+
+diff --git a/src/audio/baudio/SDL_beaudio.cc b/src/audio/baudio/SDL_beaudio.cc
+index 7faf571..300bf03 100644
+--- a/src/audio/baudio/SDL_beaudio.cc
++++ b/src/audio/baudio/SDL_beaudio.cc
+@@ -161,25 +161,30 @@ int BE_OpenAudio(_THIS, SDL_AudioSpec *spec)
+     format.byte_order = B_MEDIA_LITTLE_ENDIAN;
+     format.frame_rate = (float) spec->freq;
+     format.channel_count = spec->channels;  /* !!! FIXME: support > 2? */
++	int samplesize = 1;
+     while ((!valid_datatype) && (test_format)) {
+         valid_datatype = 1;
+         spec->format = test_format;
+         switch (test_format) {
+             case AUDIO_S8:
+                 format.format = media_raw_audio_format::B_AUDIO_CHAR;
++				samplesize = 1;
+                 break;
+ 
+             case AUDIO_U8:
+                 format.format = media_raw_audio_format::B_AUDIO_UCHAR;
++				samplesize = 1;
+                 break;
+ 
+             case AUDIO_S16LSB:
+                 format.format = media_raw_audio_format::B_AUDIO_SHORT;
++				samplesize = 2;
+                 break;
+ 
+             case AUDIO_S16MSB:
+                 format.format = media_raw_audio_format::B_AUDIO_SHORT;
+                 format.byte_order = B_MEDIA_BIG_ENDIAN;
++				samplesize = 2;
+                 break;
+ 
+             default:
+@@ -202,7 +207,7 @@ int BE_OpenAudio(_THIS, SDL_AudioSpec *spec)
+ 	/* Calculate the final parameters for this audio specification */
+ 	SDL_CalculateAudioSpec(spec);
+ 
+-    format.buffer_size = spec->samples;
++    format.buffer_size = spec->samples * spec->channels * samplesize;
+ 
+ 	/* Subscribe to the audio stream (creates a new thread) */
+ 	{ sigset_t omask;
+-- 
+1.8.3.4
+
+
+From 9b20d4dc8a3f5d607623b5d8b2c4ce14e830f4c8 Mon Sep 17 00:00:00 2001
+From: Chris Roberts <cpr420@gmail.com>
+Date: Sun, 22 Dec 2013 18:37:30 -0700
+Subject: Remove Haiku from specialized DECLSPEC definition
+
+
+diff --git a/include/begin_code.h b/include/begin_code.h
+index 27e2f7b..d5e2f1f 100644
+--- a/include/begin_code.h
++++ b/include/begin_code.h
+@@ -41,7 +41,7 @@
+  *  Some compilers use a special export keyword
+  */
+ #ifndef DECLSPEC
+-# if defined(__BEOS__) || defined(__HAIKU__)
++# if defined(__BEOS__)
+ #  if defined(__GNUC__)
+ #   define DECLSPEC
+ #  else
+-- 
+1.8.3.4
+
+
+From 09ba1fa7eccef32323c9987bdd4742bca6e9dfbc Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sun, 5 Jan 2014 17:22:10 +0100
+Subject: Change prefix from "be" to "os" for OpenGL includes
+
+Accomodate the new OpenGL kit that doesn't have the "be" symlink.
+
+diff --git a/src/video/bwindow/SDL_BWin.h b/src/video/bwindow/SDL_BWin.h
+index f2b19a2..2cb94ee 100644
+--- a/src/video/bwindow/SDL_BWin.h
++++ b/src/video/bwindow/SDL_BWin.h
+@@ -31,7 +31,7 @@
+ #include <be/game/DirectWindow.h>
+ #if SDL_VIDEO_OPENGL
+ #include "SDL_opengl.h"
+-#include <be/opengl/GLView.h>
++#include <os/opengl/GLView.h>
+ #endif
+ #include <support/UTF8.h>
+ 
+-- 
+1.8.3.4
+
