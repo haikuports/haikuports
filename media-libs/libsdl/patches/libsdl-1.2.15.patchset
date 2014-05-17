@@ -247,3 +247,143 @@ index f2b19a2..2cb94ee 100644
 -- 
 1.8.3.4
 
+From a1a8ccda9449d9f0dc61708fcc35530fbbaf7644 Mon Sep 17 00:00:00 2001
+From: Jonathan Schleifer <js@webkeks.org>
+Date: Fri, 28 Mar 2014 18:04:12 +0100
+Subject: [PATCH] Fix compilation on x86_64
+
+Also cleans up and fixes warnings.
+---
+ src/video/SDL_sysvideo.h          |  8 ++++++++
+ src/video/SDL_video.c             |  2 +-
+ src/video/bwindow/SDL_sysvideo.cc | 22 +++++++++-------------
+ src/video/bwindow/SDL_sysyuv.cc   |  3 ++-
+ 4 files changed, 20 insertions(+), 15 deletions(-)
+
+diff --git a/src/video/SDL_sysvideo.h b/src/video/SDL_sysvideo.h
+index 436450e..b45a8a9 100644
+--- a/src/video/SDL_sysvideo.h
++++ b/src/video/SDL_sysvideo.h
+@@ -24,6 +24,10 @@
+ #ifndef _SDL_sysvideo_h
+ #define _SDL_sysvideo_h
+ 
++#if defined(__BEOS__) || defined(__HAIKU__)
++#include <os/kernel/image.h>
++#endif
++
+ #include "SDL_mouse.h"
+ #define SDL_PROTOTYPES_ONLY
+ #include "SDL_syswm.h"
+@@ -296,7 +300,11 @@ struct SDL_VideoDevice {
+ 		int swap_control;
+ 		int driver_loaded;
+ 		char driver_path[256];
++#if defined(__BEOS__) || defined(__HAIKU__)
++		image_id dll_handle;
++#else
+ 		void* dll_handle;
++#endif
+ 	} gl_config;
+ 
+ 	/* * * */
+diff --git a/src/video/SDL_video.c b/src/video/SDL_video.c
+index 46285c9..255cafb 100644
+--- a/src/video/SDL_video.c
++++ b/src/video/SDL_video.c
+@@ -222,7 +222,7 @@ int SDL_VideoInit (const char *driver_name, Uint32 flags)
+ 
+ 	/* Set some very sane GL defaults */
+ 	video->gl_config.driver_loaded = 0;
+-	video->gl_config.dll_handle = NULL;
++	video->gl_config.dll_handle = 0;
+ 	video->gl_config.red_size = 3;
+ 	video->gl_config.green_size = 3;
+ 	video->gl_config.blue_size = 2;
+diff --git a/src/video/bwindow/SDL_sysvideo.cc b/src/video/bwindow/SDL_sysvideo.cc
+index a26f18b..5d4077f 100644
+--- a/src/video/bwindow/SDL_sysvideo.cc
++++ b/src/video/bwindow/SDL_sysvideo.cc
+@@ -644,17 +644,13 @@ static void BE_NormalUpdate(_THIS, int numrects, SDL_Rect *rects)
+ int BE_GL_LoadLibrary(_THIS, const char *path)
+ {
+ 	if (path == NULL) {
+-		if (_this->gl_config.dll_handle == NULL) {
++		if (_this->gl_config.dll_handle == 0) {
+ 			image_info info;
+ 			int32 cookie = 0;
+ 			while (get_next_image_info(0,&cookie,&info) == B_OK) {
+ 				void *location = NULL;
+-#ifdef __HAIKU__
+ 				if (get_image_symbol(info.id,"glBegin",B_SYMBOL_TYPE_ANY,&location) == B_OK) { // This is how it actually works in Haiku
+-#else
+-				if (get_image_symbol((image_id)cookie,"glBegin",B_SYMBOL_TYPE_ANY,&location) == B_OK) { // I don't know if that *did* work in BeOS
+-#endif
+-					_this->gl_config.dll_handle = (void*)info.id;
++					_this->gl_config.dll_handle = info.id;
+ 					_this->gl_config.driver_loaded = 1;
+ 					SDL_strlcpy(_this->gl_config.driver_path, "libGL.so", SDL_arraysize(_this->gl_config.driver_path));
+ 				}
+@@ -666,7 +662,7 @@ int BE_GL_LoadLibrary(_THIS, const char *path)
+ 			to load BGLView, which should be reloaded from new lib.
+ 			So for now just "load" linked libGL.so :(
+ 		*/
+-		if (_this->gl_config.dll_handle == NULL) {
++		if (_this->gl_config.dll_handle == 0) {
+ 			return BE_GL_LoadLibrary(_this, NULL);
+ 		}
+ 
+@@ -688,10 +684,10 @@ int BE_GL_LoadLibrary(_THIS, const char *path)
+ 		}*/
+ 	}
+ 
+-	if (_this->gl_config.dll_handle != NULL) {
++	if (_this->gl_config.dll_handle != 0) {
+ 		return 0;
+ 	} else {
+-		_this->gl_config.dll_handle = NULL;
++		_this->gl_config.dll_handle = 0;
+ 		_this->gl_config.driver_loaded = 0;
+ 		*_this->gl_config.driver_path = '\0';
+ 		return -1;
+@@ -700,10 +696,10 @@ int BE_GL_LoadLibrary(_THIS, const char *path)
+ 
+ void* BE_GL_GetProcAddress(_THIS, const char *proc)
+ {
+-	if (_this->gl_config.dll_handle != NULL) {
++	if (_this->gl_config.dll_handle != 0) {
+ 		void *location = NULL;
+ 		status_t err;
+-		if ((err = get_image_symbol((image_id)_this->gl_config.dll_handle, proc, B_SYMBOL_TYPE_ANY, &location)) == B_OK) {
++		if ((err = get_image_symbol(_this->gl_config.dll_handle, proc, B_SYMBOL_TYPE_ANY, &location)) == B_OK) {
+ 			return location;
+ 		} else {
+ 			SDL_SetError("Couldn't find OpenGL symbol");
+@@ -835,8 +831,8 @@ void BE_VideoQuit(_THIS)
+ 	}
+ 
+ #if SDL_VIDEO_OPENGL
+-	if (_this->gl_config.dll_handle != NULL)
+-		unload_add_on((image_id)_this->gl_config.dll_handle);
++	if (_this->gl_config.dll_handle != 0)
++		unload_add_on(_this->gl_config.dll_handle);
+ #endif
+ 
+ 	SDL_QuitBeApp();
+diff --git a/src/video/bwindow/SDL_sysyuv.cc b/src/video/bwindow/SDL_sysyuv.cc
+index 7c71b00..f2fef10 100644
+--- a/src/video/bwindow/SDL_sysyuv.cc
++++ b/src/video/bwindow/SDL_sysyuv.cc
+@@ -66,7 +66,8 @@ BBitmap * BE_GetOverlayBitmap(BRect bounds, color_space cs) {
+ 		uint32 aligned_height = r.source.height_alignment + 1;
+ 		if (height % aligned_height > 0) {
+ 			fprintf(stderr,"GetOverlayBitmap failed height alignment\n");
+-			fprintf(stderr,"- height = %lu, aligned_height = %lu\n",height,aligned_height);
++			fprintf(stderr,"- height = %" B_PRIu32 ", "
++				"aligned_height = %" B_PRIu32 "\n", height, aligned_height);
+ 			delete bbitmap;
+ 			return 0;
+ 		}
+-- 
+Jonathan
+
