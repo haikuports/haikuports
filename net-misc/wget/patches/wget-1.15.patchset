@@ -1,0 +1,678 @@
+From d44e24178a9dd9864e7ac068249444a1d95b9af1 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Mon, 19 May 2014 15:38:37 +0000
+Subject: apply wget-1.14.patch
+
+
+diff --git a/configure.ac b/configure.ac
+index b24588f..b396ec2 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -161,6 +161,7 @@ AC_HEADER_STDBOOL
+ AC_CHECK_HEADERS(unistd.h sys/time.h)
+ AC_CHECK_HEADERS(termios.h sys/ioctl.h sys/select.h utime.h sys/utime.h)
+ AC_CHECK_HEADERS(stdint.h inttypes.h pwd.h wchar.h)
++AC_CHECK_HEADERS(arpa/inet.h)
+ 
+ AC_CHECK_DECLS(h_errno,,,[#include <netdb.h>])
+ 
+diff --git a/m4/wget.m4 b/m4/wget.m4
+index 777e973..5a8b75d 100644
+--- a/m4/wget.m4
++++ b/m4/wget.m4
+@@ -88,6 +88,7 @@ AC_DEFUN([WGET_POSIX_CLOCK], [
+ 
+ dnl Check whether we need to link with -lnsl and -lsocket, as is the
+ dnl case on e.g. Solaris.
++dnl Haiku needs libnetwork
+ 
+ AC_DEFUN([WGET_NSL_SOCKET], [
+   dnl On Solaris, -lnsl is needed to use gethostbyname.  But checking
+@@ -107,6 +108,8 @@ AC_DEFUN([WGET_NSL_SOCKET], [
+     AC_CHECK_LIB(nsl, $wget_check_in_nsl)
+   fi
+   AC_CHECK_LIB(socket, socket)
++  AC_CHECK_LIB(network, gethostbyname)
++  AC_CHECK_LIB(network, socket)
+ ])
+ 
+ 
+diff --git a/src/config.h.in b/src/config.h.in
+index 4b03033..a4543c4 100644
+--- a/src/config.h.in
++++ b/src/config.h.in
+@@ -672,6 +672,9 @@
+ /* Define to 1 if you have the <langinfo.h> header file. */
+ #undef HAVE_LANGINFO_H
+ 
++/* Define to 1 if you have the `bind' library (-lbind). */
++#undef HAVE_LIBBIND
++
+ /* Define to 1 if you have the `dl' library (-ldl). */
+ #undef HAVE_LIBDL
+ 
+@@ -684,6 +687,9 @@
+ /* Define to 1 if you have the <libintl.h> header file. */
+ #undef HAVE_LIBINTL_H
+ 
++/* Define to 1 if you have the `network' library (-lnetwork). */
++#undef HAVE_LIBNETWORK
++
+ /* Define to 1 if you have the `nsl' library (-lnsl). */
+ #undef HAVE_LIBNSL
+ 
+diff --git a/src/connect.c b/src/connect.c
+index bfb079b..916a90e 100644
+--- a/src/connect.c
++++ b/src/connect.c
+@@ -46,7 +46,7 @@ as that of the covered work.  */
+ #  include <netdb.h>
+ # endif /* def __VMS [else] */
+ # include <netinet/in.h>
+-# ifndef __BEOS__
++# ifdef HAVE_ARPA_INET_H
+ #  include <arpa/inet.h>
+ # endif
+ #endif /* not WINDOWS */
+diff --git a/src/host.h b/src/host.h
+index 3f27ea0..3cd3ed9 100644
+--- a/src/host.h
++++ b/src/host.h
+@@ -42,9 +42,9 @@ as that of the covered work.  */
+ # endif /* def __VMS [else] */
+ # include <sys/socket.h>
+ # include <netinet/in.h>
+-#ifndef __BEOS__
+-# include <arpa/inet.h>
+-#endif
++# ifdef HAVE_ARPA_INET_H
++#  include <arpa/inet.h>
++# endif
+ #endif
+ 
+ struct url;
+-- 
+1.8.3.4
+
+
+From d91114a406b6b16542a77b55ebe140314ce803c1 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Mon, 19 May 2014 15:47:24 +0000
+Subject: apply and augment wget-1.14-build-fixes.patch
+
+
+diff --git a/src/ftp-basic.c b/src/ftp-basic.c
+index 7a512c6..7237cd1 100644
+--- a/src/ftp-basic.c
++++ b/src/ftp-basic.c
+@@ -969,8 +969,6 @@ ftp_list (int csock, const char *file, bool avoid_list_a, bool avoid_list,
+   bool ok = false;
+   size_t i = 0;
+ 
+-  *list_a_used = false;
+-
+   /* 2013-10-12 Andrea Urbani (matfanjol)
+      For more information about LIST and "LIST -a" please look at ftp.c,
+      function getftp, text "__LIST_A_EXPLANATION__".
+@@ -979,7 +977,9 @@ ftp_list (int csock, const char *file, bool avoid_list_a, bool avoid_list,
+      later "i" variable.  */
+   const char *list_commands[] = { "LIST -a",
+                                   "LIST" };
++  *list_a_used = false;
+ 
++  
+   if (avoid_list_a)
+     {
+       i = countof (list_commands)- 1;
+diff --git a/src/html-url.c b/src/html-url.c
+index 1bb44b4..5285983 100644
+--- a/src/html-url.c
++++ b/src/html-url.c
+@@ -789,6 +789,7 @@ get_urls_file (const char *file)
+       char *url_text;
+       struct urlpos *entry;
+       struct url *url;
++      char *new_url;
+ 
+       const char *line_beg = text;
+       const char *line_end = memchr (text, '\n', text_end - text);
+@@ -821,7 +822,7 @@ get_urls_file (const char *file)
+           url_text = merged;
+         }
+ 
+-      char *new_url = rewrite_shorthand_url (url_text);
++      new_url = rewrite_shorthand_url (url_text);
+       if (new_url)
+         {
+           xfree (url_text);
+diff --git a/src/http.c b/src/http.c
+index 5715df6..38ee4b1 100644
+--- a/src/http.c
++++ b/src/http.c
+@@ -29,6 +29,7 @@ Corresponding Source for a non-source form of such a combination
+ shall include the source code for the parts of OpenSSL used as well
+ as that of the covered work.  */
+ 
++#define __USE_GNU
+ #include "wget.h"
+ 
+ #include <stdio.h>
+@@ -1067,6 +1068,7 @@ extract_param (const char **source, param_token *name, param_token *value,
+                char separator)
+ {
+   const char *p = *source;
++  int param_type;
+ 
+   while (c_isspace (*p)) ++p;
+   if (!*p)
+@@ -1122,7 +1124,7 @@ extract_param (const char **source, param_token *name, param_token *value,
+     }
+   *source = p;
+ 
+-  int param_type = modify_param_name(name);
++  param_type = modify_param_name(name);
+   if (NOT_RFC2231 != param_type)
+     {
+       modify_param_value(value, param_type);
+@@ -1512,6 +1514,7 @@ read_response_body (struct http_stat *hs, int sock, FILE *fp, wgint contlen,
+   int warc_payload_offset = 0;
+   FILE *warc_tmp = NULL;
+   int warcerr = 0;
++  int flags;
+ 
+   if (opt.warc_filename != NULL)
+     {
+@@ -1548,7 +1551,7 @@ read_response_body (struct http_stat *hs, int sock, FILE *fp, wgint contlen,
+     }
+ 
+   /* Read the response body.  */
+-  int flags = 0;
++  flags = 0;
+   if (contlen != -1)
+     /* If content-length is present, read that much; otherwise, read
+        until EOF.  The HTTP spec doesn't require the server to
+@@ -1653,6 +1656,7 @@ static uerr_t
+ gethttp (struct url *u, struct http_stat *hs, int *dt, struct url *proxy,
+          struct iri *iri, int count)
+ {
++  int warc_tmp_written;
+   struct request *req;
+ 
+   char *type;
+@@ -2125,10 +2129,11 @@ gethttp (struct url *u, struct http_stat *hs, int *dt, struct url *proxy,
+           if (write_error >= 0 && warc_tmp != NULL)
+             {
+               /* Remember end of headers / start of payload. */
++              int warc_tmp_written;
+               warc_payload_offset = ftello (warc_tmp);
+ 
+               /* Write a copy of the data to the WARC record. */
+-              int warc_tmp_written = fwrite (opt.body_data, 1, body_data_size, warc_tmp);
++              warc_tmp_written = fwrite (opt.body_data, 1, body_data_size, warc_tmp);
+               if (warc_tmp_written != body_data_size)
+                 write_error = -2;
+             }
+@@ -2309,6 +2314,7 @@ read_header:
+ 
+   if (statcode == HTTP_STATUS_UNAUTHORIZED)
+     {
++      uerr_t auth_err;
+       /* Authorization is required.  */
+ 
+       /* Normally we are not interested in the response body.
+@@ -2347,7 +2353,7 @@ read_header:
+         }
+ 
+       pconn.authorized = false;
+-      uerr_t auth_err = RETROK;
++      auth_err = RETROK;
+       if (!auth_finished && (user && passwd))
+         {
+           /* IIS sends multiple copies of WWW-Authenticate, one with
+diff --git a/src/main.c b/src/main.c
+index 19d7253..ea6986e 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -987,13 +987,20 @@ main (int argc, char **argv)
+   int i, ret, longindex;
+   int nurl;
+   bool append_to_log = false;
++  struct ptimer *timer;
++  double start_time;
++  int arglen;
++  int argstring_length;
++  int retconf;
++  bool use_userconfig = false;
++  char *p;
+ 
+   total_downloaded_bytes = 0;
+ 
+   program_name = argv[0];
+ 
+-  struct ptimer *timer = ptimer_new ();
+-  double start_time = ptimer_measure (timer);
++  timer = ptimer_new ();
++  start_time = ptimer_measure (timer);
+ 
+   i18n_initialize ();
+ 
+@@ -1015,10 +1022,10 @@ main (int argc, char **argv)
+ #endif
+ 
+   /* Construct the arguments string. */
+-  int argstring_length = 1;
++  argstring_length = 1;
+   for (i = 1; i < argc; i++)
+     argstring_length += strlen (argv[i]) + 2 + 1;
+-  char *p = program_argstring = malloc (argstring_length * sizeof (char));
++  p = program_argstring = malloc (argstring_length * sizeof (char));
+   if (p == NULL)
+     {
+       fprintf (stderr, _("Memory allocation problem\n"));
+@@ -1027,7 +1034,7 @@ main (int argc, char **argv)
+   for (i = 1; i < argc; i++)
+     {
+       *p++ = '"';
+-      int arglen = strlen (argv[i]);
++      arglen = strlen (argv[i]);
+       memcpy (p, argv[i], arglen);
+       p += arglen;
+       *p++ = '"';
+@@ -1043,8 +1050,6 @@ main (int argc, char **argv)
+   /* This separate getopt_long is needed to find the user config file
+      option ("--config") and parse it before the other user options. */
+   longindex = -1;
+-  int retconf;
+-  bool use_userconfig = false;
+ 
+   while ((retconf = getopt_long (argc, argv,
+                                 short_options, long_options, &longindex)) != -1)
+@@ -1672,10 +1677,12 @@ outputting to a regular file.\n"));
+       total_downloaded_bytes != 0)
+     {
+       double end_time = ptimer_measure (timer);
++      char *wall_time;
++      char *download_time;
+       ptimer_destroy (timer);
+ 
+-      char *wall_time = xstrdup (secs_to_human_time (end_time - start_time));
+-      char *download_time = xstrdup (secs_to_human_time (total_download_time));
++      wall_time = xstrdup (secs_to_human_time (end_time - start_time));
++      download_time = xstrdup (secs_to_human_time (total_download_time));
+       logprintf (LOG_NOTQUIET,
+ 		 _("FINISHED --%s--\nTotal wall clock time: %s\n"
+ 		   "Downloaded: %d files, %s in %s (%s)\n"),
+diff --git a/src/retr.c b/src/retr.c
+index 683c811..c0a815e 100644
+--- a/src/retr.c
++++ b/src/retr.c
+@@ -377,8 +377,9 @@ fd_read_body (int fd, FILE *out, wgint toread, wgint startpos,
+ 
+       if (ret > 0)
+         {
++          int write_res;
+           sum_read += ret;
+-          int write_res = write_data (out, out2, dlbuf, ret, &skip, &sum_written);
++          write_res = write_data (out, out2, dlbuf, ret, &skip, &sum_written);
+           if (write_res < 0)
+             {
+               ret = (write_res == -3) ? -3 : -2;
+diff --git a/src/utils.c b/src/utils.c
+index 4354668..d5fecc1 100644
+--- a/src/utils.c
++++ b/src/utils.c
+@@ -64,7 +64,9 @@ as that of the covered work.  */
+ #include <sys/stat.h>
+ 
+ /* For TIOCGWINSZ and friends: */
++#ifndef __HAIKU__
+ #include <sys/ioctl.h>
++#endif
+ #ifdef HAVE_TERMIOS_H
+ # include <termios.h>
+ #endif
+diff --git a/src/version.c b/src/version.c
+new file mode 100644
+index 0000000..5ee99d1
+--- /dev/null
++++ b/src/version.c
+@@ -0,0 +1,6 @@
++/* version.c */
++/* Autogenerated by Makefile - DO NOT EDIT */
++
++const char *version_string = "1.15";
++const char *compilation_string = "gcc -DHAVE_CONFIG_H -DSYSTEM_WGETRC=\"/packages/wget-1.15-1/.settings/wgetrc\" -DLOCALEDIR=\"/packages/wget-1.15-1/.self/data/locale\" -I. -I../lib -I../lib -O2 -Wall";
++const char *link_string = "gcc -O2 -Wall -lssl -lcrypto -lz -lnetwork -lnetwork -lsocket ftp-opie.o openssl.o http-ntlm.o ../lib/libgnu.a";
+diff --git a/src/warc.c b/src/warc.c
+index c3a5857..8dcc055 100644
+--- a/src/warc.c
++++ b/src/warc.c
+@@ -160,10 +160,11 @@ warc_write_buffer (const char *buffer, size_t size)
+ static bool
+ warc_write_string (const char *str)
+ {
++  size_t n;
+   if (!warc_write_ok)
+     return false;
+ 
+-  size_t n = strlen (str);
++  n = strlen (str);
+   if (n != warc_write_buffer (str, n))
+     warc_write_ok = false;
+ 
+@@ -251,6 +252,8 @@ static bool
+ warc_write_block_from_file (FILE *data_in)
+ {
+   /* Add the Content-Length header. */
++  char buffer[BUFSIZ];
++  size_t s;
+   char content_length[MAX_INT_TO_STRING_LEN(off_t)];
+   fseeko (data_in, 0L, SEEK_END);
+   number_to_string (content_length, ftello (data_in));
+@@ -263,8 +266,6 @@ warc_write_block_from_file (FILE *data_in)
+     warc_write_ok = false;
+ 
+   /* Copy the data in the file to the WARC record. */
+-  char buffer[BUFSIZ];
+-  size_t s;
+   while (warc_write_ok && (s = fread (buffer, 1, BUFSIZ, data_in)) > 0)
+     {
+       if (warc_write_buffer (buffer, s) < s)
+@@ -289,6 +290,12 @@ warc_write_end_record (void)
+   /* We start a new gzip stream for each record.  */
+   if (warc_write_ok && warc_current_gzfile)
+     {
++      size_t result;
++      char static_header[GZIP_STATIC_HEADER_SIZE];
++      off_t current_offset;
++      off_t uncompressed_size;
++      off_t compressed_size;
++      char extra_header[EXTRA_GZIP_HEADER_SIZE];
+       if (gzclose (warc_current_gzfile) != Z_OK)
+         {
+           warc_write_ok = false;
+@@ -314,17 +321,16 @@ warc_write_end_record (void)
+       */
+ 
+       /* Calculate the uncompressed and compressed sizes. */
+-      off_t current_offset = ftello (warc_current_file);
+-      off_t uncompressed_size = current_offset - warc_current_gzfile_offset;
+-      off_t compressed_size = warc_current_gzfile_uncompressed_size;
++      current_offset = ftello (warc_current_file);
++      uncompressed_size = current_offset - warc_current_gzfile_offset;
++      compressed_size = warc_current_gzfile_uncompressed_size;
+ 
+       /* Go back to the static GZIP header. */
+       fseeko (warc_current_file, warc_current_gzfile_offset
+               + EXTRA_GZIP_HEADER_SIZE, SEEK_SET);
+ 
+       /* Read the header. */
+-      char static_header[GZIP_STATIC_HEADER_SIZE];
+-      size_t result = fread (static_header, 1, GZIP_STATIC_HEADER_SIZE,
++      result = fread (static_header, 1, GZIP_STATIC_HEADER_SIZE,
+                              warc_current_file);
+       if (result != GZIP_STATIC_HEADER_SIZE)
+         {
+@@ -341,7 +347,6 @@ warc_write_end_record (void)
+       fwrite (static_header, 1, GZIP_STATIC_HEADER_SIZE, warc_current_file);
+ 
+       /* Prepare the extra GZIP header. */
+-      char extra_header[EXTRA_GZIP_HEADER_SIZE];
+       /* XLEN, the length of the extra header fields.  */
+       extra_header[0]  = ((EXTRA_GZIP_HEADER_SIZE - 2) & 255);
+       extra_header[1]  = ((EXTRA_GZIP_HEADER_SIZE - 2) >> 8) & 255;
+@@ -653,13 +658,15 @@ warc_write_warcinfo_record (char *filename)
+   /* Write warc-info record as the first record of the file. */
+   /* We add the record id of this info record to the other records in the
+      file. */
++  char timestamp[22];
++  char *filename_copy, *filename_basename;
++  FILE *warc_tmp;
++
+   warc_current_warcinfo_uuid_str = (char *) malloc (48);
+   warc_uuid_str (warc_current_warcinfo_uuid_str);
+ 
+-  char timestamp[22];
+   warc_timestamp (timestamp);
+ 
+-  char *filename_copy, *filename_basename;
+   filename_copy = strdup (filename);
+   filename_basename = strdup (basename (filename_copy));
+ 
+@@ -671,7 +678,7 @@ warc_write_warcinfo_record (char *filename)
+   warc_write_header ("WARC-Filename", filename_basename);
+ 
+   /* Create content.  */
+-  FILE *warc_tmp = warc_tempfile ();
++  warc_tmp = warc_tempfile ();
+   if (warc_tmp == NULL)
+     {
+       free (filename_copy);
+@@ -721,6 +728,10 @@ warc_write_warcinfo_record (char *filename)
+ static bool
+ warc_start_new_file (bool meta)
+ {
++  int base_filename_length;
++  char *new_filename;
++  const char *extension;
++
+   if (opt.warc_filename == NULL)
+     return false;
+ 
+@@ -732,9 +743,9 @@ warc_start_new_file (bool meta)
+ 
+   warc_current_file_number++;
+ 
+-  int base_filename_length = strlen (opt.warc_filename);
++  base_filename_length = strlen (opt.warc_filename);
+   /* filename format:  base + "-" + 5 digit serial number + ".warc.gz" */
+-  char *new_filename = malloc (base_filename_length + 1 + 5 + 8 + 1);
++  new_filename = malloc (base_filename_length + 1 + 5 + 8 + 1);
+   warc_current_filename = new_filename;
+ 
+ #ifdef __VMS
+@@ -744,9 +755,9 @@ warc_start_new_file (bool meta)
+ #endif /* def __VMS [else] */
+ 
+ #ifdef HAVE_LIBZ
+-  const char *extension = (opt.warc_compression_enabled ? WARC_GZ : "warc");
++  extension = (opt.warc_compression_enabled ? WARC_GZ : "warc");
+ #else
+-  const char *extension = "warc";
++  extension = "warc";
+ #endif
+ 
+   /* If max size is enabled, we add a serial number to the file names. */
+@@ -820,12 +831,13 @@ static bool
+ warc_parse_cdx_header (char *lineptr, int *field_num_original_url,
+                        int *field_num_checksum, int *field_num_record_id)
+ {
++  char *token;
++  char *save_ptr;
++
+   *field_num_original_url = -1;
+   *field_num_checksum = -1;
+   *field_num_record_id = -1;
+ 
+-  char *token;
+-  char *save_ptr;
+   token = strtok_r (lineptr, CDX_FIELDSEP, &save_ptr);
+ 
+   if (token != NULL && strcmp (token, "CDX") == 0)
+@@ -869,10 +881,12 @@ warc_process_cdx_line (char *lineptr, int field_num_original_url,
+ 
+   char *token;
+   char *save_ptr;
++  int field_num;
++
+   token = strtok_r (lineptr, CDX_FIELDSEP, &save_ptr);
+ 
+   /* Read this line to get the fields we need. */
+-  int field_num = 0;
++  field_num = 0;
+   while (token != NULL)
+     {
+       char **val;
+@@ -934,10 +948,7 @@ warc_process_cdx_line (char *lineptr, int field_num_original_url,
+ static bool
+ warc_load_cdx_dedup_file (void)
+ {
+-  FILE *f = fopen (opt.warc_cdx_dedup_filename, "r");
+-  if (f == NULL)
+-    return false;
+-
++  FILE *f;
+   int field_num_original_url = -1;
+   int field_num_checksum = -1;
+   int field_num_record_id = -1;
+@@ -946,6 +957,10 @@ warc_load_cdx_dedup_file (void)
+   size_t n = 0;
+   ssize_t line_length;
+ 
++  f = fopen (opt.warc_cdx_dedup_filename, "r");
++  if (f == NULL)
++    return false;
++
+   /* The first line should contain the CDX header.
+      Format:  " CDX x x x x x"
+      where x are field type indicators.  For our purposes, we only
+@@ -973,6 +988,7 @@ _("CDX file does not list record ids. (Missing column 'u'.)\n"));
+     }
+   else
+     {
++      int nrecords;
+       /* Initialize the table. */
+       warc_cdx_dedup_table = hash_table_new (1000, warc_hash_sha1_digest,
+                                              warc_cmp_sha1_digest);
+@@ -990,7 +1006,7 @@ _("CDX file does not list record ids. (Missing column 'u'.)\n"));
+       while (line_length != -1);
+ 
+       /* Print results. */
+-      int nrecords = hash_table_count (warc_cdx_dedup_table);
++      nrecords = hash_table_count (warc_cdx_dedup_table);
+       logprintf (LOG_VERBOSE, ngettext ("Loaded %d record from CDX.\n\n",
+                                         "Loaded %d records from CDX.\n\n",
+                                          nrecords),
+@@ -1010,10 +1026,11 @@ _("CDX file does not list record ids. (Missing column 'u'.)\n"));
+ static struct warc_cdx_record *
+ warc_find_duplicate_cdx_record (char *url, char *sha1_digest_payload)
+ {
++  struct warc_cdx_record *rec_existing;
+   if (warc_cdx_dedup_table == NULL)
+     return NULL;
+ 
+-  struct warc_cdx_record *rec_existing
++  rec_existing
+     = hash_table_get (warc_cdx_dedup_table, sha1_digest_payload);
+ 
+   if (rec_existing && strcmp (rec_existing->url, url) == 0)
+@@ -1085,11 +1102,13 @@ warc_init (void)
+ static void
+ warc_write_metadata (void)
+ {
++  char manifest_uuid [48];
++  FILE * warc_tmp_fp;
++
+   /* If there are multiple WARC files, the metadata should be written to a separate file. */
+   if (opt.warc_maxsize > 0)
+     warc_start_new_file (true);
+ 
+-  char manifest_uuid [48];
+   warc_uuid_str (manifest_uuid);
+ 
+   fflush (warc_manifest_fp);
+@@ -1099,7 +1118,7 @@ warc_write_metadata (void)
+                               warc_manifest_fp, -1);
+   /* warc_write_resource_record has closed warc_manifest_fp. */
+ 
+-  FILE * warc_tmp_fp = warc_tempfile ();
++  warc_tmp_fp = warc_tempfile ();
+   if (warc_tmp_fp == NULL)
+     {
+       logprintf (LOG_NOTQUIET, _("Could not open temporary WARC file.\n"));
+@@ -1153,6 +1172,7 @@ warc_close (void)
+ FILE *
+ warc_tempfile (void)
+ {
++  int fd;
+   char filename[100];
+   if (path_search (filename, 100, opt.warc_tempdir, "wget", true) == -1)
+     return NULL;
+@@ -1172,7 +1192,7 @@ warc_tempfile (void)
+     return fopen (tfn, "w+", "fop=tmd");    /* Create auto-delete temp file. */
+   }
+ #else /* def __VMS */
+-  int fd = mkostemp (filename, O_TEMPORARY);
++  fd = mkostemp (filename, O_TEMPORARY);
+   if (fd < 0)
+     return NULL;
+ 
+@@ -1234,8 +1254,11 @@ warc_write_cdx_record (const char *url, const char *timestamp_str,
+                        off_t offset, const char *warc_filename,
+                        const char *response_uuid)
+ {
+-  /* Transform the timestamp. */
++  char offset_string[MAX_INT_TO_STRING_LEN(off_t)];
+   char timestamp_str_cdx [15];
++  const char *checksum;
++
++  /* Transform the timestamp. */
+   memcpy (timestamp_str_cdx     , timestamp_str     , 4); /* "YYYY" "-" */
+   memcpy (timestamp_str_cdx +  4, timestamp_str +  5, 2); /* "mm"   "-" */
+   memcpy (timestamp_str_cdx +  6, timestamp_str +  8, 2); /* "dd"   "T" */
+@@ -1245,7 +1268,6 @@ warc_write_cdx_record (const char *url, const char *timestamp_str,
+   timestamp_str_cdx[14] = '\0';
+ 
+   /* Rewrite the checksum. */
+-  const char *checksum;
+   if (payload_digest != NULL)
+     checksum = payload_digest + 5; /* Skip the "sha1:" */
+   else
+@@ -1256,7 +1278,6 @@ warc_write_cdx_record (const char *url, const char *timestamp_str,
+   if (redirect_location == NULL || strlen(redirect_location) == 0)
+     redirect_location = "-";
+ 
+-  char offset_string[MAX_INT_TO_STRING_LEN(off_t)];
+   number_to_string (offset_string, offset);
+ 
+   /* Print the CDX line. */
+@@ -1288,10 +1309,11 @@ warc_write_revisit_record (char *url, char *timestamp_str,
+                            char *refers_to, ip_address *ip, FILE *body)
+ {
+   char revisit_uuid [48];
+-  warc_uuid_str (revisit_uuid);
+-
+   char *block_digest = NULL;
+   char sha1_res_block[SHA1_DIGEST_SIZE];
++
++  warc_uuid_str (revisit_uuid);
++
+   sha1_stream (body, sha1_res_block);
+   block_digest = warc_base32_sha1_digest (sha1_res_block);
+ 
+@@ -1342,6 +1364,9 @@ warc_write_response_record (char *url, char *timestamp_str,
+   char sha1_res_block[SHA1_DIGEST_SIZE];
+   char sha1_res_payload[SHA1_DIGEST_SIZE];
+ 
++  char response_uuid [48];
++  off_t offset;
++
+   if (opt.warc_digests_enabled)
+     {
+       /* Calculate the block and payload digests. */
+@@ -1385,11 +1410,10 @@ warc_write_response_record (char *url, char *timestamp_str,
+ 
+   /* Not a revisit, just store the record. */
+ 
+-  char response_uuid [48];
+   warc_uuid_str (response_uuid);
+ 
+   fseeko (warc_current_file, 0L, SEEK_END);
+-  off_t offset = ftello (warc_current_file);
++  offset = ftello (warc_current_file);
+ 
+   warc_write_start_record ();
+   warc_write_header ("WARC-Type", "response");
+-- 
+1.8.3.4
+
