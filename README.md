@@ -1,3 +1,3 @@
-# README #
+# Welcome to HaikuPorts!
 
-http://bb.haikuports.org/haikuports/wiki/Home
+To get started, [read the wiki!](wiki/Home)
