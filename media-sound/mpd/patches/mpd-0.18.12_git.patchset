@@ -1,0 +1,795 @@
+From eb207183aa82a9a02b88e9da8c27505d2665ae26 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Sun, 13 Jul 2014 01:29:05 +0200
+Subject: [PATCH 1/5] configure.ac: check for socket() in libnetwork for Haiku
+
+---
+ configure.ac | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/configure.ac b/configure.ac
+index dbbb5a5..5ff995f 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -198,7 +198,7 @@ AC_SEARCH_LIBS([clock_gettime], [rt])
+ AC_SEARCH_LIBS([syslog], [bsd socket inet],
+ 	[AC_DEFINE(HAVE_SYSLOG, 1, [Define if syslog() is available])])
+ 
+-AC_SEARCH_LIBS([socket], [socket])
++AC_SEARCH_LIBS([socket], [network socket])
+ AC_SEARCH_LIBS([gethostbyname], [nsl])
+ 
+ if test x$host_is_linux = xyes; then
+-- 
+1.8.3.4
+
+
+From fddacb621abb503ea1d704548dbfe7433fcdd2cf Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Sun, 13 Jul 2014 01:29:39 +0200
+Subject: [PATCH 2/5] output: make sure AudioOutput::mixer is initialized
+
+Avoids crashing when libao fails to initialize.
+---
+ src/output/Init.cxx | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/output/Init.cxx b/src/output/Init.cxx
+index eafcec4..79ef4f9 100644
+--- a/src/output/Init.cxx
++++ b/src/output/Init.cxx
+@@ -48,6 +48,7 @@
+ 
+ AudioOutput::AudioOutput(const AudioOutputPlugin &_plugin)
+ 	:plugin(_plugin),
++	 mixer(nullptr),
+ 	 enabled(true), really_enabled(false),
+ 	 open(false),
+ 	 pause(false),
+-- 
+1.8.3.4
+
+
+From ad25cb6cc8281417fe0cf5d417f9dd542f24d7d2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Mon, 14 Jul 2014 23:10:02 +0200
+Subject: [PATCH 3/5] unix: define WCOREDUMP() for platforms that don't support
+ it
+
+Haiku does not dump core, it just starts the debugger.
+---
+ src/unix/Daemon.cxx | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/unix/Daemon.cxx b/src/unix/Daemon.cxx
+index 490b2de..49ad394 100644
+--- a/src/unix/Daemon.cxx
++++ b/src/unix/Daemon.cxx
+@@ -37,6 +37,10 @@
+ #include <grp.h>
+ #endif
+ 
++#ifndef WCOREDUMP
++#define WCOREDUMP(v) 0
++#endif
++
+ static constexpr Domain daemon_domain("daemon");
+ 
+ #ifndef WIN32
+-- 
+1.8.3.4
+
+
+From 866c9015ac11ae44ea659d8e33bdbfbdf9bae8ff Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Mon, 14 Jul 2014 23:12:03 +0200
+Subject: [PATCH 4/5] system/SocketUtil: guard usage of SO_PASSCRED
+
+Haiku has struct ucred but no SO_PASSCRED (yet).
+---
+ src/system/SocketUtil.cxx | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/system/SocketUtil.cxx b/src/system/SocketUtil.cxx
+index b9df0d5..5a88dd1 100644
+--- a/src/system/SocketUtil.cxx
++++ b/src/system/SocketUtil.cxx
+@@ -75,7 +75,7 @@ socket_bind_listen(int domain, int type, int protocol,
+ 		return -1;
+ 	}
+ 
+-#ifdef HAVE_STRUCT_UCRED
++#if defined(HAVE_STRUCT_UCRED) && defined(SO_PASSCRED)
+ 	setsockopt(fd, SOL_SOCKET, SO_PASSCRED,
+ 		   (const char *) &reuse, sizeof(reuse));
+ #endif
+-- 
+1.8.3.4
+
+
+From da7f27823ec9db825c5f957c52d7649bcf417d2b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Mon, 14 Jul 2014 23:16:20 +0200
+Subject: [PATCH 5/5] output: add native Haiku audio output and mixer support
+
+Work in progress
+
+Also uses the notification system to display tags.
+---
+ Makefile.am                              |   8 +
+ configure.ac                             |  20 ++
+ src/mixer/MixerList.hxx                  |   1 +
+ src/mixer/plugins/HaikuMixerPlugin.cxx   |  73 ++++++
+ src/output/Registry.cxx                  |   4 +
+ src/output/plugins/HaikuOutputPlugin.cxx | 432 +++++++++++++++++++++++++++++++
+ src/output/plugins/HaikuOutputPlugin.hxx |  34 +++
+ 7 files changed, 572 insertions(+)
+ create mode 100644 src/mixer/plugins/HaikuMixerPlugin.cxx
+ create mode 100644 src/output/plugins/HaikuOutputPlugin.cxx
+ create mode 100644 src/output/plugins/HaikuOutputPlugin.hxx
+
+diff --git a/Makefile.am b/Makefile.am
+index 23b5201..231ca4a 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -1221,6 +1221,14 @@ liboutput_plugins_a_SOURCES += \
+ 	src/output/plugins/FifoOutputPlugin.hxx
+ endif
+ 
++if HAVE_HAIKU
++liboutput_plugins_a_SOURCES += \
++	src/output/plugins/HaikuOutputPlugin.cxx \
++	src/output/plugins/HaikuOutputPlugin.hxx
++libmixer_plugins_a_SOURCES += \
++	src/mixer/plugins/HaikuMixerPlugin.cxx src/mixer/plugins/HaikuMixerPlugin.hxx
++endif
++
+ if ENABLE_PIPE_OUTPUT
+ liboutput_plugins_a_SOURCES += \
+ 	src/output/plugins/PipeOutputPlugin.cxx \
+diff --git a/configure.ac b/configure.ac
+index 5ff995f..81dec53 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -389,6 +389,11 @@ AC_ARG_ENABLE(gme,
+ 		[enable Blargg's game music emulator plugin]),,
+ 	enable_gme=auto)
+ 
++AC_ARG_ENABLE(haiku,
++	AS_HELP_STRING([--enable-haiku],
++		[enable the Haiku output plugin (default: auto)]),,
++	enable_haiku=auto)
++
+ AC_ARG_ENABLE(httpd-output,
+ 	AS_HELP_STRING([--enable-httpd-output],
+ 		[enables the HTTP server output]),,
+@@ -1514,6 +1519,19 @@ fi
+ 
+ AM_CONDITIONAL(HAVE_FIFO, test x$enable_fifo = xyes)
+ 
++dnl ----------------------------------- Haiku ---------------------------------
++if test x$enable_haiku = xauto; then
++	AC_CHECK_HEADER(media/MediaDefs.h,
++		[enable_haiku=yes],
++		[enable_haiku=no])
++fi
++if test x$enable_haiku = xyes; then
++	AC_DEFINE(HAVE_HAIKU,1,[Define for compiling Haiku support])
++	LIBS="$LIBS -lbe -lmedia"
++fi
++
++AM_CONDITIONAL(HAVE_HAIKU, test x$enable_haiku = xyes)
++
+ dnl ------------------------------- HTTPD Output ------------------------------
+ if test x$enable_httpd_output = xauto; then
+ 	# handle HTTPD auto-detection: disable if no encoder is
+@@ -1680,6 +1698,7 @@ if
+ 	test x$enable_roar = xno &&
+ 	test x$enable_ao = xno &&
+ 	test x$enable_fifo = xno &&
++	test x$enable_haiku = xno &&
+ 	test x$enable_httpd_output = xno &&
+ 	test x$enable_jack = xno &&
+ 	test x$enable_openal = xno &&
+@@ -1854,6 +1873,7 @@ printf '\nPlayback support:\n\t'
+ results(alsa,ALSA)
+ results(fifo,FIFO)
+ results(recorder_output,[File Recorder])
++results(haiku,[Haiku])
+ results(httpd_output,[HTTP Daemon])
+ results(jack,[JACK])
+ printf '\n\t'
+diff --git a/src/mixer/MixerList.hxx b/src/mixer/MixerList.hxx
+index e75b2e6..8bda104 100644
+--- a/src/mixer/MixerList.hxx
++++ b/src/mixer/MixerList.hxx
+@@ -29,6 +29,7 @@ struct MixerPlugin;
+ 
+ extern const MixerPlugin software_mixer_plugin;
+ extern const MixerPlugin alsa_mixer_plugin;
++extern const MixerPlugin haiku_mixer_plugin;
+ extern const MixerPlugin oss_mixer_plugin;
+ extern const MixerPlugin roar_mixer_plugin;
+ extern const MixerPlugin pulse_mixer_plugin;
+diff --git a/src/mixer/plugins/HaikuMixerPlugin.cxx b/src/mixer/plugins/HaikuMixerPlugin.cxx
+new file mode 100644
+index 0000000..5c9e383
+--- /dev/null
++++ b/src/mixer/plugins/HaikuMixerPlugin.cxx
+@@ -0,0 +1,73 @@
++/*
++ * Copyright (C) 2003-2014 The Music Player Daemon Project
++ * Copyright (C) 2010-2011 Philipp 'ph3-der-loewe' Schafft
++ * Copyright (C) 2010-2011 Hans-Kristian 'maister' Arntzen
++ * Copyright (C) 2014 François 'mmu_man' Revol
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ */
++
++
++#include "config.h"
++#include "mixer/MixerInternal.hxx"
++#include "output/plugins/HaikuOutputPlugin.hxx"
++#include "Compiler.h"
++
++class HaikuMixer final : public Mixer {
++	/** the base mixer class */
++	HaikuOutput &self;
++
++public:
++	HaikuMixer(HaikuOutput &_output, MixerListener &_listener)
++		:Mixer(haiku_mixer_plugin, _listener),
++		 self(_output) {}
++
++	/* virtual methods from class Mixer */
++	virtual bool Open(gcc_unused Error &error) override {
++		return true;
++	}
++
++	virtual void Close() override {
++	}
++
++	virtual int GetVolume(Error &error) override;
++	virtual bool SetVolume(unsigned volume, Error &error) override;
++};
++
++static Mixer *
++haiku_mixer_init(gcc_unused EventLoop &event_loop, AudioOutput &ao,
++		MixerListener &listener,
++		gcc_unused const config_param &param,
++		gcc_unused Error &error)
++{
++	return new HaikuMixer((HaikuOutput &)ao, listener);
++}
++
++int
++HaikuMixer::GetVolume(gcc_unused Error &error)
++{
++	return haiku_output_get_volume(self);
++}
++
++bool
++HaikuMixer::SetVolume(unsigned volume, gcc_unused Error &error)
++{
++	return haiku_output_set_volume(self, volume);
++}
++
++const MixerPlugin haiku_mixer_plugin = {
++	haiku_mixer_init,
++	false,
++};
+diff --git a/src/output/Registry.cxx b/src/output/Registry.cxx
+index 566f6b6..4d80ff5 100644
+--- a/src/output/Registry.cxx
++++ b/src/output/Registry.cxx
+@@ -24,6 +24,7 @@
+ #include "plugins/AoOutputPlugin.hxx"
+ #include "plugins/FifoOutputPlugin.hxx"
+ #include "plugins/httpd/HttpdOutputPlugin.hxx"
++#include "plugins/HaikuOutputPlugin.hxx"
+ #include "plugins/JackOutputPlugin.hxx"
+ #include "plugins/NullOutputPlugin.hxx"
+ #include "plugins/OpenALOutputPlugin.hxx"
+@@ -51,6 +52,9 @@ const AudioOutputPlugin *const audio_output_plugins[] = {
+ #ifdef HAVE_FIFO
+ 	&fifo_output_plugin,
+ #endif
++#ifdef HAVE_HAIKU
++	&haiku_output_plugin,
++#endif
+ #ifdef ENABLE_PIPE_OUTPUT
+ 	&pipe_output_plugin,
+ #endif
+diff --git a/src/output/plugins/HaikuOutputPlugin.cxx b/src/output/plugins/HaikuOutputPlugin.cxx
+new file mode 100644
+index 0000000..955294c
+--- /dev/null
++++ b/src/output/plugins/HaikuOutputPlugin.cxx
+@@ -0,0 +1,432 @@
++/*
++ * Copyright (C) 2003-2014 The Music Player Daemon Project
++ * http://www.musicpd.org
++ * Copyright (C) 2014 François 'mmu_man' Revol
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ */
++
++#include "config.h"
++#include "HaikuOutputPlugin.hxx"
++#include "../OutputAPI.hxx"
++#include "mixer/MixerList.hxx"
++#include "util/Error.hxx"
++#include "util/Domain.hxx"
++#include "Log.hxx"
++
++#include <MediaDefs.h>
++#include <MediaRoster.h>
++#include <Notification.h>
++#include <OS.h>
++#include <SoundPlayer.h>
++
++#include <glib.h>
++
++#include <string.h>
++
++struct HaikuOutput {
++	AudioOutput base;
++
++	size_t write_size;
++
++	media_raw_audio_format* format;
++	BSoundPlayer* sound_player;
++
++	sem_id new_buffer;
++	sem_id buffer_done;
++
++	uint8* buffer;
++	size_t buffer_size;
++	size_t buffer_filled;
++
++	unsigned buffer_delay;
++
++	HaikuOutput()
++		:base(haiku_output_plugin) {}
++
++	bool Initialize(const config_param &param, Error &error) {
++		return base.Configure(param, error);
++	}
++
++	bool Configure(const config_param &param, Error &error);
++};
++
++static constexpr Domain haiku_output_domain("haiku_output");
++
++static void
++haiku_output_error(Error &error_r, status_t err)
++{
++	const char *error = strerror(err);
++	error_r.Set(haiku_output_domain, err, error);
++}
++
++inline bool
++HaikuOutput::Configure(const config_param &param, Error &error)
++{
++	/* XXX: by default we should let the MediaKit propose the buffer size */
++	write_size = param.GetBlockValue("write_size", 1024u);
++
++	format = (media_raw_audio_format*)malloc(
++		sizeof(media_raw_audio_format));
++	if (format == nullptr) {
++		haiku_output_error(error, B_NO_MEMORY);
++		return false;
++	}
++
++	return true;
++}
++
++static bool
++haiku_test_default_device(void)
++{
++	BSoundPlayer testPlayer;
++	return testPlayer.InitCheck() == B_OK;
++
++}
++
++static AudioOutput *
++haiku_output_init(const config_param &param, Error &error)
++{
++	HaikuOutput *ad = new HaikuOutput();
++
++	if (!ad->Initialize(param, error)) {
++		delete ad;
++		return nullptr;
++	}
++
++	if (!ad->Configure(param, error)) {
++		delete ad;
++		return nullptr;
++	}
++
++	return &ad->base;
++}
++
++static void
++haiku_output_finish(AudioOutput *ao)
++{
++	HaikuOutput *ad = (HaikuOutput *)ao;
++
++	free(ad->format);
++	delete_sem(ad->new_buffer);
++	delete_sem(ad->buffer_done);
++	delete ad;
++}
++
++static void
++haiku_output_close(AudioOutput *ao)
++{
++	HaikuOutput *ad = (HaikuOutput *)ao;
++
++	ad->sound_player->SetHasData(false);
++	delete_sem(ad->new_buffer);
++	delete_sem(ad->buffer_done);
++	ad->sound_player->Stop();
++	delete ad->sound_player;
++}
++
++static void
++fill_buffer(void* cookie, void* buffer, size_t size,
++	gcc_unused const media_raw_audio_format& format)
++{
++	HaikuOutput *ad = (HaikuOutput *)cookie;
++
++	ad->buffer = (uint8*)buffer;
++	ad->buffer_size = size;
++	ad->buffer_filled = 0;
++	bigtime_t st = system_time();
++	release_sem(ad->new_buffer);
++	acquire_sem(ad->buffer_done);
++	if (ad->buffer_filled < ad->buffer_size) {
++		memset(ad->buffer + ad->buffer_filled, 0,
++			ad->buffer_size - ad->buffer_filled);
++		FormatDebug(haiku_output_domain,
++			"haiku:fill_buffer filled %d size %d clearing remainder\n",
++			ad->buffer_filled, ad->buffer_size);
++
++	}
++}
++
++static bool
++haiku_output_open(AudioOutput *ao, AudioFormat &audio_format,
++	       Error &error)
++{
++	HaikuOutput *ad = (HaikuOutput *)ao;
++	status_t err;
++	*(ad->format) = media_multi_audio_format::wildcard;
++
++	switch (audio_format.format) {
++	case SampleFormat::S8:
++		ad->format->format = media_raw_audio_format::B_AUDIO_CHAR;
++		break;
++
++	case SampleFormat::S16:
++		ad->format->format = media_raw_audio_format::B_AUDIO_SHORT;
++		break;
++
++	case SampleFormat::S32:
++		ad->format->format = media_raw_audio_format::B_AUDIO_INT;
++		break;
++
++	case SampleFormat::FLOAT:
++		ad->format->format = media_raw_audio_format::B_AUDIO_FLOAT;
++		break;
++
++	default:
++		/* fall back to float */
++		audio_format.format = SampleFormat::FLOAT;
++		ad->format->format = media_raw_audio_format::B_AUDIO_FLOAT;
++		break;
++	}
++
++	ad->format->frame_rate = audio_format.sample_rate;
++	ad->format->byte_order = B_MEDIA_HOST_ENDIAN;
++	ad->format->channel_count = audio_format.channels;
++
++	ad->buffer_size = 0;
++
++	if (ad->write_size)
++		ad->format->buffer_size = ad->write_size;
++	else
++		ad->format->buffer_size = BMediaRoster::Roster()->AudioBufferSizeFor(
++			ad->format->channel_count, ad->format->format,
++			ad->format->frame_rate, B_UNKNOWN_BUS) * 2;
++
++	FormatDebug(haiku_output_domain,
++		"using haiku driver ad: bs: %d ws: %d "
++		"channels %d rate %f fmt %08lx bs %d\n",
++			ad->buffer_size, ad->write_size,
++			ad->format->channel_count, ad->format->frame_rate,
++			ad->format->format, ad->format->buffer_size);
++
++	ad->sound_player = new BSoundPlayer(ad->format, "MPD Output",
++		fill_buffer, NULL, ad);
++
++	err = ad->sound_player->InitCheck();
++	if (err != B_OK) {
++		delete ad->sound_player;
++		ad->sound_player = NULL;
++		haiku_output_error(error, err);
++		return false;
++	}
++
++	// calculate the allowable delay for the buffer (ms)
++	ad->buffer_delay = ad->format->buffer_size;
++	ad->buffer_delay /= (ad->format->format &
++		media_raw_audio_format::B_AUDIO_SIZE_MASK);
++	ad->buffer_delay /= ad->format->channel_count;
++	ad->buffer_delay *= 1000 / ad->format->frame_rate;
++	// half of the total buffer play time
++	ad->buffer_delay /= 2;
++	FormatDebug(haiku_output_domain,
++		"buffer delay: %d ms\n", ad->buffer_delay);
++
++	ad->new_buffer = create_sem(0, "New buffer request");
++	ad->buffer_done = create_sem(0, "Buffer done");
++
++	ad->sound_player->SetVolume(1.0);
++	ad->sound_player->Start();
++	ad->sound_player->SetHasData(false);
++
++	return true;
++}
++
++static size_t
++haiku_output_play(AudioOutput *ao, const void *chunk, size_t size,
++	       gcc_unused Error &error)
++{
++	HaikuOutput *ad = (HaikuOutput *)ao;
++	BSoundPlayer* const soundPlayer = ad->sound_player;
++	const uint8 *buffer = (const uint8 *)chunk;
++
++	if (size == 0) {
++		soundPlayer->SetHasData(false);
++		return 0;
++	}
++
++	if (!soundPlayer->HasData())
++		soundPlayer->SetHasData(true);
++	acquire_sem(ad->new_buffer);
++
++	size_t bytesLeft = size;
++	while (bytesLeft > 0) {
++		if (ad->buffer_filled == ad->buffer_size) {
++			// Request another buffer from BSoundPlayer
++			release_sem(ad->buffer_done);
++			acquire_sem(ad->new_buffer);
++		}
++
++		const size_t copyBytes = std::min(bytesLeft, ad->buffer_size
++			- ad->buffer_filled);
++		memcpy(ad->buffer + ad->buffer_filled, buffer,
++			copyBytes);
++		ad->buffer_filled += copyBytes;
++		buffer += copyBytes;
++		bytesLeft -= copyBytes;
++	}
++
++
++	if (ad->buffer_filled < ad->buffer_size) {
++		// Continue filling this buffer the next time this function is called
++		release_sem(ad->new_buffer);
++	} else {
++		// Buffer is full
++		release_sem(ad->buffer_done);
++		//soundPlayer->SetHasData(false);
++	}
++
++	return size;
++}
++
++static unsigned
++haiku_output_delay(AudioOutput *ao)
++{
++	HaikuOutput *ad = (HaikuOutput *)ao;
++
++	unsigned delay = ad->buffer_filled ? 0 : ad->buffer_delay;
++
++	return 0;//delay / 2;
++}
++
++static void
++haiku_send_tag(AudioOutput *ao, const Tag *meta)
++{
++	HaikuOutput *ad = (HaikuOutput *)ao;
++	const Tag &tag = *meta;
++
++	BNotification notification(B_INFORMATION_NOTIFICATION);
++
++	BString messageId("mpd_");
++	messageId << find_thread(NULL);
++	notification.SetMessageID(messageId);
++
++	notification.SetGroup("Music Player Daemon");
++
++	notification.SetTitle("Now Playing");
++
++	char timebuf[16];
++	snprintf(timebuf, sizeof(timebuf), "%02d:%02d:%02d",
++		 tag.time / 3600, (tag.time % 3600) / 60, tag.time % 60);
++
++	BString artist;
++	BString album;
++	BString title;
++	BString track;
++	BString name;
++
++	for (unsigned i = 0; i < tag.num_items; i++)
++	{
++		switch (tag.items[i]->type) {
++		case TAG_ARTIST:
++		case TAG_ALBUM_ARTIST:
++			if (artist.Length() == 0)
++				artist << tag.items[i]->value;
++			break;
++		case TAG_ALBUM:
++			if (album.Length() == 0)
++				album << tag.items[i]->value;
++			break;
++		case TAG_TITLE:
++			if (title.Length() == 0)
++				title << tag.items[i]->value;
++			break;
++		case TAG_TRACK:
++			if (track.Length() == 0)
++				track << tag.items[i]->value;
++			break;
++		case TAG_NAME:
++			if (name.Length() == 0)
++				name << tag.items[i]->value;
++			break;
++		case TAG_GENRE:
++		case TAG_DATE:
++		case TAG_PERFORMER:
++		case TAG_COMMENT:
++		case TAG_DISC:
++		case TAG_COMPOSER:
++		case TAG_MUSICBRAINZ_ARTISTID:
++		case TAG_MUSICBRAINZ_ALBUMID:
++		case TAG_MUSICBRAINZ_ALBUMARTISTID:
++		case TAG_MUSICBRAINZ_TRACKID:
++		default:
++			FormatDebug(haiku_output_domain,
++				"tag.items[%d]: type %d value '%s'\n",
++				i, tag.items[i]->type, tag.items[i]->value);
++			break;
++		}
++	}
++
++	BString content;
++	if (artist.Length())
++		content << artist << " - ";
++	if (album.Length())
++		content << album << " - ";
++	if (track.Length())
++		content << track << " - ";
++	if (title.Length())
++		content << title << " - ";
++	if (name.Length())
++		content << name << " - ";
++	if (content.Length() == 0)
++		content << "Unknown ";
++	if (tag.time > 0)
++		content << "(" << timebuf << ")";
++
++	notification.SetContent(content);
++
++	notification.Send();
++}
++
++int
++haiku_output_get_volume(HaikuOutput &haiku)
++{
++	BSoundPlayer* const soundPlayer = haiku.sound_player;
++
++	if (soundPlayer == NULL || soundPlayer->InitCheck() != B_OK)
++		return 0;
++
++	return (int)(soundPlayer->Volume() * 100 + 0.5);
++}
++
++bool
++haiku_output_set_volume(HaikuOutput &haiku, unsigned volume)
++{
++	BSoundPlayer* const soundPlayer = haiku.sound_player;
++
++	if (soundPlayer == NULL || soundPlayer->InitCheck() != B_OK)
++		return false;
++
++	soundPlayer->SetVolume((float)volume / 100);
++	return true;
++}
++
++const struct AudioOutputPlugin haiku_output_plugin = {
++	"haiku",
++	haiku_test_default_device,
++	haiku_output_init,
++	haiku_output_finish,
++	nullptr,
++	nullptr,
++	haiku_output_open,
++	haiku_output_close,
++	haiku_output_delay,
++	haiku_send_tag,
++	haiku_output_play,
++	nullptr,
++	nullptr,
++	nullptr,
++
++	&haiku_mixer_plugin,
++};
+diff --git a/src/output/plugins/HaikuOutputPlugin.hxx b/src/output/plugins/HaikuOutputPlugin.hxx
+new file mode 100644
+index 0000000..f3f224d
+--- /dev/null
++++ b/src/output/plugins/HaikuOutputPlugin.hxx
+@@ -0,0 +1,34 @@
++/*
++ * Copyright (C) 2003-2014 The Music Player Daemon Project
++ * http://www.musicpd.org
++ * Copyright (C) 2014 François 'mmu_man' Revol
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ */
++
++#ifndef MPD_HAIKU_OUTPUT_PLUGIN_HXX
++#define MPD_HAIKU_OUTPUT_PLUGIN_HXX
++
++class HaikuOutput;
++
++extern const struct AudioOutputPlugin haiku_output_plugin;
++
++int
++haiku_output_get_volume(HaikuOutput &haiku);
++
++bool
++haiku_output_set_volume(HaikuOutput &haiku, unsigned volume);
++
++#endif
+-- 
+1.8.3.4
+
