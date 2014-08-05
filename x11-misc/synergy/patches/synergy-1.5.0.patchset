@@ -1,15 +1,58 @@
-From e51832b0a2707aec5b8e4719ab6a3e07e2f98178 Mon Sep 17 00:00:00 2001
+From c04946a72793253ce5fc16d2562b3a96cbaa4831 Mon Sep 17 00:00:00 2001
 From: Adrien Destugues <pulkomandy@pulkomandy.tk>
 Date: Tue, 5 Aug 2014 20:10:49 +0200
 Subject: First attempt at getting things to compile.
 
-* Compiler fails on the first compiled file, without an error message.
+* Disable -Werror as it's not going to work on gcc2
+* Fix pthread and inet_aton detection
+* Handle some errno code we don't define
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 6d6b770..f07772f 100644
+index 6d6b770..ebd229b 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -145,12 +145,7 @@ if (UNIX)
+@@ -76,7 +76,7 @@ if (UNIX)
+ 
+ 	# warnings as errors:
+ 	# we have a problem with people checking in code with warnings.
+-	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
++	# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
+ 
+ 	# For config.h, detect the libraries, functions, etc.
+ 	include(CheckIncludeFiles)
+@@ -119,7 +119,11 @@ if (UNIX)
+ 	# need to do a more detailed check and also include some extra libs.
+ 	if (NOT HAVE_INET_ATON)
+ 
+-		set(CMAKE_REQUIRED_LIBRARIES nsl)
++		if(HAIKU)
++			set(CMAKE_REQUIRED_LIBRARIES network bsd)
++		else()
++			set(CMAKE_REQUIRED_LIBRARIES nsl)
++		endif()
+ 		check_c_source_compiles(
+ 			"#include <arpa/inet.h>\n int main() { inet_aton(0, 0); }" 
+ 			HAVE_INET_ATON_ADV)
+@@ -130,10 +134,14 @@ if (UNIX)
+ 			# Override the previous fail.
+ 			set(HAVE_INET_ATON 1)
+ 
+-			# Assume that both nsl and socket will be needed,
+-			# it seems safe to add socket on the back of nsl,
+-			# since socket only ever needed when nsl is needed.
+-			list(APPEND libs nsl socket)
++			if(HAIKU)
++				list(APPEND libs network bsd)
++			else()
++				# Assume that both nsl and socket will be needed,
++				# it seems safe to add socket on the back of nsl,
++				# since socket only ever needed when nsl is needed.
++				list(APPEND libs nsl socket)
++			endif()
+ 
+ 		endif()
+ 
+@@ -145,12 +153,7 @@ if (UNIX)
  	check_type_size(short SIZEOF_SHORT)
  
  	# pthread is used on both Linux and Mac
@@ -23,7 +66,7 @@ index 6d6b770..f07772f 100644
  
  	# curl is used on both Linux and Mac
  	find_package(CURL)
-@@ -191,6 +186,8 @@ if (UNIX)
+@@ -191,6 +194,8 @@ if (UNIX)
  			${lib_Carbon}
  		)
  
@@ -32,7 +75,7 @@ index 6d6b770..f07772f 100644
  	else() # not-apple
  
  		# add include dir for bsd (posix uses /usr/include/)
-@@ -291,6 +288,8 @@ if (UNIX)
+@@ -291,6 +296,8 @@ if (UNIX)
  
  	if (APPLE)
  		add_definitions(-DWINAPI_CARBON=1 -D_THREAD_SAFE)
@@ -63,6 +106,160 @@ index ef492f2..7334cae 100644
  			return self.unix_generators
  		elif sys.platform == 'darwin':
  			return self.darwin_generators
+diff --git a/src/lib/arch/Arch.h b/src/lib/arch/Arch.h
+index b43eff1..d5161dd 100644
+--- a/src/lib/arch/Arch.h
++++ b/src/lib/arch/Arch.h
+@@ -57,9 +57,7 @@
+ #	include "arch/unix/ArchDaemonUnix.h"
+ #	include "arch/unix/ArchFileUnix.h"
+ #	include "arch/unix/ArchLogUnix.h"
+-#	if HAVE_PTHREAD
+-#		include "arch/unix/ArchMultithreadPosix.h"
+-#	endif
++#	include "arch/unix/ArchMultithreadPosix.h"
+ #	include "arch/unix/ArchNetworkBSD.h"
+ #	include "arch/unix/ArchSleepUnix.h"
+ #	include "arch/unix/ArchStringUnix.h"
+diff --git a/src/lib/arch/unix/ArchNetworkBSD.cpp b/src/lib/arch/unix/ArchNetworkBSD.cpp
+index 33e913d..ef8bee6 100644
+--- a/src/lib/arch/unix/ArchNetworkBSD.cpp
++++ b/src/lib/arch/unix/ArchNetworkBSD.cpp
+@@ -914,7 +914,9 @@ CArchNetworkBSD::throwError(int err)
+ 	case EPROTONOSUPPORT:
+ 	case EAFNOSUPPORT:
+ 	case EPFNOSUPPORT:
++#if defined(ESOCKTNOSUPPORT)
+ 	case ESOCKTNOSUPPORT:
++#endif
+ 	case EINVAL:
+ 	case ENOPROTOOPT:
+ 	case EOPNOTSUPP:
+-- 
+1.8.3.4
+
+
+From 79db5bf0f15c0d7ddab80e331c5d6caff6fdc182 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Tue, 5 Aug 2014 23:07:21 +0200
+Subject: gcc2 support.
+
+* -march=native is not supported
+* vector.at() isn't supported
+* compiler goes crazy when sstream is included after synergy files
+
+diff --git a/ext/CMakeLists.txt b/ext/CMakeLists.txt
+index 155f938..0ac7a59 100644
+--- a/ext/CMakeLists.txt
++++ b/ext/CMakeLists.txt
+@@ -80,7 +80,11 @@ if (UNIX)
+ 			set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-tautological-compare")
+ 		endif()
+ 	else()
+-		set(CRYPTOPP_ARCH "native")
++		if (HAIKU)
++			set(CRYPTOPP_ARCH "i586")
++		else()
++			set(CRYPTOPP_ARCH "native")
++		endif()
+ 		if ("${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^arm.*")
+ 			set(CRYPTOPP_ARCH "armv6zk")
+ 		endif()
+diff --git a/src/cmd/synergyc/synergyc.cpp b/src/cmd/synergyc/synergyc.cpp
+index 7b3786a..8cd9433 100644
+--- a/src/cmd/synergyc/synergyc.cpp
++++ b/src/cmd/synergyc/synergyc.cpp
+@@ -25,6 +25,8 @@
+ #include "synergyc/MSWindowsClientTaskBarReceiver.h"
+ #elif WINAPI_XWINDOWS
+ #include "synergyc/XWindowsClientTaskBarReceiver.h"
++#elif WINAPI_BEAPI
++#include "synergyc/BeAPIClientTaskBarReceiver.h"
+ #elif WINAPI_CARBON
+ #include "synergyc/OSXClientTaskBarReceiver.h"
+ #else
+diff --git a/src/lib/client/Client.cpp b/src/lib/client/Client.cpp
+index 2d0442d..fe014d0 100644
+--- a/src/lib/client/Client.cpp
++++ b/src/lib/client/Client.cpp
+@@ -16,6 +16,8 @@
+  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
++#include <sstream>
++
+ #include "client/Client.h"
+ 
+ #include "client/ServerProxy.h"
+@@ -42,7 +44,6 @@
+ 
+ #include <cstring>
+ #include <cstdlib>
+-#include <sstream>
+ #include <fstream>
+ 
+ //
+diff --git a/src/lib/platform/CMakeLists.txt b/src/lib/platform/CMakeLists.txt
+index 90ec1a6..dd34c20 100644
+--- a/src/lib/platform/CMakeLists.txt
++++ b/src/lib/platform/CMakeLists.txt
+@@ -20,6 +20,9 @@ if (WIN32)
+ elseif (APPLE)
+ 	file(GLOB headers "OSX*.h")
+ 	file(GLOB sources "OSX*.cpp" "OSX*.m")
++elseif (HAIKU)
++	file(GLOB headers "Be*.h")
++	file(GLOB sources "Be*.cpp")
+ elseif (UNIX)
+ 	file(GLOB headers "XWindows*.h")
+ 	file(GLOB sources "XWindows*.cpp")
+diff --git a/src/lib/synergy/DragInformation.cpp b/src/lib/synergy/DragInformation.cpp
+index fe1d8b5..a991a1b 100644
+--- a/src/lib/synergy/DragInformation.cpp
++++ b/src/lib/synergy/DragInformation.cpp
+@@ -68,7 +68,7 @@ CDragInformation::parseDragInfo(CDragFileList& dragFileList, UInt32 fileNum, CSt
+ 			CString filesize = data.substr(findResult1 + 1,
+ 										   findResult2 - findResult1 - 1);
+ 			size_t size = stringToNum(filesize);
+-			dragFileList.at(index).setFilesize(size);
++			dragFileList[index].setFilesize(size);
+ 		}
+ 		startPos = findResult1 + 1;
+ 		
+@@ -81,7 +81,7 @@ CDragInformation::parseDragInfo(CDragFileList& dragFileList, UInt32 fileNum, CSt
+ 	for (size_t i = 0; i < dragFileList.size(); ++i) {
+ 		LOG((CLOG_DEBUG2 "dragging file %i name: %s",
+ 			i + 1,
+-			dragFileList.at(i).getFilename().c_str()));
++			dragFileList[i].getFilename().c_str()));
+ 	}
+ }
+ 
+@@ -103,9 +103,9 @@ CDragInformation::setupDragInfo(CDragFileList& fileList, CString& output)
+ {
+ 	int size = fileList.size();
+ 	for (int i = 0; i < size; ++i) {
+-		output.append(fileList.at(i).getFilename());
++		output.append(fileList[i].getFilename());
+ 		output.append(",");
+-		CString filesize = getFileSize(fileList.at(i).getFilename());
++		CString filesize = getFileSize(fileList[i].getFilename());
+ 		output.append(filesize);
+ 		output.append(",");
+ 	}
+diff --git a/src/lib/synergy/DropHelper.cpp b/src/lib/synergy/DropHelper.cpp
+index 19d5496..594a495 100644
+--- a/src/lib/synergy/DropHelper.cpp
++++ b/src/lib/synergy/DropHelper.cpp
+@@ -34,7 +34,7 @@ CDropHelper::writeToDir(const CString& destination, CDragFileList& fileList, CSt
+ #else
+ 		dropTarget.append("/");
+ #endif
+-		dropTarget.append(fileList.at(0).getFilename());
++		dropTarget.append(fileList[0].getFilename());
+ 		file.open(dropTarget.c_str(), std::ios::out | std::ios::binary);
+ 		if (!file.is_open()) {
+ 			LOG((CLOG_DEBUG "drop file failed: can not open %s", dropTarget.c_str()));
 -- 
 1.8.3.4
 
