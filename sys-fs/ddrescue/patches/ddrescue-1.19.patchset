@@ -1,0 +1,222 @@
+From aab2816dd9ba12a1b9977da56cc18b985c499f5d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Tue, 28 Oct 2014 15:27:22 +0100
+Subject: [PATCH] Add proper device size and name detection on Haiku
+
+Haiku does not support lseek(SEEK_END) on block devices.
+Well, actually it does but it seeks to the stat()-reported
+length, which is zero.
+---
+ Makefile.in |  5 +++--
+ ddrescue.h  | 16 ++++++++++++++++
+ haiku.cc    | 63 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ haiku.h     | 19 +++++++++++++++++++
+ linux.cc    |  4 ----
+ main.cc     |  8 ++++----
+ 6 files changed, 105 insertions(+), 10 deletions(-)
+ create mode 100644 haiku.cc
+ create mode 100644 haiku.h
+
+diff --git a/Makefile.in b/Makefile.in
+index de0c787..f713d1b 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -7,7 +7,7 @@ INSTALL_DIR = $(INSTALL) -d -m 755
+ SHELL = /bin/sh
+ 
+ ddobjs = fillbook.o genbook.o io.o logbook.o rescuebook.o main.o
+-objs = arg_parser.o block.o linux.o logfile.o loggers.o rational.o $(ddobjs)
++objs = arg_parser.o block.o haiku.o linux.o logfile.o loggers.o rational.o $(ddobjs)
+ logobjs = arg_parser.o block.o logbook.o logfile.o ddrescuelog.o
+ 
+ 
+@@ -42,13 +42,14 @@ $(objs)       : Makefile
+ $(ddobjs)     : block.h ddrescue.h
+ arg_parser.o  : arg_parser.h
+ block.o       : block.h
++haiku.o       : haiku.h
+ io.o          : loggers.h
+ linux.o       : linux.h
+ logfile.o     : block.h
+ loggers.o     : block.h loggers.h
+ rational.o    : rational.h
+ rescuebook.o  : loggers.h
+-main.o        : arg_parser.h rational.h linux.h loggers.h main_common.cc
++main.o        : arg_parser.h rational.h loggers.h main_common.cc
+ ddrescuelog.o : Makefile arg_parser.h block.h ddrescue.h main_common.cc
+ 
+ 
+diff --git a/ddrescue.h b/ddrescue.h
+index 59d3111..d494913 100644
+--- a/ddrescue.h
++++ b/ddrescue.h
+@@ -264,3 +264,19 @@ const char * format_time( long t );
+ bool interrupted();
+ void set_signals();
+ int signaled_exit();
++
++
++// Default implementations
++#if !defined __HAIKU__
++inline long long device_size( const int fd ) {
++  {
++  return lseek( fd, 0, SEEK_END );
++  }
++#else
++long long device_size( const int fd );
++#endif
++#if !defined USE_LINUX && !defined __HAIKU__
++inline const char * device_id( const int ) { return 0; }
++#else
++const char * device_id( const int );
++#endif
+diff --git a/haiku.cc b/haiku.cc
+new file mode 100644
+index 0000000..a78e0da
+--- /dev/null
++++ b/haiku.cc
+@@ -0,0 +1,63 @@
++/*  GNU ddrescue - Data recovery tool
++    Copyright (C) 2014 Antonio Diaz Diaz.
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include "haiku.h"
++
++#ifdef __HAIKU__
++#include <cctype>
++#include <string>
++#include <unistd.h>
++#include <Drivers.h>
++
++
++void sanitize_string( std::string & str )
++  {
++  for( unsigned i = str.size(); i > 0; --i )	// remove non-printable chars
++    {
++    const unsigned char ch = str[i-1];
++    if( std::isspace( ch ) ) str[i-1] = ' ';
++    else if( ch < 32 || ch > 126 ) str.erase( i - 1, 1 );
++    }
++  for( unsigned i = str.size(); i > 0; --i )	// remove duplicate spaces
++    if( str[i-1] == ' ' && ( i <= 1 || i >= str.size() || str[i-2] == ' ' ) )
++      str.erase( i - 1, 1 );
++  }
++
++const char * device_id( const int fd )
++  {
++  static std::string id_str;
++  char id[256];
++
++  if( ioctl( fd, B_GET_DEVICE_NAME, &id, sizeof(id) ) != 0 ) return 0;
++  id_str = (const char *)id;
++  // XXX: is it needed anyway?
++  sanitize_string( id_str );
++  return id_str.c_str();
++  }
++
++off_t device_size( const int fd )
++  {
++  off_t size;
++  device_geometry geom;
++
++  if( ioctl( fd, B_GET_GEOMETRY, &geom, sizeof(geom) ) != 0 ) return 0;
++  size = (off_t)geom.bytes_per_sector * geom.sectors_per_track;
++  size *= (off_t)geom.cylinder_count * geom.head_count;
++  return size;
++  }
++
++#endif
+diff --git a/haiku.h b/haiku.h
+new file mode 100644
+index 0000000..00033fd
+--- /dev/null
++++ b/haiku.h
+@@ -0,0 +1,19 @@
++/*  GNU ddrescue - Data recovery tool
++    Copyright (C) 2014 Antonio Diaz Diaz.
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++const char * device_id( const int fd );
++long long device_size( const int fd );
+diff --git a/linux.cc b/linux.cc
+index c1021b5..89b3727 100644
+--- a/linux.cc
++++ b/linux.cc
+@@ -53,8 +53,4 @@ const char * device_id( const int fd )
+   return 0;
+   }
+ 
+-#else
+-
+-const char * device_id( const int ) { return 0; }
+-
+ #endif
+diff --git a/main.cc b/main.cc
+index 2f5fb8b..f93abcb 100644
+--- a/main.cc
++++ b/main.cc
+@@ -296,7 +296,7 @@ int do_generate( const long long offset, Domain & domain,
+   const int ides = open( iname, O_RDONLY | O_BINARY );
+   if( ides < 0 )
+     { show_error( "Can't open input file", errno ); return 1; }
+-  const long long isize = lseek( ides, 0, SEEK_END );
++  const long long isize = device_size( ides );
+   if( isize < 0 )
+     { show_error( "Input file is not seekable." ); return 1; }
+ 
+@@ -337,7 +337,7 @@ const char * device_id_or_size( const int fd )
+   const char * p = device_id( fd );
+   if( !p )
+     {
+-    const long long size = lseek( fd, 0, SEEK_END );
++    const long long size = device_size( fd );
+     snprintf( buf, sizeof buf, "%lld", size );
+     p = buf;
+     }
+@@ -395,7 +395,7 @@ int do_rescue( const long long offset, Domain & domain,
+   const int ides = open( iname, O_RDONLY | rb_opts.o_direct | O_BINARY );
+   if( ides < 0 )
+     { show_error( "Can't open input file", errno ); return 1; }
+-  long long isize = lseek( ides, 0, SEEK_END );
++  long long isize = device_size( ides );
+   if( isize < 0 )
+     { show_error( "Input file is not seekable." ); return 1; }
+   if( test_domain )
+@@ -578,7 +578,7 @@ bool Rescuebook::reopen_infile()
+   ides_ = open( iname_, O_RDONLY | o_direct | O_BINARY );
+   if( ides_ < 0 )
+     { final_msg( "Can't reopen input file", errno ); return false; }
+-  const long long isize = lseek( ides_, 0, SEEK_END );
++  const long long isize = device_size( ides_ );
+   if( isize < 0 )
+     { final_msg( "Input file has become not seekable", errno ); return false; }
+   return true;
+-- 
+1.8.3.4
+
