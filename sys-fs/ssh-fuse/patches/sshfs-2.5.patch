@@ -1,0 +1,198 @@
+From aa681affefcdfdf8f1e5074879e3397727ac0703 Mon Sep 17 00:00:00 2001
+From: Sergei Reznikov <diver@gelios.net>
+Date: Mon, 17 Nov 2014 17:53:14 +0300
+Subject: [PATCH 1/2] gcc2 fix
+
+---
+ sshfs.c | 44 ++++++++++++++++++++++++++------------------
+ 1 file changed, 26 insertions(+), 18 deletions(-)
+
+diff --git a/sshfs.c b/sshfs.c
+index 96b98a5..a34ee13 100644
+--- a/sshfs.c
++++ b/sshfs.c
+@@ -1624,6 +1624,7 @@ static int sftp_check_root(const char *base_path)
+ 	struct stat stbuf;
+ 	struct iovec iov[1];
+ 	int err = -1;
++	int err2 ;
+ 	const char *remote_dir = base_path[0] ? base_path : ".";
+ 
+ 	buf_init(&buf, 0);
+@@ -1655,7 +1656,7 @@ static int sftp_check_root(const char *base_path)
+ 		goto out;
+ 	}
+ 
+-	int err2 = buf_get_attrs(&buf, &stbuf, &flags);
++	err2 = buf_get_attrs(&buf, &stbuf, &flags);
+ 	if (err2) {
+ 		err = err2;
+ 		goto out;
+@@ -3634,20 +3635,23 @@ static void parse_idmap_line(char *line, const char* filename,
+ {
+ 	/* chomp off the trailing newline */
+ 	char *p = line;
++	char *tokens[IDMAP_FIELDS];
++	char *tok;
++	int i;
++	char *name_tok;
++	char *id_tok;
++	uint32_t remote_id;
+ 	if ((p = strrchr(line, '\n')))
+ 		*p = '\0';
+ 	else if (!eof) {
+ 		fprintf(stderr, "%s:%u: line too long\n", filename, lineno);
+ 		exit(1);
+ 	}
+-	char *tokens[IDMAP_FIELDS];
+-	char *tok;
+-	int i;
+ 	for (i = 0; (tok = strsep(&line, ":")) && (i < IDMAP_FIELDS) ; i++) {
+ 		tokens[i] = tok;
+ 	}
+ 
+-	char *name_tok, *id_tok;
++	name_tok, *id_tok;
+ 	if (i == 2) {
+ 		/* assume name:id format */
+ 		name_tok = tokens[0];
+@@ -3662,7 +3666,7 @@ static void parse_idmap_line(char *line, const char* filename,
+ 	}
+ 
+ 	errno = 0;
+-	uint32_t remote_id = strtoul(id_tok, NULL, 10);
++	remote_id = strtoul(id_tok, NULL, 10);
+ 	if (errno) {
+ 		fprintf(stderr, "Invalid id number on line %u of '%s': %s\n",
+ 				lineno, filename, strerror(errno));
+@@ -3677,12 +3681,17 @@ static void parse_idmap_line(char *line, const char* filename,
+ static void read_id_map(char *file, uint32_t *(*map_fn)(char *),
+ 		const char *name_id, GHashTable **idmap, GHashTable **r_idmap)
+ {
+-	*idmap = g_hash_table_new(NULL, NULL);
+-	*r_idmap = g_hash_table_new(NULL, NULL);
+ 	FILE *fp;
++	struct stat st;
++	uid_t local_uid = getuid();
+ 	char line[LINE_MAX];
+ 	unsigned int lineno = 0;
+-	uid_t local_uid = getuid();
++	uint32_t remote_id;
++	uint32_t *local_id;
++	char *name;
++
++	*idmap = g_hash_table_new(NULL, NULL);
++	*r_idmap = g_hash_table_new(NULL, NULL);
+ 
+ 	fp = fopen(file, "r");
+ 	if (fp == NULL) {
+@@ -3690,7 +3699,6 @@ static void read_id_map(char *file, uint32_t *(*map_fn)(char *),
+ 				file, strerror(errno));
+ 		exit(1);
+ 	}
+-	struct stat st;
+ 	if (fstat(fileno(fp), &st) == -1) {
+ 		fprintf(stderr, "failed to stat '%s': %s\n", file,
+ 				strerror(errno));
+@@ -3708,8 +3716,6 @@ static void read_id_map(char *file, uint32_t *(*map_fn)(char *),
+ 
+ 	while (fgets(line, LINE_MAX, fp) != NULL) {
+ 		lineno++;
+-		uint32_t remote_id;
+-		char *name;
+ 
+ 		/* skip blank lines */
+ 		if (line[0] == '\n' || line[0] == '\0')
+@@ -3717,7 +3723,7 @@ static void read_id_map(char *file, uint32_t *(*map_fn)(char *),
+ 
+ 		parse_idmap_line(line, file, lineno, &remote_id, &name, feof(fp));
+ 
+-		uint32_t *local_id = map_fn(name);
++		local_id = map_fn(name);
+ 		if (local_id == NULL) {
+ 			/* not found */
+ 			DEBUG("%s(%u): no local %s\n", name, remote_id, name_id);
+@@ -3744,8 +3750,9 @@ static void read_id_map(char *file, uint32_t *(*map_fn)(char *),
+  * exist on this system */
+ static uint32_t *username_to_uid(char *name)
+ {
+-	errno = 0;
+ 	struct passwd *pw = getpwnam(name);
++	uint32_t *r;
++	errno = 0;
+ 	if (pw == NULL) {
+ 		if (errno == 0) {
+ 			/* "does not exist" */
+@@ -3755,7 +3762,7 @@ static uint32_t *username_to_uid(char *name)
+ 				name, strerror(errno));
+ 		exit(1);
+ 	}
+-	uint32_t *r = malloc(sizeof(uint32_t));
++	*r = malloc(sizeof(uint32_t));
+ 	if (r == NULL) {
+ 		fprintf(stderr, "sshfs: memory allocation failed\n");
+ 		abort();
+@@ -3768,8 +3775,9 @@ static uint32_t *username_to_uid(char *name)
+  * exist on this system */
+ static uint32_t *groupname_to_gid(char *name)
+ {
+-	errno = 0;
+ 	struct group *gr = getgrnam(name);
++	uint32_t *r;
++	errno = 0;
+ 	if (gr == NULL) {
+ 		if (errno == 0) {
+ 			/* "does not exist" */
+@@ -3779,7 +3787,7 @@ static uint32_t *groupname_to_gid(char *name)
+ 				name, strerror(errno));
+ 		exit(1);
+ 	}
+-	uint32_t *r = malloc(sizeof(uint32_t));
++	*r = malloc(sizeof(uint32_t));
+ 	if (r == NULL) {
+ 		fprintf(stderr, "sshfs: memory allocation failed\n");
+ 		abort();
+@@ -3943,7 +3951,7 @@ int main(int argc, char *argv[])
+ 	g_free(fsname);
+ 	check_large_read(&args);
+ 
+-#if FUSE_VERSION >= 26
++#if 0 //FUSE_VERSION >= 26
+ 	{
+ 		struct fuse *fuse;
+ 		struct fuse_chan *ch;
+-- 
+1.8.3.4
+
+
+From 79b5f2e2fdefd9638a761ac7ecf1278fe8680361 Mon Sep 17 00:00:00 2001
+From: Sergei Reznikov <diver@gelios.net>
+Date: Mon, 17 Nov 2014 17:53:50 +0300
+Subject: [PATCH 2/2] workaround "type of file differs from mountpoint" error
+
+---
+ sshfs.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/sshfs.c b/sshfs.c
+index a34ee13..6fcd365 100644
+--- a/sshfs.c
++++ b/sshfs.c
+@@ -1670,12 +1670,12 @@ static int sftp_check_root(const char *base_path)
+ 			remote_dir);
+ 		goto out;
+ 	}
+-	if ((sshfs.mnt_mode ^ stbuf.st_mode) & S_IFMT) {
++/*	if ((sshfs.mnt_mode ^ stbuf.st_mode) & S_IFMT) {
+ 		fprintf(stderr, "%s:%s: type of file differs from mountpoint\n",
+ 			sshfs.host, remote_dir);
+ 		goto out;
+ 	}
+-
++*/
+ 	err = 0;
+ 
+ out:
+-- 
+1.8.3.4
+
