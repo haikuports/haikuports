@@ -1,0 +1,165 @@
+From 4bceec3bc45e00d53904c01167a2703d2f5242ac Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Wed, 31 Dec 2014 23:17:09 -0800
+Subject: Fix lvalues
+
+Casts are not lvalues.
+
+diff --git a/src/almp3.c b/src/almp3.c
+index 0757ca9..e10a693 100644
+--- a/src/almp3.c
++++ b/src/almp3.c
+@@ -319,6 +319,7 @@ ALMP3_MP3 *almp3_create_mp3(void *data, int data_len) {
+   int ret;
+   char test_outbuf[8192];
+   int test_size, framebytes;
++  char **data_ptr = (char **)&data;
+ 
+   /* test for ID3v1 and if exists, skip it */
+   if (memcmp((void *)&p[data_len - 128], "TAG", 3) == 0) {
+@@ -330,7 +331,7 @@ ALMP3_MP3 *almp3_create_mp3(void *data, int data_len) {
+ 
+   /* test for ID3v2 and if exists, skip it */
+   data_start_skipped = almp3_get_id3v2_skip_bytes(p);
+-  (char *)data += data_start_skipped;
++  *data_ptr += data_start_skipped;
+   data_len -= data_start_skipped;
+ 
+   /* test the next 16 * MAXFRAMESIZE bytes after ID3v2 until we find one valid frame */
+@@ -378,7 +379,7 @@ ALMP3_MP3 *almp3_create_mp3(void *data, int data_len) {
+ 
+     data_start_skipped += skipbytes;
+     data_len -= skipbytes;
+-    (char *)data += skipbytes;
++    *data_ptr += skipbytes;
+   }
+ 
+   /* must be layer III or II */
+-- 
+1.8.3.4
+
+
+From 500c50db231aa5bba5bfbd4029215d1a82f7a76f Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Wed, 31 Dec 2014 23:16:56 -0800
+Subject: Add makefile rules for Haiku and make obj and lib dir before building
+
+
+diff --git a/Makefile b/Makefile
+index 508570f..43f3654 100644
+--- a/Makefile
++++ b/Makefile
+@@ -7,7 +7,7 @@
+ #TARGET=MINGW32_STATIC
+ #TARGET=MINGW32_DLL
+ #TARGET=LINUX_STATIC
+-TARGET=SOLARIS_DYNAMIC
++#TARGET=SOLARIS_DYNAMIC
+ 
+ prefix = /opt/BCallegro
+ exec_prefix = ${prefix}
+@@ -60,6 +60,19 @@ ALMP3_DLL_EXPORTS=1
+ endif
+ 
+ 
++# HAIKU_STATIC
++ifeq ($(TARGET),HAIKU_STATIC)
++TARGETFLAGS=-Wall -O2 -march=pentium -fomit-frame-pointer -finline-functions -ffast-math
++OBJDIR=obj/haiku/static
++LIBDEST=lib/haiku/libalmp3.a
++endif
++
++# HAIKU_DYNAMIC
++ifeq ($(TARGET),HAIKU_DYNAMIC)
++TARGETFLAGS=-Wall -O2 -march=pentium -fomit-frame-pointer -finline-functions -ffast-math -shared
++OBJDIR=obj/haiku/dynamic
++LIBDEST=lib/haiku/libalmp3.so
++endif
+ 
+ # LINUX_STATIC
+ ifeq ($(TARGET),LINUX_STATIC)
+@@ -90,6 +103,11 @@ OBJECTS2=$(addprefix $(OBJDIR)/,$(OBJECTS))
+ 
+ # making of the library
+ 
++$(LIBDEST): $(dir $(LIBDEST))
++
++$(dir $(LIBDEST)):
++	mkdir -p $@
++
+ # MINGW32_DLL
+ ifeq ($(TARGET),MINGW32_DLL)
+ $(LIBDEST): $(OBJECTS)
+@@ -97,9 +115,9 @@ $(LIBDEST): $(OBJECTS)
+ 
+ # others
+ else
+-ifeq ($(TARGET),SOLARIS_DYNAMIC)
++ifeq ($(findstring _DYNAMIC,$(TARGET)),_DYNAMIC)
+ $(LIBDEST): $(OBJECTS)
+-	$(CC) -o $@ $(OBJECTS2) $(LFLAGS) $(CFLAGS) -lalleg-4.2.0
++	$(CC) -o $@ $(OBJECTS2) $(LFLAGS) $(CFLAGS) -lalleg
+ else
+ $(LIBDEST): $(OBJECTS)
+ 	ar rs $(LIBDEST) $(OBJECTS2)
+@@ -108,9 +126,12 @@ endif
+ 
+ 
+ # compiling of the library
+-%.o: %.c
++%.o: %.c $(OBJDIR)
+ 	$(CC) -c $(CFLAGS) $< -o $(OBJDIR)/$@
+ 
++$(OBJDIR):
++	mkdir -p $@
++
+ install:
+ 	$(INSTALL_DATA) -D README.txt $(DESTDIR)$(docdir)/almp3/README.txt
+ 	$(INSTALL_DATA) -D CHANGES.txt $(DESTDIR)$(docdir)/almp3/CHANGES.txt
+@@ -118,7 +139,11 @@ install:
+ 	$(INSTALL_DATA) -D docs/AUTHORS.txt $(DESTDIR)$(docdir)/almp3/AUTHORS.txt
+ 	$(INSTALL_DATA) -D docs/COPYING.txt $(DESTDIR)$(docdir)/almp3/COPYING.txt
+ 	$(INSTALL_DATA) -D include/almp3.h $(DESTDIR)$(includedir)/almp3.h
+-	$(INSTALL) -m 755 -D $(LIBDEST) $(DESTDIR)$(libdir)/libalmp3.so
++ifeq ($(findstring _DYNAMIC,$(TARGET)),_DYNAMIC)
++	$(INSTALL) -m 755 -D $(LIBDEST) $(DESTDIR)$(libdir)/$(notdir $(LIBDEST))
++else
++	$(INSTALL) -m 644 -D $(LIBDEST) $(DESTDIR)$(libdir)/$(notdir $(LIBDEST))
++endif
+ 
+ clean:
+ 	rm -f $(OBJECTS2) $(LIBDEST) $(LIBIMP)
+-- 
+1.8.3.4
+
+
+From 801ceeecb0770d2d6378fcf79339982474d15038 Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Thu, 1 Jan 2015 00:38:16 -0800
+Subject: Assume docdir already covers the specific package name
+
+
+diff --git a/Makefile b/Makefile
+index 43f3654..32a43bd 100644
+--- a/Makefile
++++ b/Makefile
+@@ -133,11 +133,11 @@ $(OBJDIR):
+ 	mkdir -p $@
+ 
+ install:
+-	$(INSTALL_DATA) -D README.txt $(DESTDIR)$(docdir)/almp3/README.txt
+-	$(INSTALL_DATA) -D CHANGES.txt $(DESTDIR)$(docdir)/almp3/CHANGES.txt
+-	$(INSTALL_DATA) -D docs/ALMP3.txt $(DESTDIR)$(docdir)/almp3/ALMP3.txt
+-	$(INSTALL_DATA) -D docs/AUTHORS.txt $(DESTDIR)$(docdir)/almp3/AUTHORS.txt
+-	$(INSTALL_DATA) -D docs/COPYING.txt $(DESTDIR)$(docdir)/almp3/COPYING.txt
++	$(INSTALL_DATA) -D README.txt $(DESTDIR)$(docdir)/README.txt
++	$(INSTALL_DATA) -D CHANGES.txt $(DESTDIR)$(docdir)/CHANGES.txt
++	$(INSTALL_DATA) -D docs/ALMP3.txt $(DESTDIR)$(docdir)/ALMP3.txt
++	$(INSTALL_DATA) -D docs/AUTHORS.txt $(DESTDIR)$(docdir)/AUTHORS.txt
++	$(INSTALL_DATA) -D docs/COPYING.txt $(DESTDIR)$(docdir)/COPYING.txt
+ 	$(INSTALL_DATA) -D include/almp3.h $(DESTDIR)$(includedir)/almp3.h
+ ifeq ($(findstring _DYNAMIC,$(TARGET)),_DYNAMIC)
+ 	$(INSTALL) -m 755 -D $(LIBDEST) $(DESTDIR)$(libdir)/$(notdir $(LIBDEST))
+-- 
+1.8.3.4
+
