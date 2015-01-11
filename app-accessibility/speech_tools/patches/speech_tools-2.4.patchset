@@ -1,0 +1,3015 @@
+From e6652c7af6115fb1e3465f79fa7344fcb030389e Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Thu, 25 Dec 2014 14:13:10 -0800
+Subject: Proper compiling routines
+
+Backported from Debian: debian_build.diff
+
+Signed-off-by: Timothy Gu <timothygu99@gmail.com>
+
+diff --git a/config/compilers/gcc_defaults.mak b/config/compilers/gcc_defaults.mak
+index 193ce24..befcd31 100644
+--- a/config/compilers/gcc_defaults.mak
++++ b/config/compilers/gcc_defaults.mak
+@@ -39,7 +39,7 @@
+  ###########################################################################
+ 
+ CC=gcc
+-CXX=gcc
++CXX=g++
+ ifeq ($(OSTYPE),Darwin)
+ CXX=g++
+ endif
+@@ -47,8 +47,9 @@ endif
+ COMPILER_DESC=FSF gcc
+ COMPILER_VERSION_COMMAND=$(CXX) -v 2>&1 | tail -1 | sed -e 's/^....//'
+ 
+-CFLAGS  = $(GCC_SYSTEM_OPTIONS) $(CC_OTHER_FLAGS)
+-CXXFLAGS  =  $(GCC_SYSTEM_OPTIONS) -fno-implicit-templates $(CC_OTHER_FLAGS)
++CFLAGS    += $(GCC_SYSTEM_OPTIONS) $(CC_OTHER_FLAGS) $(CPPFLAGS)
++CXXFLAGS  +=  $(GCC_SYSTEM_OPTIONS) $(CC_OTHER_FLAGS) $(CPPFLAGS)
++LINKFLAGS +=  $(LDFLAGS)
+ 
+ DEBUG_CCFLAGS   = -g
+ DEBUG_CXXFLAGS  = -g
+@@ -81,7 +82,7 @@ SHARED_CXXFLAGS  = -fPIC
+ SHARED_LINKFLAGS = 
+ 
+ ifndef GCC_MAKE_SHARED_LIB
+-    MAKE_SHARED_LIB = $(CXX) -shared -fno-shared-data -o XXX
++    MAKE_SHARED_LIB = $(CXX) -shared -o XXX -Wl,-soname -Wl,YYY
+ else
+     MAKE_SHARED_LIB = $(GCC_MAKE_SHARED_LIB)
+ endif
+diff --git a/config/project.mak b/config/project.mak
+index 5e9c216..2578fc1 100644
+--- a/config/project.mak
++++ b/config/project.mak
+@@ -103,12 +103,15 @@ PROJECT_LIBRARY_USES_estbase = eststring
+ 
+ PROJECT_LIBRARY_USES_estjava = estbase eststring
+ 
+-PROJECT_LIBRARY_VERSION_estools = $(PROJECT_VERSION).1
+-PROJECT_LIBRARY_VERSION_estbase = $(PROJECT_VERSION).1
+-PROJECT_LIBRARY_VERSION_eststring = 1.2
+-PROJECT_LIBRARY_VERSION_estjava = $(PROJECT_VERSION).1
++# These are used for the SONAME fields in ELF libraries
++PROJECT_LIBRARY_VERSION_estools = $(PROJECT_MAJOR_VERSION)
++PROJECT_LIBRARY_VERSION_estbase = $(PROJECT_MAJOR_VERSION)
++PROJECT_LIBRARY_VERSION_eststring = $(PROJECT_MAJOR_VERSION)
++PROJECT_LIBRARY_VERSION_estjava = $(PROJECT_MAJOR_VERSION)
+ 
+ PROJECT_LIBRARY_NEEDS_SYSLIBS_estjava=1
++# This line allows estbase to link with libpulse among others
++PROJECT_LIBRARY_NEEDS_SYSLIBS_estbase=1
+ 
+ PROJECT_DEFAULT_LIBRARY = estools
+ 
+diff --git a/config/rules/bin_process.mak b/config/rules/bin_process.mak
+index a1b9807..7158f83 100644
+--- a/config/rules/bin_process.mak
++++ b/config/rules/bin_process.mak
+@@ -59,6 +59,7 @@ endif
+ 		Makefile ) : ;; \
+ 		VCLocalRules ) : ;; \
+ 		RCS|CVS ) : ;; \
++		SCCS|BitKeeper ) : ;; \
+ 		* ) $(ECHO_N) " $$i"; $(RM) -f "$$i";; \
+ 	    esac \
+ 	done
+diff --git a/config/rules/library.mak b/config/rules/library.mak
+index 0181988..497180f 100644
+--- a/config/rules/library.mak
++++ b/config/rules/library.mak
+@@ -102,15 +102,44 @@ endif
+  ##                                                                       ##
+  ###########################################################################
+ 
++libestools.so : libestools.a
++	echo Make Shared Library estools
++	if [ ! -d shared_space ] ; then mkdir shared_space ; else $(RM) -f shared_space/*.o ; fi
++	(cd shared_space ; $(AR) x ../$< )
++	echo Link Shared Library estools
++	if [ -n "$(PROJECT_LIBRARY_NEEDS_SYSLIBS_estools)" ] ; then libs='$(JAVA_PROJECT_LIBS)' ; fi ;\
++	$(subst YYY,$@.$(PROJECT_LIBRARY_VERSION_estools),\
++		$(subst XXX,$@.$(PROJECT_VERSION),$(MAKE_SHARED_LIB))) \
++		shared_space/*.o $(PROJECT_LIBRARY_USES_estools:%=-L. -l%) $$libs -L. -lestbase -leststring -lncurses
++	$(RM) -f shared_space/*.o $@
++	-ln -sf $@.$(PROJECT_VERSION) $@.$(PROJECT_LIBRARY_VERSION_estools)
++	-ln -sf $@.$(PROJECT_LIBRARY_VERSION_estools) $@
++
++libestbase.so : libestbase.a
++	echo Make Shared Library estbase
++	if [ ! -d shared_space ] ; then mkdir shared_space ; else $(RM) -f shared_space/*.o ; fi
++	(cd shared_space ; $(AR) x ../$< )
++	echo Link Shared Library estbase
++	if [ -n "$(PROJECT_LIBRARY_NEEDS_SYSLIBS_estbase)" ] ; then libs='$(JAVA_PROJECT_LIBS)' ; fi ;\
++	$(subst YYY,$@.$(PROJECT_LIBRARY_VERSION_estbase),\
++		$(subst XXX,$@.$(PROJECT_VERSION),$(MAKE_SHARED_LIB))) \
++		shared_space/*.o $(PROJECT_LIBRARY_USES_estbase:%=-L. -l%) $$libs -L.
++	$(RM) -f shared_space/*.o $@
++	-ln -sf $@.$(PROJECT_VERSION) $@.$(PROJECT_LIBRARY_VERSION_estbase)
++	-ln -sf $@.$(PROJECT_LIBRARY_VERSION_estbase) $@
++
+ lib%.so : lib%.a
+-	@echo Make Shared Library $*
+-	@if [ ! -d shared_space ] ; then mkdir shared_space ; else $(RM) -f shared_space/*.o ; fi
+-	@(cd shared_space ; $(AR) x ../$< ) 
+-	@echo Link Shared Library $*
++	echo Make Shared Library $*
++	if [ ! -d shared_space ] ; then mkdir shared_space ; else $(RM) -f shared_space/*.o ; fi
++	(cd shared_space ; $(AR) x ../$< )
++	echo Link Shared Library $*
+ 	if [ -n "$(PROJECT_LIBRARY_NEEDS_SYSLIBS_$*)" ] ; then libs='$(JAVA_PROJECT_LIBS)' ; fi ;\
+-	$(subst XXX,$@.$(PROJECT_LIBRARY_VERSION_$*),$(MAKE_SHARED_LIB)) shared_space/*.o $(PROJECT_LIBRARY_USES_$*:%=-L. -l%) $$libs
+-	@$(RM) -f shared_space/*.o $@
+-	@ln -s $@.$(PROJECT_LIBRARY_VERSION_$*) $@
++	$(subst YYY,$@.$(PROJECT_LIBRARY_VERSION_$*),\
++		$(subst XXX,$@.$(PROJECT_VERSION),$(MAKE_SHARED_LIB))) \
++		shared_space/*.o $(PROJECT_LIBRARY_USES_$*:%=-L. -l%) $$libs
++	$(RM) -f shared_space/*.o $@
++	-ln -sf $@.$(PROJECT_VERSION) $@.$(PROJECT_LIBRARY_VERSION_$*)
++	-ln -sf $@.$(PROJECT_LIBRARY_VERSION_$*) $@
+ 
+  ###########################################################################
+  ##                                                                       ##
+diff --git a/config/rules/targets.mak b/config/rules/targets.mak
+index f052401..0c55b00 100644
+--- a/config/rules/targets.mak
++++ b/config/rules/targets.mak
+@@ -71,7 +71,7 @@ ifdef ALL_DIRS
+ 	@ for i in $(ALL_DIRS) ; \
+ 	do \
+ 	   echo "clean in $(DIRNAME)/$$i" ;\
+-	   $(MAKE) --no-print-directory -C $$i clean ; \
++	   $(MAKE) --no-print-directory -C $$i NO_DEPEND=1 clean ; \
+ 	done
+ endif
+ ifdef EXTRA_LIB_BUILD_DIRS
+diff --git a/config/system.sh b/config/system.sh
+index af07781..71b271c 100644
+--- a/config/system.sh
++++ b/config/system.sh
+@@ -60,8 +60,7 @@ OSREV=`{ uname -r || echo ""; } 2> /dev/null |
+ 	sed -e 's/^\([^.]*\)\(\.[^-. ]*\).*/\1\2/'`
+ 
+ # Sort out various flavours of Linux
+-if [ "$OSTYPE" = Linux ]
+-    then
++case "$OSTYPE" in Linux|GNU|GNU/*)
+     if [ -f "/etc/redhat-release" ]
+ 	then
+ 	OSTYPE=RedHatLinux
+@@ -74,7 +73,8 @@ if [ "$OSTYPE" = Linux ]
+ 	# Generic unknown GNU/Linux system.
+ 	OSTYPE=Linux
+     fi
+-fi
++;;
++esac
+ 
+ # Make sure we actually have a .mak file for it, otherwise fall back
+ # to sensible defaults (for example, kernel version and architecture
+-- 
+1.8.3.4
+
+
+From 0eca7062ef526b969b4bc63a396bf380838369ee Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Thu, 25 Dec 2014 14:14:58 -0800
+Subject: Use datadir for architecure-independent runtime libs
+
+Backported from Debian: datadir_fhs.diff, revision 7ec39b344cab.
+
+Signed-off-by: Timothy Gu <timothygu99@gmail.com>
+
+diff --git a/include/EST_cutils.h b/include/EST_cutils.h
+index c285204..8c8dc31 100644
+--- a/include/EST_cutils.h
++++ b/include/EST_cutils.h
+@@ -48,6 +48,7 @@ extern "C" {
+ extern const char * const est_tools_version;
+ extern const char * const est_name;
+ extern const char * const est_libdir;
++extern const char * const est_datadir;
+ extern const char * const est_ostype;
+ 
+ #include "EST_walloc.h"
+diff --git a/lib/siod/siod.scm b/lib/siod/siod.scm
+index a910390..227d48f 100644
+--- a/lib/siod/siod.scm
++++ b/lib/siod/siod.scm
+@@ -426,19 +426,28 @@ return values."
+ ;; will be set automatically on start-up
+ (defvar libdir '<automatically_set>
+   "libdir
+-  The pathname of the run-time libary directory.  Note reseting is 
+-  almost definitely not what you want to do.   This value is automatically
+-  set at start up from the value specifed at compile-time or the value
+-  specifed with --libdir on the command line.  A number of other variables
+-  depend on this value.")
+-
+-(defvar load-path (list libdir)
++  The pathname of the architecture-dependent run-time libary directory.
++  Note reseting is almost definitely not what you want to do.   This
++  value is automatically set at start up from the value specifed at
++  compile-time or the value specifed with --libdir on the command line.
++  A number of other variables depend on this value.")
++
++(defvar datadir '<automatically_set>
++  "datadir
++  The pathname of the architecture-independent run-time libary
++  directory.  Note reseting is almost definitely not what you want to
++  do.   This value is automatically set at start up from the value
++  specifed at compile-time or the value specifed with --datadir on the
++  command line.  A number of other variables depend on this value.")
++
++(defvar load-path (list datadir)
+   "load-path
+   A list of directories containing .scm files.  Used for various functions
+   such as load_library and require.  Follows the same use as EMACS.  By
+-  default it is set up to the compile-time library directory but may be 
+-  changed by the user at run time, by adding a user's own library directory
+-  or even replacing all of the standard library. [see Site initialization]")
++  default it is set up to the compile-time architecture-independent
++  library directory but may be changed by the user at run time, by
++  adding a user's own library directory or even replacing all of the
++  standard library. [see Site initialization]")
+ 
+ ;; will be set automatically on start-up
+ (defvar *ostype* 'unknown
+@@ -447,12 +456,6 @@ return values."
+   on, e.g. SunOS5, FreeBSD, linux etc.  The value is taken from the Makefile
+   variable OSTYPE at compile time.")
+ 
+-(defvar etc-path (path-append libdir "etc/" *ostype*)
+-  "etc-path
+-  A list of directories where binaries specific to Festival may be located.
+-  This variable is automatically set to LIBDIR/etc/OSTYPE/
+-  and that path is added to the end of the UNIX PATH environment variable.")
+-
+ (define (library_expand_filename fname)
+ "(library_expand_filename FILENAME)
+   Search for filename by appending FILENAME to each member of load-path.
+diff --git a/main/siod_main.cc b/main/siod_main.cc
+index 2c4a1a0..e93ba6c 100644
+--- a/main/siod_main.cc
++++ b/main/siod_main.cc
+@@ -178,7 +178,7 @@ static void siod_load_default_files(void)
+     EST_Pathname initfile;
+ 
+     // Load library init first
+-    initfile = EST_Pathname(est_libdir).as_directory();
++    initfile = EST_Pathname(est_datadir).as_directory();
+     initfile += "siod";
+     initfile += "init.scm";
+ 
+@@ -197,9 +197,12 @@ static void siod_lisp_vars(void)
+ 
+     lib = EST_Pathname(est_libdir).as_directory();
+     lib += "siod";
+-    
+     siod_set_lval("libdir",strintern(lib));
+ 
++    lib = EST_Pathname(est_datadir).as_directory();
++    lib += "siod";
++    siod_set_lval("datadir",strintern(lib));
++
+     if (!strcmp(est_ostype,""))
+       siod_set_lval("*ostype*",rintern(est_ostype));
+     siod_set_lval("est_version",
+@@ -221,19 +224,10 @@ static void siod_lisp_vars(void)
+ 		       cons(flocons(minor),
+ 			    cons(flocons(subminor),NIL))));
+ 
+-    EST_Pathname etcdircommon = est_libdir;
+-    etcdircommon += "etc";
+-
+-    EST_Pathname etcdir = etcdircommon;
+-    etcdir += est_ostype;
+-    
+     //  Modify my PATH to include these directories
+-    siod_set_lval("etc-path",cons(rintern(etcdir),
+-				  cons(rintern(etcdircommon),NIL)));
+-
+     EST_String path = getenv("PATH");
+ 
+-    path += ":" + EST_String(etcdir) + ":" +  EST_String(etcdircommon);
++    path += ":" + EST_String(est_libdir);
+ 
+     putenv(wstrdup("PATH=" + path));
+     
+diff --git a/main/xml_parser_main.cc b/main/xml_parser_main.cc
+index 41579f6..8f8a7e1 100644
+--- a/main/xml_parser_main.cc
++++ b/main/xml_parser_main.cc
+@@ -165,7 +165,7 @@ int main(int argc, char *argv[])
+ 		       al.sval("-sysdir") + "/\\1");
+ 
+   pclass.register_id("//CSTR//EST \\(.*\\)",
+-		     EST_String::cat(est_libdir, "/\\1.dtd"));
++		     EST_String::cat(est_datadir, "/\\1.dtd"));
+ 
+   /* An individual parser runs over a single source.
+     */
+diff --git a/utils/EST_cutils.c b/utils/EST_cutils.c
+index fd29653..af30aed 100644
+--- a/utils/EST_cutils.c
++++ b/utils/EST_cutils.c
+@@ -54,12 +54,19 @@ const char * const est_name = STRINGIZE(ESTNAME);
+ #ifdef ESTLIBDIRC
+ #    define ESTLIBDIR STRINGIZE(ESTLIBDIRC)
+ #endif
+-
+ #ifndef ESTLIBDIR
+ #define ESTLIBDIR "/usr/local/lib/speech_tools"
+ #endif
+ 
++#ifdef ESTDATADIRC
++#    define ESTDATADIR STRINGIZE(ESTDATADIRC)
++#endif
++#ifndef ESTDATADIR
++#define ESTDATADIR "/usr/local/share/speech_tools"
++#endif
++
+ const char * const est_libdir = ESTLIBDIR;
++const char * const est_datadir = ESTDATADIR;
+ 
+ const char * const est_ostype = STRINGIZE(ESTOSTYPE);
+ 
+diff --git a/utils/Makefile b/utils/Makefile
+index c17bab4..62a0de8 100644
+--- a/utils/Makefile
++++ b/utils/Makefile
+@@ -58,5 +58,5 @@ ALL = .buildlibs
+ include $(TOP)/config/common_make_rules
+ 
+ EST_cutils.o: EST_cutils.c
+-	$(CC_COMMAND) -DESTNAME='$(PROJECT_NAME)' -DESTDATE='$(PROJECT_DATE)' -DESTVERSION='$(PROJECT_VERSION)' -DESTLIBDIRC='$(EST_HOME)/lib' -DESTSTATE='$(PROJECT_STATE)' -DESTOSTYPE='$(SYSTEM_TYPE)' EST_cutils.c
++	$(CC_COMMAND) -DESTNAME='$(PROJECT_NAME)' -DESTDATE='$(PROJECT_DATE)' -DESTVERSION='$(PROJECT_VERSION)' -DESTLIBDIR=\"$(EST_HOME)/lib\" -DESTDATADIR=\"$(EST_HOME)/share\" -DESTSTATE='$(PROJECT_STATE)' -DESTOSTYPE='$(SYSTEM_TYPE)' EST_cutils.c
+ 
+-- 
+1.8.3.4
+
+
+From 30567c705c2e5aaf1c45737ebc409a87e70bf690 Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Thu, 25 Dec 2014 14:17:52 -0800
+Subject: Use standard headers
+
+Backported from Debian: use_standard_headers.diff, rev fc5c7c603109
+
+Signed-off-by: Timothy Gu <timothygu99@gmail.com>
+
+diff --git a/include/EST_dynamic_model.h b/include/EST_dynamic_model.h
+index a54a0c5..7807f8a 100644
+--- a/include/EST_dynamic_model.h
++++ b/include/EST_dynamic_model.h
+@@ -38,8 +38,8 @@
+ /*=======================================================================*/
+ 
+ #include <cstdlib>
+-#include <stdio.h>
+-#include <fstream.h>
++#include <cstdio>
++#include <fstream>
+ #include "EST.h"
+ #include "EST_model_types.h"
+ 
+-- 
+1.8.3.4
+
+
+From a03f11db6ac385ceb2f2897214e56fec6a477eff Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Thu, 25 Dec 2014 14:19:24 -0800
+Subject: Force the use of actual template of EST_TIterator
+
+Backported from Debian: include_EST_TIterator.h.diff, rev c16015e8c96.
+
+Signed-off-by: Timothy Gu <timothygu99@gmail.com>
+
+diff --git a/include/EST_TIterator.h b/include/EST_TIterator.h
+index 7ce188e..832e8e3 100644
+--- a/include/EST_TIterator.h
++++ b/include/EST_TIterator.h
+@@ -228,7 +228,7 @@ private:
+ 
+ public:
+ 
+-  typedef EST_TIterator<Container, IPointer, Entry> Iter;
++  typedef EST_TRwIterator<Container, IPointer, Entry> Iter;
+ 
+   /// Create an iterator not associated with any specific container.
+   EST_TRwIterator() {this->cont=NULL;}
+@@ -278,7 +278,7 @@ class EST_TRwStructIterator
+ {
+ public:
+ 
+-  typedef EST_TIterator<Container, IPointer, Entry> Iter;
++  typedef EST_TRwStructIterator<Container, IPointer, Entry> Iter;
+ 
+   /// Create an iterator not associated with any specific container.
+   EST_TRwStructIterator() {this->cont=NULL;}
+-- 
+1.8.3.4
+
+
+From 5a0d0a6091371c358a47f4a6c14eadbd300b1ac0 Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Thu, 25 Dec 2014 14:22:25 -0800
+Subject: Modify data loading memory management to avoid crashes
+
+Author: Samuel Thibault
+
+Backported from Debian: speech_class/EST_WaveFile.cc, rev 1d2d56519d
+
+Signed-off-by: Timothy Gu <timothygu99@gmail.com>
+
+diff --git a/speech_class/EST_WaveFile.cc b/speech_class/EST_WaveFile.cc
+index ba8a362..7f07a31 100644
+--- a/speech_class/EST_WaveFile.cc
++++ b/speech_class/EST_WaveFile.cc
+@@ -85,7 +85,10 @@ EST_read_status load_using(standard_load_fn_fp fn,
+ 
+   if (status == read_ok)
+     {
+-      wv.values().set_memory(data, 0, nsamp, nchan, TRUE);
++      short *data2 = new short[nsamp*nchan];
++      memcpy(data2, data, nsamp*nchan*sizeof(short));
++      wfree(data);
++      wv.values().set_memory(data2, 0, nsamp, nchan, TRUE);
+       wv.set_sample_rate(srate);
+     }
+ 
+-- 
+1.8.3.4
+
+
+From 2a470daf58bcebc49461b08c678bb4dd694adf1b Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Thu, 25 Dec 2014 14:24:19 -0800
+Subject: Use 3-clause BSD license for the files derived from BSD
+
+BSD (where these two files came from) already switched to 3-clause BSD.
+
+Backported from Debian: copyright_4clausefix.diff, rev 9d3453539788.
+
+Changes to README made by me (Timothy), with the same rationale as the original
+Debian patch.
+
+Signed-off-by: Timothy Gu <timothygu99@gmail.com>
+
+diff --git a/README b/README
+index 88e3ded..dfdeae5 100644
+--- a/README
++++ b/README
+@@ -126,7 +126,7 @@ base_class/string/EST_strcasecmp.c
+    Copyright (c) 1987, 1993
+  	The Regents of the University of California.  All rights reserved.
+ 
+-   The standard BSD licence
++   The 3-clause BSD licence
+ 
+ 
+ ACKNOWLEDGEMENTS
+diff --git a/base_class/string/EST_strcasecmp.c b/base_class/string/EST_strcasecmp.c
+index 72a9b7c..1c48a32 100755
+--- a/base_class/string/EST_strcasecmp.c
++++ b/base_class/string/EST_strcasecmp.c
+@@ -10,11 +10,7 @@
+  * 2. Redistributions in binary form must reproduce the above copyright
+  *    notice, this list of conditions and the following disclaimer in the
+  *    documentation and/or other materials provided with the distribution.
+- * 3. All advertising materials mentioning features or use of this software
+- *    must display the following acknowledgement:
+- *	This product includes software developed by the University of
+- *	California, Berkeley and its contributors.
+- * 4. Neither the name of the University nor the names of its contributors
++ * 3. Neither the name of the University nor the names of its contributors
+  *    may be used to endorse or promote products derived from this software
+  *    without specific prior written permission.
+  *
+diff --git a/base_class/string/regexp.h b/base_class/string/regexp.h
+index 578c968..8b310ae 100644
+--- a/base_class/string/regexp.h
++++ b/base_class/string/regexp.h
+@@ -14,11 +14,7 @@
+  * 2. Redistributions in binary form must reproduce the above copyright
+  *    notice, this list of conditions and the following disclaimer in the
+  *    documentation and/or other materials provided with the distribution.
+- * 3. All advertising materials mentioning features or use of this software
+- *    must display the following acknowledgement:
+- *	This product includes software developed by the University of
+- *	California, Berkeley and its contributors.
+- * 4. Neither the name of the University nor the names of its contributors
++ * 3. Neither the name of the University nor the names of its contributors
+  *    may be used to endorse or promote products derived from this software
+  *    without specific prior written permission.
+  *
+-- 
+1.8.3.4
+
+
+From 3de08ae8da37beb2665fb8a256311315f5edd31c Mon Sep 17 00:00:00 2001
+From: Sergio Oller <sergioller@gmail.com>
+Date: Thu, 25 Dec 2014 14:33:54 -0800
+Subject: Seeking and reading interface to istreams in EST_TokenStream
+
+Reduces IO disk usage when using HTS voices.
+
+Backported from Debian: tokenstream_istream.diff, rev b3d550a5aa330.
+
+Signed-off-by: Timothy Gu <timothygu99@gmail.com>
+
+diff --git a/base_class/EST_Token.cc b/base_class/EST_Token.cc
+index 4287d19..533467d 100644
+--- a/base_class/EST_Token.cc
++++ b/base_class/EST_Token.cc
+@@ -287,8 +287,9 @@ int EST_TokenStream::seek_end()
+ 	return -1;
+ 	break;
+       case tst_istream:
+-	cerr << "EST_TokenStream seek on istream not yet supported" << endl;
+-	return -1;
++    is->seekg(0,is->end);
++    p_filepos = is->tellg();
++	return p_filepos;
+ 	break;
+       case tst_string:
+ 	pos = buffer_length;
+@@ -320,8 +321,9 @@ int EST_TokenStream::seek(int position)
+ 	return -1;
+ 	break;
+       case tst_istream:
+-	cerr << "EST_TokenStream seek on istream not yet supported" << endl;
+-	return -1;
++    p_filepos = position;
++    is->seekg(position, is->beg);
++	return 0;
+ 	break;
+       case tst_string:
+ 	if (position >= pos)
+@@ -381,8 +383,9 @@ int EST_TokenStream::fread(void *buff, int size, int nitems)
+ 	return 0;
+ 	break;
+       case tst_istream:
+-	cerr << "EST_TokenStream fread istream not yet supported" << endl;
+-	return 0;
++    is->read((char*)buff, (size_t) size*nitems);
++	return is->gcount()/size;
++    break;
+       case tst_string:
+ 	if ((buffer_length-pos)/size < nitems)
+ 	    items_read = (buffer_length-pos)/size;
+-- 
+1.8.3.4
+
+
+From 1a4805cb16dd6d322b8736c0846748f1bf8fa2f0 Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Thu, 25 Dec 2014 14:48:11 -0800
+Subject: Add ALAW support
+
+Backported from Debian: alaw.diff, rev da4af248.
+
+Signed-off-by: Timothy Gu <timothygu99@gmail.com>
+
+diff --git a/include/EST_wave_aux.h b/include/EST_wave_aux.h
+index 4995794..9d2bfde 100644
+--- a/include/EST_wave_aux.h
++++ b/include/EST_wave_aux.h
+@@ -97,6 +97,7 @@ void alaw_to_short(const unsigned char *alaw,short *data,int length);
+ void uchar_to_short(const unsigned char *chars,short *data,int length);
+ void short_to_char(const short *data,unsigned char *chars,int length);
+ void short_to_ulaw(const short *data,unsigned char *ulaw,int length);
++void short_to_alaw(const short *data,unsigned char *alaw,int length);
+ 
+ // Used when setting Waves in Features
+ VAL_REGISTER_CLASS_DCLS(wave,EST_Wave)
+diff --git a/speech_class/EST_WaveFile.cc b/speech_class/EST_WaveFile.cc
+index 7f07a31..5e8d46e 100644
+--- a/speech_class/EST_WaveFile.cc
++++ b/speech_class/EST_WaveFile.cc
+@@ -315,6 +315,27 @@ EST_write_status EST_WaveFile::save_ulaw(FILE *fp,
+     return save_using(save_wave_ulaw, fp, localwv, stype, bo);
+ }
+ 
++EST_read_status EST_WaveFile::load_alaw(EST_TokenStream &ts,
++  EST_Wave &wv,
++  int rate,
++  EST_sample_type_t stype, int bo, int nchan,
++  int offset, int length)
++{
++  return load_using(load_wave_alaw,
++    ts, wv, rate, 
++    stype, bo, nchan,
++    offset, length);
++}
++
++EST_write_status EST_WaveFile::save_alaw(FILE *fp,
++ const EST_Wave &wv,
++ EST_sample_type_t stype, int bo)
++{
++    EST_Wave localwv = wv;
++    localwv.resample(8000);
++    return save_using(save_wave_alaw, fp, localwv, stype, bo);
++}
++
+ static int parse_esps_r_option(EST_String arg, int &offset, int &length)
+ {
+     EST_String s, e;
+@@ -385,6 +406,11 @@ EST_read_status read_wave(EST_Wave &sig, const EST_String &in_file,
+ 	al.add_item("-itype","ulaw");
+ 	al.add_item("-f","8000");
+     }
++    if (al.present("-alaw"))
++    {
++al.add_item("-itype","alaw");
++al.add_item("-f","8000");
++    }
+     if (al.present("-iswap"))
+ 	al.add_item("-ibo","other");
+ 
+@@ -455,6 +481,11 @@ EST_read_status read_wave(EST_Wave &sig, const EST_String &in_file,
+ 	cerr << "Cannot recognize file format or cannot access file: \"" << in_file << "\"\n";
+ 	return read_error;
+     }
++    if (file_type == "alaw")
++    {
++sample_rate = 8000;
++sample_type = "alaw";
++    }
+ 
+     if (al.present("-start") || al.present("-end") 
+ 	|| al.present("-to") || al.present("-from"))
+diff --git a/speech_class/EST_WaveFile.h b/speech_class/EST_WaveFile.h
+index 04fca06..e9217b9 100644
+--- a/speech_class/EST_WaveFile.h
++++ b/speech_class/EST_WaveFile.h
+@@ -57,7 +57,8 @@ typedef enum EST_WaveFileType{
+   wff_aiff,
+   wff_riff,
+   wff_raw,
+-  wff_ulaw
++  wff_ulaw,
++  wff_alaw
+ } EST_WaveFileType;
+ 
+ class EST_WaveFile {
+@@ -125,6 +126,9 @@ public:
+   static EST_write_status save_ulaw(SaveWave_TokenStreamArgs);
+   static EST_read_status load_ulaw(LoadWave_TokenStreamArgs);
+ 
++  static EST_write_status save_alaw(SaveWave_TokenStreamArgs);
++  static EST_read_status load_alaw(LoadWave_TokenStreamArgs);
++
+   static EST_TNamedEnumI<EST_WaveFileType, Info> map;
+ 
+   static EST_String options_supported(void);
+diff --git a/speech_class/EST_wave_aux.cc b/speech_class/EST_wave_aux.cc
+index afd6a85..24eb430 100644
+--- a/speech_class/EST_wave_aux.cc
++++ b/speech_class/EST_wave_aux.cc
+@@ -287,7 +287,7 @@ EST_String options_wave_input(void)
+ 	"    endian)\n\n"
+ 	"-iswap  Swap bytes. (For use on an unheadered input file)\n\n"
+ 	"-istype <string> Sample type in an unheadered input file:\n"
+-	"     short, mulaw, byte, ascii\n\n"
++	"     short, alaw, mulaw, byte, ascii\n\n"
+ 	"-c <string>  Select a single channel (starts from 0). \n"
+ 	"    Waveforms can have multiple channels. This option \n"
+         "    extracts a single channel for progcessing and \n"
+@@ -318,7 +318,7 @@ EST_String options_wave_output(void)
+ 	"    Intel, Alpha, DEC Mips, Vax are LSB \n"
+ 	"    (little endian)\n\n"
+ 	"-oswap Swap bytes when saving to output\n\n"+
+-	"-ostype <string> Output sample type: short, mulaw, byte or ascii\n\n";
++	"-ostype <string> Output sample type: short, alaw, mulaw, byte or ascii\n\n";
+ }
+ 
+ Declare_TNamedEnum(EST_sample_type_t)
+diff --git a/speech_class/EST_wave_io.cc b/speech_class/EST_wave_io.cc
+index e351d21..dae0963 100644
+--- a/speech_class/EST_wave_io.cc
++++ b/speech_class/EST_wave_io.cc
+@@ -107,15 +107,17 @@ const char *sample_type_to_nist(enum EST_sample_type_t sample_type)
+ {
+     const char *c;
+     switch (sample_type) {
+-    case st_unknown:  
++    case st_unknown:
+ 	c = ""; break;
+-    case st_schar:  
++    case st_schar:
+ 	c = "PCM-1"; break;
++    case st_alaw:
++	c = "ALAW"; break;
+     case st_mulaw:
+ 	c = "ULAW"; break;
+-    case st_short: 
++    case st_short:
+ 	c = "pcm"; break;
+-    case st_int:   
++    case st_int:
+ 	c = "PCM-4"; break;
+     case st_float:
+ 	c = "REAL"; break;
+@@ -141,6 +143,9 @@ enum EST_sample_type_t nist_to_sample_type(char *type)
+ 	     (EST_strcasecmp(type,"mu-law",NULL) == 0) ||
+ 	     (EST_strcasecmp(type,"mulaw",NULL) == 0))
+ 	return st_mulaw;
++    else if ((EST_strcasecmp(type,"ALAW",NULL) == 0) ||
++	     (EST_strcasecmp(type,"A-LAW",NULL) == 0))
++	return st_alaw;
+     else if (strcmp(type,"alaw") == 0)
+ 	return st_alaw;
+     else if (strcmp(type,"PCM-1") == 0)
+@@ -192,6 +197,11 @@ enum EST_read_status load_wave_nist(EST_TokenStream &ts, short **data, int
+ 	byte_order = wstrdup((EST_BIG_ENDIAN ? "10" : "01"));
+ 	sample_coding = wstrdup("ULAW");
+     }
++    if (streq(byte_order,"a-law"))
++    {
++	byte_order = wstrdup((EST_BIG_ENDIAN ? "10" : "01"));
++	sample_coding = wstrdup("ALAW");
++    }
+ 
+     /* code for reading in Tony Robinson's shorten files.
+        This is a temporary fix which calls the unshorten program on the
+@@ -473,12 +483,13 @@ enum EST_read_status load_wave_riff(EST_TokenStream &ts, short **data, int
+ 	/* The follow are registered proprietary WAVE formats  (?) */
+     case WAVE_FORMAT_MULAW:
+ 	actual_sample_type = st_mulaw; break;
++    case WAVE_FORMAT_ALAW:
++	actual_sample_type = st_alaw; break;
+     case WAVE_FORMAT_ADPCM:
+-	fprintf(stderr, "RIFF file: unsupported proprietary sample format ADPCM\n"); 
++	fprintf(stderr, "RIFF file: unsupported proprietary sample format ADPCM\n");
+ 	actual_sample_type = st_short;
+ 	break;
+ 	/*	  actual_sample_type = st_adpcm; break; */ /* yes but which adpcm ! */
+-    case WAVE_FORMAT_ALAW:
+     default:
+ 	fprintf(stderr, "RIFF file: unknown sample format\n");
+ 	actual_sample_type = st_short;
+@@ -843,50 +854,103 @@ enum EST_read_status load_wave_ulaw(EST_TokenStream &ts, short **data, int
+ {
+     unsigned char *ulaw;
+     int data_length,samps;
+-    
++
+     ts.seek_end();
+     samps = ts.tell();
+-    
++
+     if (length == 0)
+ 	data_length = samps - offset;
+     else
+ 	data_length = length;
+-    
++
+     ulaw = walloc(unsigned char, data_length);
+     ts.seek(offset);
+     if (ts.fread(ulaw,1,data_length) != data_length)
+     {
+-	wfree(ulaw); 
++	wfree(ulaw);
+ 	return misc_read_error;
+     }
+-    
++
+     *data = walloc(short,data_length);
+     ulaw_to_short(ulaw,*data,data_length);
+     wfree(ulaw);
+-    
++
+     *num_samples = data_length;
+     *sample_rate = 8000;
+     *num_channels = 1;
+     *sample_type = st_short;
+     *word_size = 2;
+     *bo = EST_NATIVE_BO;
+-    
++
+     return format_ok;
+ }
+ 
+ enum EST_write_status save_wave_ulaw(FILE *fp, const short *data, int offset,
+-				     int num_samples, int num_channels, 
+-				     int sample_rate, 
++				     int num_samples, int num_channels,
++				     int sample_rate,
+ 				     enum EST_sample_type_t sample_type, int bo)
+ {
+     (void)sample_rate;
+     (void)sample_type;
+     return save_wave_raw(fp,data,offset,num_samples,num_channels,
+ 			 8000,st_mulaw,bo);
+-    
+-    
++
++
++}
++
++enum EST_read_status load_wave_alaw(EST_TokenStream &ts, short **data, int
++				    *num_samples, int *num_channels, int *word_size, int
++				    *sample_rate, enum EST_sample_type_t *sample_type, int *bo,
++				    int offset, int length)
++
++{
++    unsigned char *alaw;
++    int data_length,samps;
++
++    ts.seek_end();
++    samps = ts.tell();
++
++    if (length == 0)
++	data_length = samps - offset;
++    else
++	data_length = length;
++
++    alaw = walloc(unsigned char, data_length);
++    ts.seek(offset);
++    if (ts.fread(alaw,1,data_length) != data_length)
++    {
++	wfree(alaw);
++	return misc_read_error;
++    }
++
++    *data = walloc(short,data_length);
++    alaw_to_short(alaw,*data,data_length);
++    wfree(alaw);
++
++    *num_samples = data_length;
++    *sample_rate = 8000;
++    *num_channels = 1;
++    *sample_type = st_short;
++    *word_size = 2;
++    *bo = EST_NATIVE_BO;
++
++    return format_ok;
+ }
+ 
++enum EST_write_status save_wave_alaw(FILE *fp, const short *data, int offset,
++				     int num_samples, int num_channels,
++				     int sample_rate,
++				     enum EST_sample_type_t sample_type, int bo)
++{
++    (void)sample_rate;
++    (void)sample_type;
++    return save_wave_raw(fp,data,offset,num_samples,num_channels,
++			 8000,st_alaw,bo);
++
++
++}
++
++
+ /*=======================================================================*/
+ /* Sun and Next snd files                                                */
+ /*=======================================================================*/
+diff --git a/speech_class/EST_wave_utils.cc b/speech_class/EST_wave_utils.cc
+index d70ee87..55878b9 100644
+--- a/speech_class/EST_wave_utils.cc
++++ b/speech_class/EST_wave_utils.cc
+@@ -53,7 +53,9 @@
+ #include "EST_error.h"
+ 
+ static short st_ulaw_to_short(unsigned char ulawbyte);
++static short st_alaw_to_short(unsigned char alawbyte);
+ static unsigned char st_short_to_ulaw(short sample);
++static unsigned char st_short_to_alaw(short sample);
+ 
+ /*
+  * This table is 
+@@ -202,6 +204,16 @@ void short_to_ulaw(const short *data,unsigned char *ulaw,int length)
+     
+ }
+ 
++void short_to_alaw(const short *data,unsigned char *alaw,int length)
++{
++    /* Convert alaw to shorts */
++    int i;
++
++    for (i=0; i<length; i++)
++	alaw[i] = st_short_to_alaw(data[i]);  /* alaw convert */
++    
++}
++
+ short *convert_raw_data(unsigned char *file_data,int data_length,
+ 			enum EST_sample_type_t sample_type,int bo)
+ {
+@@ -230,6 +242,13 @@ short *convert_raw_data(unsigned char *file_data,int data_length,
+ 	wfree(file_data);
+ 	return d;
+     }
++    else if (sample_type == st_alaw)
++    {
++	d = walloc(short,data_length);
++	alaw_to_short(file_data,d,data_length);
++	wfree(file_data);
++	return d;
++    }
+ #if 0
+     else if (sample_type == st_adpcm)
+     {   /* Not really checked yet */
+@@ -279,6 +298,16 @@ enum EST_write_status save_raw_data(FILE *fp, const short *data, int offset,
+ 	if (n != (num_channels * num_samples))
+ 	    return misc_write_error;
+     }
++    else if (sample_type == st_alaw)
++    {
++	unsigned char *alaw = walloc(unsigned char,num_samples*num_channels);
++	short_to_alaw(data+(offset*num_channels),
++		      alaw,num_samples*num_channels);
++	n = fwrite(alaw,1,num_channels * num_samples,fp);	
++	wfree(alaw);
++	if (n != (num_channels * num_samples))
++	    return misc_write_error;
++    }
+     else if (sample_type == st_ascii)
+     {
+ 	for (i=offset*num_channels; i < num_samples*num_channels; i++)
+@@ -354,6 +383,7 @@ int get_word_size(enum EST_sample_type_t sample_type)
+       case st_schar:  
+ 	word_size = 1;	break;
+       case st_mulaw:
++      case st_alaw:
+ 	word_size = 1;	break;
+ #if 0
+       case st_adpcm:  /* maybe I mean 0.5 */
+@@ -420,6 +450,7 @@ const char *sample_type_to_str(enum EST_sample_type_t type)
+       case st_short:   return "short";
+       case st_shorten:   return "shorten";
+       case st_mulaw:   return "ulaw";
++      case st_alaw:    return "alaw";
+       case st_schar:    return "char";
+       case st_uchar:    return "unsignedchar";
+       case st_int:     return "int";
+@@ -531,6 +562,77 @@ static short st_ulaw_to_short( unsigned char ulawbyte )
+     return sample;
+ }
+ 
++
++/* The following is copied from sox:g711.c */
++/*
++ * This source code is a product of Sun Microsystems, Inc. and is provided
++ * for unrestricted use.  Users may copy or modify this source code without
++ * charge.
++ * [ no warranties or liabilities whatsoever; see there for details. ]
++ */
++/* copy from CCITT G.711 specifications */
++static unsigned char _u2a[128] = {	/* u- to A-law conversions */
++	1,	1,	2,	2,	3,	3,	4,	4,
++	5,	5,	6,	6,	7,	7,	8,	8,
++	9,	10,	11,	12,	13,	14,	15,	16,
++	17,	18,	19,	20,	21,	22,	23,	24,
++	25,	27,	29,	31,	33,	34,	35,	36,
++	37,	38,	39,	40,	41,	42,	43,	44,
++	46,	48,	49,	50,	51,	52,	53,	54,
++	55,	56,	57,	58,	59,	60,	61,	62,
++	64,	65,	66,	67,	68,	69,	70,	71,
++	72,	73,	74,	75,	76,	77,	78,	79,
++	80,	82,	83,	84,	85,	86,	87,	88,
++	89,	90,	91,	92,	93,	94,	95,	96,
++	97,	98,	99,	100,	101,	102,	103,	104,
++	105,	106,	107,	108,	109,	110,	111,	112,
++	113,	114,	115,	116,	117,	118,	119,	120,
++	121,	122,	123,	124,	125,	126,	127,	128};
++
++static unsigned char _a2u[128] = {		/* A- to u-law conversions */
++	1,	3,	5,	7,	9,	11,	13,	15,
++	16,	17,	18,	19,	20,	21,	22,	23,
++	24,	25,	26,	27,	28,	29,	30,	31,
++	32,	32,	33,	33,	34,	34,	35,	35,
++	36,	37,	38,	39,	40,	41,	42,	43,
++	44,	45,	46,	47,	48,	48,	49,	49,
++	50,	51,	52,	53,	54,	55,	56,	57,
++	58,	59,	60,	61,	62,	63,	64,	64,
++	65,	66,	67,	68,	69,	70,	71,	72,
++	73,	74,	75,	76,	77,	78,	79,	80,
++	80,	81,	82,	83,	84,	85,	86,	87,
++	88,	89,	90,	91,	92,	93,	94,	95,
++	96,	97,	98,	99,	100,	101,	102,	103,
++	104,	105,	106,	107,	108,	109,	110,	111,
++	112,	113,	114,	115,	116,	117,	118,	119,
++	120,	121,	122,	123,	124,	125,	126,	127};
++
++/* A-law to u-law conversion */
++static inline unsigned char st_alaw2ulaw(
++	unsigned char	aval)
++{
++	aval &= 0xff;
++	return (unsigned char) ((aval & 0x80) ? (0xFF ^ _a2u[aval ^ 0xD5]) :
++	    (0x7F ^ _a2u[aval ^ 0x55]));
++}
++
++/* u-law to A-law conversion */
++static inline unsigned char st_ulaw2alaw(
++	unsigned char	uval)
++{
++	uval &= 0xff;
++	return (unsigned char) ((uval & 0x80) ? (0xD5 ^ (_u2a[0xFF ^ uval] - 1)) :
++	    (unsigned char) (0x55 ^ (_u2a[0x7F ^ uval] - 1)));
++}
++/* end of Sun code */
++
++/* This is somewhat simple-minded, but ... */
++static unsigned char st_short_to_alaw(short sample)
++{
++    return st_ulaw2alaw(st_short_to_ulaw(sample));
++}
++
++
+ /*
+  * C O N V E R T   T O   I E E E   E X T E N D E D
+  */
+diff --git a/speech_class/waveP.h b/speech_class/waveP.h
+index 9b500af..9af6096 100644
+--- a/speech_class/waveP.h
++++ b/speech_class/waveP.h
+@@ -41,7 +41,7 @@
+ 
+ #include <stdio.h>
+ 
+-/* The follow two (raw and ulaw) cannot be in the table as they cannot */
++/* The follow two (raw, alaw and ulaw) cannot be in the table as they cannot */
+ /* identify themselves from files (both are unheadered)                */
+ enum EST_read_status load_wave_raw(EST_TokenStream &ts, short **data, int
+ 	 *num_samples, int *num_channels, int *word_size, int
+@@ -62,6 +62,15 @@ enum EST_write_status save_wave_ulaw(FILE *fp, const short *data, int offset,
+ 				int sample_rate,
+ 				enum EST_sample_type_t, int bo);
+ 
++enum EST_read_status load_wave_alaw(EST_TokenStream &ts, short **data, int
++	 *num_samples, int *num_channels, int *word_size, int
++	 *sample_rate,  enum EST_sample_type_t *sample_type, int *bo, int
++	 offset, int length);
++enum EST_write_status save_wave_alaw(FILE *fp, const short *data, int offset,
++				int length, int num_channels, 
++				int sample_rate,
++				enum EST_sample_type_t, int bo);
++
+ enum EST_read_status load_wave_nist(EST_TokenStream &ts, short **data, int
+ 	 *num_samples, int *num_channels, int *word_size, int
+ 	 *sample_rate,  enum EST_sample_type_t *sample_type, int *bo, int
+diff --git a/testsuite/correct/ch_wave_script.out b/testsuite/correct/ch_wave_script.out
+index b656ff3..fa4aee1 100644
+--- a/testsuite/correct/ch_wave_script.out
++++ b/testsuite/correct/ch_wave_script.out
+@@ -77,7 +77,7 @@ use "-" to make input and output files stdin/out
+ -iswap  Swap bytes. (For use on an unheadered input file)
+ 
+ -istype <string> Sample type in an unheadered input file:
+-     short, mulaw, byte, ascii
++     short, alaw, mulaw, byte, ascii
+ 
+ -c <string>  Select a single channel (starts from 0). 
+     Waveforms can have multiple channels. This option 
+@@ -112,7 +112,7 @@ use "-" to make input and output files stdin/out
+ 
+ -oswap Swap bytes when saving to output
+ 
+--ostype <string> Output sample type: short, mulaw, byte or ascii
++-ostype <string> Output sample type: short, alaw, mulaw, byte or ascii
+ 
+ -scale <float> Scaling factor. Increase or descrease the amplitude
+     of the whole waveform by the factor given
+-- 
+1.8.3.4
+
+
+From 77a6c8d1f2fa93c2809ede4833d21e19b757df14 Mon Sep 17 00:00:00 2001
+From: Sergio Oller <sergioller@gmail.com>
+Date: Thu, 25 Dec 2014 14:48:54 -0800
+Subject: Allow saving wave files in parts
+
+Backported from Debian: wave_save_parts.diff, rev 5cf72e31d.
+
+Signed-off-by: Timothy Gu <timothygu99@gmail.com>
+
+diff --git a/include/EST_Wave.h b/include/EST_Wave.h
+index 053e2a9..1e7324e 100644
+--- a/include/EST_Wave.h
++++ b/include/EST_Wave.h
+@@ -295,11 +295,18 @@ public:
+ 
+   EST_write_status save_file(const EST_String filename, 
+ 			     EST_String filetype,
+-			     EST_String sample_type, int bo);
++			     EST_String sample_type, int bo, const char *mode = "wb");
+ 
+   EST_write_status save_file(FILE *fp,
+ 			     EST_String filetype,
+ 			     EST_String sample_type, int bo);
++
++  EST_write_status save_file_header(FILE *fp,
++				     EST_String ftype,
++				     EST_String stype, int obo);
++  EST_write_status save_file_data(FILE *fp,
++				     EST_String ftype,
++				     EST_String stype, int obo);
+   //@}
+ 
+   /// Assignment operator
+diff --git a/include/EST_wave_aux.h b/include/EST_wave_aux.h
+index 9d2bfde..942ffb3 100644
+--- a/include/EST_wave_aux.h
++++ b/include/EST_wave_aux.h
+@@ -116,6 +116,13 @@ enum EST_sample_type_t {
+   st_alaw, 
+   st_ascii};
+ 
++
++enum EST_write_status wave_io_save_header(FILE *fp,
++                      const int num_samples, const int num_channels,
++                      const int sample_rate,
++                      const EST_String& stype, const int bo,
++                      const EST_String& ftype);
++
+ extern EST_TNamedEnum<EST_sample_type_t> EST_sample_type_map;
+ 
+ #endif /* __EST_WAVE_AUX_H__ */
+diff --git a/speech_class/EST_Wave.cc b/speech_class/EST_Wave.cc
+index 7a882a0..816baec 100644
+--- a/speech_class/EST_Wave.cc
++++ b/speech_class/EST_Wave.cc
+@@ -392,13 +392,13 @@ EST_write_status EST_Wave::save(FILE *fp, const EST_String type)
+ 
+ EST_write_status EST_Wave::save_file(const EST_String filename,
+ 				     EST_String ftype,
+-				     EST_String stype, int obo)
++				     EST_String stype, int obo, const char *mode)
+ {
+     FILE *fp;
+ 
+     if (filename == "-")
+ 	fp = stdout;
+-    else if ((fp = fopen(filename,"wb")) == NULL)
++    else if ((fp = fopen(filename, mode)) == NULL)
+     {
+ 	cerr << "Wave save: can't open output file \"" <<
+ 	    filename << "\"" << endl;
+@@ -433,7 +433,55 @@ EST_write_status EST_Wave::save_file(FILE *fp,
+     }
+     
+     return (*s_fun)(fp, *this, sample_type, obo);
++}
++
++EST_write_status EST_Wave::save_file_data(FILE *fp,
++				     EST_String ftype,
++				     EST_String stype, int obo)
++{
++    EST_WaveFileType t = EST_WaveFile::map.token(ftype);
++    EST_sample_type_t sample_type = EST_sample_type_map.token(stype);
++
++    if (t == wff_none)
++      {
++	cerr << "Unknown Wave file type " << ftype << endl;
++	return write_fail;
++      }
++
++    EST_WaveFile::Save_TokenStream * s_fun = EST_WaveFile::map.info(t).save_data;
+     
++    if (s_fun == NULL)
++    {
++	cerr << "Can't save wave data to files type " << ftype << endl;
++	return write_fail;
++    }
++
++    return (*s_fun)(fp, *this, sample_type, obo);
++}
++
++
++EST_write_status EST_Wave::save_file_header(FILE *fp,
++				     EST_String ftype,
++				     EST_String stype, int obo)
++{
++    EST_WaveFileType t = EST_WaveFile::map.token(ftype);
++    EST_sample_type_t sample_type = EST_sample_type_map.token(stype);
++
++    if (t == wff_none)
++      {
++	cerr << "Unknown Wave file type " << ftype << endl;
++	return write_fail;
++      }
++
++    EST_WaveFile::Save_TokenStream * s_fun = EST_WaveFile::map.info(t).save_header;
++
++    if (s_fun == NULL)
++    {
++	cerr << "Can't save wave header to files type " << ftype << endl;
++	return write_fail;
++    }
++
++    return (*s_fun)(fp, *this, sample_type, obo);
+ }
+ 
+ void EST_Wave::resample(int new_freq)
+diff --git a/speech_class/EST_WaveFile.cc b/speech_class/EST_WaveFile.cc
+index 5e8d46e..61d5c23 100644
+--- a/speech_class/EST_WaveFile.cc
++++ b/speech_class/EST_WaveFile.cc
+@@ -43,8 +43,8 @@
+ #include "EST_cutils.h"
+ #include "EST_Option.h"
+ #include "EST_io_aux.h"
+-#include "stdio.h"
+-#include "math.h"
++#include <cstdio>
++#include <cmath>
+ 
+ void extract(EST_Wave &sig, EST_Option &al);
+ 
+@@ -62,7 +62,12 @@ EST_write_status (*standard_save_fn_fp)(FILE *fp,
+ 				    int offset, int nsamp,
+ 				    int nchan, int srate,
+ 				    EST_sample_type_t stype, int bo);
+-				    
++
++typedef
++EST_write_status (*standard_save_header_fn_fp)(FILE *fp,
++				    int nsamp,
++				    int nchan, int srate,
++				    EST_sample_type_t stype, int bo);
+   
+ static 
+ EST_read_status load_using(standard_load_fn_fp fn,
+@@ -109,6 +114,19 @@ EST_write_status status =  (*fn)(fp,
+ return status; 
+ }
+ 
++static
++EST_write_status save_header_using(standard_save_header_fn_fp fn,
++			    FILE *fp, const EST_Wave wv,
++			    EST_sample_type_t stype, int bo)
++{
++
++EST_write_status status =  (*fn)(fp,
++                wv.num_samples(), wv.num_channels(),
++				wv.sample_rate(),
++				stype, bo);
++return status;
++}
++
+ EST_read_status EST_WaveFile::load_nist(EST_TokenStream &ts,
+ 			  EST_Wave &wv,
+ 			  int rate,
+@@ -128,6 +146,20 @@ EST_write_status EST_WaveFile::save_nist(FILE *fp,
+   return save_using(save_wave_nist, fp, wv, stype, bo);
+ }
+ 
++EST_write_status EST_WaveFile::save_nist_data(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++  return save_using(save_wave_nist_data, fp, wv, stype, bo);
++}
++
++EST_write_status EST_WaveFile::save_nist_header(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++  return save_header_using(save_wave_nist_header, fp, wv, stype, bo);
++}
++
+ EST_read_status EST_WaveFile::load_est(EST_TokenStream &ts,
+ 			  EST_Wave &wv,
+ 			  int rate,
+@@ -149,7 +181,24 @@ EST_write_status EST_WaveFile::save_est(FILE *fp,
+   return save_using(save_wave_est,
+ 		    fp, wv,
+ 		    stype, bo);
++}
++
++EST_write_status EST_WaveFile::save_est_data(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++  return save_using(save_wave_est_data,
++		    fp, wv,
++		    stype, bo);
++}
+ 
++EST_write_status EST_WaveFile::save_est_header(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++  return save_header_using(save_wave_est_header,
++		    fp, wv,
++		    stype, bo);
+ }
+ 
+ EST_read_status EST_WaveFile::load_aiff(EST_TokenStream &ts, 
+@@ -171,6 +220,19 @@ EST_write_status EST_WaveFile::save_aiff(FILE *fp,
+   return save_using(save_wave_aiff, fp, wv, stype, bo);
+ }
+ 
++EST_write_status EST_WaveFile::save_aiff_data(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++  return save_using(save_wave_aiff_data, fp, wv, stype, bo);
++}
++
++EST_write_status EST_WaveFile::save_aiff_header(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++  return save_header_using(save_wave_aiff_header, fp, wv, stype, bo);
++}
+ 
+ EST_read_status EST_WaveFile::load_riff(EST_TokenStream &ts,
+ 			  EST_Wave &wv,
+@@ -191,6 +253,19 @@ EST_write_status EST_WaveFile::save_riff(FILE *fp,
+   return save_using(save_wave_riff, fp, wv, stype, bo);
+ }
+ 
++EST_write_status EST_WaveFile::save_riff_data(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++  return save_using(save_wave_riff_data, fp, wv, stype, bo);
++}
++
++EST_write_status EST_WaveFile::save_riff_header(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++  return save_header_using(save_wave_riff_header, fp, wv, stype, bo);
++}
+ 
+ EST_read_status EST_WaveFile::load_esps(EST_TokenStream &ts, 
+ 			  EST_Wave &wv,
+@@ -213,6 +288,23 @@ EST_write_status EST_WaveFile::save_esps(FILE *fp,
+ 		    stype, bo);
+ }
+ 
++EST_write_status EST_WaveFile::save_esps_data(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++  return save_using(save_wave_sd_data,
++		    fp, wv,
++		    stype, bo);
++}
++
++EST_write_status EST_WaveFile::save_esps_header(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++  return save_header_using(save_wave_sd_header,
++		    fp, wv,
++		    stype, bo);
++}
+ 
+ EST_read_status EST_WaveFile::load_audlab(EST_TokenStream &ts, 
+ 			  EST_Wave &wv,
+@@ -233,6 +325,19 @@ EST_write_status EST_WaveFile::save_audlab(FILE *fp,
+   return save_using(save_wave_audlab, fp, wv, stype, bo);
+ }
+ 
++EST_write_status EST_WaveFile::save_audlab_data(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++  return save_using(save_wave_audlab_data, fp, wv, stype, bo);
++}
++
++EST_write_status EST_WaveFile::save_audlab_header(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++  return save_header_using(save_wave_audlab_header, fp, wv, stype, bo);
++}
+ 
+ EST_read_status EST_WaveFile::load_snd(EST_TokenStream &ts, 
+ 			  EST_Wave &wv,
+@@ -253,6 +358,21 @@ EST_write_status EST_WaveFile::save_snd(FILE *fp,
+   return save_using(save_wave_snd, fp, wv, stype, bo);
+ }
+ 
++EST_write_status EST_WaveFile::save_snd_data(FILE *fp,
++					const EST_Wave &wv,
++					EST_sample_type_t stype, int bo)
++{
++  return save_using(save_wave_snd_data, fp, wv, stype, bo);
++}
++
++EST_write_status EST_WaveFile::save_snd_header(FILE *fp,
++					const EST_Wave &wv,
++					EST_sample_type_t stype, int bo)
++{
++  return save_header_using(save_wave_snd_header, fp, wv, stype, bo);
++}
++
++
+ 
+ EST_read_status EST_WaveFile::load_raw(EST_TokenStream &ts, 
+ 			  EST_Wave &wv,
+@@ -293,6 +413,20 @@ EST_write_status status =  save_wave_raw(fp,
+ return status; 
+ }
+ 
++EST_write_status EST_WaveFile::save_raw_data(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++return save_raw(fp, wv, stype, bo);
++}
++
++
++EST_write_status EST_WaveFile::save_raw_header(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++  return save_header_using(save_wave_raw_header, fp, wv, stype, bo);
++}
+ 
+ EST_read_status EST_WaveFile::load_ulaw(EST_TokenStream &ts,
+ 			  EST_Wave &wv,
+@@ -315,6 +449,25 @@ EST_write_status EST_WaveFile::save_ulaw(FILE *fp,
+     return save_using(save_wave_ulaw, fp, localwv, stype, bo);
+ }
+ 
++EST_write_status EST_WaveFile::save_ulaw_data(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++    EST_Wave localwv = wv;
++    localwv.resample(8000);
++    return save_using(save_wave_ulaw_data, fp, localwv, stype, bo);
++}
++
++
++EST_write_status EST_WaveFile::save_ulaw_header(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++    EST_Wave localwv = wv;
++    localwv.resample(8000);
++    return save_header_using(save_wave_ulaw_header, fp, localwv, stype, bo);
++}
++
+ EST_read_status EST_WaveFile::load_alaw(EST_TokenStream &ts,
+   EST_Wave &wv,
+   int rate,
+@@ -575,25 +728,43 @@ static
+ EST_TValuedEnumDefinition<EST_WaveFileType, const char *, EST_WaveFile::Info> wavefile_names[] =
+ {
+   { wff_none,	{ NULL }, 
+-    { FALSE, NULL, NULL, "unknown track file type"} },
++    { FALSE, NULL, NULL, NULL, NULL, "unknown track file type"} },
+   { wff_nist,	{ "nist", "timit" }, 
+-    { TRUE, EST_WaveFile::load_nist,  EST_WaveFile::save_nist, "nist/timit" } },
++    { TRUE, EST_WaveFile::load_nist,  EST_WaveFile::save_nist,
++      EST_WaveFile::save_nist_header, EST_WaveFile::save_nist_data,
++      "nist/timit" } },
+   { wff_est,	{ "est"}, 
+-    { TRUE, EST_WaveFile::load_est,  EST_WaveFile::save_est, "est" } },
++    { TRUE, EST_WaveFile::load_est,  EST_WaveFile::save_est,
++      EST_WaveFile::save_est_header, EST_WaveFile::save_est_data,
++      "est" } },
+   { wff_esps,	{ "esps", "sd"}, 
+-    { TRUE,  EST_WaveFile::load_esps,  EST_WaveFile::save_esps, "esps SD waveform" } },
++    { TRUE,  EST_WaveFile::load_esps,  EST_WaveFile::save_esps,
++      EST_WaveFile::save_esps_header, EST_WaveFile::save_esps_data,
++      "esps SD waveform" } },
+   { wff_audlab, { "audlab", "vox"}, 
+-    { TRUE,  EST_WaveFile::load_audlab,  EST_WaveFile::save_audlab, "audlab waveform" } },
++    { TRUE,  EST_WaveFile::load_audlab,  EST_WaveFile::save_audlab,
++      EST_WaveFile::save_audlab_header, EST_WaveFile::save_audlab_data,
++      "audlab waveform" } },
+   { wff_snd,	{ "snd", "au"}, 
+-    { TRUE,  EST_WaveFile::load_snd,  EST_WaveFile::save_snd, "Sun snd file" } },
++    { TRUE,  EST_WaveFile::load_snd,  EST_WaveFile::save_snd,
++      EST_WaveFile::save_snd_header, EST_WaveFile::save_snd_data,
++      "Sun snd file" } },
+   { wff_aiff,	{ "aiff" }, 
+-    { TRUE,  EST_WaveFile::load_aiff,  EST_WaveFile::save_aiff, "Apple aiff file" } },
++    { TRUE,  EST_WaveFile::load_aiff,  EST_WaveFile::save_aiff,
++      EST_WaveFile::save_aiff_header, EST_WaveFile::save_aiff_data,
++      "Apple aiff file" } },
+   { wff_riff,	{ "riff", "wav" }, 
+-    { TRUE,  EST_WaveFile::load_riff,  EST_WaveFile::save_riff, "Microsoft wav/riff file" } },
++    { TRUE,  EST_WaveFile::load_riff,  EST_WaveFile::save_riff,
++      EST_WaveFile::save_riff_header, EST_WaveFile::save_riff_data,
++      "Microsoft wav/riff file" } },
+   { wff_raw,	{ "raw" }, 
+-    { FALSE,  EST_WaveFile::load_raw,  EST_WaveFile::save_raw, "Headerless File" } },
++    { FALSE,  EST_WaveFile::load_raw,  EST_WaveFile::save_raw,
++      EST_WaveFile::save_raw_header, EST_WaveFile::save_raw_data,
++      "Headerless File" } },
+   { wff_ulaw,	{ "ulaw", "basic" }, 
+-    { FALSE,  EST_WaveFile::load_ulaw,  EST_WaveFile::save_ulaw, "Headerless 8K ulaw  File" } },
++    { FALSE,  EST_WaveFile::load_ulaw,  EST_WaveFile::save_ulaw,
++      EST_WaveFile::save_ulaw_header, EST_WaveFile::save_ulaw_data,
++      "Headerless 8K ulaw  File" } },
+   { wff_none,	{NULL} }
+ };
+ 
+diff --git a/speech_class/EST_WaveFile.h b/speech_class/EST_WaveFile.h
+index e9217b9..a185f5a 100644
+--- a/speech_class/EST_WaveFile.h
++++ b/speech_class/EST_WaveFile.h
+@@ -96,34 +96,54 @@ public:
+     bool recognise;
+     Load_TokenStream *load;
+     Save_TokenStream *save;
++    Save_TokenStream *save_header;
++    Save_TokenStream *save_data;
+     const char *description;
+   } Info;
+ 
+   static EST_write_status save_nist(SaveWave_TokenStreamArgs);
++  static EST_write_status save_nist_header(SaveWave_TokenStreamArgs);
++  static EST_write_status save_nist_data(SaveWave_TokenStreamArgs);
+   static EST_read_status load_nist(LoadWave_TokenStreamArgs);
+ 
+   static EST_write_status save_est(SaveWave_TokenStreamArgs);
++  static EST_write_status save_est_header(SaveWave_TokenStreamArgs);
++  static EST_write_status save_est_data(SaveWave_TokenStreamArgs);
+   static EST_read_status load_est(LoadWave_TokenStreamArgs);
+ 
+   static EST_write_status save_esps(SaveWave_TokenStreamArgs);
++  static EST_write_status save_esps_header(SaveWave_TokenStreamArgs);
++  static EST_write_status save_esps_data(SaveWave_TokenStreamArgs);
+   static EST_read_status load_esps(LoadWave_TokenStreamArgs);
+ 
+   static EST_write_status save_audlab(SaveWave_TokenStreamArgs);
++  static EST_write_status save_audlab_header(SaveWave_TokenStreamArgs);
++  static EST_write_status save_audlab_data(SaveWave_TokenStreamArgs);
+   static EST_read_status load_audlab(LoadWave_TokenStreamArgs);
+ 
+   static EST_write_status save_snd(SaveWave_TokenStreamArgs);
++  static EST_write_status save_snd_header(SaveWave_TokenStreamArgs);
++  static EST_write_status save_snd_data(SaveWave_TokenStreamArgs);
+   static EST_read_status load_snd(LoadWave_TokenStreamArgs);
+ 
+   static EST_write_status save_aiff(SaveWave_TokenStreamArgs);
++  static EST_write_status save_aiff_header(SaveWave_TokenStreamArgs);
++  static EST_write_status save_aiff_data(SaveWave_TokenStreamArgs);
+   static EST_read_status load_aiff(LoadWave_TokenStreamArgs);
+ 
+   static EST_write_status save_riff(SaveWave_TokenStreamArgs);
++  static EST_write_status save_riff_header(SaveWave_TokenStreamArgs);
++  static EST_write_status save_riff_data(SaveWave_TokenStreamArgs);
+   static EST_read_status load_riff(LoadWave_TokenStreamArgs);
+ 
+   static EST_write_status save_raw(SaveWave_TokenStreamArgs);
++  static EST_write_status save_raw_header(SaveWave_TokenStreamArgs);
++  static EST_write_status save_raw_data(SaveWave_TokenStreamArgs);
+   static EST_read_status load_raw(LoadWave_TokenStreamArgs);
+ 
+   static EST_write_status save_ulaw(SaveWave_TokenStreamArgs);
++  static EST_write_status save_ulaw_header(SaveWave_TokenStreamArgs);
++  static EST_write_status save_ulaw_data(SaveWave_TokenStreamArgs);
+   static EST_read_status load_ulaw(LoadWave_TokenStreamArgs);
+ 
+   static EST_write_status save_alaw(SaveWave_TokenStreamArgs);
+diff --git a/speech_class/EST_wave_io.cc b/speech_class/EST_wave_io.cc
+index dae0963..7cec8f4 100644
+--- a/speech_class/EST_wave_io.cc
++++ b/speech_class/EST_wave_io.cc
+@@ -283,10 +283,10 @@ enum EST_read_status load_wave_nist(EST_TokenStream &ts, short **data, int
+     return format_ok;
+ }
+ 
+-enum EST_write_status save_wave_nist(FILE *fp, const short *data, int offset,
+-				     int num_samples, int num_channels, 
++enum EST_write_status save_wave_nist_header(FILE *fp,
++				     int num_samples, int num_channels,
+ 				     int sample_rate,
+-				     enum EST_sample_type_t sample_type, int bo)   
++				     enum EST_sample_type_t sample_type, int bo)
+ {
+     char h[1024], p[1024];
+     const char *t;
+@@ -322,13 +322,37 @@ enum EST_write_status save_wave_nist(FILE *fp, const short *data, int offset,
+     strcat(h, "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"); 
+     
+     if (fwrite(&h, 1024, 1, fp) != 1)
+-	return misc_write_error;
++	    return misc_write_error;
+     
++    return write_ok;
++}
++
++
++enum EST_write_status save_wave_nist_data(FILE *fp, const short *data, int offset,
++				     int num_samples, int num_channels,
++				     int sample_rate,
++				     enum EST_sample_type_t sample_type, int bo)
++{
++    if (data == NULL)
++       return write_ok;
++
+     return save_raw_data(fp,data,offset,num_samples,num_channels,
+ 			 sample_type,bo);
+     
+ }
+ 
++enum EST_write_status save_wave_nist(FILE *fp, const short *data, int offset,
++				     int num_samples, int num_channels,
++				     int sample_rate,
++				     enum EST_sample_type_t sample_type, int bo)
++{
++    save_wave_nist_header(fp, num_samples, num_channels,
++				      sample_rate, sample_type, bo);
++    return save_wave_nist_data(fp, data, offset,
++				     num_samples, num_channels,
++				     sample_rate, sample_type, bo);
++}
++
+ /*=======================================================================*/
+ /* EST's own format                                                      */
+ /*=======================================================================*/
+@@ -401,10 +425,10 @@ enum EST_read_status load_wave_est(EST_TokenStream &ts, short **data, int
+     return format_ok;
+ }
+ 
+-enum EST_write_status save_wave_est(FILE *fp, const short *data, int offset,
+-				       int num_samples, int num_channels, 
++enum EST_write_status save_wave_est_header(FILE *fp,
++				       int num_samples, int num_channels,
+ 				       int sample_rate,
+-				       enum EST_sample_type_t sample_type, int bo)   
++				       enum EST_sample_type_t sample_type, int bo)
+ {
+     fprintf(fp, "EST_File wave\n");
+     fprintf(fp, "DataType binary\n");
+@@ -416,10 +440,32 @@ enum EST_write_status save_wave_est(FILE *fp, const short *data, int offset,
+ 	fprintf(fp, "ByteOrder %s\n", ((bo == bo_big) ? "10" : "01"));
+     
+     fprintf(fp, "EST_Header_End\n");
+-    
++    return write_ok;
++}
++
++enum EST_write_status save_wave_est_data(FILE *fp, const short *data, int offset,
++				       int num_samples, int num_channels,
++				       int sample_rate,
++				       enum EST_sample_type_t sample_type, int bo)
++{
++    if (data == NULL)
++       return write_ok;
++
+     return save_raw_data(fp, data, offset, num_samples, num_channels,
+ 			 sample_type, bo);
++}
++
++enum EST_write_status save_wave_est(FILE *fp, const short *data, int offset,
++				       int num_samples, int num_channels,
++				       int sample_rate,
++				       enum EST_sample_type_t sample_type, int bo)
++{
++    save_wave_est_header(fp, num_samples, num_channels,
++				         sample_rate, sample_type, bo);
+     
++    return save_wave_est_data(fp, data, offset,
++				       num_samples, num_channels,
++				       sample_rate, sample_type, bo);
+ }
+ 
+ /*=======================================================================*/
+@@ -576,10 +622,9 @@ enum EST_read_status load_wave_riff(EST_TokenStream &ts, short **data, int
+     return format_ok;
+ }
+ 
+-enum EST_write_status save_wave_riff(FILE *fp, const short *data, int offset,
+-				     int num_samples, int num_channels, 
+-				     int sample_rate,
+-				     enum EST_sample_type_t sample_type, int bo)   
++enum EST_write_status save_wave_riff_header(FILE *fp, int num_samples,
++                     int num_channels, int sample_rate,
++				     enum EST_sample_type_t sample_type, int bo)
+ {
+     (void)bo;
+     const char *info;
+@@ -636,10 +681,35 @@ enum EST_write_status save_wave_riff(FILE *fp, const short *data, int offset,
+     if (EST_BIG_ENDIAN) data_size = SWAPINT(data_size);
+     fwrite(&data_size,1,4,fp);	/* total number of bytes in data */
+     
++    return write_ok;
++}
++
++enum EST_write_status save_wave_riff_data(FILE *fp, const short *data,
++                     int offset, int num_samples, int num_channels,
++				     int sample_rate,
++				     enum EST_sample_type_t sample_type, int bo)
++{
++    if (data == NULL)
++       return write_ok;
++
+     return save_raw_data(fp,data,offset,num_samples,num_channels,
+ 			 sample_type,bo_little);
+ }
+ 
++
++enum EST_write_status save_wave_riff(FILE *fp, const short *data, int offset,
++				     int num_samples, int num_channels,
++				     int sample_rate,
++				     enum EST_sample_type_t sample_type, int bo)
++{
++    save_wave_riff_header(fp, num_samples, num_channels, sample_rate,
++				     sample_type, bo);
++
++    return save_wave_riff_data(fp, data, offset, num_samples,
++                        num_channels, sample_rate, sample_type, bo);
++
++}
++
+ /*=======================================================================*/
+ /* Amiga/Apple AIFF waveform format                                      */
+ /* This was constructed using info in AudioIFF1.3.hqx found on the web   */
+@@ -776,10 +846,11 @@ enum EST_read_status load_wave_aiff(EST_TokenStream &ts, short **data, int
+     return format_ok;
+ }
+ 
+-enum EST_write_status save_wave_aiff(FILE *fp, const short *data, int offset,
+-				     int num_samples, int num_channels, 
++
++enum EST_write_status save_wave_aiff_header(FILE *fp,
++				     int num_samples, int num_channels,
+ 				     int sample_rate,
+-				     enum EST_sample_type_t sample_type, int bo)   
++				     enum EST_sample_type_t sample_type, int bo)
+ {
+     (void)bo;
+     const char *info;
+@@ -830,16 +901,40 @@ enum EST_write_status save_wave_aiff(FILE *fp, const short *data, int offset,
+ 	data_int = SWAPINT(data_int);
+     fwrite(&data_int,1,4,fp);   /* blocksize */
+     
+-    if ((sample_type == st_short) ||
+-	(sample_type == st_uchar))
+-	return save_raw_data(fp,data,offset,num_samples,num_channels,
+-			     sample_type,bo_big);
++    return write_ok;
++
++}
++
++enum EST_write_status save_wave_aiff_data(FILE *fp, const short *data, int offset,
++				     int num_samples, int num_channels,
++				     int sample_rate,
++				     enum EST_sample_type_t sample_type, int bo)
++{
++
++    if (data == NULL)
++       return write_ok;
++    if ((sample_type == st_short) || (sample_type == st_uchar))
++	    return save_raw_data(fp,data, offset, num_samples, num_channels,
++                             sample_type, bo_big);
+     else
+     {
+ 	fprintf(stderr,"AIFF: requested data type not uchar or short\n");
+ 	return misc_write_error;
+     }
+-    
++}
++
++
++enum EST_write_status save_wave_aiff(FILE *fp, const short *data, int offset,
++				     int num_samples, int num_channels,
++				     int sample_rate,
++				     enum EST_sample_type_t sample_type, int bo)
++{
++    save_wave_aiff_header(fp, num_samples, num_channels,
++                          sample_rate, sample_type, bo);
++
++    return save_wave_aiff_data(fp, data, offset,
++				     num_samples, num_channels,
++				     sample_rate, sample_type, bo);
+ }
+ 
+ /*=======================================================================*/
+@@ -885,19 +980,47 @@ enum EST_read_status load_wave_ulaw(EST_TokenStream &ts, short **data, int
+     return format_ok;
+ }
+ 
+-enum EST_write_status save_wave_ulaw(FILE *fp, const short *data, int offset,
++enum EST_write_status save_wave_ulaw_header(FILE *fp,
+ 				     int num_samples, int num_channels,
+ 				     int sample_rate,
+ 				     enum EST_sample_type_t sample_type, int bo)
+ {
+-    (void)sample_rate;
+-    (void)sample_type;
++    (void) sample_rate;
++    (void) sample_type;
++    (void) fp;
++    (void) num_samples;
++    (void) num_channels;
++    (void) bo;
++    return write_ok;
++}
++
++enum EST_write_status save_wave_ulaw_data(FILE *fp, const short *data, int offset,
++				     int num_samples, int num_channels,
++				     int sample_rate,
++				     enum EST_sample_type_t sample_type, int bo)
++{
++    if (data == NULL)
++       return write_ok;
++
+     return save_wave_raw(fp,data,offset,num_samples,num_channels,
+ 			 8000,st_mulaw,bo);
++}
+ 
++enum EST_write_status save_wave_ulaw(FILE *fp, const short *data, int offset,
++				     int num_samples, int num_channels,
++				     int sample_rate,
++				     enum EST_sample_type_t sample_type, int bo)
++{
++    save_wave_ulaw_header(fp, num_samples, num_channels,
++                          sample_rate, sample_type, bo);
+ 
++    return save_wave_ulaw_data(fp, data, offset,
++				     num_samples, num_channels,
++				     sample_rate, sample_type, bo);
+ }
+ 
++
++
+ enum EST_read_status load_wave_alaw(EST_TokenStream &ts, short **data, int
+ 				    *num_samples, int *num_channels, int *word_size, int
+ 				    *sample_rate, enum EST_sample_type_t *sample_type, int *bo,
+@@ -1050,8 +1173,8 @@ enum EST_read_status load_wave_snd(EST_TokenStream &ts, short **data, int
+     return read_ok;
+ }
+ 
+-enum EST_write_status save_wave_snd(FILE *fp, const short *data, int offset,
+-				    int num_samples, int num_channels, 
++enum EST_write_status save_wave_snd_header(FILE *fp,
++				    int num_samples, int num_channels,
+ 				    int sample_rate, 
+ 				    enum EST_sample_type_t sample_type, int bo)
+ {
+@@ -1103,11 +1226,35 @@ enum EST_write_status save_wave_snd(FILE *fp, const short *data, int offset,
+     if (fwrite(&header, sizeof(header), 1, fp) != 1)
+ 	return misc_write_error;
+ 
++    return write_ok;
++}
++
++enum EST_write_status save_wave_snd_data(FILE *fp, const short *data, int offset,
++				    int num_samples, int num_channels,
++				    int sample_rate,
++				    enum EST_sample_type_t sample_type, int bo)
++{
++    if (data == NULL)
++       return write_ok;
++
+     /* snd files are always in BIG_ENDIAN (sun) byte order */
+     return save_raw_data(fp,data,offset,num_samples,num_channels,
+ 			 sample_type,bo_big);
+ }
+ 
++
++enum EST_write_status save_wave_snd(FILE *fp, const short *data, int offset,
++				    int num_samples, int num_channels,
++				    int sample_rate,
++				    enum EST_sample_type_t sample_type, int bo)
++{
++    save_wave_snd_header(fp, num_samples, num_channels, sample_rate,
++                         sample_type, bo);
++    return save_wave_snd_data(fp, data, offset, num_samples,
++             num_channels, sample_rate, sample_type, bo);
++}
++
++
+ /*=======================================================================*/
+ /* CSTR Audlab files (from the last century)                             */
+ /* They are always bigendian                                             */
+@@ -1219,8 +1366,8 @@ enum EST_read_status load_wave_audlab(EST_TokenStream &ts, short **data, int
+     return format_ok;
+ }
+ 
+-enum EST_write_status save_wave_audlab(FILE *fp, const short *data, int offset,
+-				       int num_samples, int num_channels, 
++enum EST_write_status save_wave_audlab_header(FILE *fp,
++				       int num_samples, int num_channels,
+ 				       int sample_rate, 
+ 				       enum EST_sample_type_t sample_type, int bo)
+ {
+@@ -1260,12 +1407,34 @@ enum EST_write_status save_wave_audlab(FILE *fp, const short *data, int offset,
+     fwrite (&fh, sizeof(fh), 1, fp);
+     fwrite (&sh, sizeof(sh), 1, fp);
+     fwrite (&sd, sizeof(sd), 1, fp);
+-    
++    return write_ok;
++}
++
++enum EST_write_status save_wave_audlab_data(FILE *fp, const short *data, int offset,
++				       int num_samples, int num_channels,
++				       int sample_rate,
++				       enum EST_sample_type_t sample_type, int bo)
++{
++    if (data == NULL)
++       return write_ok;
++
+     /* write data*/
+     return save_raw_data(fp,data,offset,num_samples,num_channels,
+ 			 st_short,bo_big);
+ }
+ 
++enum EST_write_status save_wave_audlab(FILE *fp, const short *data, int offset,
++				       int num_samples, int num_channels,
++				       int sample_rate,
++				       enum EST_sample_type_t sample_type, int bo)
++{
++    save_wave_audlab_header(fp, num_samples, num_channels,
++                        sample_rate, sample_type, bo);
++    return save_wave_audlab_data(fp, data, offset,
++				       num_samples, num_channels,
++				       sample_rate, sample_type, bo);
++}
++
+ /*=======================================================================*/
+ /* Entropic ESPS SD files: portable (non-proprietary) method             */
+ /*=======================================================================*/
+@@ -1356,8 +1525,9 @@ enum EST_read_status load_wave_sd(EST_TokenStream &ts, short **data, int
+     
+ }
+ 
+-enum EST_write_status save_wave_sd(FILE *fp, const short *data, int offset,
+-				   int num_samples, int num_channels, 
++
++enum EST_write_status save_wave_sd_header(FILE *fp,
++				   int num_samples, int num_channels,
+ 				   int sample_rate, 
+ 				   enum EST_sample_type_t sample_type, int bo)
+ 
+@@ -1382,6 +1552,7 @@ enum EST_write_status save_wave_sd(FILE *fp, const short *data, int offset,
+ 		}
+     /* I believe all of the following are necessary and in this order */
+     add_field(hdr,"samples",esps_type,num_channels);
++    /* FIXME: What is doing this path here?? */
+     add_fea_special(hdr,ESPS_FEA_DIRECTORY,"margo:/disk/disk10/home/awb/projects/speech_tools/main");
+     add_fea_special(hdr,ESPS_FEA_COMMAND,
+ 		    "EDST waveform written as ESPS FEA_SD.\n\
+@@ -1397,11 +1568,37 @@ enum EST_write_status save_wave_sd(FILE *fp, const short *data, int offset,
+     }
+     /* lets ignore desired bo and sample type for the time being */
+     delete_esps_hdr(hdr);
+-    
++    return write_ok;
++}
++
++
++enum EST_write_status save_wave_sd_data(FILE *fp, const short *data,
++                   int offset,
++				   int num_samples, int num_channels,
++				   int sample_rate,
++				   enum EST_sample_type_t sample_type, int bo)
++
++{
++    if (data == NULL)
++       return write_ok;
++
+     return save_raw_data(fp,data,offset,num_samples,num_channels,
+ 			 sample_type,EST_NATIVE_BO);
+ }
+ 
++enum EST_write_status save_wave_sd(FILE *fp, const short *data, int offset,
++				   int num_samples, int num_channels,
++				   int sample_rate,
++				   enum EST_sample_type_t sample_type, int bo)
++
++{
++    save_wave_sd_header(fp, num_samples, num_channels, sample_rate,
++                        sample_type, bo);
++    return save_wave_sd_data(fp, data, offset, num_samples,
++                num_channels, sample_rate, sample_type, bo);
++
++}
++
+ /*=======================================================================*/
+ /* Raw data files -- unheadered                                          */
+ /* THESE FUNCTIONS ARE DIFFERENT FROM THE REST                           */
+@@ -1496,21 +1693,151 @@ enum EST_read_status load_wave_raw(EST_TokenStream &ts, short **data, int
+     return format_ok;
+ }
+ 
+-enum EST_write_status save_wave_raw(FILE *fp, const short *data, 
++enum EST_write_status save_wave_raw_header(FILE *fp,
++				    int num_samples, int num_channels,
++				    int sample_rate,
++				    enum EST_sample_type_t sample_type, int bo)
++{
++    return write_ok;
++}
++
++enum EST_write_status save_wave_raw_data(FILE *fp, const short *data,
+ 				    int offset,
+-				    int num_samples, int num_channels, 
++				    int num_samples, int num_channels,
+ 				    int sample_rate,
+-				    enum EST_sample_type_t sample_type, int bo)   
++				    enum EST_sample_type_t sample_type, int bo)
+ {
+-    (void)sample_rate;
++    if (data == NULL)
++       return write_ok;
+     
+     return save_raw_data(fp,data,offset,num_samples,num_channels,
+ 			 sample_type,bo);
+ }
+ 
++enum EST_write_status save_wave_raw(FILE *fp, const short *data,
++				    int offset,
++				    int num_samples, int num_channels,
++				    int sample_rate,
++				    enum EST_sample_type_t sample_type, int bo)
++{
++    (void)sample_rate;
++
++    return save_wave_raw_data(fp, data, offset, num_samples,
++                    num_channels, sample_rate, sample_type, bo);
++}
++
+ /***********************************************************************/
+ /*                                                                     */
+ /* end of file type specific functions                                 */
+ /*                                                                     */
+ /***********************************************************************/
+ 
++enum EST_write_status wave_io_save_header(FILE *fp,
++                      const int num_samples, const int num_channels,
++                      const int sample_rate,
++                      const EST_String& stype, const int bo,
++                      const EST_String& ftype)
++{
++    EST_WaveFileType t = EST_WaveFile::map.token(ftype);
++    EST_sample_type_t sample_type = EST_sample_type_map.token(stype);
++    switch(t)
++    {
++        case wff_nist:
++            return save_wave_nist_header(fp, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_esps:
++            return save_wave_sd_header(fp, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_est:
++            return save_wave_est_header(fp, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_audlab:
++            return save_wave_audlab_header(fp, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_snd:
++            return save_wave_snd_header(fp, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_aiff:
++            return save_wave_aiff_header(fp, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_riff:
++            return save_wave_riff_header(fp, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_raw:
++            return save_wave_raw_header(fp, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_ulaw:
++            return save_wave_ulaw_header(fp, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        default:
++        case wff_none:
++            cerr << "Can't save wave header to files type " << ftype << endl;
++            break;
++    }
++    return write_ok;
++}
++
++
++enum EST_write_status wave_io_save_data(FILE *fp, const short * data,
++                      const int offset,
++                      const int num_samples, const int num_channels,
++                      const int sample_rate,
++                      const EST_String& stype, const int bo,
++                      const EST_String& ftype)
++{
++    EST_WaveFileType t = EST_WaveFile::map.token(ftype);
++    EST_sample_type_t sample_type = EST_sample_type_map.token(stype);
++    switch(t)
++    {
++        case wff_nist:
++            return save_wave_nist_data(fp, data, offset, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_esps:
++            return save_wave_sd_data(fp, data, offset, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_est:
++            return save_wave_est_data(fp, data, offset, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_audlab:
++            return save_wave_audlab_data(fp, data, offset, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_snd:
++            return save_wave_snd_data(fp, data, offset, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_aiff:
++            return save_wave_aiff_data(fp, data, offset, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_riff:
++            return save_wave_riff_data(fp, data, offset, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_raw:
++            return save_wave_raw_data(fp, data, offset, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        case wff_ulaw:
++            return save_wave_ulaw_data(fp, data, offset, num_samples, num_channels,
++                       sample_rate, sample_type, bo);
++            break;
++        default:
++        case wff_none:
++            cerr << "Can't save wave data to files type " << ftype << endl;
++            break;
++    }
++    return write_ok;
++}
+diff --git a/speech_class/waveP.h b/speech_class/waveP.h
+index 9af6096..406e4b1 100644
+--- a/speech_class/waveP.h
++++ b/speech_class/waveP.h
+@@ -51,7 +51,17 @@ enum EST_read_status load_wave_raw(EST_TokenStream &ts, short **data, int
+ enum EST_write_status save_wave_raw(FILE *fp, const short *data, int offset,
+ 			       int num_samples, int num_channels, 
+ 			       int sample_rate,
+-			       enum EST_sample_type_t sample_type, int bo)   ;
++			       enum EST_sample_type_t sample_type, int bo);
++
++enum EST_write_status save_wave_raw_header(FILE *fp,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
++enum EST_write_status save_wave_raw_data(FILE *fp, const short *data, int offset,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
+ 
+ enum EST_read_status load_wave_ulaw(EST_TokenStream &ts, short **data, int
+ 	 *num_samples, int *num_channels, int *word_size, int
+@@ -62,6 +72,16 @@ enum EST_write_status save_wave_ulaw(FILE *fp, const short *data, int offset,
+ 				int sample_rate,
+ 				enum EST_sample_type_t, int bo);
+ 
++enum EST_write_status save_wave_ulaw_header(FILE *fp,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
++enum EST_write_status save_wave_ulaw_data(FILE *fp, const short *data, int offset,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
+ enum EST_read_status load_wave_alaw(EST_TokenStream &ts, short **data, int
+ 	 *num_samples, int *num_channels, int *word_size, int
+ 	 *sample_rate,  enum EST_sample_type_t *sample_type, int *bo, int
+@@ -81,6 +101,16 @@ enum EST_write_status save_wave_nist(FILE *fp, const short *data, int offset,
+ 			       int sample_rate,
+ 			       enum EST_sample_type_t sample_type, int bo);
+ 
++enum EST_write_status save_wave_nist_header(FILE *fp,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
++enum EST_write_status save_wave_nist_data(FILE *fp, const short *data, int offset,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
+ enum EST_read_status load_wave_est(EST_TokenStream &ts, short **data, int
+ 	 *num_samples, int *num_channels, int *word_size, int
+ 	 *sample_rate,  enum EST_sample_type_t *sample_type, int *bo, int
+@@ -91,6 +121,16 @@ enum EST_write_status save_wave_est(FILE *fp, const short *data, int offset,
+ 			       int sample_rate,
+ 			       enum EST_sample_type_t sample_type, int bo);
+ 
++enum EST_write_status save_wave_est_header(FILE *fp,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
++enum EST_write_status save_wave_est_data(FILE *fp, const short *data, int offset,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
+ enum EST_read_status load_wave_sd(EST_TokenStream &ts, short **data, int
+ 	 *num_samples, int *num_channels, int *word_size, int
+ 	 *sample_rate,  enum EST_sample_type_t *sample_type, int *bo, int
+@@ -101,6 +141,16 @@ enum EST_write_status save_wave_sd(FILE *fp, const short *data, int offset,
+ 			      int sample_rate, 
+ 			      enum EST_sample_type_t sample_type, int bo);
+ 
++enum EST_write_status save_wave_sd_header(FILE *fp,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
++enum EST_write_status save_wave_sd_data(FILE *fp, const short *data, int offset,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
+ enum EST_read_status load_wave_audlab(EST_TokenStream &ts, short **data, int
+ 	 *num_samples, int *num_channels, int *word_size, int
+ 	 *sample_rate,  enum EST_sample_type_t *sample_type, int *bo, int
+@@ -111,6 +161,16 @@ enum EST_write_status save_wave_audlab(FILE *fp, const short *data, int offset,
+ 			       int sample_rate, 
+ 			       enum EST_sample_type_t sample_type, int bo);
+ 
++enum EST_write_status save_wave_audlab_header(FILE *fp,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
++enum EST_write_status save_wave_audlab_data(FILE *fp, const short *data, int offset,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
+ enum EST_read_status load_wave_snd(EST_TokenStream &ts, short **data, int
+ 	 *num_samples, int *num_channels, int *word_size, int
+ 	 *sample_rate,  enum EST_sample_type_t *sample_type, int *bo, int
+@@ -121,6 +181,16 @@ enum EST_write_status save_wave_snd(FILE *fp, const short *data, int offset,
+ 			       int sample_rate, 
+ 			       enum EST_sample_type_t sample_type, int bo);
+ 
++enum EST_write_status save_wave_snd_header(FILE *fp,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
++enum EST_write_status save_wave_snd_data(FILE *fp, const short *data, int offset,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
+ enum EST_read_status load_wave_aiff(EST_TokenStream &ts, short **data, int
+ 	 *num_samples, int *num_channels, int *word_size, int
+ 	 *sample_rate,  enum EST_sample_type_t *sample_type, int *bo, int
+@@ -131,6 +201,16 @@ enum EST_write_status save_wave_aiff(FILE *fp, const short *data, int offset,
+ 				int sample_rate,
+ 				enum EST_sample_type_t sample_type, int bo);
+ 
++enum EST_write_status save_wave_aiff_header(FILE *fp,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
++enum EST_write_status save_wave_aiff_data(FILE *fp, const short *data, int offset,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
+ enum EST_read_status load_wave_riff(EST_TokenStream &ts, short **data, int
+ 	 *num_samples, int *num_channels, int *word_size, int
+ 	 *sample_rate,  enum EST_sample_type_t *sample_type, int *bo, int
+@@ -141,4 +221,14 @@ enum EST_write_status save_wave_riff(FILE *fp, const short *data, int offset,
+ 				int sample_rate,
+ 				enum EST_sample_type_t sample_type, int bo);
+ 
++enum EST_write_status save_wave_riff_header(FILE *fp,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
++enum EST_write_status save_wave_riff_data(FILE *fp, const short *data, int offset,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
+ #endif /* __EST_WAVEP_H__ */
+-- 
+1.8.3.4
+
+
+From cbb58d2c46f59b918f8bae060db2e7d2846edcca Mon Sep 17 00:00:00 2001
+From: Sergio Oller <sergioller@gmail.com>
+Date: Thu, 25 Dec 2014 14:50:41 -0800
+Subject: Allow writing ALAW files in parts
+
+Backported from Debian: wave_save_parts_alaw.diff, rev f150a7a5c75c.
+
+Signed-off-by: Timothy Gu <timothygu99@gmail.com>
+
+diff --git a/speech_class/EST_WaveFile.cc b/speech_class/EST_WaveFile.cc
+index 61d5c23..6476849 100644
+--- a/speech_class/EST_WaveFile.cc
++++ b/speech_class/EST_WaveFile.cc
+@@ -480,6 +480,24 @@ EST_read_status EST_WaveFile::load_alaw(EST_TokenStream &ts,
+     offset, length);
+ }
+ 
++EST_write_status EST_WaveFile::save_alaw_header(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++    EST_Wave localwv = wv;
++    localwv.resample(8000);
++    return save_header_using(save_wave_alaw_header, fp, localwv, stype, bo);
++}
++
++EST_write_status EST_WaveFile::save_alaw_data(FILE *fp,
++					 const EST_Wave &wv,
++					 EST_sample_type_t stype, int bo)
++{
++    EST_Wave localwv = wv;
++    localwv.resample(8000);
++    return save_using(save_wave_alaw_data, fp, localwv, stype, bo);
++}
++
+ EST_write_status EST_WaveFile::save_alaw(FILE *fp,
+  const EST_Wave &wv,
+  EST_sample_type_t stype, int bo)
+diff --git a/speech_class/EST_WaveFile.h b/speech_class/EST_WaveFile.h
+index a185f5a..cdf948c 100644
+--- a/speech_class/EST_WaveFile.h
++++ b/speech_class/EST_WaveFile.h
+@@ -147,6 +147,8 @@ public:
+   static EST_read_status load_ulaw(LoadWave_TokenStreamArgs);
+ 
+   static EST_write_status save_alaw(SaveWave_TokenStreamArgs);
++  static EST_write_status save_alaw_header(SaveWave_TokenStreamArgs);
++  static EST_write_status save_alaw_data(SaveWave_TokenStreamArgs);
+   static EST_read_status load_alaw(LoadWave_TokenStreamArgs);
+ 
+   static EST_TNamedEnumI<EST_WaveFileType, Info> map;
+diff --git a/speech_class/EST_wave_io.cc b/speech_class/EST_wave_io.cc
+index 7cec8f4..1bdaf4f 100644
+--- a/speech_class/EST_wave_io.cc
++++ b/speech_class/EST_wave_io.cc
+@@ -1060,17 +1060,44 @@ enum EST_read_status load_wave_alaw(EST_TokenStream &ts, short **data, int
+     return format_ok;
+ }
+ 
+-enum EST_write_status save_wave_alaw(FILE *fp, const short *data, int offset,
++enum EST_write_status save_wave_alaw_header(FILE *fp,
++				     int num_samples, int num_channels,
++				     int sample_rate,
++				     enum EST_sample_type_t sample_type, int bo)
++{
++    (void) sample_rate;
++    (void) sample_type;
++    (void) fp;
++    (void) num_samples;
++    (void) num_channels;
++    (void) bo;
++    return write_ok;
++}
++
++enum EST_write_status save_wave_alaw_data(FILE *fp, const short *data, int offset,
+ 				     int num_samples, int num_channels,
+ 				     int sample_rate,
+ 				     enum EST_sample_type_t sample_type, int bo)
+ {
+     (void)sample_rate;
+     (void)sample_type;
++    if (data == NULL)
++       return write_ok;
+     return save_wave_raw(fp,data,offset,num_samples,num_channels,
+ 			 8000,st_alaw,bo);
++}
+ 
++enum EST_write_status save_wave_alaw(FILE *fp, const short *data, int offset,
++				     int num_samples, int num_channels,
++				     int sample_rate,
++				     enum EST_sample_type_t sample_type, int bo)
++{
++    save_wave_alaw_header(fp, num_samples, num_channels,
++                          sample_rate, sample_type, bo);
+ 
++    return save_wave_alaw_data(fp, data, offset,
++				     num_samples, num_channels,
++				     sample_rate, sample_type, bo);
+ }
+ 
+ 
+diff --git a/speech_class/waveP.h b/speech_class/waveP.h
+index 406e4b1..aa78512 100644
+--- a/speech_class/waveP.h
++++ b/speech_class/waveP.h
+@@ -91,6 +91,16 @@ enum EST_write_status save_wave_alaw(FILE *fp, const short *data, int offset,
+ 				int sample_rate,
+ 				enum EST_sample_type_t, int bo);
+ 
++enum EST_write_status save_wave_alaw_header(FILE *fp,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
++enum EST_write_status save_wave_alaw_data(FILE *fp, const short *data, int offset,
++				int num_samples, int num_channels,
++				int sample_rate,
++				enum EST_sample_type_t sample_type, int bo);
++
+ enum EST_read_status load_wave_nist(EST_TokenStream &ts, short **data, int
+ 	 *num_samples, int *num_channels, int *word_size, int
+ 	 *sample_rate,  enum EST_sample_type_t *sample_type, int *bo, int
+-- 
+1.8.3.4
+
+
+From 22e096d3b4122b80cce76b203fcdb8d2e75413ca Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Thu, 25 Dec 2014 14:52:30 -0800
+Subject: Check all fread() calls
+
+Backported from Debian: check_fread.diff, rev 4a67fbe7e.
+
+Signed-off-by: Timothy Gu <timothygu99@gmail.com>
+
+diff --git a/include/EST_Token.h b/include/EST_Token.h
+index e6fe38d..6b9512f 100644
+--- a/include/EST_Token.h
++++ b/include/EST_Token.h
+@@ -329,7 +329,7 @@ class EST_TokenStream{
+     {	if (!peeked_tokp) get();
+ 	peeked_tokp = TRUE; return current_tok; }
+     /// Reading binary data, (don't use peek() immediately beforehand)
+-    int fread(void *buff,int size,int nitems);
++    int fread(void *buff,int size,int nitems) EST_WARN_UNUSED_RESULT;
+     //@}
+     /**@name stream initialization functions */
+     //@{
+diff --git a/include/EST_common.h b/include/EST_common.h
+index 42af9d9..ee63e1e 100644
+--- a/include/EST_common.h
++++ b/include/EST_common.h
+@@ -43,6 +43,14 @@
+ 
+ /* all this stuff should be common to C and C++ */
+ 
++#if defined __GNUC__
++  #define EST_WARN_UNUSED_RESULT __attribute__((warn_unused_result))
++#elif defined __clang__
++  #define EST_WARN_UNUSED_RESULT __attribute__((annotate("lo_warn_unused")))
++#else
++  #define EST_WARN_UNUSED_RESULT
++#endif
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+diff --git a/speech_class/EST_wave_io.cc b/speech_class/EST_wave_io.cc
+index 1bdaf4f..d3a35f0 100644
+--- a/speech_class/EST_wave_io.cc
++++ b/speech_class/EST_wave_io.cc
+@@ -503,7 +503,8 @@ enum EST_read_status load_wave_riff(EST_TokenStream &ts, short **data, int
+ 	return wrong_format;
+ 
+     /* We've got a riff file */
+-    ts.fread(&dsize,4,1);
++    /* Next 4 bytes are the file size */
++    if(ts.fread(&dsize,4,1) != 1) return misc_read_error;
+     /* .wav files are always little endian */
+     if (EST_BIG_ENDIAN) dsize = SWAPINT(dsize);
+     if ((ts.fread(info,sizeof(char),4) != 4) ||
+@@ -516,9 +517,9 @@ enum EST_read_status load_wave_riff(EST_TokenStream &ts, short **data, int
+ 	(strncmp(info,"fmt ",4) != 0))
+ 	return misc_read_error;	/* something else wrong */
+ 
+-    ts.fread(&dsize,4,1);
++    if (ts.fread(&dsize,4,1) != 1) return misc_read_error;
+     if (EST_BIG_ENDIAN) dsize = SWAPINT(dsize);
+-    ts.fread(&shortdata,2,1);
++    if (ts.fread(&shortdata,2,1) != 1) return misc_read_error;
+     if (EST_BIG_ENDIAN) shortdata = SWAPSHORT(shortdata);
+ 
+     switch (shortdata)
+@@ -541,16 +542,16 @@ enum EST_read_status load_wave_riff(EST_TokenStream &ts, short **data, int
+ 	actual_sample_type = st_short;
+ 	/*	return misc_read_error; */
+     }
+-    ts.fread(&shortdata,2,1);
++    if (ts.fread(&shortdata,2,1) != 1) return misc_read_error;
+     if (EST_BIG_ENDIAN) shortdata = SWAPSHORT(shortdata);
+     *num_channels = shortdata;
+-    ts.fread(sample_rate,4,1);
++    if (ts.fread(sample_rate,4,1) != 1) return misc_read_error;
+     if (EST_BIG_ENDIAN) *sample_rate = SWAPINT(*sample_rate);
+-    ts.fread(&intdata,4,1);	/* average bytes per second -- ignored */
++    if (ts.fread(&intdata,4,1) != 1) return misc_read_error; /* average bytes per second -- ignored */
+     if (EST_BIG_ENDIAN) intdata = SWAPINT(intdata);
+-    ts.fread(&shortdata,2,1);	/* block align ? */
++    if (ts.fread(&shortdata,2,1) != 1) return misc_read_error;	/* block align ? */
+     if (EST_BIG_ENDIAN) shortdata = SWAPSHORT(shortdata);
+-    ts.fread(&shortdata,2,1);
++    if (ts.fread(&shortdata,2,1) != 1) return misc_read_error;
+     if (EST_BIG_ENDIAN) shortdata = SWAPSHORT(shortdata);
+ 
+     sample_width = (shortdata+7)/8;
+@@ -567,14 +568,14 @@ enum EST_read_status load_wave_riff(EST_TokenStream &ts, short **data, int
+ 	}
+ 	if (strncmp(info,"data",4) == 0)
+ 	{
+-	    ts.fread(&samps,4,1);
++	    if (ts.fread(&samps,4,1) != 1) return misc_read_error;
+ 	    if (EST_BIG_ENDIAN) samps = SWAPINT(samps);
+ 	    samps /= (sample_width*(*num_channels));
+ 	    break;
+ 	}
+ 	else if (strncmp(info,"fact",4) == 0)
+ 	{			/* some other type of chunk -- skip it */
+-	    ts.fread(&samps,4,1);
++	    if (ts.fread(&samps,4,1) != 1) return misc_read_error;
+ 	    if (EST_BIG_ENDIAN) samps = SWAPINT(samps);
+ 	    ts.seek(samps+ts.tell());	/* skip rest of header */
+ 	    /* Hope this is the right amount */
+@@ -584,7 +585,7 @@ enum EST_read_status load_wave_riff(EST_TokenStream &ts, short **data, int
+             //	    fprintf(stderr,"Ignoring unsupported chunk type \"%c%c%c%c\" in RIFF file\n",
+             //    info[0],info[1],info[2],info[3]);
+ 	    //return misc_read_error;
+-	    ts.fread(&dsize,4,1);
++	    if(ts.fread(&dsize,4,1) != 1) return misc_read_error;
+ 	    if (EST_BIG_ENDIAN) dsize = SWAPINT(dsize);
+ 	    ts.seek(dsize+ts.tell());     /* skip this chunk */
+ 	}
+@@ -750,7 +751,7 @@ enum EST_read_status load_wave_aiff(EST_TokenStream &ts, short **data, int
+ 	return wrong_format;
+ 
+     /* We've got an aiff file, I hope */
+-    ts.fread(&dsize,4,1);
++    if (ts.fread(&dsize,4,1) != 1) return misc_read_error;
+     if (EST_LITTLE_ENDIAN)	/* file is in different byte order */
+ 	dsize = SWAPINT(dsize);
+     if ((ts.fread(info,sizeof(char),4) != 4) ||
+@@ -760,7 +761,7 @@ enum EST_read_status load_wave_aiff(EST_TokenStream &ts, short **data, int
+ 	return misc_read_error; 
+     }
+     
+-    for ( ; ts.fread(&chunk,1,sizeof(chunk)) == sizeof(chunk) ; )
++    for ( ; ts.fread(&chunk, sizeof(chunk), 1) == 1 ; )
+     {				/* for each chunk in the file */
+ 	if (EST_LITTLE_ENDIAN)	/* file is in different byte order */
+ 	    chunk.size = SWAPINT(chunk.size);
+@@ -771,10 +772,13 @@ enum EST_read_status load_wave_aiff(EST_TokenStream &ts, short **data, int
+ 		fprintf(stderr,"AIFF chunk: bad size\n");
+ 		return misc_read_error;
+ 	    }
+-	    ts.fread(&comm_channels,1,sizeof(short));
+-	    ts.fread(&comm_samples,1,sizeof(int));
+-	    ts.fread(&comm_bits,1,sizeof(short));
+-	    if (ts.fread(ieee_ext_sample_rate,1,10) != 10)
++	    if (ts.fread(&comm_channels, sizeof(short), 1) != 1)
++            return misc_read_error;
++	    if (ts.fread(&comm_samples, sizeof(int), 1) != 1)
++            return misc_read_error;
++	    if (ts.fread(&comm_bits, sizeof(short), 1) != 1)
++            return misc_read_error;
++	    if (ts.fread(ieee_ext_sample_rate, 10, 1) != 1)
+ 	    {
+ 		fprintf(stderr,"AIFF chunk: eof within COMM chunk\n");
+ 		return misc_read_error;
+@@ -789,7 +793,7 @@ enum EST_read_status load_wave_aiff(EST_TokenStream &ts, short **data, int
+ 	}
+ 	else if (strncmp(chunk.id,"SSND",4) == 0)
+ 	{
+-	    if (ts.fread(&ssndchunk,1,sizeof(ssndchunk)) != sizeof(ssndchunk))
++	    if (ts.fread(&ssndchunk, sizeof(ssndchunk), 1) != 1)
+ 	    {
+ 		fprintf(stderr,"AIFF chunk: eof within SSND chunk\n");
+ 		return misc_read_error;
+@@ -1127,7 +1131,8 @@ enum EST_read_status load_wave_snd(EST_TokenStream &ts, short **data, int
+     int current_pos;
+     
+     current_pos = ts.tell();
+-    ts.fread(&header, sizeof(Sun_au_header), 1);
++    if (ts.fread(&header, sizeof(Sun_au_header), 1) != 1)
++        return misc_read_error;
+     
+     /* test for magic number */
+     if ((EST_LITTLE_ENDIAN) && 
+@@ -1347,12 +1352,16 @@ enum EST_read_status load_wave_audlab(EST_TokenStream &ts, short **data, int
+     
+     /* Read header structures from char array */
+     current_pos = ts.tell();
+-    ts.fread(&fh, sizeof(struct audlabfh), 1);
++
++    if (ts.fread(&fh, sizeof(struct audlabfh), 1) != 1)
++        return misc_read_error;
+     if (strcmp(fh.file_type, "Sample") != 0) 
+ 	return wrong_format;
+     
+-    ts.fread(&sh, sizeof(struct audlabsh), 1);
+-    ts.fread(&sd, sizeof(struct audlabsd), 1);
++    if (ts.fread(&sh, sizeof(struct audlabsh), 1) != 1)
++        return misc_read_error;
++    if (ts.fread(&sd, sizeof(struct audlabsd), 1) != 1)
++        return misc_read_error;
+     hdr_length = sizeof(struct audlabfh) +
+ 	sizeof(struct audlabsh) +
+ 	    sizeof(struct audlabsd);
+-- 
+1.8.3.4
+
+
+From 644690fc0c8e45fe5c58caa9bd928eedb178fa49 Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Thu, 25 Dec 2014 14:55:07 -0800
+Subject: Fix a few memory handling bugs
+
+Backported from Debian: memory_bugs.diff, rev 0691e0f66a14c.
+
+Signed-off-by: Timothy Gu <timothygu99@gmail.com>
+
+diff --git a/base_class/rateconv.cc b/base_class/rateconv.cc
+index f27fb44..10ef465 100644
+--- a/base_class/rateconv.cc
++++ b/base_class/rateconv.cc
+@@ -431,7 +431,7 @@ static int outmax;
+ 
+ static int ioerr(void)
+ {
+-    delete g_coep;
++    delete[] g_coep;
+     return -1;
+ }
+ 
+@@ -585,7 +585,7 @@ int rateconv(short *in,int isize, short **out, int *osize,
+ 	    return ioerr();
+     } while (outsize == OUTBUFFSIZE); 
+ 
+-    delete g_coep;
++    delete[] g_coep;
+ 
+     *osize = outpos;
+ 
+diff --git a/base_class/string/EST_String.cc b/base_class/string/EST_String.cc
+index 3cab0f1..3e33da3 100644
+--- a/base_class/string/EST_String.cc
++++ b/base_class/string/EST_String.cc
+@@ -329,6 +329,7 @@ int EST_String::gsub_internal (const char *os, int olength, const char *s, int l
+ 	  p += length;
+ 	  at=end;
+ 	}
++   if (p != from+at)
+       memcpy(p, from+at, size-at);
+ 
+       p += size-at;
+diff --git a/stats/EST_Discrete.cc b/stats/EST_Discrete.cc
+index f151888..89d3d74 100644
+--- a/stats/EST_Discrete.cc
++++ b/stats/EST_Discrete.cc
+@@ -151,7 +151,7 @@ Discretes::~Discretes()
+  
+     for (i=0; i<next_free; i++)
+ 	delete discretes[i];
+-    delete discretes;
++    delete[] discretes;
+ }
+ 
+ const int Discretes::def(const EST_StrList &vocab)
+@@ -165,7 +165,7 @@ const int Discretes::def(const EST_StrList &vocab)
+ 	for (i=0; i<next_free; i++)
+ 	    new_discretes[i] = discretes[i];
+ 	max *= 2;
+-	delete discretes;
++	delete[] discretes;
+ 	discretes = new_discretes;
+     }
+ 
+-- 
+1.8.3.4
+
+
+From cd3aafe3b063606879972e54ac73108553ec4021 Mon Sep 17 00:00:00 2001
+From: Sergio Oller <sergioller@gmail.com>
+Date: Thu, 25 Dec 2014 14:56:46 -0800
+Subject: Allow `-pc longest` in lower case
+
+Backported from Debian: ch_wave-LONGEST.diff, rev: a9c9f0e91f.
+
+Signed-off-by: Timothy Gu <timothygu99@gmail.com>
+
+diff --git a/main/ch_wave_main.cc b/main/ch_wave_main.cc
+index 3e74a12..e7859ac 100644
+--- a/main/ch_wave_main.cc
++++ b/main/ch_wave_main.cc
+@@ -199,7 +199,7 @@ int main (int argc, char *argv[])
+ 		wave_info(sigload);
+ 	    else if (al.present("-pc"))
+ 	    {
+-		if ((al.val("-pc") == "longest") &&
++		if ((downcase(al.val("-pc")) == "longest") &&
+ 		    (sig.num_samples() < sigload.num_samples()))
+ 		    sig.resize(sigload.num_samples());
+ 		else /* "first" or sig is longer */
+-- 
+1.8.3.4
+
+
+From 295c71122265d274429dd6712323d8f624a712fa Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Thu, 25 Dec 2014 15:27:31 -0800
+Subject: Add Haiku configurations
+
+
+diff --git a/config/systems/Haiku.mak b/config/systems/Haiku.mak
+new file mode 100644
+index 0000000..5d78efd
+--- /dev/null
++++ b/config/systems/Haiku.mak
+@@ -0,0 +1,56 @@
++ ###########################################################################
++ ##                                                                       ##
++ ##                Centre for Speech Technology Research                  ##
++ ##                     University of Edinburgh, UK                       ##
++ ##                         Copyright (c) 2014                            ##
++ ##                        All Rights Reserved.                           ##
++ ##                                                                       ##
++ ##  Permission is hereby granted, free of charge, to use and distribute  ##
++ ##  this software and its documentation without restriction, including   ##
++ ##  without limitation the rights to use, copy, modify, merge, publish,  ##
++ ##  distribute, sublicense, and/or sell copies of this work, and to      ##
++ ##  permit persons to whom this work is furnished to do so, subject to   ##
++ ##  the following conditions:                                            ##
++ ##   1. The code must retain the above copyright notice, this list of    ##
++ ##      conditions and the following disclaimer.                         ##
++ ##   2. Any modifications must be clearly marked as such.                ##
++ ##   3. Original authors' names are not deleted.                         ##
++ ##   4. The authors' names are not used to endorse or promote products   ##
++ ##      derived from this software without specific prior written        ##
++ ##      permission.                                                      ##
++ ##                                                                       ##
++ ##  THE UNIVERSITY OF EDINBURGH AND THE CONTRIBUTORS TO THIS WORK        ##
++ ##  DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE, INCLUDING      ##
++ ##  ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO EVENT   ##
++ ##  SHALL THE UNIVERSITY OF EDINBURGH NOR THE CONTRIBUTORS BE LIABLE     ##
++ ##  FOR ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES    ##
++ ##  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN   ##
++ ##  AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,          ##
++ ##  ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF       ##
++ ##  THIS SOFTWARE.                                                       ##
++ ##                                                                       ##
++ ###########################################################################
++ ##                                                                       ##
++ ##          Author: Tiancheng "Timothy" Gu <timothygu99@gmail.com>       ##
++ ## --------------------------------------------------------------------  ##
++ ## Settings for BeOS-derived systems, e.g. Haiku                         ##
++ ##                                                                       ##
++ ###########################################################################
++
++include $(EST)/config/systems/default.mak
++
++## Don't assume echo -n works
++ECHO_N = /bin/printf "%s"
++
++## No native audio
++NATIVE_AUDIO =
++
++## ncurses available, and sockets operations are in libnetwork
++OS_LIBS = -lncurses -lnetwork
++
++## No math library needed. Empty $(sort) needed so that `ifdef MATH_LIBRARY`
++## returns true.
++MATH_LIBRARY = $(sort  )
++
++## awk is a compatible awk, usually gawk.
++NAWK=awk
+diff --git a/config/systems/ix86_Haiku.mak b/config/systems/ix86_Haiku.mak
+new file mode 100644
+index 0000000..3822625
+--- /dev/null
++++ b/config/systems/ix86_Haiku.mak
+@@ -0,0 +1,41 @@
++ ###########################################################################
++ ##                                                                       ##
++ ##                Centre for Speech Technology Research                  ##
++ ##                     University of Edinburgh, UK                       ##
++ ##                         Copyright (c) 2014                            ##
++ ##                        All Rights Reserved.                           ##
++ ##                                                                       ##
++ ##  Permission is hereby granted, free of charge, to use and distribute  ##
++ ##  this software and its documentation without restriction, including   ##
++ ##  without limitation the rights to use, copy, modify, merge, publish,  ##
++ ##  distribute, sublicense, and/or sell copies of this work, and to      ##
++ ##  permit persons to whom this work is furnished to do so, subject to   ##
++ ##  the following conditions:                                            ##
++ ##   1. The code must retain the above copyright notice, this list of    ##
++ ##      conditions and the following disclaimer.                         ##
++ ##   2. Any modifications must be clearly marked as such.                ##
++ ##   3. Original authors' names are not deleted.                         ##
++ ##   4. The authors' names are not used to endorse or promote products   ##
++ ##      derived from this software without specific prior written        ##
++ ##      permission.                                                      ##
++ ##                                                                       ##
++ ##  THE UNIVERSITY OF EDINBURGH AND THE CONTRIBUTORS TO THIS WORK        ##
++ ##  DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE, INCLUDING      ##
++ ##  ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO EVENT   ##
++ ##  SHALL THE UNIVERSITY OF EDINBURGH NOR THE CONTRIBUTORS BE LIABLE     ##
++ ##  FOR ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES    ##
++ ##  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN   ##
++ ##  AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,          ##
++ ##  ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF       ##
++ ##  THIS SOFTWARE.                                                       ##
++ ##                                                                       ##
++ ###########################################################################
++ ##                                                                       ##
++ ##          Author: Tiancheng "Timothy" Gu <timothygu99@gmail.com>       ##
++ ## --------------------------------------------------------------------  ##
++ ## Settings for BeOS-derived systems, e.g. Haiku                         ##
++ ##                                                                       ##
++ ###########################################################################
++
++include $(EST)/config/systems/Haiku.mak
++
+diff --git a/config/systems/x86_64_Haiku.mak b/config/systems/x86_64_Haiku.mak
+new file mode 100644
+index 0000000..3822625
+--- /dev/null
++++ b/config/systems/x86_64_Haiku.mak
+@@ -0,0 +1,41 @@
++ ###########################################################################
++ ##                                                                       ##
++ ##                Centre for Speech Technology Research                  ##
++ ##                     University of Edinburgh, UK                       ##
++ ##                         Copyright (c) 2014                            ##
++ ##                        All Rights Reserved.                           ##
++ ##                                                                       ##
++ ##  Permission is hereby granted, free of charge, to use and distribute  ##
++ ##  this software and its documentation without restriction, including   ##
++ ##  without limitation the rights to use, copy, modify, merge, publish,  ##
++ ##  distribute, sublicense, and/or sell copies of this work, and to      ##
++ ##  permit persons to whom this work is furnished to do so, subject to   ##
++ ##  the following conditions:                                            ##
++ ##   1. The code must retain the above copyright notice, this list of    ##
++ ##      conditions and the following disclaimer.                         ##
++ ##   2. Any modifications must be clearly marked as such.                ##
++ ##   3. Original authors' names are not deleted.                         ##
++ ##   4. The authors' names are not used to endorse or promote products   ##
++ ##      derived from this software without specific prior written        ##
++ ##      permission.                                                      ##
++ ##                                                                       ##
++ ##  THE UNIVERSITY OF EDINBURGH AND THE CONTRIBUTORS TO THIS WORK        ##
++ ##  DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE, INCLUDING      ##
++ ##  ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO EVENT   ##
++ ##  SHALL THE UNIVERSITY OF EDINBURGH NOR THE CONTRIBUTORS BE LIABLE     ##
++ ##  FOR ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES    ##
++ ##  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN   ##
++ ##  AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,          ##
++ ##  ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF       ##
++ ##  THIS SOFTWARE.                                                       ##
++ ##                                                                       ##
++ ###########################################################################
++ ##                                                                       ##
++ ##          Author: Tiancheng "Timothy" Gu <timothygu99@gmail.com>       ##
++ ## --------------------------------------------------------------------  ##
++ ## Settings for BeOS-derived systems, e.g. Haiku                         ##
++ ##                                                                       ##
++ ###########################################################################
++
++include $(EST)/config/systems/Haiku.mak
++
+-- 
+1.8.3.4
+
+
+From ce49b8a8bf93cf694281be2e979ec58c3950635e Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Thu, 25 Dec 2014 15:30:42 -0800
+Subject: Haiku-specific configuration
+
+Signed-off-by: Timothy Gu <timothygu99@gmail.com>
+
+diff --git a/config/config.in b/config/config.in
+index 15d563e..e7e6a65 100644
+--- a/config/config.in
++++ b/config/config.in
+@@ -61,7 +61,7 @@ WARN=1
+ # VERBOSE=1
+ #DEBUG=1
+ # PROFILE=gprof
+-#SHARED=2
++SHARED=2
+ 
+ ## Directory specific selections which override the above
+ 
+@@ -83,7 +83,7 @@ OPTIMISE_sigpr = 3
+ # INCLUDE_MODULES += ESD_AUDIO
+ 
+ ## Native audio for your platform (sun, linux, freebsd, irix, macosx, windows)
+-INCLUDE_MODULES += NATIVE_AUDIO
++# INCLUDE_MODULES += NATIVE_AUDIO
+ 
+ ## Special code to run Windows MPLAYER
+ # INCLUDE_MODULES += MPLAYER_AUDIO
+@@ -172,7 +172,7 @@ INCLUDE_MODULES += RXP
+ 
+ # Languages to generate wrappers for. Currently: PYTHON
+ # PERL5 is no longer supported
+-CONFIG_WRAPPER_LANGUAGES = PYTHON 
++CONFIG_WRAPPER_LANGUAGES =
+ 
+ # Language specific includes should be set to correct site paths
+ CONFIG_PYTHON_INCLUDES= -I/usr/include/python2.2/
+-- 
+1.8.3.4
+
+
+From a88060a26c29c6f61b6e18824d0164f82456c6ac Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Thu, 25 Dec 2014 16:30:07 -0800
+Subject: Add missing library major version
+
+
+diff --git a/config/project.mak b/config/project.mak
+index 2578fc1..11884c5 100644
+--- a/config/project.mak
++++ b/config/project.mak
+@@ -42,6 +42,7 @@
+ PROJECT_NAME = Edinburgh Speech Tools Library
+ PROJECT_PREFIX = EST
+ PROJECT_VERSION = 2.4
++PROJECT_MAJOR_VERSION = 2
+ PROJECT_DATE = December 2014
+ PROJECT_STATE = release
+ 
+-- 
+1.8.3.4
+
+
+From f50c1e621e9d510f475032474438b2df97ac07a0 Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Fri, 26 Dec 2014 02:35:24 +0000
+Subject: config/system.sh: Use `uname -p` for machine type
+
+Fixes Haiku detection
+
+diff --git a/config/system.sh b/config/system.sh
+index 71b271c..b7ac4a1 100644
+--- a/config/system.sh
++++ b/config/system.sh
+@@ -46,9 +46,9 @@ OSTYPE=`uname -s |
+ 	sed -e '/^\([^_]*\).*/s//\1/' -e '/\//s///g'`
+ 
+ # CPU, downcased, /s and some uninteresting details eliminated
+-MACHINETYPE=`{ mach || uname -m || echo unknown ; } 2>/dev/null |
++MACHINETYPE=`{ mach || uname -p || echo unknown ; } 2>/dev/null |
+ 	tr ABCDEFGHIJKLMNOPQRSTUVWXYZ/ abcdefghijklmnopqrstuvwxyz_ | 
+-	sed -e 's/i[0-9]86/ix86/' \
++	sed -e 's/i\{0,1\}[0-9x]86/ix86/' \
+ 	    -e 's/sun4/sparc/' \
+ 	    -e 's/ip[0-9]*/ip/'\
+ 	    -e 's/ /_/g'\
+-- 
+1.8.3.4
+
+From d1dec5aa5d0de6e3f83fcf1ad07b2486a5f62e63 Mon Sep 17 00:00:00 2001
+From: Timothy Gu <timothygu99@gmail.com>
+Date: Fri, 26 Dec 2014 23:17:23 -0800
+Subject: Remove -lstdc++ from linking command
+
+
+diff --git a/config/compilers/gcc32.mak b/config/compilers/gcc32.mak
+index 9703a3e..43fea62 100644
+--- a/config/compilers/gcc32.mak
++++ b/config/compilers/gcc32.mak
+@@ -56,7 +56,7 @@ STATIC_LINKFLAGS = -Dstatic
+ MAKE_DEPEND_C = $(CC) -MM $(INCLUDES) $(TEMPLATES) $(TEMPLATE_SPECIFIC)
+ MAKE_DEPEND_CXX = $(CC) -MM $(INCLUDES) $(WARN_CXXFLAGS) $(TEMPLATES) $(TEMPLATE_SPECIFIC)
+ 
+-COMPILERLIBS= $(COMPILER_LIBS_DIR:%=-L%) -lstdc++
++COMPILERLIBS= $(COMPILER_LIBS_DIR:%=-L%)
+ 
+ 
+ 
+diff --git a/config/compilers/gcc_defaults.mak b/config/compilers/gcc_defaults.mak
+index befcd31..0be771d 100644
+--- a/config/compilers/gcc_defaults.mak
++++ b/config/compilers/gcc_defaults.mak
+@@ -96,10 +96,7 @@ STATIC_LINKFLAGS = -static
+ TEMPLATE_SPECIFIC = -DINSTANTIATE_TEMPLATES
+ TEMPLATE_ARGS = 
+ 
+-## The -lgcc here is redundant - gcc does this anyway - but it
+-## helps java know what needs to be loaded.
+-
+-COMPILERLIBS= $(COMPILER_LIBS_DIR:%=-L%) -lstdc++
++COMPILERLIBS= $(COMPILER_LIBS_DIR:%=-L%)
+ 
+ ## special ways of doing things, blank means default
+ 
+-- 
+1.8.3.4
+
