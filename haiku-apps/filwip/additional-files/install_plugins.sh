@@ -12,9 +12,9 @@ fi
 mkdir -p $settingsDir
 
 if [ -d "$pluginsSysDataDir/Plugins" ]; then
-	cp -rf $pluginsSysDataDir/Plugins "$settingsDir"
+	cp -rf "$pluginsSysDataDir/Plugins" "$settingsDir"
 elif [ -d "$pluginsUserDataDir/Plugins" ]; then
-	cp -rf $pluginsUserDataDir/Plugins "$settingsDir"
+	cp -rf "$pluginsUserDataDir/Plugins" "$settingsDir"
 else
 	exit 1 # couldn't find Plugins
 fi
