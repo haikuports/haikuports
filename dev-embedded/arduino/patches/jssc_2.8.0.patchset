@@ -1,0 +1,135 @@
+From c1ec0feff48494daf1020c6bd0e4942533a44737 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Thu, 11 Jun 2015 18:18:38 +1000
+Subject: Add haiku support for jssc
+
+
+diff --git a/src/cpp/_nix_based/jssc.cpp b/src/cpp/_nix_based/jssc.cpp
+index 634b620..b642cd1 100644
+--- a/src/cpp/_nix_based/jssc.cpp
++++ b/src/cpp/_nix_based/jssc.cpp
+@@ -42,7 +42,10 @@
+ #ifdef __APPLE__
+     #include <serial/ioss.h>//Needed for IOSSIOSPEED in Mac OS X (Non standard baudrate)
+ #endif
+-
++#ifdef __HAIKU__
++	#define TIOCOUTQ -1
++	#define TIOCM_RNG 0200
++#endif
+ #include <jni.h>
+ #include "../jssc_SerialNativeInterface.h"
+ 
+@@ -692,9 +695,14 @@ const jint INTERRUPT_PARITY = 8192;
+ 
+ const jint EV_CTS = 8;
+ const jint EV_DSR = 16;
+-const jint EV_RING = 256;
++#ifdef __HAIKU__
++const jint EV_RLSD = 32;
++const jint EV_RXCHAR = 256;
++#else
++const jint EV_RING  256
+ const jint EV_RLSD = 32;
+ const jint EV_RXCHAR = 1;
++#endif
+ //const jint EV_RXFLAG = 2; //Not supported
+ const jint EV_TXEMPTY = 4;
+ const jint events[] = {INTERRUPT_BREAK,
+diff --git a/src/cpp/jssc_SerialNativeInterface.h b/src/cpp/jssc_SerialNativeInterface.h
+index 7029b1b..fcd7bb2 100644
+--- a/src/cpp/jssc_SerialNativeInterface.h
++++ b/src/cpp/jssc_SerialNativeInterface.h
+@@ -43,6 +43,8 @@ extern "C" {
+ #define jssc_SerialNativeInterface_OS_SOLARIS 2L
+ #undef jssc_SerialNativeInterface_OS_MAC_OS_X
+ #define jssc_SerialNativeInterface_OS_MAC_OS_X 3L
++#undef jssc_SerialNativeInterface_OS_HAIKU
++#define jssc_SerialNativeInterface_OS_HAIKU 4L
+ #undef jssc_SerialNativeInterface_ERR_PORT_BUSY
+ #define jssc_SerialNativeInterface_ERR_PORT_BUSY -1LL
+ #undef jssc_SerialNativeInterface_ERR_PORT_NOT_FOUND
+diff --git a/src/java/jssc/SerialNativeInterface.java b/src/java/jssc/SerialNativeInterface.java
+index c5264f5..8ded600 100644
+--- a/src/java/jssc/SerialNativeInterface.java
++++ b/src/java/jssc/SerialNativeInterface.java
+@@ -43,6 +43,7 @@ public class SerialNativeInterface {
+     public static final int OS_WINDOWS = 1;
+     public static final int OS_SOLARIS = 2;//since 0.9.0
+     public static final int OS_MAC_OS_X = 3;//since 0.9.0
++    public static final int OS_HAIKU = 4;//since 0.9.0
+ 
+     private static int osType = -1;
+ 
+@@ -87,7 +88,12 @@ public class SerialNativeInterface {
+         String tmpFolder = System.getProperty("java.io.tmpdir");
+ 
+         //since 2.3.0 ->
+-        String libRootFolder = new File(userHome).canWrite() ? userHome : tmpFolder;
++        String libRootFolder;
++        if(osName.equals("Haiku")){
++			libRootFolder = tmpFolder;
++        } else {
++			libRootFolder = new File(userHome).canWrite() ? userHome : tmpFolder;
++        }
+         //<- since 2.3.0
+ 
+         String javaLibPath = System.getProperty("java.library.path");//since 2.1.0
+@@ -104,6 +110,10 @@ public class SerialNativeInterface {
+             osName = "solaris";
+             osType = OS_SOLARIS;
+         }
++        else if(osName.equals("Haiku")){
++            osName = "haiku";
++            osType = OS_HAIKU;
++        }
+         else if(osName.equals("Mac OS X") || osName.equals("Darwin")){//os.name "Darwin" since 2.6.0
+             osName = "mac_os_x";
+             osType = OS_MAC_OS_X;
+diff --git a/src/java/jssc/SerialPort.java b/src/java/jssc/SerialPort.java
+index e5f43b4..8a1149e 100644
+--- a/src/java/jssc/SerialPort.java
++++ b/src/java/jssc/SerialPort.java
+@@ -264,6 +264,7 @@ public class SerialPort {
+         checkPortOpened("setEventsMask()");
+         if(SerialNativeInterface.getOsType() == SerialNativeInterface.OS_LINUX ||
+            SerialNativeInterface.getOsType() == SerialNativeInterface.OS_SOLARIS ||
++           SerialNativeInterface.getOsType() == SerialNativeInterface.OS_HAIKU ||
+            SerialNativeInterface.getOsType() == SerialNativeInterface.OS_MAC_OS_X){//since 0.9.0
+             linuxMask = mask;
+             if(mask > 0){
+@@ -298,6 +299,7 @@ public class SerialPort {
+         checkPortOpened("getEventsMask()");
+         if(SerialNativeInterface.getOsType() == SerialNativeInterface.OS_LINUX ||
+            SerialNativeInterface.getOsType() == SerialNativeInterface.OS_SOLARIS ||
++           SerialNativeInterface.getOsType() == SerialNativeInterface.OS_HAIKU ||
+            SerialNativeInterface.getOsType() == SerialNativeInterface.OS_MAC_OS_X){//since 0.9.0
+             return linuxMask;
+         }
+@@ -1041,6 +1043,7 @@ public class SerialPort {
+     private EventThread getNewEventThread() {
+         if(SerialNativeInterface.getOsType() == SerialNativeInterface.OS_LINUX ||
+            SerialNativeInterface.getOsType() == SerialNativeInterface.OS_SOLARIS ||
++           SerialNativeInterface.getOsType() == SerialNativeInterface.OS_HAIKU ||
+            SerialNativeInterface.getOsType() == SerialNativeInterface.OS_MAC_OS_X){//since 0.9.0
+             return new LinuxEventThread();
+         }
+diff --git a/src/java/jssc/SerialPortList.java b/src/java/jssc/SerialPortList.java
+index 5af9a95..87a7ee4 100644
+--- a/src/java/jssc/SerialPortList.java
++++ b/src/java/jssc/SerialPortList.java
+@@ -47,6 +47,11 @@ public class SerialPortList {
+                 PORTNAMES_PATH = "/dev/";
+                 break;
+             }
++            case SerialNativeInterface.OS_HAIKU: {
++                PORTNAMES_REGEXP = Pattern.compile("(pc_serial|usb|serial)[0-9]{1,3}");
++                PORTNAMES_PATH = "/dev/ports";
++                break;
++            }
+             case SerialNativeInterface.OS_SOLARIS: {
+                 PORTNAMES_REGEXP = Pattern.compile("[0-9]*|[a-z]*");
+                 PORTNAMES_PATH = "/dev/term/";
+-- 
+2.2.2
+
