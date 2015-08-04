@@ -6,6 +6,11 @@ git fetch real_origin
 files=$(git diff $(git rev-parse --abbrev-ref HEAD) real_origin/master --numstat | awk '{print $3}')
 for file in $files; do
 	if [ -e "$file" ] && [[ "$file" == *recipe ]]; then
+		LINES=$(grep -l '[[:blank:]]$' $file)
+		if [ ! -z "$LINES" ]; then
+			echo "Trailing whitespace in '$file'."; exit 1
+		fi
+
 		baseName=$(basename $file)
 		portName=${baseName::-7}
 		haikuporter $@ --lint $portName
