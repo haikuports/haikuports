@@ -1,0 +1,370 @@
+From b755a676e918041fe3320e5e6bfa061b3b892994 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Tue, 28 Jan 2014 09:17:21 +0100
+Subject: applying patch openal-1.13.patch
+
+
+diff --git a/Alc/ALc.c b/Alc/ALc.c
+index 6bdcc66..c8b2af4 100644
+--- a/Alc/ALc.c
++++ b/Alc/ALc.c
+@@ -60,6 +60,9 @@ static BackendInfo BackendList[] = {
+ #ifdef HAVE_SOLARIS
+     { "solaris", alc_solaris_init, alc_solaris_deinit, alc_solaris_probe, EmptyFuncs },
+ #endif
++#ifdef HAVE_HAIKU
++    { "haiku", alc_haiku_init, alc_haiku_deinit, alc_haiku_probe, EmptyFuncs },
++#endif
+ #ifdef HAVE_DSOUND
+     { "dsound", alcDSoundInit, alcDSoundDeinit, alcDSoundProbe, EmptyFuncs },
+ #endif
+diff --git a/Alc/haiku.cpp b/Alc/haiku.cpp
+new file mode 100644
+index 0000000..c66e99d
+--- /dev/null
++++ b/Alc/haiku.cpp
+@@ -0,0 +1,214 @@
++/**
++ * OpenAL cross platform audio library
++ * Copyright (C) 1999-2010 by authors.
++ * This library is free software; you can redistribute it and/or
++ *  modify it under the terms of the GNU Library General Public
++ *  License as published by the Free Software Foundation; either
++ *  version 2 of the License, or (at your option) any later version.
++ 
++ * This library is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ *  Library General Public License for more details.
++ *
++ * You should have received a copy of the GNU Library General Public
++ *  License along with this library; if not, write to the
++ *  Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ *  Boston, MA  02111-1307, USA.
++ * Or go to http://www.gnu.org/copyleft/lgpl.html
++ */
++
++#include "config.h"
++#include <stdlib.h>
++#include <stdio.h>
++#include <memory.h>
++
++#include "alMain.h"
++#include "AL/al.h"
++#include "AL/alc.h"
++
++#include <SoundPlayer.h>
++
++void alc_haiku_init(BackendFuncs *func_list);
++void alc_haiku_deinit();
++void alc_haiku_probe(int type);
++
++static const ALCchar haiku_device[] = "Haiku Software";
++
++void alc_haiku_init(BackendFuncs *func_list)
++{
++
++	ALCboolean HaikuOpenPlayback(ALCdevice *dev, const ALCchar *devName);
++	void HaikuPlayBufferCb(void *dev /* void *cookie */, void *buffer, size_t buf_sz, const media_raw_audio_format &fmt);
++	void HaikuClosePlayback(ALCdevice *dev);
++	ALCboolean HaikuResetPlayback(ALCdevice *dev);
++	void HaikuStopPlayback(ALCdevice *dev);
++
++	ALCboolean HaikuOpenCapture(ALCdevice *dev, const ALCchar *devName);
++	void HaikuCloseCapture(ALCdevice *dev);
++	void HaikuStartCapture(ALCdevice *dev);
++	void HaikuStopCapture(ALCdevice *dev);
++	ALCuint HaikuAvailableSamples(ALCdevice *Dev);
++	void HaikuCaptureSamples(ALCdevice *dev, ALCvoid *pBuf, ALCuint lSamples);
++
++	static BackendFuncs HaikuFuncs = {
++    	HaikuOpenPlayback,
++    	HaikuClosePlayback,
++    	HaikuResetPlayback,
++    	HaikuStopPlayback,
++    	HaikuOpenCapture,
++    	HaikuCloseCapture,
++    	HaikuStartCapture,
++    	HaikuStopCapture,
++    	HaikuCaptureSamples,
++    	HaikuAvailableSamples
++	};
++
++    
++    *func_list = HaikuFuncs;
++}
++
++void alc_haiku_deinit()
++{
++}
++
++void alc_haiku_probe(int type)
++{
++#ifdef HAVE_STAT
++    struct stat buf;
++    if(stat(GetConfigValue("haiku", "device", "/dev/audio"), &buf) != 0)
++        return;
++#endif
++
++    if(type == DEVICE_PROBE)
++        AppendDeviceList(haiku_device);
++    else if(type == ALL_DEVICE_PROBE)
++        AppendAllDeviceList(haiku_device);
++}
++
++typedef struct {
++    BSoundPlayer *pl;
++    ALCdevice *device;
++    ALuint frameSize;
++} HaikuData;
++
++ALCboolean HaikuOpenPlayback(ALCdevice *dev, const ALCchar *devName)
++{
++	void HaikuPlayBufferCb(void *dev /* void *cookie */, void *buffer, size_t buf_sz, const media_raw_audio_format &fmt);
++	
++	if (!devName)
++        devName = haiku_device;
++    else if (strcmp(devName, haiku_device) != 0)
++        return ALC_FALSE;
++
++    HaikuData *data = new HaikuData;
++    data = (HaikuData*)calloc(1, sizeof(HaikuData));
++    data->device = dev;
++    dev->szDeviceName = strdup(devName);
++    dev->ExtraData = data;
++
++    media_raw_audio_format fmt;
++    fmt.frame_rate = dev->Frequency;
++    fmt.channel_count = ChannelsFromDevFmt(dev->FmtChans);
++    switch (dev->FmtType) {
++    case DevFmtByte: fmt.format = fmt.B_AUDIO_CHAR; break;
++    case DevFmtUByte: fmt.format = fmt.B_AUDIO_UCHAR; break;
++    case DevFmtShort: fmt.format = fmt.B_AUDIO_SHORT; break;
++    case DevFmtUShort:
++      delete data; dev->ExtraData = 0;
++      return ALC_FALSE;
++    case DevFmtFloat: fmt.format = fmt.B_AUDIO_FLOAT; break;
++    }
++    {
++        union {
++          char bytes[2];
++          short data;
++        } test;
++        test.data = 10;
++	if (test.bytes[0] == 10)
++            fmt.byte_order = B_MEDIA_LITTLE_ENDIAN;
++	else
++	    fmt.byte_order = B_MEDIA_BIG_ENDIAN;
++    }
++    fmt.buffer_size = 4096;
++
++    data->pl = new BSoundPlayer(&fmt, "OpenAL sound player", HaikuPlayBufferCb, NULL, dev);
++    if (data->pl->InitCheck() != B_OK) {
++      delete data->pl;
++      delete data;
++      dev->ExtraData = 0;
++      return ALC_FALSE;
++    }
++    data->frameSize = FrameSizeFromDevFmt(dev->FmtChans, dev->FmtType);
++    return ALC_TRUE;
++}
++void HaikuPlayBufferCb(void *cookie, void *buffer, size_t buf_sz, const media_raw_audio_format &fmt)
++{
++	(void)fmt;
++    ALCdevice *dev = (ALCdevice*)cookie;
++    HaikuData *data = (HaikuData*)dev->ExtraData;
++    aluMixData(dev, buffer, buf_sz / data->frameSize);
++}
++
++void HaikuClosePlayback(ALCdevice *dev) {
++    HaikuData *data = (HaikuData*)dev->ExtraData;
++    data->pl->Stop(true, true);
++    delete data->pl;
++    delete data; dev->ExtraData = 0;
++}
++
++ALCboolean HaikuResetPlayback(ALCdevice *dev)
++{
++    HaikuData *data = (HaikuData*)dev->ExtraData;
++    data->pl->Stop(true, true);
++
++    ALuint64 bufSize = dev->UpdateSize;
++    bufSize = bufSize / data->frameSize + (bufSize % data->frameSize > 0) ? 1 : 0; // Divide with round up
++    bufSize *= bufSize;
++    dev->UpdateSize = bufSize;
++
++    data->pl->Start();
++    return ALC_TRUE;
++}
++
++void HaikuStopPlayback(ALCdevice *dev) {
++    HaikuData *data = (HaikuData*)dev->ExtraData;
++    data->pl->Stop(true, true);
++    return;
++}
++
++ALCboolean HaikuOpenCapture(ALCdevice *dev, const ALCchar *devName)
++{
++	(void)dev;
++    (void)devName;
++    return ALC_FALSE;
++}
++
++void HaikuCloseCapture(ALCdevice *dev) 
++{
++	(void)dev;	
++}
++
++void HaikuStartCapture(ALCdevice *dev) 
++{
++	(void)dev;
++}
++
++void HaikuStopCapture(ALCdevice *dev) 
++{
++	(void)dev;
++}
++
++ALCuint HaikuAvailableSamples(ALCdevice *Dev)
++{
++	(void)Dev;
++    return 0;
++}
++
++void HaikuCaptureSamples(ALCdevice *dev, ALCvoid *pBuf, ALCuint lSamples) 
++{
++    (void)dev;
++    (void)pBuf;
++    (void)lSamples;	
++}
++
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 44f9ea8..ffbe13b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -16,10 +16,12 @@ INCLUDE(CheckIncludeFiles)
+ INCLUDE(CheckSymbolExists)
+ INCLUDE(CheckCCompilerFlag)
+ INCLUDE(CheckCSourceCompiles)
++INCLUDE(CheckCXXCompilerFlag)
++INCLUDE(CheckCXXSourceCompiles)
+ INCLUDE(CheckTypeSize)
+ 
+ 
+-PROJECT(OpenAL C)
++PROJECT(OpenAL C CXX)
+ 
+ 
+ SET(CMAKE_ALLOW_LOOSE_LOOP_CONSTRUCTS TRUE)
+@@ -28,6 +30,7 @@ SET(CMAKE_ALLOW_LOOSE_LOOP_CONSTRUCTS TRUE)
+ OPTION(ALSA    "Check for ALSA backend"                ON)
+ OPTION(OSS     "Check for OSS backend"                 ON)
+ OPTION(SOLARIS "Check for Solaris backend"             ON)
++OPTION(HAIKU   "Check for Haiku backend"               ON)
+ OPTION(DSOUND  "Check for DirectSound backend"         ON)
+ OPTION(WINMM   "Check for Windows Multimedia backend"  ON)
+ OPTION(PORTAUDIO  "Check for PortAudio backend"        ON)
+@@ -334,6 +337,7 @@ SET(BACKENDS "")
+ SET(HAVE_ALSA       0)
+ SET(HAVE_OSS        0)
+ SET(HAVE_SOLARIS    0)
++SET(HAVE_HAIKU      0)
+ SET(HAVE_DSOUND     0)
+ SET(HAVE_WINMM      0)
+ SET(HAVE_PORTAUDIO  0)
+@@ -378,6 +382,24 @@ IF(SOLARIS)
+     ENDIF()
+ ENDIF()
+ 
++# Check Haiku backend
++IF(HAIKU)
++    CHECK_CXX_SOURCE_COMPILES("#include <SoundPlayer.h>
++                           int main(void)
++                           {
++                               BSoundPlayer *player;
++                               return 0;
++                           }
++                          " HAVE_SOUND_PLAYER_H)
++    IF(HAVE_SOUND_PLAYER_H)
++        SET(HAVE_HAIKU 1)
++        SET(ALC_OBJS  ${ALC_OBJS} Alc/haiku.cpp)
++        SET(BACKENDS  "${BACKENDS} Haiku,")
++        SET(EXTRA_LIBS be ${EXTRA_LIBS})
++        SET(EXTRA_LIBS media ${EXTRA_LIBS})
++	ENDIF()
++ENDIF()
++
+ # Check DSound/MMSystem backend
+ IF(DSOUND)
+     CHECK_INCLUDE_FILE(dsound.h HAVE_DSOUND_H)
+diff --git a/OpenAL32/Include/alMain.h b/OpenAL32/Include/alMain.h
+index 02153a8..e3b357a 100644
+--- a/OpenAL32/Include/alMain.h
++++ b/OpenAL32/Include/alMain.h
+@@ -276,6 +276,9 @@ void alc_oss_probe(int type);
+ void alc_solaris_init(BackendFuncs *func_list);
+ void alc_solaris_deinit(void);
+ void alc_solaris_probe(int type);
++void alc_haiku_init(BackendFuncs *func_list);
++void alc_haiku_deinit(void);
++void alc_haiku_probe(int type);
+ void alcDSoundInit(BackendFuncs *func_list);
+ void alcDSoundDeinit(void);
+ void alcDSoundProbe(int type);
+diff --git a/config.h.in b/config.h.in
+index 3c1e7e6..27a19cf 100644
+--- a/config.h.in
++++ b/config.h.in
+@@ -13,6 +13,9 @@
+ /* Define if we have the Solaris backend */
+ #cmakedefine HAVE_SOLARIS
+ 
++/* Define if we have the Haiku backend */
++#cmakedefine HAVE_HAIKU
++
+ /* Define if we have the DSound backend */
+ #cmakedefine HAVE_DSOUND
+ 
+-- 
+1.8.3.4
+
+
+From af8af1218c33e188372b600c4c0bfefc616b43e6 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Tue, 28 Jan 2014 09:22:49 +0100
+Subject: Make bin directory a variable.
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index ffbe13b..a060122 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -488,6 +488,7 @@ SET(libdir "\${exec_prefix}/lib${LIB_SUFFIX}")
+ SET(bindir "\${exec_prefix}/bin")
+ SET(includedir "\${prefix}/include")
+ SET(PACKAGE_VERSION "${LIB_VERSION}")
++SET(BIN_DIR "bin" CACHE STRING "relative dir where to put executables")
+ 
+ # End configuration
+ CONFIGURE_FILE(
+@@ -512,7 +513,7 @@ TARGET_LINK_LIBRARIES(${LIBNAME} ${EXTRA_LIBS})
+ 
+ # Add an install target here
+ INSTALL(TARGETS ${LIBNAME}
+-        RUNTIME DESTINATION bin
++	RUNTIME DESTINATION "${BIN_DIR}"
+         LIBRARY DESTINATION "lib${LIB_SUFFIX}"
+         ARCHIVE DESTINATION "lib${LIB_SUFFIX}"
+ )
+@@ -554,7 +555,7 @@ IF(UTILS)
+     ADD_EXECUTABLE(openal-info utils/openal-info.c)
+     TARGET_LINK_LIBRARIES(openal-info ${LIBNAME})
+     INSTALL(TARGETS openal-info
+-            RUNTIME DESTINATION bin
++		RUNTIME DESTINATION "${BIN_DIR}"
+             LIBRARY DESTINATION "lib${LIB_SUFFIX}"
+             ARCHIVE DESTINATION "lib${LIB_SUFFIX}"
+     )
+-- 
+1.8.3.4
+

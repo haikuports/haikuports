@@ -1,0 +1,202 @@
+Index: src/ether.cpp
+===================================================================
+RCS file: /home/cvs/cebix/BasiliskII/src/ether.cpp,v
+retrieving revision 1.16
+diff -u -r1.16 ether.cpp
+--- src/ether.cpp	1 Jan 2008 09:40:31 -0000	1.16
++++ src/ether.cpp	26 Apr 2015 01:01:10 -0000
+@@ -57,7 +57,7 @@
+ #define MONITOR 0
+ 
+ 
+-#ifdef __BEOS__
++#if defined(__BEOS__) && (IPPROTO_TCP != 6) /* net_server */
+ #define CLOSESOCKET closesocket
+ #else
+ #define CLOSESOCKET close
+Index: src/BeOS/Makefile
+===================================================================
+RCS file: /home/cvs/cebix/BasiliskII/src/BeOS/Makefile,v
+retrieving revision 1.10
+diff -u -r1.10 Makefile
+--- src/BeOS/Makefile	15 Jul 2001 14:19:08 -0000	1.10
++++ src/BeOS/Makefile	26 Apr 2015 01:01:10 -0000
+@@ -68,7 +68,16 @@
+ #		naming scheme you need to specify the path to the library
+ #		and it's name
+ #		library: my_lib.a entry: my_lib.a or path/my_lib.a
+-LIBS=be game media device textencoding tracker net
++ifneq ($(wildcard /boot/develop/lib/*/libnetwork.so),)
++NETLIBS := network
++else
++ifneq ($(wildcard /boot/develop/lib/*/libsocket.so),)
++NETLIBS := socket bind
++else
++NETLIBS := net
++endif
++endif
++LIBS=be game media device textencoding tracker $(NETLIBS) 
+ 		
+ #	specify additional paths to directories following the standard
+ #	libXXX.so or libXXX.a naming scheme.  You can specify full paths
+Index: src/BeOS/ether_beos.cpp
+===================================================================
+RCS file: /home/cvs/cebix/BasiliskII/src/BeOS/ether_beos.cpp,v
+retrieving revision 1.14
+diff -u -r1.14 ether_beos.cpp
+--- src/BeOS/ether_beos.cpp	1 Jan 2008 09:40:32 -0000	1.14
++++ src/BeOS/ether_beos.cpp	26 Apr 2015 01:01:10 -0000
+@@ -30,6 +30,9 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/socket.h>
++#ifdef AF_MAX /* BONE or Haiku */
++#include <netinet/in.h>
++#endif
+ 
+ #include "cpu_emulation.h"
+ #include "main.h"
+Index: src/BeOS/main_beos.cpp
+===================================================================
+RCS file: /home/cvs/cebix/BasiliskII/src/BeOS/main_beos.cpp,v
+retrieving revision 1.16
+diff -u -r1.16 main_beos.cpp
+--- src/BeOS/main_beos.cpp	21 Sep 2009 03:33:20 -0000	1.16
++++ src/BeOS/main_beos.cpp	26 Apr 2015 01:01:10 -0000
+@@ -19,7 +19,8 @@
+  */
+ 
+ #include <AppKit.h>
+-#include <InterfaceKit.h>
++//#include <InterfaceKit.h>
++#include <Alert.h>
+ #include <KernelKit.h>
+ #include <StorageKit.h>
+ 
+Index: src/BeOS/video_beos.cpp
+===================================================================
+RCS file: /home/cvs/cebix/BasiliskII/src/BeOS/video_beos.cpp,v
+retrieving revision 1.17
+diff -u -r1.17 video_beos.cpp
+--- src/BeOS/video_beos.cpp	1 Jan 2008 09:40:32 -0000	1.17
++++ src/BeOS/video_beos.cpp	26 Apr 2015 01:01:10 -0000
+@@ -19,10 +19,16 @@
+  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+  */
+ 
++/* FIXME: HACK: struct name conflict in Accelerant.h: video_mode */
++#define video_mode beos_video_mode
++
++#include <Accelerant.h>
+ #include <AppKit.h>
+ #include <InterfaceKit.h>
+ #include <GameKit.h>
+ 
++#undef video_mode
++
+ #include <stdio.h>
+ #include <string.h>
+ 
+@@ -47,6 +53,7 @@
+ 
+ #define DEBUGGER_AVAILABLE 0
+ 
++//#define ENABLE_DISPLAY_SCREEN
+ 
+ // Messages
+ const uint32 MSG_REDRAW = 'draw';
+@@ -60,15 +67,39 @@
+ const uint32 MSG_MOUNT = 'moun';
+ const uint32 MSG_DEBUGGER = 'dbug';
+ 
++// From sys_beos.cpp
++extern void SysCreateVolumeMenu(BMenu *menu, uint32 msg);
++extern void SysMountVolume(const char *name);
++
++// Supported video modes
++static vector<video_mode> VideoModes;
++
+ // Display types
+ enum {
+ 	DISPLAY_WINDOW,
++#ifdef ENABLE_DISPLAY_SCREEN
+ 	DISPLAY_SCREEN
++#endif
+ };
+ 
+-// From sys_beos.cpp
+-extern void SysCreateVolumeMenu(BMenu *menu, uint32 msg);
+-extern void SysMountVolume(const char *name);
++/*
++ *  monitor_desc subclass for BeOS display
++ */
++
++class BeOS_monitor_desc : public monitor_desc {
++public:
++	BeOS_monitor_desc(const vector<video_mode> &available_modes, video_depth default_depth, uint32 default_id)
++		: monitor_desc(available_modes, default_depth, default_id) {};
++	~BeOS_monitor_desc() {};
++
++	virtual void switch_to_current_mode(void);
++	virtual void set_palette(uint8 *pal, int num);
++
++	bool video_open(void);
++	void video_close(void);
++public:
++	int display_type;		// See enum above
++};
+ 
+ 
+ /*
+@@ -93,6 +124,25 @@
+ 
+ 
+ /*
++ *  Display "driver" classes
++ */
++
++class driver_base {
++public:
++	driver_base(BeOS_monitor_desc &m);
++	virtual ~driver_base();
++
++	virtual void set_palette(uint8 *pal, int num) {};
++	virtual struct BitMap *get_bitmap() { return NULL; };
++public:
++	Amiga_monitor_desc &monitor;	// Associated video monitor
++	const video_mode &mode;		// Video mode handled by the driver
++	bool init_ok;			// Initialization succeeded (we can't use exceptions because of -fomit-frame-pointer)
++	struct Window *the_win;
++};
++
++
++/*
+  *  Window class
+  */
+ 
+@@ -130,6 +180,7 @@
+ };
+ 
+ 
++#ifdef ENABLE_DISPLAY_SCREEN
+ /*
+  *  Screen class
+  */
+@@ -156,7 +207,7 @@
+ 	bool screen_active;
+ 	bool first_time;
+ };
+-
++#endif
+ 
+ // Global variables
+ static int display_type = DISPLAY_WINDOW;	// See enum above
+@@ -206,7 +257,7 @@
+ 	}
+ 
+ 	VideoModes.push_back(mode);
+-	video_init_depth_list();
++	//video_init_depth_list();	Now done in monitor_desc constructor?
+ 	VideoMonitor.mode = mode;
+ }
+ 

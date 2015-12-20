@@ -1,0 +1,436 @@
+--- fastdep-0.16.orig/realpath.cc
++++ fastdep-0.16/realpath.cc
+@@ -55,7 +55,7 @@
+ {
+ 	strcpy(resolved_path,path);
+ 	return resolved_path;
+-
++	exit(2);
+ 	// until fixed
+ 	char copy_path[PATH_MAX];
+ 	char link_path[PATH_MAX];
+--- fastdep-0.16.orig/FileCache.cc
++++ fastdep-0.16/FileCache.cc
+@@ -8,7 +8,7 @@
+ #include <limits.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+-
++#include <memory>
+ 
+ #include <sys/types.h>
+ #include <sys/stat.h>
+@@ -23,6 +23,19 @@
+ #define PATH_MAX MAX_PATH
+ #endif
+ 
++// this is not really a solution, but it is used in realpath.cc as well...
++#ifndef PATH_MAX
++#ifdef _POSIX_VERSION
++#define PATH_MAX _POSIX_PATH_MAX
++#else
++#ifdef MAXPATHLEN
++#define PATH_MAX MAXPATHLEN
++#else
++#define PATH_MAX 1024
++#endif
++#endif
++#endif
++
+ using namespace std;
+ 
+ bool FileCache::QuietMode = false;
+@@ -152,7 +165,7 @@
+ 	if (DebugMode)
+ 		std::cout << "[DEBUG] FileCache::update(" << aDirectory << "," << aFilename << ","
+ 			<< isSystem << ");" << std::endl;
+-	char ResolvedBuffer[PATH_MAX+1];
++	char ResolvedBuffer[PATH_MAX];
+ 	{
+ 		unsigned int i;
+ 		for (i=0; i<IncludeDirs.size(); ++i)
+--- fastdep-0.16.orig/MappedFile.h
++++ fastdep-0.16/MappedFile.h
+@@ -39,7 +39,7 @@
+ 	/** C'tor
+ 	 *
+ 	 */
+-	MappedFile() : opened_(false),file_size(0){}
++	MappedFile() : opened_(false),file_size(0),map_(0){}
+ 	
+ 	/** D'tor
+ 	 *
+--- fastdep-0.16.orig/MappedFile.cc
++++ fastdep-0.16/MappedFile.cc
+@@ -10,6 +10,7 @@
+ 
+ #endif
+ 
++#include <cstdio>
+ #include <memory>
+ 
+ #include "MappedFile.h"
+@@ -96,8 +97,11 @@
+ 		
+ MappedFile::~MappedFile()
+ {
+-	munmap(map_, mapsize);
+-	close(fd);		
++	if(opened_)
++	{
++		munmap(map_, mapsize);
++		close(fd);
++	}
+ }
+ 
+ 				
+--- fastdep-0.16.orig/debian/rules
++++ fastdep-0.16/debian/rules
+@@ -0,0 +1,72 @@
++#!/usr/bin/make -f
++
++# Uncomment this to turn on verbose mode.
++#export DH_VERBOSE=1
++
++CFLAGS=-g
++
++ifneq (,$(findstring noopt,$(DEB_BUILD_OPTIONS)))
++	CFLAGS += -O0
++else
++	CFLAGS += -O2
++endif
++
++
++config/config.me: configure
++	dh_testdir
++	./configure --debian --without-fastdep
++
++
++build: build-stamp
++
++build-stamp:  config/config.me
++	dh_testdir
++	CFLAGS="$(CFLAGS)" $(MAKE)
++	cd tests && ./run.sh
++	# regression test, replace with a full test suite
++	./fastdep ./Define.cc ./FileCache.cc > /dev/null
++	touch build-stamp
++
++clean:
++	dh_testdir
++	dh_testroot
++	rm -f build-stamp 
++	[ ! -f Makefile ] || $(MAKE) clean
++	rm -f config/a.out
++	rm -f tests/last/*.out
++	dh_clean  --exclude ./FileCache.cc.orig --exclude ./FileCache.h.orig --exclude ./Include.cc.orig --exclude ./fastdep.cc.orig
++
++install: build
++	dh_testdir
++	dh_testroot
++	dh_prep  --exclude ./FileCache.cc.orig --exclude ./FileCache.h.orig --exclude ./Include.cc.orig --exclude ./fastdep.cc.orig
++	dh_installdirs
++	dh_install fastdep /usr/bin/
++
++
++# Build architecture-independent files here.
++binary-indep: build install
++
++# Build architecture-dependent files here.
++binary-arch: build install
++	dh_testdir
++	dh_testroot
++	dh_installchangelogs CHANGELOG
++	dh_installdocs
++	# custom doc installation
++	dh_install doc/c*.htm /usr/share/doc/fastdep/manual/
++	dh_install doc/fastdep.html /usr/share/doc/fastdep/manual/
++	dh_install doc/fastdep.pdf /usr/share/doc/fastdep/
++	dh_link /usr/share/doc/fastdep/manual/fastdep.html /usr/share/doc/fastdep/manual/book1.htm
++	dh_installman doc/fastdep.1
++	dh_strip
++	dh_compress
++	dh_fixperms
++	dh_installdeb
++	dh_shlibdeps
++	dh_gencontrol
++	dh_md5sums
++	dh_builddeb
++
++binary: binary-indep binary-arch
++.PHONY: build clean binary-indep binary-arch binary install 
+--- fastdep-0.16.orig/debian/control
++++ fastdep-0.16/debian/control
+@@ -0,0 +1,15 @@
++Source: fastdep
++Section: devel
++Priority: optional
++Maintainer: Robert Lemmen <robertle@semistable.com>
++Build-Depends: debhelper (>= 7.0.0)
++Standards-Version: 3.8.1
++
++Package: fastdep
++Architecture: any
++Depends: ${shlibs:Depends}
++Description: fast dependency generator for C/C++ files
++ Efficiently generates dependency information for C and C++ files, suitable for
++ inclusion in makefiles, and optionally generates dependency information for
++ its own output. This can be used to create robust, fast and largely automated
++ build rules. 
+--- fastdep-0.16.orig/debian/docs
++++ fastdep-0.16/debian/docs
+@@ -0,0 +1,2 @@
++TODO
++AUTHORS
+--- fastdep-0.16.orig/debian/fastdep.doc-base
++++ fastdep-0.16/debian/fastdep.doc-base
+@@ -0,0 +1,13 @@
++Document: fastdep
++Title: Fastdep Manual
++Author: Bart Vanhauwaert
++Abstract: This manual describes fastdep, what it does and how you can
++ include it in your build system.
++Section: Programming
++
++Format: HTML
++Index: /usr/share/doc/fastdep/manual/fastdep.html
++Files: /usr/share/doc/fastdep/manual/*.html
++
++Format: PDF
++Files: /usr/share/doc/fastdep/fastdep.pdf.gz
+--- fastdep-0.16.orig/debian/changelog
++++ fastdep-0.16/debian/changelog
+@@ -0,0 +1,78 @@
++fastdep (0.16-11) unstable; urgency=low
++
++  * Included missing header to make fastdep compile with GCC 4.4 
++    (closes: #505125)
++
++ -- Robert Lemmen <robertle@semistable.com>  Thu, 12 Mar 2009 19:18:37 +0000
++
++fastdep (0.16-10) unstable; urgency=low
++
++  * Included a doc-base registration file (closes: #451643)
++  * Fixed includes for g++ 4.3 (closes: #454848)
++
++ -- Robert Lemmen <robertle@semistable.com>  Mon, 10 Dec 2007 16:07:27 +0100
++
++fastdep (0.16-9) unstable; urgency=low
++
++  * Used the same kludge in FileCache as it is already used in realpath,
++  	should make it work on the hurd
++  * Bumped standards version and made minor tweaks (FSF address)
++
++ -- Robert Lemmen <robertle@semistable.com>  Thu, 26 Oct 2006 16:20:04 +0200
++
++fastdep (0.16-8) unstable; urgency=low
++
++  * Rebuild for the g++ transition
++  * Updated to newer standards version
++
++ -- Robert Lemmen <robertle@semistable.com>  Tue, 19 Jul 2005 10:35:28 +0200
++
++fastdep (0.16-7) unstable; urgency=low
++
++  * smallish fixes for description and manual page (closes: #258017,#259372)
++
++ -- Robert Lemmen <robertle@semistable.com>  Mon, 15 Nov 2004 11:23:23 +0100
++
++fastdep (0.16-6) unstable; urgency=low
++
++  * [jps@debian.org] Sponsored upload
++  * [jps@debian.org] Patch to stop segfault on i386
++  * [jps@debian.org] Fix broken link (book1.htm)
++  
++ -- Robert Lemmen <robertle@semistable.com>  Wed,  9 Jun 2004 23:47:30 +0200
++
++fastdep (0.16-5) unstable; urgency=low
++
++  * trivial fix for a bug that caused fastdep to segfault in some cases
++  * regression test for this bug
++  * no longer uses itself while building if installed
++
++ -- Robert Lemmen <robertle@semistable.com>  Thu, 27 May 2004 18:03:40 +0200
++
++fastdep (0.16-4) unstable; urgency=low
++
++  * fixed debian/rules for a cleaner package build
++  * removed README (just compile info) and added AUTHORS
++  * fixed links in documentation
++
++ -- Robert Lemmen <robertle@semistable.com>  Sun, 16 May 2004 21:06:15 +0200
++
++fastdep (0.16-3) unstable; urgency=low
++
++  * Fixed description
++
++ -- Robert Lemmen <robertle@semistable.com>  Sun, 18 Apr 2004 16:26:18 +0200
++
++fastdep (0.16-2) unstable; urgency=low
++
++  * Fixed copyright file
++  * Cleaned up debian/rules
++
++ -- Robert Lemmen <robertle@semistable.com>  Sun, 18 Apr 2004 15:26:09 +0200
++
++fastdep (0.16-1) unstable; urgency=low
++
++  * Initial Release. (closes: #214408)
++
++ -- Robert Lemmen <robertle@semistable.com>  Sat, 17 Apr 2004 15:56:30 +0200
++
+--- fastdep-0.16.orig/debian/compat
++++ fastdep-0.16/debian/compat
+@@ -0,0 +1 @@
++7
+--- fastdep-0.16.orig/debian/watch
++++ fastdep-0.16/debian/watch
+@@ -0,0 +1,6 @@
++# Example watch control file for uscan
++# Rename this file to "watch" and then you can run the "uscan" command
++# to check for upstream updates and more.
++# Site		Directory		Pattern			Version	Script
++version=2
++http://www.irule.be/bvh/c++/fastdep/ fastdep-(.*)\.tar\.gz
+--- fastdep-0.16.orig/debian/copyright
++++ fastdep-0.16/debian/copyright
+@@ -0,0 +1,26 @@
++This package was debianized by Robert Lemmen <robertle@semistable.com> on
++Sat, 17 Apr 2004 15:56:30 +0200.
++
++It was downloaded from http://www.irule.be/bvh/c++/fastdep/
++
++Upstream Author: Bart Vanhauwaert <bvh-cplusplus@irule.be>
++
++Copyright: 2001-2003 Bart Vanhauwaert
++
++  This program is free software; you can redistribute it and/or modify
++  it under the terms of the GNU General Public License as published by
++  the Free Software Foundation; either version 2 of the License, or
++  (at your option) any later version.
++
++  This program is distributed in the hope that it will be useful,
++  but WITHOUT ANY WARRANTY; without even the implied warranty of
++  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++  GNU General Public License for more details.
++
++  You should have received a copy of the GNU General Public License with
++  the Debian GNU/Linux distribution in file /usr/share/common-licenses/GPL;
++  if not, write to the Free Software Foundation, Inc., 51 Franklin St, 
++  Fifth Floor, Boston, MA 02110-1301, USA.
++
++ On Debian systems, the complete text of the GNU General Public
++ License, version 2, can be found in /usr/share/common-licenses/GPL-2.
+--- fastdep-0.16.orig/config/config.me
++++ fastdep-0.16/config/config.me
+@@ -1,2 +1,3 @@
++FASTDEP_BIN=/usr/bin/fastdep
+ DEBUGSYMBOLS=no
+ OPTIMIZE=yes
+--- fastdep-0.16.orig/config/release.sh
++++ fastdep-0.16/config/release.sh
+@@ -8,6 +8,7 @@
+ {
+ 	debugprofile=
+ 	releaseprofile=yes
++	debianprofile=
+ 	for i in $@
+ 	do
+ 		value=${i#--debug}
+@@ -15,12 +16,21 @@
+ 		then
+ 			debugprofile=yes
+ 			releaseprofile=
++			debianprofile=
+ 		fi
+ 		value=${i#--release}
+ 		if [ ${#i} -ne ${#value} ]
+ 		then
+ 			debugprofile=
+ 			releaseprofile=yes
++			debianprofile=
++		fi
++		value=${i#--debian}
++		if [ ${#i} -ne ${#value} ]
++		then
++			debugprofile=
++			releaseprofile=
++			debianprofile=yes
+ 		fi
+ 	done
+ }
+@@ -39,6 +49,11 @@
+ 		echo "DEBUGSYMBOLS=no" >> config.me
+ 		echo "OPTIMIZE=yes" >> config.me
+ 	fi
++	if [ -n "$debianprofile" ]
++	then
++		echo "DEBUGSYMBOLS=no" >> config.me
++		echo "OPTIMIZE=no" >> config.me
++	fi
+ }
+ 
+ # step 0 : give help
+@@ -49,4 +64,6 @@
+ 	echo -e "\t\tinclude debugging symbols"
+ 	echo -e "\t--release [default]"
+ 	echo -e "\t\tdon't include debugging symbols and optimize"
++	echo -e "\t--debian"
++	echo -e "\t\tdon't include debugging symbols, don't optimize (if you want to use CFLAGS instead)"
+ }
+--- fastdep-0.16.orig/doc/fastdep.1
++++ fastdep-0.16/doc/fastdep.1
+@@ -1,9 +1,3 @@
+-...\" $Header: /aolnet/dev/src/CVS/sgml/docbook-to-man/cmd/docbook-to-man.sh,v 1.1.1.1 1998/11/13 21:31:59 db3l Exp $
+-...\"
+-...\"	transcript compatibility for postscript use.
+-...\"
+-...\"	synopsis:  .P! <file.ps>
+-...\"
+ .de P!
+ .fl
+ \!!1 setgray
+@@ -25,7 +19,7 @@
+ .el .ie \\*(f4 .ds f4 \\n(.f
+ .el .tm ? font overflow
+ .ft \\$1
+-..
++
+ .de fP
+ .ie     !\\*(f4 \{\
+ .	ft \\*(f4
+@@ -93,7 +87,7 @@
+ make (1), cook (1), gcc (1), dep.pl (1), cvs (1), aegis (1). 
+ .PP 
+ The program is documented fully at 
+-\fI/usr/share/doc/fastdep/html/fastdep.html\fP. 
++\fI/usr/share/doc/fastdep/manual/fastdep.html\fP. 
+ .SH "AUTHOR" 
+ .PP 
+ This manual page was written by Zenaan Harkness zen@freedbms.org for 
+@@ -106,4 +100,3 @@
+ On Debian systems, the complete text of the GNU General Public 
+ License can be found in /usr/share/common-licenses/GPL. 
+  
+-...\" created by instant / docbook-to-man, Wed 22 Oct 2003, 09:06 
+--- fastdep-0.16.orig/tests/run.sh
++++ fastdep-0.16/tests/run.sh
+@@ -5,7 +5,7 @@
+ 	echo "Testing " $1
+ 	rm -f last/$1.out
+ 	../fastdep $1 > last/$1.out
+-	diff -u good/$1.out last/$1.out
++	diff -u good/$1.out last/$1.out || exit 1
+ }
+ 
+ runonescript()
+@@ -22,6 +22,6 @@
+ 	runonetest $i
+ done
+ 
+-for i in *.script; do
+-	runonescript $i
+-done
++#for i in *.script; do
++#	runonescript $i
++#done

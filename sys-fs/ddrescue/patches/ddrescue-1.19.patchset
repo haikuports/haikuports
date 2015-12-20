@@ -1,0 +1,199 @@
+From dfb317fc2a8456f2d6dbf1793301a32161daccbc Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Tue, 28 Oct 2014 15:27:22 +0100
+Subject: [PATCH] Add device name detection on Haiku
+
+Move the default implementation and declaration of device_id()
+to ddrescue.h to avoid redeclaring it.
+Also drop linux.h since it's then useless.
+---
+ Makefile.in |  7 ++++---
+ extra.h     | 23 +++++++++++++++++++++++
+ haiku.cc    | 52 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ linux.cc    |  6 +-----
+ linux.h     | 18 ------------------
+ main.cc     |  2 +-
+ 6 files changed, 81 insertions(+), 27 deletions(-)
+ create mode 100644 extra.h
+ create mode 100644 haiku.cc
+ delete mode 100644 linux.h
+
+diff --git a/Makefile.in b/Makefile.in
+index de0c787..86ac8b5 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -7,7 +7,7 @@ INSTALL_DIR = $(INSTALL) -d -m 755
+ SHELL = /bin/sh
+ 
+ ddobjs = fillbook.o genbook.o io.o logbook.o rescuebook.o main.o
+-objs = arg_parser.o block.o linux.o logfile.o loggers.o rational.o $(ddobjs)
++objs = arg_parser.o block.o haiku.o linux.o logfile.o loggers.o rational.o $(ddobjs)
+ logobjs = arg_parser.o block.o logbook.o logfile.o ddrescuelog.o
+ 
+ 
+@@ -42,13 +42,14 @@ $(objs)       : Makefile
+ $(ddobjs)     : block.h ddrescue.h
+ arg_parser.o  : arg_parser.h
+ block.o       : block.h
++haiku.o       : ddrescue.h
+ io.o          : loggers.h
+-linux.o       : linux.h
++linux.o       : ddrescue.h
+ logfile.o     : block.h
+ loggers.o     : block.h loggers.h
+ rational.o    : rational.h
+ rescuebook.o  : loggers.h
+-main.o        : arg_parser.h rational.h linux.h loggers.h main_common.cc
++main.o        : arg_parser.h rational.h loggers.h main_common.cc
+ ddrescuelog.o : Makefile arg_parser.h block.h ddrescue.h main_common.cc
+ 
+ 
+diff --git a/extra.h b/extra.h
+new file mode 100644
+index 0000000..a013c38
+--- /dev/null
++++ b/extra.h
+@@ -0,0 +1,23 @@
++/*  GNU ddrescue - Data recovery tool
++    Copyright (C) 2014 Antonio Diaz Diaz.
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++// Extra features, default implementations
++#if !defined USE_LINUX && !defined __HAIKU__
++inline const char * device_id( const int ) { return 0; }
++#else
++const char * device_id( const int );
++#endif
+diff --git a/haiku.cc b/haiku.cc
+new file mode 100644
+index 0000000..8d9a8be
+--- /dev/null
++++ b/haiku.cc
+@@ -0,0 +1,52 @@
++/*  GNU ddrescue - Data recovery tool
++    Copyright (C) 2014 Antonio Diaz Diaz.
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include "extra.h"
++
++#ifdef __HAIKU__
++#include <cctype>
++#include <string>
++#include <unistd.h>
++#include <Drivers.h>
++
++
++void sanitize_string( std::string & str )
++  {
++  for( unsigned i = str.size(); i > 0; --i )	// remove non-printable chars
++    {
++    const unsigned char ch = str[i-1];
++    if( std::isspace( ch ) ) str[i-1] = ' ';
++    else if( ch < 32 || ch > 126 ) str.erase( i - 1, 1 );
++    }
++  for( unsigned i = str.size(); i > 0; --i )	// remove duplicate spaces
++    if( str[i-1] == ' ' && ( i <= 1 || i >= str.size() || str[i-2] == ' ' ) )
++      str.erase( i - 1, 1 );
++  }
++
++const char * device_id( const int fd )
++  {
++  static std::string id_str;
++  char id[256];
++
++  if( ioctl( fd, B_GET_DEVICE_NAME, &id, sizeof(id) ) != 0 ) return 0;
++  id_str = (const char *)id;
++  // XXX: is it needed anyway?
++  sanitize_string( id_str );
++  return id_str.c_str();
++  }
++
++#endif
+diff --git a/linux.cc b/linux.cc
+index c1021b5..eaa1779 100644
+--- a/linux.cc
++++ b/linux.cc
+@@ -17,7 +17,7 @@
+ 
+ #define _FILE_OFFSET_BITS 64
+ 
+-#include "linux.h"
++#include "extra.h"
+ 
+ #ifdef USE_LINUX
+ #include <cctype>
+@@ -53,8 +53,4 @@ const char * device_id( const int fd )
+   return 0;
+   }
+ 
+-#else
+-
+-const char * device_id( const int ) { return 0; }
+-
+ #endif
+diff --git a/linux.h b/linux.h
+deleted file mode 100644
+index 750bf4c..0000000
+--- a/linux.h
++++ /dev/null
+@@ -1,18 +0,0 @@
+-/*  GNU ddrescue - Data recovery tool
+-    Copyright (C) 2014 Antonio Diaz Diaz.
+-
+-    This program is free software: you can redistribute it and/or modify
+-    it under the terms of the GNU General Public License as published by
+-    the Free Software Foundation, either version 2 of the License, or
+-    (at your option) any later version.
+-
+-    This program is distributed in the hope that it will be useful,
+-    but WITHOUT ANY WARRANTY; without even the implied warranty of
+-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-    GNU General Public License for more details.
+-
+-    You should have received a copy of the GNU General Public License
+-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+-*/
+-
+-const char * device_id( const int fd );
+diff --git a/main.cc b/main.cc
+index 2f5fb8b..1741bdb 100644
+--- a/main.cc
++++ b/main.cc
+@@ -42,7 +42,7 @@
+ #include "rational.h"
+ #include "block.h"
+ #include "ddrescue.h"
+-#include "linux.h"
++#include "extra.h"
+ #include "loggers.h"
+ 
+ #ifndef O_BINARY
+-- 
+1.8.3.4
+
