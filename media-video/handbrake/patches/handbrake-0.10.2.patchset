@@ -3766,3 +3766,485 @@ index 7d1049a..d536a18 100644
 -- 
 2.7.0
 
+From 50eb4bfe1a62c07569e8801e4a290c5fa76bdbe2 Mon Sep 17 00:00:00 2001
+From: Markus Himmel <markus@himmel-villmar.de>
+Date: Thu, 21 Jan 2016 16:17:17 +0100
+Subject: [PATCH] Fix build of the BeOS GUI
+
+This does not actually make it work properly (though it fixes a small number
+of issues). See https://github.com/haikuports/haikuports/issues/411.
+---
+ haiku/HBApp.cpp      |   1 +
+ haiku/MainWindow.cpp |  36 ++++++++-----
+ haiku/Makefile       | 133 +++++++++++++++++++++++++++++++++++++++++++++
+ haiku/PicWindow.cpp  |  24 +++++----
+ haiku/makefile       | 148 ---------------------------------------------------
+ 5 files changed, 169 insertions(+), 173 deletions(-)
+ create mode 100644 haiku/Makefile
+ delete mode 100644 haiku/makefile
+
+diff --git a/haiku/HBApp.cpp b/haiku/HBApp.cpp
+index f878308..cfd7345 100644
+--- a/haiku/HBApp.cpp
++++ b/haiku/HBApp.cpp
+@@ -4,6 +4,7 @@
+ 
+ int main()
+ {
++    hb_global_init();
+     HBApp * app = new HBApp();
+     app->Run();
+     delete app;
+diff --git a/haiku/MainWindow.cpp b/haiku/MainWindow.cpp
+index d536a18..8d5dda8 100644
+--- a/haiku/MainWindow.cpp
++++ b/haiku/MainWindow.cpp
+@@ -169,10 +169,13 @@ MainView::MainView( hb_handle_t * handle )
+     fVidRatePopUp = new BPopUpMenu( "" );
+     fVidRatePopUp->AddItem( new BMenuItem( "Same as source",
+         new BMessage() ) );
+-    for( int i = 0; i < hb_video_rates_count; i++ )
++
++    const hb_rate_t * current_video_rate = hb_video_framerate_get_next( NULL );
++    while( current_video_rate != NULL )
+     {
+-        fVidRatePopUp->AddItem( new BMenuItem( hb_video_rates[i].string,
++        fVidRatePopUp->AddItem( new BMenuItem( current_video_rate->name,
+             new BMessage() ) );
++        current_video_rate = hb_video_framerate_get_next( current_video_rate );
+     }
+     fVidRatePopUp->ItemAt( 0 )->SetMarked( true );
+     fVidRateMenu = new BMenuField( r, NULL, "Framerate (fps):",
+@@ -267,11 +270,15 @@ MainView::MainView( hb_handle_t * handle )
+     box->AddChild( fAudLang2Menu );
+     r = BRect( 10,65,b.right-10,85 );
+     fAudRatePopUp = new BPopUpMenu( "" );
+-    for( int i = 0; i < hb_audio_rates_count; i++ )
++    const hb_rate_t * current_audio_samples = hb_audio_samplerate_get_next( NULL );
++    while( current_audio_samples != NULL )
+     {
+-        fAudRatePopUp->AddItem( new BMenuItem( hb_audio_rates[i].string,
+-            new BMessage ) );
++        fAudRatePopUp->AddItem( new BMenuItem( current_audio_samples->name,
++            new BMessage() ) );
++        current_audio_samples =
++            hb_audio_samplerate_get_next( current_audio_samples );
+     }
++
+ 	#if 0
+ 	// TODO: hb_audio_rates_default
+     fAudRatePopUp->ItemAt( hb_audio_rates_default )->SetMarked( true );
+@@ -281,10 +288,12 @@ MainView::MainView( hb_handle_t * handle )
+     box->AddChild( fAudRateMenu );
+     r = BRect( 10,90,b.right-10,110 );
+     fAudBitratePopUp = new BPopUpMenu( "" );
+-    for( int i = 0; i < hb_audio_bitrates_count; i++ )
++    const hb_rate_t * current_audio_bits = hb_audio_bitrate_get_next( NULL );
++    while( current_audio_bits != NULL)
+     {
+-        fAudBitratePopUp->AddItem( new BMenuItem(
+-            hb_audio_bitrates[i].string, new BMessage ) );
++        fAudBitratePopUp->AddItem( new BMenuItem( current_audio_bits->name,
++            new BMessage() ) );
++        current_audio_bits = hb_audio_bitrate_get_next( current_audio_bits );
+     }
+     #if 0
+     // TODO: hb_audio_bitrates_default
+@@ -676,7 +685,7 @@ void MainView::TitlePopUpChanged()
+         fAudLang2PopUp->AddItem( new BMenuItem( audio->lang, new BMessage() ) );
+         #endif
+     }
+-    fAudLang1PopUp->ItemAt( 1 )->SetMarked( true );
++    fAudLang1PopUp->ItemAt( 0 )->SetMarked( true );
+     fAudLang2PopUp->ItemAt( 0 )->SetMarked( true );
+ }
+ 
+@@ -799,7 +808,7 @@ void MainView::CodecsPopUpChanged()
+ 
+ void MainView::CheckExtension()
+ {
+-    char * ext = NULL;
++    const char * ext = NULL;
+     switch( fDstFormat )
+     {
+         case 0:
+@@ -882,11 +891,10 @@ void MainView::AddJob()
+     }
+ 
+     int index;
+-    index = fVidRatePopUp->IndexOf(
+-        fVidRatePopUp->FindMarked() );
+-    if( index > 0 )
++    BMenuItem* marked = fVidRatePopUp->FindMarked();
++    if( marked != NULL )
+     {
+-        job->vrate_base = hb_video_rates[index-1].rate;
++        job->vrate_base = hb_video_framerate_get_from_name( marked->Label() );
+     }
+     else
+     {
+diff --git a/haiku/Makefile b/haiku/Makefile
+new file mode 100644
+index 0000000..e0ac283
+--- /dev/null
++++ b/haiku/Makefile
+@@ -0,0 +1,133 @@
++## Haiku Generic Makefile v2.6 ## 
++
++## Fill in this file to specify the project being created, and the referenced
++## Makefile-Engine will do all of the hard work for you. This handles any
++## architecture of Haiku.
++
++# The name of the binary.
++NAME = HandBrake
++
++# The type of binary, must be one of:
++#	APP:	Application
++#	SHARED:	Shared library or add-on
++#	STATIC:	Static library archive
++#	DRIVER: Kernel driver
++TYPE = APP
++
++# 	If you plan to use localization, specify the application's MIME signature.
++APP_MIME_SIG = 
++
++#	The following lines tell Pe and Eddie where the SRCS, RDEFS, and RSRCS are
++#	so that Pe and Eddie can fill them in for you.
++#%{
++# @src->@ 
++
++#	Specify the source files to use. Full paths or paths relative to the 
++#	Makefile can be included. All files, regardless of directory, will have
++#	their object files created in the common object directory. Note that this
++#	means this Makefile will not work correctly if two source files with the
++#	same name (source.c or source.cpp) are included from different directories.
++#	Also note that spaces in folder names do not work well with this Makefile.
++SRCS = HBApp.cpp MainWindow.cpp PicWindow.cpp QueueWindow.cpp ScanWindow.cpp Stepper.cpp
++
++#	Specify the resource definition files to use. Full or relative paths can be
++#	used.
++RDEFS = 
++
++#	Specify the resource files to use. Full or relative paths can be used.
++#	Both RDEFS and RSRCS can be utilized in the same Makefile.
++RSRCS = 
++
++# End Pe/Eddie support.
++# @<-src@ 
++#%}
++
++#	Specify libraries to link against.
++#	There are two acceptable forms of library specifications:
++#	-	if your library follows the naming pattern of libXXX.so or libXXX.a,
++#		you can simply specify XXX for the library. (e.g. the entry for
++#		"libtracker.so" would be "tracker")
++#
++#	-	for GCC-independent linking of standard C++ libraries, you can use
++#		$(STDCPPLIBS) instead of the raw "stdc++[.r4] [supc++]" library names.
++#
++#	- 	if your library does not follow the standard library naming scheme,
++#		you need to specify the path to the library and it's name.
++#		(e.g. for mylib.a, specify "mylib.a" or "path/mylib.a")
++LIBS = be network tracker $(STDCPPLIBS) bz2 \
++	ass fribidi ogg theora vorbis vorbisenc iconv samplerate fontconfig \
++	freetype z a52 avdevice avformat avcodec avresample avutil bluray dvdnav \
++	dvdread faac mkv mp3lame mp4v2 mpeg2 mpeg2convert swscale x264 \
++	handbrake
++
++
++#	Specify additional paths to directories following the standard libXXX.so
++#	or libXXX.a naming scheme. You can specify full paths or paths relative
++#	to the Makefile. The paths included are not parsed recursively, so
++#	include all of the paths where libraries must be found. Directories where
++#	source files were specified are	automatically included.
++LIBPATHS = ../build/libhb
++
++#	Additional paths to look for system headers. These use the form
++#	"#include <header>". Directories that contain the files in SRCS are
++#	NOT auto-included here.
++SYSTEM_INCLUDE_PATHS = 
++
++#	Additional paths paths to look for local headers. These use the form
++#	#include "header". Directories that contain the files in SRCS are
++#	automatically included.
++LOCAL_INCLUDE_PATHS = ../build/libhb ../build/contrib/include/
++
++#	Specify the level of optimization that you want. Specify either NONE (O0),
++#	SOME (O1), FULL (O2), or leave blank (for the default optimization level).
++OPTIMIZE := 
++
++# 	Specify the codes for languages you are going to support in this
++# 	application. The default "en" one must be provided too. "make catkeys"
++# 	will recreate only the "locales/en.catkeys" file. Use it as a template
++# 	for creating catkeys for other languages. All localization files must be
++# 	placed in the "locales" subdirectory.
++LOCALES = 
++
++#	Specify all the preprocessor symbols to be defined. The symbols will not
++#	have their values set automatically; you must supply the value (if any) to
++#	use. For example, setting DEFINES to "DEBUG=1" will cause the compiler
++#	option "-DDEBUG=1" to be used. Setting DEFINES to "DEBUG" would pass
++#	"-DDEBUG" on the compiler's command line.
++DEFINES = 
++
++#	Specify the warning level. Either NONE (suppress all warnings),
++#	ALL (enable all warnings), or leave blank (enable default warnings).
++WARNINGS = 
++
++#	With image symbols, stack crawls in the debugger are meaningful.
++#	If set to "TRUE", symbols will be created.
++SYMBOLS := 
++
++#	Includes debug information, which allows the binary to be debugged easily.
++#	If set to "TRUE", debug info will be created.
++DEBUGGER := 
++
++#	Specify any additional compiler flags to be used.
++COMPILER_FLAGS = 
++
++#	Specify any additional linker flags to be used.
++LINKER_FLAGS = 
++
++#	Specify the version of this binary. Example:
++#		-app 3 4 0 d 0 -short 340 -long "340 "`echo -n -e '\302\251'`"1999 GNU GPL"
++#	This may also be specified in a resource.
++APP_VERSION := 
++
++#	(Only used when "TYPE" is "DRIVER"). Specify the desired driver install
++#	location in the /dev hierarchy. Example:
++#		DRIVER_PATH = video/usb
++#	will instruct the "driverinstall" rule to place a symlink to your driver's
++#	binary in ~/add-ons/kernel/drivers/dev/video/usb, so that your driver will
++#	appear at /dev/video/usb when loaded. The default is "misc".
++DRIVER_PATH = 
++
++## Include the Makefile-Engine
++DEVEL_DIRECTORY := \
++	$(shell findpaths -r "makefile_engine" B_FIND_PATH_DEVELOP_DIRECTORY)
++include $(DEVEL_DIRECTORY)/etc/makefile-engine
+diff --git a/haiku/PicWindow.cpp b/haiku/PicWindow.cpp
+index b93c393..3ff3045 100644
+--- a/haiku/PicWindow.cpp
++++ b/haiku/PicWindow.cpp
+@@ -26,7 +26,7 @@ PicView::PicView( hb_handle_t * handle, int index )
+     hb_list_t * list;
+     list   = hb_get_titles( fHandle );
+     fTitle = (hb_title_t *) hb_list_item( list, index );
+-    fJob   = fTitle->job;
++    fJob   = hb_job_init(fTitle);
+ 
+     /* We'll start with the first picture */
+     fIndex = 0;
+@@ -83,7 +83,7 @@ PicView::PicView( hb_handle_t * handle, int index )
+     r = BRect( 10,65,b.right-10,85 );
+     fRatioCheck = new BCheckBox( r, NULL, "Keep aspect ratio",
+                                  new BMessage( MSG_WIDTH ) );
+-    fRatioCheck->SetValue( fJob->keep_ratio );
++    fRatioCheck->SetValue( fJob->anamorphic.keep_display_aspect );
+     box->AddChild( fRatioCheck );
+ 
+     /* "Crop" box */
+@@ -254,35 +254,37 @@ void PicView::RadioChanged()
+ 
+ void PicView::UpdateSettings( uint32 what )
+ {
+-    fJob->width       = fWidthStepper->Value();
+-    fJob->height      = fHeightStepper->Value();
+-    fJob->keep_ratio  = fRatioCheck->Value();
+-    fJob->deinterlace = fDeintCheck->Value();
++    fJob->width                           = fWidthStepper->Value();
++    fJob->height                          = fHeightStepper->Value();
++    fJob->anamorphic.keep_display_aspect  = fRatioCheck->Value();
++    fJob->deinterlace                     = fDeintCheck->Value();
+     for( int i = 0; i < 4; i++ )
+     {
+         fJob->crop[i] = fCropSteppers[i]->Value();
+     }
+ 
+-    if( fJob->keep_ratio )
++    if( fJob->anamorphic.keep_display_aspect )
+     {
+         if( what == MSG_WIDTH )
+         {
+-            hb_fix_aspect( fJob, HB_KEEP_WIDTH );
+             if( fJob->height > fTitle->height )
+             {
+                 fJob->height = fTitle->height;
+-                hb_fix_aspect( fJob, HB_KEEP_HEIGHT );
+             }
+         }
+         else
+         {
+-            hb_fix_aspect( fJob, HB_KEEP_HEIGHT );
+             if( fJob->width > fTitle->width )
+             {
+                 fJob->width = fTitle->width;
+-                hb_fix_aspect( fJob, HB_KEEP_WIDTH );
+             }
+         }
++        int width, height, par_width, par_height;
++        hb_set_anamorphic_size(fJob, &width, &height, &par_width, &par_height);
++        fJob->width = width;
++        fJob->height = height;
++        fJob->anamorphic.par_width = par_width;
++        fJob->anamorphic.par_height = par_height;
+     }
+ 
+     fWidthStepper->SetValue( fJob->width );
+diff --git a/haiku/makefile b/haiku/makefile
+deleted file mode 100644
+index 44da58a..0000000
+--- a/haiku/makefile
++++ /dev/null
+@@ -1,148 +0,0 @@
+-## BeOS Generic Makefile v2.5 ##
+-
+-## Fill in this file to specify the project being created, and the referenced
+-## makefile-engine will do all of the hard work for you.  This handles both
+-## Intel and PowerPC builds of the BeOS and Haiku.
+-
+-## Application Specific Settings ---------------------------------------------
+-
+-# specify the name of the binary
+-NAME=HandBrake
+-
+-# specify the type of binary
+-#	APP:	Application
+-#	SHARED:	Shared library or add-on
+-#	STATIC:	Static library archive
+-#	DRIVER: Kernel Driver
+-TYPE=APP
+-
+-# 	if you plan to use localization features 
+-# 	specify the application MIME siganture
+-APP_MIME_SIG= 
+-
+-#	add support for new Pe and Eddie features
+-#	to fill in generic makefile
+-
+-#%{
+-# @src->@ 
+-
+-#	specify the source files to use
+-#	full paths or paths relative to the makefile can be included
+-# 	all files, regardless of directory, will have their object
+-#	files created in the common object directory.
+-#	Note that this means this makefile will not work correctly
+-#	if two source files with the same name (source.c or source.cpp)
+-#	are included from different directories.  Also note that spaces
+-#	in folder names do not work well with this makefile.
+-SRCS=HBApp.cpp MainWindow.cpp PicWindow.cpp QueueWindow.cpp ScanWindow.cpp Stepper.cpp
+-
+-#	specify the resource definition files to use
+-#	full path or a relative path to the resource file can be used.
+-RDEFS= 
+-	
+-#	specify the resource files to use. 
+-#	full path or a relative path to the resource file can be used.
+-#	both RDEFS and RSRCS can be defined in the same makefile.
+-RSRCS= 
+-
+-# @<-src@ 
+-#%}
+-
+-#	end support for Pe and Eddie
+-
+-#	specify additional libraries to link against
+-#	there are two acceptable forms of library specifications
+-#	-	if your library follows the naming pattern of:
+-#		libXXX.so or libXXX.a you can simply specify XXX
+-#		library: libbe.so entry: be
+-#
+-#	-	for version-independent linking of standard C++ libraries please add
+-#		$(STDCPPLIBS) instead of raw "stdc++[.r4] [supc++]" library names
+-#
+-#	-	for localization support add following libs:
+-#		locale localestub
+-#		
+-#	- 	if your library does not follow the standard library
+-#		naming scheme you need to specify the path to the library
+-#		and it's name
+-#		library: my_lib.a entry: my_lib.a or path/my_lib.a
+-LIBS=be network tracker stdc++ bz2 \
+-	ass fribidi ogg theora vorbis vorbisenc iconv samplerate fontconfig \
+-	freetype z a52 avdevice avformat avcodec avresample avutil bluray dvdnav \
+-	dvdread faac mkv mp3lame mp4v2 mpeg2 mpeg2convert swscale x264 \
+-	libhandbrake.a
+-
+-
+-#	specify additional paths to directories following the standard
+-#	libXXX.so or libXXX.a naming scheme.  You can specify full paths
+-#	or paths relative to the makefile.  The paths included may not
+-#	be recursive, so include all of the paths where libraries can
+-#	be found.  Directories where source files are found are
+-#	automatically included.
+-LIBPATHS= 
+-
+-#	additional paths to look for system headers
+-#	thes use the form: #include <header>
+-#	source file directories are NOT auto-included here
+-SYSTEM_INCLUDE_PATHS = 
+-
+-#	additional paths to look for local headers
+-#	thes use the form: #include "header"
+-#	source file directories are automatically included
+-LOCAL_INCLUDE_PATHS = ../build/libhb/ ../build/contrib/include/
+-
+-#	specify the level of optimization that you desire
+-#	NONE, SOME, FULL
+-OPTIMIZE= 
+-
+-# 	specify here the codes for languages you are going
+-# 	to support in this application. The default "en"
+-# 	one must be provided too. "make catkeys" will recreate only
+-# 	locales/en.catkeys file. Use it as template for creating other
+-# 	languages catkeys. All localization files must be placed
+-# 	in "locales" sub-directory.
+-LOCALES=
+-
+-#	specify any preprocessor symbols to be defined.  The symbols will not
+-#	have their values set automatically; you must supply the value (if any)
+-#	to use.  For example, setting DEFINES to "DEBUG=1" will cause the
+-#	compiler option "-DDEBUG=1" to be used.  Setting DEFINES to "DEBUG"
+-#	would pass "-DDEBUG" on the compiler's command line.
+-DEFINES=
+-
+-#	specify special warning levels
+-#	if unspecified default warnings will be used
+-#	NONE = supress all warnings
+-#	ALL = enable all warnings
+-WARNINGS = 
+-
+-#	specify whether image symbols will be created
+-#	so that stack crawls in the debugger are meaningful
+-#	if TRUE symbols will be created
+-SYMBOLS = 
+-
+-#	specify debug settings
+-#	if TRUE will allow application to be run from a source-level
+-#	debugger.  Note that this will disable all optimzation.
+-DEBUGGER = 
+-
+-#	specify additional compiler flags for all files
+-COMPILER_FLAGS =
+-
+-#	specify additional linker flags
+-LINKER_FLAGS =
+-
+-#	specify the version of this particular item
+-#	(for example, -app 3 4 0 d 0 -short 340 -long "340 "`echo -n -e '\302\251'`"1999 GNU GPL") 
+-#	This may also be specified in a resource.
+-APP_VERSION = 
+-
+-#	(for TYPE == DRIVER only) Specify desired location of driver in the /dev
+-#	hierarchy. Used by the driverinstall rule. E.g., DRIVER_PATH = video/usb will
+-#	instruct the driverinstall rule to place a symlink to your driver's binary in
+-#	~/add-ons/kernel/drivers/dev/video/usb, so that your driver will appear at
+-#	/dev/video/usb when loaded. Default is "misc".
+-DRIVER_PATH = 
+-
+-## include the makefile-engine
+-include $(BUILDHOME)/etc/makefile-engine
+-- 
+2.7.0
+
