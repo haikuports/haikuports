@@ -1,0 +1,108 @@
+diff -aur tar-1.26/src/common.h tar/src/common.h
+--- tar-1.26/src/common.h	2011-02-11 12:56:13.006553600 +0100
++++ tar/src/common.h	2012-10-30 20:04:25.823132160 +0100
+@@ -186,6 +186,8 @@
+ };
+ GLOBAL enum old_files old_files_option;
+ 
++GLOBAL bool simulate_hardlinks_option;
++
+ /* Specified file name for incremental list.  */
+ GLOBAL const char *listed_incremental_option;
+ /* Incremental dump level */
+diff -aur tar-1.26/src/extract.c tar/src/extract.c
+--- tar-1.26/src/extract.c	2010-11-27 11:33:22.008912896 +0100
++++ tar/src/extract.c	2012-10-30 20:26:14.453246976 +0100
+@@ -31,6 +31,8 @@
+ static mode_t newdir_umask;	/* umask when creating new directories */
+ static mode_t current_umask;	/* current umask (which is set to 0 if -p) */
+ 
++static int extract_symlink (char *, int);
++
+ #define ALL_MODE_BITS ((mode_t) ~ (mode_t) 0)
+ 
+ #if ! HAVE_FCHMOD && ! defined fchmod
+@@ -1113,6 +1115,38 @@
+   char const *link_name;
+   int rc;
+ 
++  if (simulate_hardlinks_option)
++  {
++	/* symlinks have to be normalized */
++	const char* f = file_name;
++	const char* l = current_stat_info.link_name;
++	int sep_pos = 0;
++	int p_count = 0;
++	char *link_name = (char*) xmalloc(strlen(current_stat_info.link_name) * 2);
++
++   for (; *f && *l; f++, l++)
++	{
++	  if (*f != *l)
++		  break;
++	  if (*f == DIRECTORY_SEPARATOR)
++		  sep_pos = f - file_name;
++	}
++
++	for (p_count = 0; *f; f++)
++	  if (*f == DIRECTORY_SEPARATOR)
++	    p_count++;
++
++	link_name[0] = '\0';
++	while (p_count--)
++	  strcat(link_name, "../");
++
++	strcat(link_name, &current_stat_info.link_name[sep_pos + 1]);
++	free(current_stat_info.link_name);
++	current_stat_info.link_name = link_name;
++
++	return extract_symlink(file_name, typeflag);
++  }
++
+   link_name = current_stat_info.link_name;
+ 
+   if (! absolute_names_option && contains_dot_dot (link_name))
+@@ -1201,6 +1235,13 @@
+ #else
+   static int warned_once;
+ 
++  /* recursion is not welcomed here */
++  if (simulate_hardlinks_option && typeflag == LINKTYPE)
++  {
++	link_error (current_stat_info.link_name, file_name);
++	return -1;
++  }
++
+   if (!warned_once)
+     {
+       warned_once = 1;
+diff -aur tar-1.26/src/tar.c tar/src/tar.c
+--- tar-1.26/src/tar.c	2010-10-24 20:07:55.005767168 +0200
++++ tar/src/tar.c	2012-10-30 20:21:51.518520832 +0100
+@@ -466,6 +466,8 @@
+   {"overwrite-dir", OVERWRITE_DIR_OPTION, 0, 0,
+    N_("overwrite metadata of existing directories when extracting (default)"),
+    GRID+1 },
++  {"replace-hardlinks", 'Q', 0, 0,
++   N_("replace hardlinks with corresponding symlink when extracting"), GRID+1 },
+ #undef GRID
+ 
+ #define GRID 40
+@@ -1815,6 +1817,10 @@
+       set_archive_format (arg);
+       break;
+ 
++    case 'Q':
++      simulate_hardlinks_option = true;
++      break;
++
+     case INDEX_FILE_OPTION:
+       index_file_name = arg;
+       break;
+@@ -2240,6 +2246,7 @@
+   unquote_option = true;
+   tar_sparse_major = 1;
+   tar_sparse_minor = 0;
++  simulate_hardlinks_option = false;
+ 
+   owner_option = -1;
+   group_option = -1;

@@ -1,0 +1,671 @@
+From d5e22939a27c71bc0e55a56623b7ea83dceca155 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sun, 19 Jan 2014 17:50:47 +0100
+Subject: Split writable files to writable directory
+
+* Patch adapted from the Debian package.
+* Rename "pause" to "paused" to avoid conflict with unistd.h pause().
+
+diff --git a/sources/Makefile b/sources/Makefile
+index 08a898f..779f7bd 100644
+--- a/sources/Makefile
++++ b/sources/Makefile
+@@ -12,11 +12,11 @@ OBJS := \
+ all: stransball2
+ 
+ %.o: %.cpp
+-	c++ -c -g3 -O3 $< -o $@ `sdl-config --cflags` -I/usr/local/include/SDL
++	c++ -c -g3 -O3 $< -o $@ `sdl-config --cflags`
+ 
+ # dynamically linked binary:
+ stransball2: $(OBJS)
+-	c++ $^ -o $@ `sdl-config --libs` -lSDL_image -lSDL_mixer -lSDL_sound -lSDL_sound -lSGE -I/usr/local/include/SDL
++	c++ $^ -o $@ `sdl-config --libs` -lSDL_image -lSDL_mixer -lSDL_sound -lSDL_sound -lSGE -lbe
+ 	mv ./stransball2 ..
+ 
+ clean:
+diff --git a/sources/configuration.cpp b/sources/configuration.cpp
+index b39fdc2..8ef89f9 100644
+--- a/sources/configuration.cpp
++++ b/sources/configuration.cpp
+@@ -1,4 +1,5 @@
+ #include "stdio.h"
++#include <unistd.h>
+ 
+ #include "SDL.h"
+ 
+@@ -9,13 +10,17 @@ extern SDLKey PAUSE_KEY;
+ extern bool fullscreen;
+ extern int PIXEL_SIZE;
+ 
++extern char *datadir;
++extern char *confdir;
+ 
+ bool load_configuration(void)
+ {
+ 	int a,b,c,d,e,f,g;
+ 	FILE *fp;
+ 
++	chdir(confdir);
+ 	fp=fopen("transball.cfg","r");
++	chdir(datadir);
+ 
+ 	if (fp==0) return false;
+ 
+@@ -46,7 +51,9 @@ void save_configuration(void)
+ {
+ 	FILE *fp;
+ 
++	chdir(confdir);
+ 	fp=fopen("transball.cfg","w");
++	chdir(datadir);
+ 	
+ 	if (fp==0) return;
+ 
+diff --git a/sources/encoder.cpp b/sources/encoder.cpp
+index f2d4945..9780520 100644
+--- a/sources/encoder.cpp
++++ b/sources/encoder.cpp
+@@ -1,4 +1,8 @@
+ #include "stdio.h"
++#include "unistd.h"
++
++extern char *confdir;
++extern char *datadir;
+ 
+ void encode(char *in,char *out)
+ {
+@@ -9,8 +13,11 @@ void encode(char *in,char *out)
+ 	FILE *fpin;
+ 	FILE *fpout;
+ 
++	chdir(datadir);
+ 	fpin=fopen(in,"rb");
++	chdir(confdir);
+ 	fpout=fopen(out,"wb");
++	chdir(datadir);
+ 	if (fpin==0 || fpout==0) return;
+ 
+ 	do{
+@@ -40,8 +47,11 @@ void decode(char *in,char *out)
+ 	FILE *fpin;
+ 	FILE *fpout;
+ 
++	chdir(datadir);
+ 	fpin=fopen(in,"rb");
++	chdir(confdir);
+ 	fpout=fopen(out,"wb");
++	chdir(datadir);
+ 	if (fpin==0 || fpout==0) return;
+ 
+ 	do{
+diff --git a/sources/game.cpp b/sources/game.cpp
+index 6429e2d..901e3ee 100644
+--- a/sources/game.cpp
++++ b/sources/game.cpp
+@@ -8,6 +8,7 @@
+ #endif
+ 
+ #include <stdio.h>
++#include <unistd.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include "SDL/SDL.h"
+@@ -84,6 +85,9 @@ extern TRANSBALL *game;
+ /* Frames per second counter: */ 
+ extern int frames_per_sec;
+ 
++extern char *datadir;
++extern char *confdir;
++
+ FILE *replayfile;
+ int replaynum;
+ int replay_source=0;
+@@ -92,7 +96,7 @@ int replay_source=0;
+ SDLKey THRUST_KEY=SDLK_q,ANTITHRUST_KEY=SDLK_a,LEFT_KEY=SDLK_o,RIGHT_KEY=SDLK_p;
+ SDLKey FIRE_KEY=SDLK_SPACE,ATRACTOR_KEY=SDLK_RETURN;
+ SDLKey PAUSE_KEY=SDLK_F1;
+-bool pause=false;
++bool paused=false;
+ 
+ unsigned char old_keyboard[SDLK_LAST];
+ SDL_Surface *image=0,*image2=0;	/* For the tittle screen, etc. */ 
+@@ -133,8 +137,10 @@ bool gamecycle(SDL_Surface *screen,int sx,int sy)
+ 		strcpy(tmp,"maps/");
+ 		strcat(tmp,levelpack);
+ 
++		chdir(datadir);
+ 		decode(tmp,"decoding.tmp");
+ 
++		chdir(confdir);
+ 		fp=fopen("decoding.tmp","r+");
+ 		if (fp!=0) {
+ 			fscanf(fp,"%i",&NLEVELS);
+@@ -167,6 +173,8 @@ bool gamecycle(SDL_Surface *screen,int sx,int sy)
+ 
+ 	if (NLEVELS==-1) return false;
+ 
++	chdir(datadir);
++
+ 	switch(STATE) {
+ 	case 0:	if (!state_logo_cycle(screen,sx,sy,keyboard)) return false;
+ 			break;
+diff --git a/sources/main.cpp b/sources/main.cpp
+index 285740a..b633601 100644
+--- a/sources/main.cpp
++++ b/sources/main.cpp
+@@ -12,6 +12,14 @@
+ #include "SDL_mixer.h"
+ #include "sge.h"
+ 
++#include <libgen.h>
++#include <string.h>
++#include <unistd.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <storage/FindDirectory.h>
++#include <storage/Path.h>
++
+ #include "fonts.h"
+ #include "list.h"
+ 
+@@ -42,6 +50,8 @@ int frames_per_sec=0;
+ int frames_per_sec_tmp=0;
+ int init_time=0;
+ 
++char *datadir;
++char *confdir;
+ 
+ /* Surfaces: */ 
+ SDL_Surface *screen_sfc=0,*buffer_screen_sfc=0;
+@@ -126,6 +136,33 @@ int main(int argc, char** argv)
+ 	setupTickCount();
+ #endif
+ 
++    mode_t mode;
++    FILE *cfg;
++
++	datadir=dirname(argv[0]);
++	BPath confPath;
++	find_directory(B_USER_SETTINGS_DIRECTORY, &confPath, true);
++	confdir = (char*) malloc(strlen(confPath.Path()) + 17);
++	strcpy(confdir, confPath.Path());
++	strcat(confdir,"/supertransball2");
++
++	mode=S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IXGRP;
++	mkdir(confdir,mode);
++	chdir(confdir);
++	mkdir("replays",mode);
++	mkdir("high",mode);
++
++	cfg=fopen("transball.cfg", "r");
++	if (!cfg)
++	{
++		cfg=fopen("transball.cfg", "w");
++        fprintf(cfg,"%s","113 97 111 112 32 13 282");
++	}
++
++	fclose(cfg);
++	
++    chdir(datadir);
++
+ 	int time,act_time;
+ 	SDL_Event event;
+     bool quit = false;
+diff --git a/sources/maps.cpp b/sources/maps.cpp
+index 56df6f7..f1506c7 100644
+--- a/sources/maps.cpp
++++ b/sources/maps.cpp
+@@ -1,4 +1,5 @@
+ #include <stdio.h>
++#include <unistd.h>
+ #include <stdlib.h>
+ #include "SDL/SDL.h"
+ #include "SDL_mixer.h"
+@@ -13,6 +14,8 @@
+ #define EMPTY_ROWS	8
+ #define FACTOR	512
+ 
++extern char *datadir;
++extern char *confdir;
+ 
+ TRANSBALL_MAP::TRANSBALL_MAP(char *file)
+ {
+@@ -25,6 +28,7 @@ TRANSBALL_MAP::TRANSBALL_MAP(char *file)
+ 	S_enemyhit=0;
+ 	S_switch=0;
+ 
++	chdir(datadir);
+ 	fp=fopen(file,"r");
+ 	if (fp==0) {
+ 		sx=0;
+diff --git a/sources/replays.cpp b/sources/replays.cpp
+index 1d4e885..5d95fc5 100644
+--- a/sources/replays.cpp
++++ b/sources/replays.cpp
+@@ -1,5 +1,8 @@
+ #include "stdio.h"
++#include "unistd.h"
+ 
++extern char* datadir;
++extern char* confdir;
+ 
+ int replay_parameters(char *file, int *ship, int *length, char *levelname)
+ {
+@@ -8,7 +11,9 @@ int replay_parameters(char *file, int *ship, int *length, char *levelname)
+ 	int l,end;
+ 	int v1,v2,fuel;
+ 
++        chdir(confdir);
+ 	fp=fopen(file,"rb");
++        chdir(datadir);
+ 	if (fp==0) return -1;
+ 	v1=fgetc(fp);
+ 	v2=fgetc(fp);
+@@ -35,8 +40,11 @@ void replay_copy(char *f1,char *f2)
+ 
+ 	FILE *fp1,*fp2;
+ 
++        chdir(confdir);
+ 	fp1=fopen(f1,"rb");
++        /* chdir(confdir); */
+ 	fp2=fopen(f2,"wb");
++        chdir(datadir);
+ 
+ 	do{
+ 		fputc(fgetc(fp1),fp2);
+diff --git a/sources/state_changepack.cpp b/sources/state_changepack.cpp
+index 41c28da..0b56928 100644
+--- a/sources/state_changepack.cpp
++++ b/sources/state_changepack.cpp
+@@ -8,6 +8,7 @@
+ #endif
+ 
+ #include <stdio.h>
++#include "unistd.h"
+ #include <stdlib.h>
+ #include <string.h>
+ #include "SDL/SDL.h"
+@@ -43,7 +44,7 @@ extern int replay_source;
+ extern SDLKey THRUST_KEY,ANTITHRUST_KEY,LEFT_KEY,RIGHT_KEY;
+ extern SDLKey FIRE_KEY,ATRACTOR_KEY;
+ extern SDLKey PAUSE_KEY;
+-extern bool pause;
++extern bool paused;
+ extern unsigned char old_keyboard[SDLK_LAST];
+ extern SDL_Surface *image,*image2;
+ extern char edit_text[80];
+@@ -63,6 +64,8 @@ extern char *leveltext[MAXLEVELS];
+ extern char *levelcode[MAXLEVELS];
+ extern int initialfuel[MAXLEVELS];
+ 
++extern char *confdir;
++extern char *datadir;
+ 
+ bool state_changepack_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *keyboard)
+ {
+@@ -97,7 +100,8 @@ bool state_changepack_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *key
+ #else
+                         DIR *dp;
+                         struct dirent *ep;
+-		  
++			
++			chdir(datadir);
+                         dp = opendir ("maps");
+                         if (dp != NULL)
+                         {
+diff --git a/sources/state_chooseship.cpp b/sources/state_chooseship.cpp
+index 6de61e2..7262269 100644
+--- a/sources/state_chooseship.cpp
++++ b/sources/state_chooseship.cpp
+@@ -43,7 +43,7 @@ extern int replay_source;
+ extern SDLKey THRUST_KEY,ANTITHRUST_KEY,LEFT_KEY,RIGHT_KEY;
+ extern SDLKey FIRE_KEY,ATRACTOR_KEY;
+ extern SDLKey PAUSE_KEY;
+-extern bool pause;
++extern bool paused;
+ extern unsigned char old_keyboard[SDLK_LAST];
+ extern SDL_Surface *image,*image2;
+ extern char edit_text[80];
+diff --git a/sources/state_endsequence.cpp b/sources/state_endsequence.cpp
+index 963a9f7..ed3d3ad 100644
+--- a/sources/state_endsequence.cpp
++++ b/sources/state_endsequence.cpp
+@@ -43,7 +43,7 @@ extern int replay_source;
+ extern SDLKey THRUST_KEY,ANTITHRUST_KEY,LEFT_KEY,RIGHT_KEY;
+ extern SDLKey FIRE_KEY,ATRACTOR_KEY;
+ extern SDLKey PAUSE_KEY;
+-extern bool pause;
++extern bool paused;
+ extern unsigned char old_keyboard[SDLK_LAST];
+ extern SDL_Surface *image,*image2;
+ extern char edit_text[80];
+diff --git a/sources/state_game.cpp b/sources/state_game.cpp
+index 10f515f..43856a2 100644
+--- a/sources/state_game.cpp
++++ b/sources/state_game.cpp
+@@ -43,7 +43,7 @@ extern int replay_source;
+ extern SDLKey THRUST_KEY,ANTITHRUST_KEY,LEFT_KEY,RIGHT_KEY;
+ extern SDLKey FIRE_KEY,ATRACTOR_KEY;
+ extern SDLKey PAUSE_KEY;
+-extern bool pause;
++extern bool paused;
+ extern unsigned char old_keyboard[SDLK_LAST];
+ extern SDL_Surface *image,*image2;
+ extern char edit_text[80];
+@@ -69,11 +69,11 @@ bool state_game_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *keyboard)
+ 	int retval=0;
+ 
+ 	if (keyboard[PAUSE_KEY] && !old_keyboard[PAUSE_KEY]) {
+-		if (pause) pause=false;
+-			  else pause=true;
++		if (paused) paused=false;
++			  else paused=true;
+ 	} /* if */ 
+ 
+-	if (!pause) {
++	if (!paused) {
+ 		retval=game->cycle(keyboard);
+ 		if (replayfile!=0) {
+ 			fputc(keyboard[THRUST_KEY],replayfile);
+@@ -88,7 +88,7 @@ bool state_game_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *keyboard)
+ 
+ 	game->render(screen,sx,sy);
+ 
+-	if (pause) {
++	if (paused) {
+ 		surface_fader(screen,0.5F,0.5F,0.5F,-1,0);
+ 		font_print(sx/2,sy/2-16,"PAUSE",screen);
+ 	} else {
+diff --git a/sources/state_gameover.cpp b/sources/state_gameover.cpp
+index 7c02012..4b280b5 100644
+--- a/sources/state_gameover.cpp
++++ b/sources/state_gameover.cpp
+@@ -43,7 +43,7 @@ extern int replay_source;
+ extern SDLKey THRUST_KEY,ANTITHRUST_KEY,LEFT_KEY,RIGHT_KEY;
+ extern SDLKey FIRE_KEY,ATRACTOR_KEY;
+ extern SDLKey PAUSE_KEY;
+-extern bool pause;
++extern bool paused;
+ extern unsigned char old_keyboard[SDLK_LAST];
+ extern SDL_Surface *image,*image2;
+ extern char edit_text[80];
+diff --git a/sources/state_instructions.cpp b/sources/state_instructions.cpp
+index acd6e03..882db1c 100644
+--- a/sources/state_instructions.cpp
++++ b/sources/state_instructions.cpp
+@@ -41,7 +41,7 @@ extern int replay_source;
+ extern SDLKey THRUST_KEY,ANTITHRUST_KEY,LEFT_KEY,RIGHT_KEY;
+ extern SDLKey FIRE_KEY,ATRACTOR_KEY;
+ extern SDLKey PAUSE_KEY;
+-extern bool pause;
++extern bool paused;
+ extern unsigned char old_keyboard[SDLK_LAST];
+ extern SDL_Surface *image,*image2;
+ extern char edit_text[80];
+diff --git a/sources/state_interphase.cpp b/sources/state_interphase.cpp
+index 41a7810..24a0ecf 100644
+--- a/sources/state_interphase.cpp
++++ b/sources/state_interphase.cpp
+@@ -8,6 +8,7 @@
+ #endif
+ 
+ #include <stdio.h>
++#include <unistd.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include "SDL/SDL.h"
+@@ -43,7 +44,7 @@ extern int replay_source;
+ extern SDLKey THRUST_KEY,ANTITHRUST_KEY,LEFT_KEY,RIGHT_KEY;
+ extern SDLKey FIRE_KEY,ATRACTOR_KEY;
+ extern SDLKey PAUSE_KEY;
+-extern bool pause;
++extern bool paused;
+ extern unsigned char old_keyboard[SDLK_LAST];
+ extern SDL_Surface *image,*image2;
+ extern char edit_text[80];
+@@ -63,6 +64,8 @@ extern char *leveltext[MAXLEVELS];
+ extern char *levelcode[MAXLEVELS];
+ extern int initialfuel[MAXLEVELS];
+ 
++extern char *datadir;
++extern char *confdir;
+ 
+ bool state_interphase_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *keyboard)
+ {
+@@ -92,7 +95,9 @@ bool state_interphase_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *key
+ 			if (game=0) delete game;
+ 			game=new TRANSBALL("graphics/","sound/","maps/",initialfuel[level],levelnames[level],ship_type);
+ 			sprintf(tmp,"replays/replay%.3i.rpl",replaynum++);
++			chdir(confdir);
+ 			replayfile=fopen(tmp,"wb+");
++			chdir(datadir);
+ 			fputc(32,replayfile);
+ 			fputc(0,replayfile);
+ 			/* level name: */ 
+diff --git a/sources/state_keyredefinition.cpp b/sources/state_keyredefinition.cpp
+index b062e62..11355b6 100644
+--- a/sources/state_keyredefinition.cpp
++++ b/sources/state_keyredefinition.cpp
+@@ -43,7 +43,7 @@ extern int replay_source;
+ extern SDLKey THRUST_KEY,ANTITHRUST_KEY,LEFT_KEY,RIGHT_KEY;
+ extern SDLKey FIRE_KEY,ATRACTOR_KEY;
+ extern SDLKey PAUSE_KEY;
+-extern bool pause;
++extern bool paused;
+ extern unsigned char old_keyboard[SDLK_LAST];
+ extern SDL_Surface *image,*image2;
+ extern char edit_text[80];
+diff --git a/sources/state_levelfinished.cpp b/sources/state_levelfinished.cpp
+index 31ccd8a..16993ec 100644
+--- a/sources/state_levelfinished.cpp
++++ b/sources/state_levelfinished.cpp
+@@ -43,7 +43,7 @@ extern int replay_source;
+ extern SDLKey THRUST_KEY,ANTITHRUST_KEY,LEFT_KEY,RIGHT_KEY;
+ extern SDLKey FIRE_KEY,ATRACTOR_KEY;
+ extern SDLKey PAUSE_KEY;
+-extern bool pause;
++extern bool paused;
+ extern unsigned char old_keyboard[SDLK_LAST];
+ extern SDL_Surface *image,*image2;
+ extern char edit_text[80];
+diff --git a/sources/state_logo.cpp b/sources/state_logo.cpp
+index 1487e8b..4518429 100644
+--- a/sources/state_logo.cpp
++++ b/sources/state_logo.cpp
+@@ -41,7 +41,7 @@ extern int replay_source;
+ extern SDLKey THRUST_KEY,ANTITHRUST_KEY,LEFT_KEY,RIGHT_KEY;
+ extern SDLKey FIRE_KEY,ATRACTOR_KEY;
+ extern SDLKey PAUSE_KEY;
+-extern bool pause;
++extern bool paused;
+ extern unsigned char old_keyboard[SDLK_LAST];
+ extern SDL_Surface *image,*image2;
+ extern char edit_text[80];
+diff --git a/sources/state_mainmenu.cpp b/sources/state_mainmenu.cpp
+index e689caf..9d6f86b 100644
+--- a/sources/state_mainmenu.cpp
++++ b/sources/state_mainmenu.cpp
+@@ -8,6 +8,7 @@
+ #endif
+ 
+ #include <stdio.h>
++#include <unistd.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include "SDL/SDL.h"
+@@ -41,7 +42,7 @@ extern int replay_source;
+ extern SDLKey THRUST_KEY,ANTITHRUST_KEY,LEFT_KEY,RIGHT_KEY;
+ extern SDLKey FIRE_KEY,ATRACTOR_KEY;
+ extern SDLKey PAUSE_KEY;
+-extern bool pause;
++extern bool paused;
+ extern unsigned char old_keyboard[SDLK_LAST];
+ extern SDL_Surface *image,*image2;
+ extern char edit_text[80];
+@@ -57,6 +58,8 @@ extern List<char> levelpacks;
+ extern int act_levelpack;
+ extern char levelpack[256];
+ 
++extern char *datadir;
++extern char *confdir;
+ 
+ bool state_mainmenu_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *keyboard)
+ {
+@@ -157,6 +160,7 @@ bool state_mainmenu_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *keybo
+ 			tittle_alpha=255;
+ 
+ 			sprintf(tmp,"demos/demo%i.rpl",((rand()%40)/10)+1);
++			chdir(datadir);
+ 			replayfile=fopen(tmp,"rb");
+ 			v1=fgetc(replayfile);
+ 			v2=fgetc(replayfile);	// To maintain compatibility with a previous version
+diff --git a/sources/state_replay.cpp b/sources/state_replay.cpp
+index a38ac37..f8d2ba8 100644
+--- a/sources/state_replay.cpp
++++ b/sources/state_replay.cpp
+@@ -43,7 +43,7 @@ extern int replay_source;
+ extern SDLKey THRUST_KEY,ANTITHRUST_KEY,LEFT_KEY,RIGHT_KEY;
+ extern SDLKey FIRE_KEY,ATRACTOR_KEY;
+ extern SDLKey PAUSE_KEY;
+-extern bool pause;
++extern bool paused;
+ extern unsigned char old_keyboard[SDLK_LAST];
+ extern SDL_Surface *image,*image2;
+ extern char edit_text[80];
+@@ -71,11 +71,11 @@ bool state_replay_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *keyboar
+ 	SUBSTATE++;
+ 
+ 	if (keyboard[PAUSE_KEY] && !old_keyboard[PAUSE_KEY]) {
+-		if (pause) pause=false;
+-			  else pause=true;
++		if (paused) paused=false;
++			  else paused=true;
+ 	} /* if */ 
+ 
+-	if (!pause) {
++	if (!paused) {
+ 		int i;
+ 		unsigned char tmp[SDLK_LAST];
+ 		for(i=0;i<SDLK_LAST;i++) tmp[i]=0;
+@@ -91,7 +91,7 @@ bool state_replay_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *keyboar
+ 
+ 	game->render(screen,sx,sy);
+ 
+-	if (pause) {
++	if (paused) {
+ 		surface_fader(screen,0.5F,0.5F,0.5F,-1,0);
+ 		font_print(sx/2,sy/2-16,"PAUSE",screen);
+ 	} else {
+diff --git a/sources/state_replaymanager.cpp b/sources/state_replaymanager.cpp
+index e767de2..7eb324c 100644
+--- a/sources/state_replaymanager.cpp
++++ b/sources/state_replaymanager.cpp
+@@ -8,6 +8,7 @@
+ #endif
+ 
+ #include <stdio.h>
++#include <unistd.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include "SDL/SDL.h"
+@@ -43,7 +44,7 @@ extern int replay_source;
+ extern SDLKey THRUST_KEY,ANTITHRUST_KEY,LEFT_KEY,RIGHT_KEY;
+ extern SDLKey FIRE_KEY,ATRACTOR_KEY;
+ extern SDLKey PAUSE_KEY;
+-extern bool pause;
++extern bool paused;
+ extern unsigned char old_keyboard[SDLK_LAST];
+ extern SDL_Surface *image,*image2;
+ extern char edit_text[80];
+@@ -63,6 +64,8 @@ extern char *leveltext[MAXLEVELS];
+ extern char *levelcode[MAXLEVELS];
+ extern int initialfuel[MAXLEVELS];
+ 
++extern char *datadir;
++extern char *confdir;
+ 
+ bool state_replaymanager_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *keyboard)
+ {
+@@ -103,6 +106,7 @@ bool state_replaymanager_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *
+ 		DIR *dp;
+ 		struct dirent *ep;
+ 		  
++		chdir(confdir);
+ 		if (replay_source==0) dp = opendir ("replays");
+ 						 else dp = opendir ("high");
+ 		if (dp != NULL)
+@@ -124,6 +128,7 @@ bool state_replaymanager_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *
+ 			 }
+ 			(void) closedir (dp);
+ 		 }
++		chdir(datadir);
+ #endif                          
+ 		first_file=0;
+ 		act_file=0;		
+@@ -210,7 +215,9 @@ bool state_replaymanager_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *
+ 
+ 				if (replay_source==0) sprintf(tmp,"replays/%s",files[act_file]);
+ 								 else sprintf(tmp,"high/%s",files[act_file]);
++				chdir(confdir);
+ 				replayfile=fopen(tmp,"rb");
++				chdir(datadir);
+ 				v1=fgetc(replayfile);
+ 				v2=fgetc(replayfile);	// To maintain compatibility with a previous version
+ 
+@@ -309,6 +316,7 @@ bool state_replaymanager_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *
+ 				DIR *dp;
+ 				struct dirent *ep;
+ 				  
++				chdir(confdir);
+ 				dp = opendir ("replays");
+ 				if (dp != NULL)
+ 				 {
+@@ -329,6 +337,7 @@ bool state_replaymanager_cycle(SDL_Surface *screen,int sx,int sy,unsigned char *
+ 					 }
+ 					(void) closedir (dp);
+ 				 }
++				chdir(datadir);
+ #endif                  
+ 				
+ 				/* Check if this replay is a highscore: */ 
+diff --git a/sources/state_typetext.cpp b/sources/state_typetext.cpp
+index da45793..20c5017 100644
+--- a/sources/state_typetext.cpp
++++ b/sources/state_typetext.cpp
+@@ -43,7 +43,7 @@ extern int replay_source;
+ extern SDLKey THRUST_KEY,ANTITHRUST_KEY,LEFT_KEY,RIGHT_KEY;
+ extern SDLKey FIRE_KEY,ATRACTOR_KEY;
+ extern SDLKey PAUSE_KEY;
+-extern bool pause;
++extern bool paused;
+ extern unsigned char old_keyboard[SDLK_LAST];
+ extern SDL_Surface *image,*image2;
+ extern char edit_text[80];
+-- 
+1.8.3.4
+
+
+From b382be38bd296d72071c135e9fddd6872040c532 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sun, 19 Jan 2014 18:56:20 +0100
+Subject: Avoid waste of CPU.
+
+We can sleep longer than 1ms without slowing down the game.
+
+diff --git a/sources/main.cpp b/sources/main.cpp
+index b633601..5445993 100644
+--- a/sources/main.cpp
++++ b/sources/main.cpp
+@@ -284,7 +284,7 @@ int main(int argc, char** argv)
+ 			} /* if */ 
+ 			SDL_Flip(screen_sfc);
+ 		}
+-		SDL_Delay(1);
++		SDL_Delay(REDRAWING_PERIOD);
+ 	}
+ 
+ 	fonts_termination();
+-- 
+1.8.3.4
+
