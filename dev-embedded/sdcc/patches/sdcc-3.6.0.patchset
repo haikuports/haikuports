@@ -1,28 +1,28 @@
-From 1bd79b2e8b02c9147ee3fcbeae69ece7e7070687 Mon Sep 17 00:00:00 2001
+From a95501e57f35c71394748a6656e52581ab2a4932 Mon Sep 17 00:00:00 2001
 From: Adrien Destugues <pulkomandy@pulkomandy.tk>
 Date: Sun, 14 Sep 2014 12:25:39 +0200
 Subject: let sdbinutils know about Haiku.
 
 
 diff --git a/support/sdbinutils/bfd/config.bfd b/support/sdbinutils/bfd/config.bfd
-index ee1d39d..386faab 100644
+index a1a8311..2e2f99d 100644
 --- a/support/sdbinutils/bfd/config.bfd
 +++ b/support/sdbinutils/bfd/config.bfd
-@@ -693,6 +693,9 @@ case "${targ}" in
-     targ_defvec=bfd_elf32_i386_vec
-     targ_selvecs="i386pe_vec i386pei_vec"
+@@ -725,6 +725,9 @@ case "${targ}" in
+     targ_defvec=i386_elf32_vec
+     targ_selvecs="i386_pe_vec i386_pei_vec"
      ;;
 +  i[3-7]86-*-haiku*)
-+    targ_defvec=bfd_elf32_i386_vec
++    targ_defvec=i386_elf32_vec
 +    ;;
    i[3-7]86-*-interix*)
-     targ_defvec=i386pei_vec
-     targ_selvecs="i386pe_vec"
+     targ_defvec=i386_pei_vec
+     targ_selvecs="i386_pe_vec"
 -- 
 2.7.0
 
 
-From 1109aa92552ca00f54c3e9a980562f3a789104bc Mon Sep 17 00:00:00 2001
+From 33d4dfa0af15f64b9ef9313f53fd1594907814e7 Mon Sep 17 00:00:00 2001
 From: Adrien Destugues <pulkomandy@pulkomandy.tk>
 Date: Sun, 14 Sep 2014 12:26:14 +0200
 Subject: Missing include.
@@ -44,7 +44,7 @@ index 5050d2f..ef3ed70 100644
 2.7.0
 
 
-From c7067504f4e06e5905f253ac6597f611794ab8e9 Mon Sep 17 00:00:00 2001
+From 75bb84c28fb9bcee9236d5490112e5a5a0edb3be Mon Sep 17 00:00:00 2001
 From: Adrien Destugues <pulkomandy@pulkomandy.tk>
 Date: Sun, 14 Sep 2014 12:59:31 +0200
 Subject: strings.h fix.
@@ -66,7 +66,7 @@ index e809980..166d8b1 100644
 2.7.0
 
 
-From 93c2311eb84b19e333946332959d4fbf6bc7a975 Mon Sep 17 00:00:00 2001
+From aa034f022a15f189c4d20c36578e8423b77ba5ea Mon Sep 17 00:00:00 2001
 From: Adrien Destugues <pulkomandy@pulkomandy.tk>
 Date: Sun, 14 Sep 2014 12:59:16 +0200
 Subject: Remove hardcoded -lm
@@ -193,7 +193,7 @@ index fc22c22..ebf63f1 100644
 2.7.0
 
 
-From aef811431a7cf3d20e26da1302c5fbfc6d6dd1a0 Mon Sep 17 00:00:00 2001
+From f28f97241c95b6434d9a326d8349f25cd16bebfb Mon Sep 17 00:00:00 2001
 From: Adrien Destugues <pulkomandy@pulkomandy.tk>
 Date: Fri, 22 Jan 2016 21:01:19 +0100
 Subject: Import Kevin Thacker patch for runtime relocation support.
@@ -240,7 +240,7 @@ index bb83900..bfaa197 100644
  int     jflag;          /*      NoICE output flag
                           */
 diff --git a/sdas/linksrc/lkmain.c b/sdas/linksrc/lkmain.c
-index f68e8f9..bd426dd 100644
+index 1cc7a45..9d6f916 100644
 --- a/sdas/linksrc/lkmain.c
 +++ b/sdas/linksrc/lkmain.c
 @@ -233,6 +233,7 @@ main(int argc, char *argv[])
@@ -394,6 +394,311 @@ index cf184f2..6f11cdc 100644
          if (oflag != 0) {
                  lkflush();
                  lkfclose();
+diff --git a/sdas/linksrc/lkrrel.c b/sdas/linksrc/lkrrel.c
+new file mode 100644
+index 0000000..e9e8383
+--- /dev/null
++++ b/sdas/linksrc/lkrrel.c
+@@ -0,0 +1,251 @@
++/* (c) Kevin Thacker, May 2005 */
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++#include "aslink.h"
++#include "lkrrel.h"
++
++struct relrechead
++{
++	int count;
++	struct relrec *head;
++};
++
++/* 16-bit values, add full 16-bit base address */
++
++static struct relrechead head16= {0,NULL};
++/* 8-bit, but add high byte of 16-bit base address */
++static struct relrechead head8hi = {0,NULL};
++/* 8-bit, but add low byte of 16-bit base address */
++static struct relrechead head8lo = {0,NULL};
++
++/* internal; free's list */
++static void relrecfree(struct relrechead *head)
++{
++	struct relrec *cur = head->head;
++	
++	while (cur!=NULL)
++	{
++		struct relrec *next = cur->next;
++		free(cur);
++
++		cur = next;
++	}
++}
++
++/* free relocation record list; e.g. on exit */
++void freerelrec()
++{
++	relrecfree(&head16);
++	relrecfree(&head8hi);
++	relrecfree(&head8lo);
++}
++
++/* internal; allocate a relocation record */
++static void newrelrec(struct relrechead *head, a_uint addr, a_uint symaddr)
++{
++	struct relrec *rec;
++	
++	rec  = (struct relrec *) malloc(sizeof(struct relrec));
++	
++	/* error if allocation failed */
++	if (rec==NULL)
++		return;
++
++	rec->addr = addr;
++	rec->symaddr = symaddr;
++	
++	/* add to start of list */
++	rec->next = head->head;
++	head->head = rec;
++	head->count++;
++}
++	
++/* add item to 16-bit relocation record list */
++void relrec16(a_uint addr)
++{
++	newrelrec(&head16, addr,0);
++}
++
++/* add item to 8-bit (high) relocation record list */
++void relrec8hi(a_uint addr, a_uint symaddr)
++{
++	newrelrec(&head8hi, addr,symaddr);
++}
++
++/* add address to 8-bit (low) relocation list */
++void relrec8lo(a_uint addr, a_uint symaddr)
++{
++	newrelrec(&head8lo, addr,symaddr);
++}
++
++/* internal; compare two addresses within two relocate records */ 
++static int relreccompare(const void *a, const void *b)
++{
++	const struct relrec *relreca = (const struct relrec *)a;
++	const struct relrec *relrecb = (const struct relrec *)b;
++
++	return (relreca->addr-relrecb->addr);
++}
++
++/* sort a list of relocate records and return an array of the records */
++static struct relrec *relrecsort(struct relrechead *head)
++{
++	int count;
++	struct relrec *reclist;
++	struct relrec *cur;
++
++	if (head->count==0)
++		return NULL;
++
++	/* allocate list to hold all items */
++	reclist = (struct relrec *)malloc(sizeof(struct relrec)*head->count);	
++
++	if (reclist==NULL)
++		return NULL;
++
++	/* fill list */
++	count = 0;
++	cur = head->head;
++	while (cur!=NULL)
++	{
++		memcpy(&reclist[count],cur,sizeof(struct relrec));
++		count++;
++		cur = cur->next;
++	}
++
++	/* sort into ascending address order */
++	qsort(reclist, count, sizeof(struct relrec),relreccompare);
++
++	return reclist;
++}
++
++int outbyte(int addr, char byte)
++{
++	rtval[0] = addr&0x0ff;
++	rtval[1] = (addr>>8)&0x0ff;
++	rtval[2] = byte&0x0ff;
++	addr+=1;		
++	rtflg[0] = 1;
++	rtflg[1] = 1;
++	rtflg[2] = 1;
++	rtcnt = 3;
++	ixx(1);
++	return addr;
++}
++
++void relrecwritelist1(struct relrechead *list,int *addrptr)
++{
++	int i;
++	struct relrec *relreclist;
++	int addr;
++
++	addr = *addrptr;
++
++	relreclist = relrecsort(list);
++
++	if (relreclist!=NULL)
++	{
++		int prevaddr = 0;
++		for (i=0; i<list->count; i++)
++		{
++			struct relrec *cur = &relreclist[i];
++
++			int delta = cur->addr-prevaddr;
++			
++			if (delta>254)
++			{
++				int largedelta = delta-1;
++				addr = outbyte(addr,0x0ff);
++				addr = outbyte(addr,largedelta&0x0ff);
++				addr = outbyte(addr,(largedelta>>8)&0x0ff);
++				delta = 1;
++			}
++			prevaddr = cur->addr;
++			addr = outbyte(addr,delta&0x0ff);
++		}	
++	
++		free(relreclist);
++	}
++	
++	addr = outbyte(addr, 0);
++	
++	*addrptr = addr;
++
++}
++
++void relrecwritelist2(struct relrechead *list,int *addrptr)
++{
++	int i;
++	struct relrec *relreclist;
++	int addr;
++
++	addr = *addrptr;
++
++	relreclist = relrecsort(list);
++
++	if (relreclist!=NULL)
++	{
++		int prevaddr = 0;
++		for (i=0; i<list->count; i++)
++		{
++			struct relrec *cur = &relreclist[i];
++			int delta = cur->addr-prevaddr;
++			prevaddr = cur->addr;
++			
++			if (delta>254)
++			{
++				int largedelta = delta-1;
++				addr = outbyte(addr,0x0ff);
++				addr = outbyte(addr,largedelta&0x0ff);
++				addr = outbyte(addr,(largedelta>>8)&0x0ff);
++				delta = 1;
++			}
++
++			addr = outbyte(addr,delta&0x0ff);
++			addr = outbyte(addr,cur->symaddr&0x0ff);
++		}	
++	
++		free(relreclist);
++	}
++
++	addr = outbyte(addr,0);
++	
++	*addrptr = addr;
++
++}
++
++
++void relrecwrite()
++{
++	int areasize = 0;
++
++	struct area *cur = areap;
++	while (cur!=NULL)
++	{
++		areasize+=cur->a_size;
++		cur=cur->a_ap;
++	}
++
++	//printf("total length before relocation records: %04x\n",areasize);
++
++	/* re-write offset to relocation records */
++	rtval[0] = 0;
++	rtval[1] = 0;
++	rtval[2] = areasize&0x0ff;
++	rtval[3] = (areasize>>8)&0x0ff;
++	rtflg[0] = 1;
++	rtflg[1] = 1;
++	rtflg[2] = 1;
++	rtflg[3] = 1;
++	rtcnt = 4;
++	ixx(1);
++	
++
++	int addr = areasize;
++
++
++	relrecwritelist1(&head16,&addr);
++	relrecwritelist1(&head8lo,&addr);
++	relrecwritelist2(&head8hi,&addr);
++}
+diff --git a/sdas/linksrc/lkrrel.h b/sdas/linksrc/lkrrel.h
+new file mode 100644
+index 0000000..ca1cfd4
+--- /dev/null
++++ b/sdas/linksrc/lkrrel.h
+@@ -0,0 +1,17 @@
++/* relocation record */
++struct relrec
++{
++	/* next item */
++	struct relrec *next;
++
++	/* address of relocate */
++	a_uint addr;
++
++	a_uint symaddr;
++};
++
++void relrec16(a_uint addr);
++void relrec8lo(a_uint addr, a_uint symaddr);
++void relrec8hi(a_uint addr, a_uint symaddr);
++void freerelrec();
++void relrecwrite();
+-- 
+2.7.0
+
+
+From b56f61aea4312e943ecf79e65846f55f4a83827e Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sun, 15 Jan 2017 20:50:32 +0100
+Subject: sdcpp: add missing include path
+
+This prevents the configure script from detecting some things, and later
+on the build fails.
+
+diff --git a/support/cpp/configure.ac b/support/cpp/configure.ac
+index cbf4e07..34435cb 100644
+--- a/support/cpp/configure.ac
++++ b/support/cpp/configure.ac
+@@ -217,7 +217,7 @@ AC_FUNC_MMAP_FILE
+ 
+ # We will need to find libiberty.h and ansidecl.h
+ saved_CFLAGS="$CFLAGS"
+-CFLAGS="$CFLAGS -I${srcdir} -I${srcdir}/libiberty -I${srcdir}/libcpp/include"
++CFLAGS="$CFLAGS -I${srcdir} -I${srcdir}/../libiberty -I${srcdir}/libcpp/include -I${srcdir}/../sdbinutils/include"
+ gcc_AC_CHECK_DECLS(getenv abort strsignal errno \
+         malloc realloc calloc free clock, , ,[
+ #include "ansidecl.h"
 -- 
 2.7.0
 
