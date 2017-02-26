@@ -2,7 +2,7 @@
 
 _progress () {
 	notify --type progress --group ssh-keygen \
-		--icon /boot/system/kernel_x86 \
+		--icon /system/kernel_`uname -p` \
 		--messageID $0_$$ \
 		--title "Generating ssh keys..." \
 		--progress "$1" "$2" >/dev/null

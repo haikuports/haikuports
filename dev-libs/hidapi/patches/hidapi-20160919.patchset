@@ -1,0 +1,223 @@
+From 0e6ebfe2cee9ea675ebc175fb95830cc1ecf5ef8 Mon Sep 17 00:00:00 2001
+From: CodeforEvolution <themysterymail555@gmail.com>
+Date: Mon, 26 Dec 2016 16:59:41 +0000
+Subject: Changes to Build System for Haiku
+
+
+diff --git a/Makefile.am b/Makefile.am
+index 196c991..48e522d 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -31,6 +31,10 @@ if OS_KFREEBSD
+ SUBDIRS += libusb
+ endif
+ 
++if OS_HAIKU
++SUBDIRS += libusb
++endif
++
+ if OS_WINDOWS
+ SUBDIRS += windows
+ endif
+diff --git a/configure.ac b/configure.ac
+index c6747f9..dd5249a 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -107,6 +107,18 @@ case $host in
+ 	AC_CHECK_LIB([usb], [libusb_init], [LIBS_LIBUSB_PRIVATE="${LIBS_LIBUSB_PRIVATE} -lusb"], [hidapi_lib_error libusb])
+ 	echo libs_priv: $LIBS_LIBUSB_PRIVATE
+ 	;;
++*-*-haiku)
++	AC_MSG_RESULT([ (Haiku back-end)])
++	AC_DEFINE(OS_HAIKU, 1, [Haiku implementation])
++	AC_SUBST(OS_HAIKU)
++	backend="libusb"
++	os="haiku"
++	threads="pthreads"
++
++	PKG_CHECK_MODULES([libusb], [libusb-1.0 >= 1.0.9], true, [hidapi_lib_error libusb-1.0])
++	LIBS_LIBUSB_PRIVATE+=" $libusb_LIBS"
++	CFLAGS_LIBUSB+=" $libusb_CFLAGS"
++	;;
+ *-mingw*)
+ 	AC_MSG_RESULT([ (Windows back-end, using MinGW)])
+ 	backend="windows"
+@@ -213,6 +225,7 @@ AM_CONDITIONAL(OS_LINUX, test "x$os" = xlinux)
+ AM_CONDITIONAL(OS_DARWIN, test "x$os" = xdarwin)
+ AM_CONDITIONAL(OS_FREEBSD, test "x$os" = xfreebsd)
+ AM_CONDITIONAL(OS_KFREEBSD, test "x$os" = xkfreebsd)
++AM_CONDITIONAL(OS_HAIKU, test "x$os" = xhaiku)
+ AM_CONDITIONAL(OS_WINDOWS, test "x$os" = xwindows)
+ 
+ AC_CONFIG_HEADERS([config.h])
+diff --git a/libusb/Makefile-manual b/libusb/Makefile-manual
+index c0fe868..0acf707 100644
+--- a/libusb/Makefile-manual
++++ b/libusb/Makefile-manual
+@@ -10,6 +10,10 @@ ifeq ($(OS), FreeBSD)
+ 	FILE=Makefile.freebsd
+ endif
+ 
++ifeq ($(OS), Haiku)
++	FILE=Makefile.haiku
++endif
++
+ ifeq ($(FILE), )
+ all:
+ 	$(error Your platform ${OS} is not supported by hidapi/libusb at this time.)
+diff --git a/libusb/Makefile.am b/libusb/Makefile.am
+index 13c9d35..1da06bc 100644
+--- a/libusb/Makefile.am
++++ b/libusb/Makefile.am
+@@ -21,6 +21,13 @@ libhidapi_la_LDFLAGS = $(LTLDFLAGS)
+ libhidapi_la_LIBADD = $(LIBS_LIBUSB)
+ endif
+ 
++if OS_HAIKU
++lib_LTLIBRARIES = libhidapi.la
++libhidapi_la_SOURCES = hid.c
++libhidapi_la_LDFLAGS = $(LTLDFLAGS)
++libhidapi_la_LIBADD = $(LIBS_LIBUSB)
++endif
++
+ hdrdir = $(includedir)/hidapi
+ hdr_HEADERS = $(top_srcdir)/hidapi/hidapi.h
+ 
+diff --git a/libusb/Makefile.haiku b/libusb/Makefile.haiku
+new file mode 100644
+index 0000000..6ddd172
+--- /dev/null
++++ b/libusb/Makefile.haiku
+@@ -0,0 +1,46 @@
++###########################################
++# Simple Makefile for HIDAPI test program
++#
++# Alan Ott
++# Signal 11 Software
++# 2010-06-01
++###########################################
++
++all: hidtest libs
++
++libs: libhidapi.so
++
++CC       ?= cc
++CFLAGS   ?= -Wall -g -fPIC
++
++CXX      ?= c++
++CXXFLAGS ?= -Wall -g
++
++COBJS     = hid.o
++CPPOBJS   = ../hidtest/hidtest.o
++OBJS      = $(COBJS) $(CPPOBJS)
++INCLUDES  = -I../hidapi -I$(shell finddir B_SYSTEM_HEADERS_DIRECTORY)
++LDFLAGS   = -L$(shell finddir B_SYSTEM_LIB_DIRECTORY)
++LIBS      = -lusb-1.0
++
++
++# Console Test Program
++hidtest: $(OBJS)
++	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ -o $@ $(LIBS)
++
++# Shared Libs
++libhidapi.so: $(COBJS)
++	$(CC) $(LDFLAGS) -shared -Wl,-soname,$@.0 $^ -o $@ $(LIBS)
++
++# Objects
++$(COBJS): %.o: %.c
++	$(CC) $(CFLAGS) -c $(INCLUDES) $< -o $@
++
++$(CPPOBJS): %.o: %.cpp
++	$(CXX) $(CXXFLAGS) -c $(INCLUDES) $< -o $@
++
++
++clean:
++	rm -f $(OBJS) hidtest libhidapi.so ../hidtest/hidtest.o
++
++.PHONY: clean libs
+-- 
+2.2.2
+
+
+From 106ec32de206ec49fb0441e55690d7ff3cd24b9c Mon Sep 17 00:00:00 2001
+From: CodeforEvolution <themysterymail555@gmail.com>
+Date: Mon, 26 Dec 2016 17:14:58 +0000
+Subject: Changes in source for no iconv/pthread barriers
+
+
+diff --git a/libusb/hid.c b/libusb/hid.c
+index 3c6d877..c6ad012 100644
+--- a/libusb/hid.c
++++ b/libusb/hid.c
+@@ -45,15 +45,15 @@
+ 
+ /* GNU / LibUSB */
+ #include <libusb.h>
+-#ifndef __ANDROID__
++#if !defined(__ANDROID__) || !defined(__HAIKU__)
+ #include <iconv.h>
+ #endif
+ 
+ #include "hidapi.h"
+ 
+-#ifdef __ANDROID__
++#if defined(__ANDROID__) || defined(__HAIKU__)
+ 
+-/* Barrier implementation because Android/Bionic don't have pthread_barrier.
++/* Barrier implementation because Android/Bionic/Haiku don't have pthread_barrier.
+    This implementation came from Brent Priddy and was posted on
+    StackOverflow. It is used with his permission. */
+ typedef int pthread_barrierattr_t;
+@@ -390,7 +390,7 @@ static wchar_t *get_usb_string(libusb_device_handle *dev, uint8_t idx)
+ 	int len;
+ 	wchar_t *str = NULL;
+ 
+-#ifndef __ANDROID__ /* we don't use iconv on Android */
++#if !defined(__ANDROID__) || !defined(__HAIKU__) /* we don't use iconv on Android/Haiku */
+ 	wchar_t wbuf[256];
+ 	/* iconv variables */
+ 	iconv_t ic;
+@@ -420,7 +420,7 @@ static wchar_t *get_usb_string(libusb_device_handle *dev, uint8_t idx)
+ 	if (len < 0)
+ 		return NULL;
+ 
+-#ifdef __ANDROID__
++#if defined(__ANDROID__) || defined(__HAIKU__)
+ 
+ 	/* Bionic does not have iconv support nor wcsdup() function, so it
+ 	   has to be done manually.  The following code will only work for
+-- 
+2.2.2
+
+
+From 3de18a772eebbddd93e0fa356d6c738b0718f011 Mon Sep 17 00:00:00 2001
+From: CodeforEvolution <themysterymail555@gmail.com>
+Date: Mon, 26 Dec 2016 18:09:26 +0000
+Subject: Fix Change in Source
+
+
+diff --git a/libusb/hid.c b/libusb/hid.c
+index c6ad012..f11d4d5 100644
+--- a/libusb/hid.c
++++ b/libusb/hid.c
+@@ -45,7 +45,7 @@
+ 
+ /* GNU / LibUSB */
+ #include <libusb.h>
+-#if !defined(__ANDROID__) || !defined(__HAIKU__)
++#if !defined(__ANDROID__) && !defined(__HAIKU__)
+ #include <iconv.h>
+ #endif
+ 
+@@ -390,7 +390,7 @@ static wchar_t *get_usb_string(libusb_device_handle *dev, uint8_t idx)
+ 	int len;
+ 	wchar_t *str = NULL;
+ 
+-#if !defined(__ANDROID__) || !defined(__HAIKU__) /* we don't use iconv on Android/Haiku */
++#if !defined(__ANDROID__) && !defined(__HAIKU__) /* we don't use iconv on Android/Haiku */
+ 	wchar_t wbuf[256];
+ 	/* iconv variables */
+ 	iconv_t ic;
+-- 
+2.2.2
+

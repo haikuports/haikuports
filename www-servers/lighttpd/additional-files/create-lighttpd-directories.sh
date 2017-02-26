@@ -11,3 +11,4 @@ if [ ! -e var/www/htdocs/index.lighttpd.html ]; then
 fi
 
 mkdir -p var/log/lighttpd var/lib/lighttpd var/cache/lighttpd var/tmp/lighttpd
+mkdir -p var/run

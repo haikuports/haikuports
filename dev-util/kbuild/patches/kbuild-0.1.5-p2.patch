@@ -1,0 +1,827 @@
+diff --git a/Config.kmk b/Config.kmk
+index 774bda5..6e42081 100644
+--- a/Config.kmk
++++ b/Config.kmk
+@@ -107,6 +107,8 @@ DEFS.openbsd += KBUILD_OS_OPENBSD
+ DEFS.os2     += KBUILD_OS_OS2
+ DEFS.solaris += KBUILD_OS_SOLARIS
+ DEFS.win     += KBUILD_OS_WINDOWS
++DEFS.haiku   += KBUILD_OS_HAIKU
++
+ 
+ DEFS.x86     += KBUILD_ARCH_X86
+ DEFS.amd64   += KBUILD_ARCH_AMD64
+diff --git a/SvnInfo.kmk b/SvnInfo.kmk
+old mode 100755
+new mode 100644
+diff --git a/kBuild/env.sh b/kBuild/env.sh
+index 19f8eb2..59901bf 100755
+--- a/kBuild/env.sh
++++ b/kBuild/env.sh
+@@ -279,6 +279,10 @@ if test -z "$KBUILD_HOST"; then
+         os2|OS/2|OS2)
+             KBUILD_HOST=os2
+             ;;
++
++        Haiku*)
++            KBUILD_HOST=haiku
++            ;;
+ 
+         SunOS)
+             KBUILD_HOST=solaris
+@@ -322,7 +326,7 @@ if test -z "$KBUILD_HOST_ARCH"; then
+         x86_64|AMD64|amd64|k8|k8l|k9|k10)
+             KBUILD_HOST_ARCH='amd64'
+             ;;
+-        x86|i86pc|ia32|i[3456789]86)
++        x86|i86pc|ia32|i[3456789]86|BePC)
+             KBUILD_HOST_ARCH='x86'
+             ;;
+         sparc32|sparc|sparcv8|sparcv7|sparcv8e)
+diff --git a/kBuild/header.kmk b/kBuild/header.kmk
+index d575934..4ec5b84 100644
+--- a/kBuild/header.kmk
++++ b/kBuild/header.kmk
+@@ -176,7 +176,7 @@ KBUILD_BLD_TYPES := release profile debug
+ # this keyword namespace is shared between OSes, architectures, cpus and
+ # build types. (PORTME)
+ #
+-KBUILD_OSES   := darwin dos dragonfly freebsd l4 linux netbsd nt openbsd os2 solaris win os-agnostic
++KBUILD_OSES   := darwin dos dragonfly freebsd l4 linux netbsd nt openbsd os2 solaris win os-agnostic haiku
+ KBUILD_ARCHES := x86 amd64 sparc32 sparc64 s390 s390x ppc32 ppc64 mips32 mips64 ia64 hppa32 hppa64 arm alpha
+ 
+ 
+diff --git a/src/kObjCache/kObjCache.c b/src/kObjCache/kObjCache.c
+index b403d58..fb757e0 100644
+--- a/src/kObjCache/kObjCache.c
++++ b/src/kObjCache/kObjCache.c
+@@ -70,6 +70,9 @@
+ #if defined(__WIN__)
+ # include <Windows.h>
+ #endif
++#if defined(__HAIKU__)
++# include <posix/sys/file.h>
++#endif
+ 
+ #include "crc32.h"
+ #include "md5.h"
+diff --git a/src/kash/Makefile.kmk b/src/kash/Makefile.kmk
+index aca65f6..6dc5cc5 100644
+--- a/src/kash/Makefile.kmk
++++ b/src/kash/Makefile.kmk
+@@ -98,7 +98,9 @@ kash_SOURCES.win = \
+ kash_SOURCES.solaris = \
+ 	sys_signame.c \
+ 	strlcpy.c
+-
++kash_SOURCES.haiku = \
++	sys_signame.c \
++	strlcpy.c
+ kash_INTERMEDIATES = \
+ 	$(PATH_kash)/arith.h \
+ 	$(PATH_kash)/builtins.h \
+diff --git a/src/kash/error.h b/src/kash/error.h
+index 84a3d61..b5eda62 100644
+--- a/src/kash/error.h
++++ b/src/kash/error.h
+@@ -59,7 +59,11 @@
+  * inner scope, and restore handler on exit from the scope.
+  */
+ 
+-#include <setjmp.h>
++#ifndef __HAIKU__
++# include <setjmp.h>
++#else
++# include <posix/setjmp.h>
++#endif
+ 
+ struct jmploc {
+ 	jmp_buf loc;
+@@ -120,7 +124,7 @@ void sh_exit(struct shinstance *, int) __attribute__((__noreturn__));
+  * so we use _setjmp instead.
+  */
+ 
+-#if defined(BSD) && !defined(__SVR4) && !defined(__GLIBC__) && !defined(__KLIBC__) && !defined(_MSC_VER)
++#if defined(BSD) && !defined(__SVR4) && !defined(__GLIBC__) && !defined(__KLIBC__) && !defined(_MSC_VER) && !defined(__HAIKU__)
+ #define setjmp(jmploc)	_setjmp(jmploc)
+ #define longjmp(jmploc, val)	_longjmp(jmploc, val)
+ #endif
+diff --git a/src/kash/jobs.c b/src/kash/jobs.c
+index 50eaaa5..6442626 100644
+--- a/src/kash/jobs.c
++++ b/src/kash/jobs.c
+@@ -400,10 +400,12 @@ showjob(shinstance *psh, struct output *out, struct job *jp, int mode)
+ 				scopyn(sys_siglist[st], s + col, 32);
+ 			else
+ 				fmtstr(s + col, 16, "Signal %d", st);
++#ifndef __HAIKU__
+ 			if (WCOREDUMP(ps->status)) {
+ 				col += strlen(s + col);
+ 				scopyn(" (core dumped)", s + col,  64 - col);
+ 			}
++#endif
+ 		}
+ 		col += strlen(s + col);
+ 		outstr(s, out);
+diff --git a/src/kash/shfile.h b/src/kash/shfile.h
+index 51293cc..b677dd2 100644
+--- a/src/kash/shfile.h
++++ b/src/kash/shfile.h
+@@ -45,8 +45,10 @@
+ #  define _PATH_DEFPATH "/bin:/usr/bin:/sbin:/usr/sbin"
+ # endif
+ #endif
+-#ifndef _MSC_VER
+-# include <sys/fcntl.h>
++#if !defined(_MSC_VER)
++#  ifndef __HAIKU__
++#   include <sys/fcntl.h>
++#  endif
+ # include <unistd.h>
+ # ifndef O_BINARY
+ #  define O_BINARY  0
+diff --git a/src/kash/shtypes.h b/src/kash/shtypes.h
+index 18a2194..b58bfed 100644
+--- a/src/kash/shtypes.h
++++ b/src/kash/shtypes.h
+@@ -31,11 +31,13 @@
+ 
+ #include <sys/types.h>
+ #include <stdlib.h>
+-#ifndef _MSC_VER
++#if !defined(_MSC_VER) && !defined(__HAIKU__)
+ # include <sys/signal.h>
++#elif defined(__HAIKU__)
++#include <posix/signal.h>
+ #endif
+ 
+-#ifdef _MSC_VER
++#if defined(_MSC_VER)
+ # include <io.h> /* intptr_t and uintptr_t */
+ typedef signed char     int8_t;
+ typedef unsigned char   uint8_t;
+diff --git a/src/kmk/Makefile.kmk b/src/kmk/Makefile.kmk
+index 12b9697..bcaa624 100644
+--- a/src/kmk/Makefile.kmk
++++ b/src/kmk/Makefile.kmk
+@@ -57,6 +57,7 @@ TEMPLATE_BIN-KMK_INCS = $(PATH_kmk) . $(TEMPLATE_BIN_INCS)
+ TEMPLATE_BIN-KMK_INCS.darwin = glob
+ TEMPLATE_BIN-KMK_INCS.dragonfly = glob
+ TEMPLATE_BIN-KMK_INCS.freebsd = glob
++TEMPLATE_BIN-KMK_INCS.haiku = glob
+ TEMPLATE_BIN-KMK_INCS.solaris = glob
+ TEMPLATE_BIN-KMK_LIBS = $(TEMPLATE_BIN_LIBS) $(TARGET_kmkmissing) $(LIB_KUTIL)
+ ifdef ELECTRIC_HEAP # for electric heap (see electric.c) - windows only.
+@@ -92,6 +93,11 @@ kmkmissing_SOURCES.darwin = \
+ 	glob/glob.c \
+ 	glob/fnmatch.c
+ 
++kmkmissing_SOURCES.haiku = \
++	kmkbuiltin/haikufakes.c \
++	glob/glob.c \
++	glob/fnmatch.c
++
+ kmkmissing_SOURCES.dragonfly = \
+ 	glob/glob.c \
+ 	glob/fnmatch.c
+diff --git a/src/kmk/arscan.c b/src/kmk/arscan.c
+index 5e94000..5300908 100644
+--- a/src/kmk/arscan.c
++++ b/src/kmk/arscan.c
+@@ -231,7 +231,7 @@ ar_scan (const char *archive, ar_member_func_t function, const void *arg)
+ #endif
+ 
+ #ifndef WINDOWS32
+-# ifndef __BEOS__
++# ifndef (__BEOS__) && !defined(__HAIKU__)
+ #  include <ar.h>
+ # else
+    /* BeOS 5 doesn't have <ar.h> but has archives in the same format
+diff --git a/src/kmk/glob/fnmatch.c b/src/kmk/glob/fnmatch.c
+index 03d0352..b60ae8e 100644
+--- a/src/kmk/glob/fnmatch.c
++++ b/src/kmk/glob/fnmatch.c
+@@ -27,7 +27,7 @@ USA.  */
+ #endif
+ 
+ #include <errno.h>
+-#include <fnmatch.h>
++#include "fnmatch.h"
+ #include <ctype.h>
+ 
+ #if HAVE_STRING_H || defined _LIBC
+diff --git a/src/kmk/incdep.c b/src/kmk/incdep.c
+index 54e5287..ea30984 100644
+--- a/src/kmk/incdep.c
++++ b/src/kmk/incdep.c
+@@ -635,7 +635,7 @@ incdep_are_threads_enabled (void)
+ 
+ #elif defined(__APPLE__) \
+    || defined(__sun__) || defined(__SunOS__) || defined(__sun) || defined(__SunOS) \
+-   || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
++   || defined(__FreeBSD__) || defined(__HAIKU__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
+   /* No broken preload libraries known to be in common use on these platforms... */
+ 
+ #elif defined(_MSC_VER) || defined(_WIN32) || defined(__OS2__)
+diff --git a/src/kmk/job.c b/src/kmk/job.c
+index 6d14300..137f2d6 100644
+--- a/src/kmk/job.c
++++ b/src/kmk/job.c
+@@ -2050,7 +2050,7 @@ job_next_command (struct child *child)
+ static int
+ load_too_high (void)
+ {
+-#if defined(__MSDOS__) || defined(VMS) || defined(_AMIGA) || defined(__riscos__)
++#if defined(__MSDOS__) || defined(VMS) || defined(_AMIGA) || defined(__riscos__) || defined(__HAIKU__)
+   return 1;
+ #else
+   static double last_sec;
+diff --git a/src/kmk/kmkbuiltin/chmod.c b/src/kmk/kmkbuiltin/chmod.c
+index 3e1eaec..6bcc1e6 100644
+--- a/src/kmk/kmkbuiltin/chmod.c
++++ b/src/kmk/kmkbuiltin/chmod.c
+@@ -60,6 +60,9 @@ static char sccsid[] = "@(#)chmod.c	8.8 (Berkeley) 4/1/94";
+ #ifdef __sun__
+ # include "solfakes.h"
+ #endif
++#ifdef __HAIKU__
++# include "haikufakes.h"
++#endif
+ #include "getopt.h"
+ #include "kmkbuiltin.h"
+ 
+@@ -92,6 +95,7 @@ kmk_builtin_chmod(int argc, char *argv[], char **envp)
+ 	char *mode;
+ 	mode_t newmode;
+ 	int (*change_mode)(const char *, mode_t);
++	extern int lchmod(const char *, mode_t);
+ 
+ 	/* kmk: reset getopt and set progname */
+ 	g_progname = argv[0];
+diff --git a/src/kmk/kmkbuiltin/cp_utils.c b/src/kmk/kmkbuiltin/cp_utils.c
+index 1773815..1cf0191 100644
+--- a/src/kmk/kmkbuiltin/cp_utils.c
++++ b/src/kmk/kmkbuiltin/cp_utils.c
+@@ -52,11 +52,16 @@ __FBSDID("$FreeBSD: src/bin/cp/utils.c,v 1.43 2004/04/06 20:06:44 markm Exp $");
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <signal.h>
++#ifndef __HAIKU__
+ #include <sysexits.h>
++#endif
+ #include <unistd.h>
+ #ifdef __sun__
+ # include "solfakes.h"
+ #endif
++#ifdef __HAIKU__
++# include "haikufakes.h"
++#endif
+ #ifdef _MSC_VER
+ # define MSC_DO_64_BIT_IO
+ # include "mscfakes.h"
+diff --git a/src/kmk/kmkbuiltin/fts.c b/src/kmk/kmkbuiltin/fts.c
+index f913f17..9860f67 100644
+--- a/src/kmk/kmkbuiltin/fts.c
++++ b/src/kmk/kmkbuiltin/fts.c
+@@ -75,7 +75,7 @@ __RCSID("$NetBSD: __fts13.c,v 1.44 2005/01/19 00:59:48 mycroft Exp $");
+ #endif
+ 
+ #if ! HAVE_NBTOOL_CONFIG_H
+-# if !defined(__sun__) && !defined(__gnu_linux__)
++# if !defined(__sun__) && !defined(__gnu_linux__) && !defined(__HAIKU__)
+ #  define HAVE_STRUCT_DIRENT_D_NAMLEN 1
+ # endif
+ #endif
+diff --git a/src/kmk/kmkbuiltin/install.c b/src/kmk/kmkbuiltin/install.c
+index 9ab4b00..e13bf89 100644
+--- a/src/kmk/kmkbuiltin/install.c
++++ b/src/kmk/kmkbuiltin/install.c
+@@ -52,7 +52,9 @@ __FBSDID("$FreeBSD: src/usr.bin/xinstall/xinstall.c,v 1.66 2005/01/25 14:34:57 s
+ # ifdef USE_MMAP
+ #  include <sys/mman.h>
+ # endif
+-# include <sys/mount.h>
++# ifndef __HAIKU__
++#  include <sys/mount.h>
++# endif
+ # include <sys/wait.h>
+ # include <sys/time.h>
+ #endif /* !_MSC_VER */
+@@ -68,7 +70,9 @@ __FBSDID("$FreeBSD: src/usr.bin/xinstall/xinstall.c,v 1.66 2005/01/25 14:34:57 s
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+-#include <sysexits.h>
++#ifndef __HAIKU__
++# include <sysexits.h>
++#endif
+ #include <unistd.h>
+ #if defined(__EMX__) || defined(_MSC_VER)
+ # include <process.h>
+@@ -80,6 +84,9 @@ __FBSDID("$FreeBSD: src/usr.bin/xinstall/xinstall.c,v 1.66 2005/01/25 14:34:57 s
+ #ifdef _MSC_VER
+ # include "mscfakes.h"
+ #endif
++#ifdef __HAIKU__
++# include "haikufakes.h"
++#endif
+ #include "kmkbuiltin.h"
+ 
+ 
+diff --git a/src/kmk/kmkbuiltin/mkdir.c b/src/kmk/kmkbuiltin/mkdir.c
+index e066460..d04dc91 100644
+--- a/src/kmk/kmkbuiltin/mkdir.c
++++ b/src/kmk/kmkbuiltin/mkdir.c
+@@ -53,12 +53,17 @@ __FBSDID("$FreeBSD: src/bin/mkdir/mkdir.c,v 1.28 2004/04/06 20:06:48 markm Exp $
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+-#include <sysexits.h>
++#ifndef __HAIKU__
++# include <sysexits.h>
++#endif
+ #include <unistd.h>
+ #ifdef HAVE_ALLOCA_H
+ # include <alloca.h>
+ #endif
+ #include "getopt.h"
++#ifdef __HAIKU__
++# include "haikufakes.h"
++#endif
+ #ifdef _MSC_VER
+ # include <malloc.h>
+ # include "mscfakes.h"
+diff --git a/src/kmk/kmkbuiltin/mv.c b/src/kmk/kmkbuiltin/mv.c
+index 2233c56..8f9e271 100644
+--- a/src/kmk/kmkbuiltin/mv.c
++++ b/src/kmk/kmkbuiltin/mv.c
+@@ -55,7 +55,9 @@ __FBSDID("$FreeBSD: src/bin/mv/mv.c,v 1.46 2005/09/05 04:36:08 csjp Exp $");
+ # include <sys/param.h>
+ # include <sys/time.h>
+ # include <sys/wait.h>
+-# include <sys/mount.h>
++# ifndef __HAIKU__
++#  include <sys/mount.h>
++# endif
+ #endif
+ #include <sys/stat.h>
+ 
+@@ -69,12 +71,17 @@ __FBSDID("$FreeBSD: src/bin/mv/mv.c,v 1.46 2005/09/05 04:36:08 csjp Exp $");
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+-#include <sysexits.h>
++#ifndef __HAIKU__
++# include <sysexits.h>
++#endif
+ #include <unistd.h>
+ #include "getopt.h"
+ #ifdef __sun__
+ # include "solfakes.h"
+ #endif
++#ifdef __HAIKU__
++# include "haikufakes.h"
++#endif
+ #ifdef _MSC_VER
+ # include "mscfakes.h"
+ #endif
+diff --git a/src/kmk/kmkbuiltin/rm.c b/src/kmk/kmkbuiltin/rm.c
+index 1b6522c..c6b2fb8 100644
+--- a/src/kmk/kmkbuiltin/rm.c
++++ b/src/kmk/kmkbuiltin/rm.c
+@@ -43,7 +43,7 @@ static char sccsid[] = "@(#)rm.c	8.5 (Berkeley) 4/18/94";
+ 
+ #include "config.h"
+ #include <sys/stat.h>
+-#ifndef _MSC_VER
++#if !defined(_MSC_VER) && !defined(__HAIKU__)
+ # include <sys/param.h>
+ # include <sys/mount.h>
+ #endif
+@@ -57,10 +57,14 @@ static char sccsid[] = "@(#)rm.c	8.5 (Berkeley) 4/18/94";
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+-#include <sysexits.h>
+-#include <unistd.h>
++#ifndef __HAIKU__
++# include <sysexits.h>
++#endif#include <unistd.h>
+ #include <ctype.h>
+ #include "getopt.h"
++#ifdef __HAIKU__
++# include "haikufakes.h"
++#endif
+ #ifdef _MSC_VER
+ # include "mscfakes.h"
+ #endif
+diff --git a/src/kmk/main.c b/src/kmk/main.c
+index e901e98..3a95bf7 100644
+--- a/src/kmk/main.c
++++ b/src/kmk/main.c
+@@ -55,6 +55,9 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
+ #  define INCL_BASE
+ #  include <os2.h>
+ # endif
++# ifdef __HAIKU__
++#  include <OS.h>
++# endif
+ #endif /* KMK*/
+ 
+ #if defined(HAVE_SYS_RESOURCE_H) && defined(HAVE_GETRLIMIT) && defined(HAVE_SETRLIMIT)
+@@ -850,7 +853,25 @@ set_make_priority_and_affinity (void)
+   if (!SetPriorityClass (GetCurrentProcess (), dwPriority))
+     fprintf (stderr, "warning: SetPriorityClass (,%#x) failed with last error %d\n",
+              dwPriority, GetLastError ());
++#elif __HAIKU__
++  int32 newPriority;
++   status_t error;
+ 
++  switch (process_priority)
++    {
++      case 0:     return;
++      case 1:     newPriority = B_LOWEST_ACTIVE_PRIORITY; break;
++      case 2:     newPriority = B_LOW_PRIORITY; break;
++      case 3:     newPriority = B_NORMAL_PRIORITY; break;
++      case 4:     newPriority = B_URGENT_DISPLAY_PRIORITY; break;
++      case 5:     newPriority = B_REAL_TIME_DISPLAY_PRIORITY; break;
++      default:    fatal(NILF, _("invalid priority %d\n"), process_priority);
++    }
++      error = set_thread_priority (find_thread (NULL), newPriority);
++      if (error != B_OK)
++//	    fprintf (stderr, "warning: set_thread_priority (,%d) failed: %s\n",
++	    fprintf (stderr, "warning: SetPriorityClass (,%#x) failed with last error %d\n",
++             newPriority, strerror (error));
+ # else /*#elif HAVE_NICE */
+   int nice_level = 0;
+   switch (process_priority)
+diff --git a/src/kmk/maintMakefile b/src/kmk/maintMakefile
+index 276457f..79a5f23 100644
+--- a/src/kmk/maintMakefile
++++ b/src/kmk/maintMakefile
+@@ -3,7 +3,7 @@
+ # tree, not a dist copy.
+ 
+ # We like mondo-warnings!
+-AM_CFLAGS += -Wall -Wextra -Wdeclaration-after-statement -Wshadow -Wpointer-arith -Wbad-function-cast
++AM_CFLAGS += -Wall -Wshadow -Wpointer-arith -Wbad-function-cast
+ 
+ # I want this one but I have to wait for the const cleanup!
+ # -Wwrite-strings
+diff --git a/src/kmk/make.h b/src/kmk/make.h
+index 38b511f..2c2b984 100644
+--- a/src/kmk/make.h
++++ b/src/kmk/make.h
+@@ -158,7 +158,7 @@ unsigned int get_path_max (void);
+ #  define MY_INLINE     static
+ # endif
+ 
+-# ifdef __GNUC__
++#if !defined __HAIKU__
+ #  define MY_PREDICT_TRUE(expr)  __builtin_expect(!!(expr), 1)
+ #  define MY_PREDICT_FALSE(expr) __builtin_expect(!!(expr), 0)
+ # else
+diff --git a/src/lib/k/kDefs.h b/src/lib/k/kDefs.h
+index ead7fd0..fef30bf 100644
+--- a/src/lib/k/kDefs.h
++++ b/src/lib/k/kDefs.h
+@@ -57,7 +57,7 @@
+ /** Windows. */
+ #define K_OS_WINDOWS    10
+ /** The max K_OS_* value (exclusive). */
+-#define K_OS_MAX        11
++#define K_OS_MAX        12
+ /** @} */
+ 
+ /** @def K_OS
+@@ -78,6 +78,8 @@
+ #  define K_OS      K_OS_DRAGONFLY
+ # elif defined(__FreeBSD__) /*??*/
+ #  define K_OS      K_OS_FREEBSD
++# elif defined(__HAIKU__) /*??*/
++#  define K_OS      K_OS_HAIKU
+ # elif defined(__gnu_linux__)
+ #  define K_OS      K_OS_LINUX
+ # elif defined(__NetBSD__) /*??*/
+diff --git a/src/misc/kmk_time.c b/src/misc/kmk_time.c
+index 9b2e73b..fb3e58e 100644
+--- a/src/misc/kmk_time.c
++++ b/src/misc/kmk_time.c
+@@ -360,8 +360,10 @@ int main(int argc, char **argv)
+                (unsigned)tv.tv_usec);
+         if (WIFEXITED(rc))
+             printf(" - normal exit: %d\n", WEXITSTATUS(rc));
++#ifndef __HAIKU__
+         else if (WIFSIGNALED(rc) && WCOREDUMP(rc))
+             printf(" - dumped core: %s (%d)\n", my_strsignal(WTERMSIG(rc)), WTERMSIG(rc));
++#endif
+         else if (WIFSIGNALED(rc))
+             printf(" -   killed by: %s (%d)\n", my_strsignal(WTERMSIG(rc)), WTERMSIG(rc));
+         else if (WIFSTOPPED(rc))
+diff --git a/src/sed/Makefile.kmk b/src/sed/Makefile.kmk
+index 30c3585..ed67536 100644
+--- a/src/sed/Makefile.kmk
++++ b/src/sed/Makefile.kmk
+@@ -76,6 +76,9 @@ kmk_sed_SOURCES.win = \
+ 	lib/mkstemp.c \
+ 	lib/getline.c \
+ 	../lib/startuphacks-win.c
++kmk_sed_SOURCES.haiku = \
++	lib/strverscmp.c \
++	lib/obstack.c
+ 
+ include $(FILE_KBUILD_SUB_FOOTER)
+ 
+diff --git a/src/sed/config/help2man b/src/sed/config/help2man
+index af57f41..89638a0 100755
+--- a/src/sed/config/help2man
++++ b/src/sed/config/help2man
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env perl
++#!/bin/env perl
+ 
+ # Generate a short man page from --help and --version output.
+ # Copyright (C) 1997, 1998, 1999, 2000, 2001, 2002 Free Software
+
+Index: a/src/kmk/kmkbuiltin/haikufakes.c
+===================================================================
+--- a/src/kmk/kmkbuiltin/haikufakes.c	(revision 0)
++++ b/src/kmk/kmkbuiltin/haikufakes.c	(revision 0)
+@@ -0,0 +1,52 @@
++/* $Id: haikufakes.c 2413 2010-09-11 17:43:04Z bird $ */
++/** @file
++ * Fake Unix stuff for Haiku.
++ */
++
++/*
++ * Copyright (c) 2005-2010 knut st. osmundsen <bird-kBuild-spamx@anduin.net>
++ *
++ * This file is part of kBuild.
++ *
++ * kBuild is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * kBuild is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with kBuild.  If not, see <http://www.gnu.org/licenses/>
++ *
++ */
++
++/*******************************************************************************
++*   Header Files                                                               *
++*******************************************************************************/
++#include "config.h"
++#include <errno.h>
++#include <stdio.h>
++#include <stdarg.h>
++#include <stdlib.h>
++#include <sys/stat.h>
++#include "haikufakes.h"
++
++
++int haiku_lchmod(const char *pszPath, mode_t mode)
++{
++    /*
++     * Weed out symbolic links.
++     */
++    struct stat s;
++    if (    !lstat(pszPath, &s)
++        &&  S_ISLNK(s.st_mode))
++    {
++        errno = -ENOSYS;
++        return -1;
++    }
++
++    return chmod(pszPath, mode);
++}
+
+Index: a/src/kmk/kmkbuiltin/haikufakes.h
+===================================================================
+--- a/src/kmk/kmkbuiltin/haikufakes.h	(revision 0)
++++ b/src/kmk/kmkbuiltin/haikufakes.h	(revision 0)
+@@ -0,0 +1,39 @@
++/* $Id: mscfakes.h 2413 2010-09-11 17:43:04Z bird $ */
++/** @file
++ * Unix fakes for MSC.
++ */
++
++/*
++ * Copyright (c) 2005-2010 knut st. osmundsen <bird-kBuild-spamx@anduin.net>
++ *
++ * This file is part of kBuild.
++ *
++ * kBuild is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * kBuild is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with kBuild.  If not, see <http://www.gnu.org/licenses/>
++ *
++ */
++
++#ifndef ___haikufakes_h
++#define ___haikufakes_h
++
++#define EX_OK 0
++#define EX_OSERR 1
++#define EX_NOUSER 1
++#define EX_USAGE 1
++#define EX_TEMPFAIL 1
++#define EX_SOFTWARE 1
++
++#define lutimes(path, tvs) utimes(path, tvs)
++#define lchmod chmod
++
++#endif
+
+diff --git a/src/sed/lib/regexec.c b/src/sed/lib/regexec.c
+index 8c5e296..aa4f65c 100644
+--- a/src/sed/lib/regexec.c
++++ b/src/sed/lib/regexec.c
+@@ -17,6 +17,7 @@
+    License along with the GNU C Library; if not, write to the Free
+    Software Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA
+    02111-1307 USA.  */
++#include "stdbool.h"
+ 
+ static reg_errcode_t match_ctx_init (re_match_context_t *cache, int eflags,
+ 				     int n) internal_function;
+
+diff --git a/src/sed/lib/utils.c b/src/sed/lib/utils.c
+index 647fd6d..21eb4d0 100644
+--- a/src/sed/lib/utils.c
++++ b/src/sed/lib/utils.c
+@@ -19,7 +19,7 @@
+ #include "config.h"
+ 
+ #include <stdio.h>
+-
++#include "stdbool.h"
+ #include <errno.h>
+ #ifndef errno
+   extern int errno;
+
+diff --git a/src/sed/sed/sed.h b/src/sed/sed/sed.h
+index 78bd937..646cfc3 100644
+--- a/src/sed/sed/sed.h
++++ b/src/sed/sed/sed.h
+@@ -20,6 +20,7 @@
+ #include "config.h"
+ #endif
+ 
++#include "stdbool.h"
+ #include "basicdefs.h"
+ #include "regex.h"
+
+diff --git a/src/ash/eval.c b/src/ash/eval.c
+index 7e8a51c..1a71c09 100644
+--- a/src/ash/eval.c
++++ b/src/ash/eval.c
+@@ -47,7 +47,9 @@ __RCSID("$NetBSD: eval.c,v 1.84 2005/06/23 23:05:29 christos Exp $");
+ #include <signal.h>
+ #include <stdio.h>
+ #include <unistd.h>
+-#include <sys/fcntl.h>
++#ifndef __HAIKU__
++# include <sys/fcntl.h>
++#endif
+ #include <sys/times.h>
+ #include <sys/param.h>
+ #include <sys/types.h>
+@@ -137,6 +139,7 @@ static int
+ sh_pipe(int fds[2])
+ {
+ 	int nfd;
++	int F_DUPFD;
+ 
+ 	if (pipe(fds))
+ 		return -1;
+diff --git a/src/ash/jobs.c b/src/ash/jobs.c
+index 146326a..9b6165e 100644
+--- a/src/ash/jobs.c
++++ b/src/ash/jobs.c
+@@ -58,7 +58,7 @@ __RCSID("$NetBSD: jobs.c,v 1.63 2005/06/01 15:41:19 lukem Exp $");
+ #endif
+ #include <sys/types.h>
+ #include <sys/param.h>
+-#if defined(BSD) || defined(__sun__)
++#if defined(BSD) || defined(__sun__) || defined(__HAIKU__)
+ #include <sys/wait.h>
+ #include <sys/time.h>
+ #include <sys/resource.h>
+diff --git a/src/ash/show.c b/src/ash/show.c
+index 2769c69..4d2353c 100644
+--- a/src/ash/show.c
++++ b/src/ash/show.c
+@@ -46,7 +46,9 @@ __RCSID("$NetBSD: show.c,v 1.26 2003/11/14 10:46:13 dsl Exp $");
+ #include <stdio.h>
+ #include <stdarg.h>
+ #include <stdlib.h>
+-#include <sys/fcntl.h>
++#ifndef __HAIKU__
++# include <sys/fcntl.h>
++#endif
+ #include <unistd.h>
+ 
+ #include "shell.h"
+diff --git a/src/ash/trap.c b/src/ash/trap.c
+index 6a246e6..378856e 100644
+--- a/src/ash/trap.c
++++ b/src/ash/trap.c
+@@ -88,7 +88,7 @@ int pendingsigs;		/* indicates some signal received */
+ #ifdef __sun__
+ typedef void (*sig_t) (int);
+ #endif
+-static int getsigaction(int, sig_t *);
++static int getsigaction(int, __sighandler_t *);
+ 
+ /*
+  * return the signal number described by `p' (as a number or a name)
+@@ -251,7 +251,7 @@ long
+ setsignal(int signo, int vforked)
+ {
+ 	int action;
+-	sig_t sigact = SIG_DFL;
++	__sighandler_t sigact = SIG_DFL;
+ 	char *t, tsig;
+ 
+ 	if ((t = trap[signo]) == NULL)
+@@ -327,13 +327,13 @@ setsignal(int signo, int vforked)
+  * Return the current setting for sig w/o changing it.
+  */
+ static int
+-getsigaction(int signo, sig_t *sigact)
++getsigaction(int signo, __sighandler_t *sigact)
+ {
+ 	struct sigaction sa;
+ 
+ 	if (sigaction(signo, (struct sigaction *)0, &sa) == -1)
+ 		return 0;
+-	*sigact = (sig_t) sa.sa_handler;
++	*sigact = (__sighandler_t) sa.sa_handler;
+ 	return 1;
+ }
+ 
+diff --git a/Config.kmk b/Config.kmk
+index 6e42081..1856f31 100644
+--- a/Config.kmk
++++ b/Config.kmk
+@@ -293,7 +293,7 @@ ifndef TEMPLATE_BIN_TOOL
+   TEMPLATE_BIN_CXXFLAGS.sparc32+= -m32
+   TEMPLATE_BIN_CXXFLAGS.amd64  += -m64
+   TEMPLATE_BIN_CXXFLAGS.sparc64+= -m64
+-  TEMPLATE_BIN_LDFLAGS.x86     += -m32
++  TEMPLATE_BIN_LDFLAGS.x86     += -m32 -lbsd -lroot
+   TEMPLATE_BIN_LDFLAGS.sparc32 += -m32
+   TEMPLATE_BIN_LDFLAGS.amd64   += -m64
+   TEMPLATE_BIN_LDFLAGS.sparc64 += -m64
+diff --git a/src/ash/error.h b/src/ash/error.h
+index b4637f1..9bb0ebe 100644
+--- a/src/ash/error.h
++++ b/src/ash/error.h
+@@ -111,7 +111,7 @@ void sh_exit(int) __attribute__((__noreturn__));
+  * so we use _setjmp instead.
+  */
+ 
+-#if defined(BSD) && !defined(__SVR4) && !defined(__GLIBC__) && !defined(__KLIBC__) && !defined(_MSC_VER)
++#if defined(BSD) && !defined(__SVR4) && !defined(__GLIBC__) && !defined(__KLIBC__) && !defined(_MSC_VER) && !defined(__HAIKU__)
+ #define setjmp(jmploc)	_setjmp(jmploc)
+ #define longjmp(jmploc, val)	_longjmp(jmploc, val)
+ #endif
+
+diff --git a/src/ash/Makefile.kmk b/src/ash/Makefile.kmk
+index ad1ca85..1a3dabf 100644
+--- a/src/ash/Makefile.kmk
++++ b/src/ash/Makefile.kmk
+@@ -36,6 +36,7 @@ kmk_ash_DEFS.debug = DEBUG=2
+ endif
+ kmk_ash_DEFS.linux = BSD
+ kmk_ash_DEFS.solaris = BSD
++kmk_ash_DEFS.haiku = haiku
+ kmk_ash_DEFS.win = \
+ 	BSD PC_PATH_SEP PC_DRIVE_LETTERS PC_EXE_EXTS PC_SLASHES
+ kmk_ash_DEFS.os2 = \
+@@ -94,7 +95,10 @@ kmk_ash_SOURCES.solaris = \
+ 	sys_signame.c \
+ 	strlcpy.c \
+ 	setmode.c
+-
++kmk_ash_SOURCES.haiku = \
++	sys_signame.c \
++	strlcpy.c \
++	setmode.c
+ kmk_ash_INTERMEDIATES = \
+ 	$(PATH_kmk_ash)/builtins.h \
+ 	$(PATH_kmk_ash)/nodes.h \
