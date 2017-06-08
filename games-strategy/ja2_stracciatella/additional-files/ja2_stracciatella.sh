@@ -18,11 +18,11 @@ else
 if [ "$(alert --warning "Please, copy your original JA2 Files to the Data Folder and rename them to lower-case." "Open Data Folder" "Cancel")" == "Open Data Folder" ]; then
 
 # then let's create the data Dir and open it
-mkdir -p $DATA_PATH
-open $DATA_PATH
-
 mkdir -p $CONFIG_FILE_PATH
 echo "#Tells ja2-stracciatella where the binary datafiles are located" > $CONFIG_FILE
 echo "data_dir = $DATA_PATH" >> $CONFIG_FILE
+
+mkdir -p $DATA_PATH
+open $DATA_PATH
 fi
 fi
