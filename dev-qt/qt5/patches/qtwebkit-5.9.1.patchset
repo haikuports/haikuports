@@ -1,0 +1,180 @@
+From 243c45b09329138bad208ce12ca968c0bc8aa642 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Mon, 26 Oct 2015 10:51:40 +0000
+Subject: Fix qtwebkit build
+
+
+diff --git a/Source/JavaScriptCore/heap/HeapStatistics.cpp b/Source/JavaScriptCore/heap/HeapStatistics.cpp
+index b63c316..281536a 100644
+--- a/Source/JavaScriptCore/heap/HeapStatistics.cpp
++++ b/Source/JavaScriptCore/heap/HeapStatistics.cpp
+@@ -45,7 +45,7 @@ double HeapStatistics::s_endTime = 0.0;
+ Vector<double>* HeapStatistics::s_pauseTimeStarts = 0;
+ Vector<double>* HeapStatistics::s_pauseTimeEnds = 0;
+ 
+-#if OS(UNIX) 
++#if OS(UNIX) && !OS(HAIKU)
+ 
+ void HeapStatistics::initialize()
+ {
+diff --git a/Source/JavaScriptCore/heap/MachineStackMarker.cpp b/Source/JavaScriptCore/heap/MachineStackMarker.cpp
+index 78fdfa4..3ef39a4 100644
+--- a/Source/JavaScriptCore/heap/MachineStackMarker.cpp
++++ b/Source/JavaScriptCore/heap/MachineStackMarker.cpp
+@@ -43,6 +43,10 @@
+ #include <windows.h>
+ #include <malloc.h>
+ 
++#elif OS(HAIKU)
++
++#include <OS.h>
++
+ #elif OS(UNIX)
+ 
+ #include <sys/mman.h>
+@@ -374,6 +378,8 @@ static size_t getPlatformThreadRegisters(const PlatformThread& platformThread, P
+ #if HAVE(PTHREAD_NP_H) || OS(NETBSD)
+     // e.g. on FreeBSD 5.4, neundorf@kde.org
+     pthread_attr_get_np(platformThread, &regs);
++#elif OS(HAIKU)
++	// TODO
+ #else
+     // FIXME: this function is non-portable; other POSIX systems may have different np alternatives
+     pthread_getattr_np(platformThread, &regs);
+@@ -434,6 +440,11 @@ static inline void* otherThreadStackPointer(const PlatformThreadRegisters& regs)
+ #elif OS(QNX)
+     return reinterpret_cast<void*>((uintptr_t) regs.sp);
+ 
++#elif OS(HAIKU)
++    thread_info threadInfo;
++    get_thread_info(find_thread(NULL), &threadInfo);
++    return threadInfo.stack_end;
++
+ #elif USE(PTHREADS)
+     void* stackBase = 0;
+     size_t stackSize = 0;
+diff --git a/Source/ThirdParty/ANGLE/src/compiler/osinclude.h b/Source/ThirdParty/ANGLE/src/compiler/osinclude.h
+index d8bb1a7..4b978b8 100644
+--- a/Source/ThirdParty/ANGLE/src/compiler/osinclude.h
++++ b/Source/ThirdParty/ANGLE/src/compiler/osinclude.h
+@@ -18,7 +18,7 @@
+       defined(__FreeBSD__) || defined(__OpenBSD__) || \
+       defined(__sun) || defined(ANDROID) || \
+       defined(__GLIBC__) || defined(__GNU__) || \
+-      defined(__QNX__)
++      defined(__QNX__) || defined(__HAIKU__)
+ #define ANGLE_OS_POSIX
+ #else
+ #error Unsupported platform.
+diff --git a/Source/WTF/wtf/Platform.h b/Source/WTF/wtf/Platform.h
+index 562840c..7970a50 100644
+--- a/Source/WTF/wtf/Platform.h
++++ b/Source/WTF/wtf/Platform.h
+@@ -436,6 +436,11 @@
+ #define WTF_OS_QNX 1
+ #endif
+ 
++/* OS(HAIKU) - HAIKU */
++#if defined(__HAIKU__)
++#define WTF_OS_HAIKU 1
++#endif
++
+ /* OS(SOLARIS) - Solaris */
+ #if defined(sun) || defined(__sun)
+ #define WTF_OS_SOLARIS 1
+@@ -467,7 +472,8 @@
+     || OS(SOLARIS)          \
+     || defined(unix)        \
+     || defined(__unix)      \
+-    || defined(__unix__)
++    || defined(__unix__)	\
++    || defined(__HAIKU__)
+ #define WTF_OS_UNIX 1
+ #endif
+ 
+diff --git a/Source/WTF/wtf/StackBounds.cpp b/Source/WTF/wtf/StackBounds.cpp
+index 061cae7..df4ef39 100644
+--- a/Source/WTF/wtf/StackBounds.cpp
++++ b/Source/WTF/wtf/StackBounds.cpp
+@@ -31,6 +31,10 @@
+ 
+ #include <windows.h>
+ 
++#elif OS(HAIKU)
++
++#include <OS.h>
++
+ #elif OS(SOLARIS)
+ 
+ #include <thread.h>
+@@ -55,6 +59,14 @@
+ 
+ namespace WTF {
+ 
++#if OS(HAIKU)
++static const ptrdiff_t estimatedStackSize = 128 * sizeof(void*) * 1024;
++static void* estimateStackBound(void* origin)
++{
++    return static_cast<char*>(origin) - estimatedStackSize;
++}
++#endif
++
+ #if OS(DARWIN)
+ 
+ void StackBounds::initialize()
+@@ -124,6 +136,16 @@ void StackBounds::initialize()
+ #endif
+ }
+ 
++#elif OS(HAIKU)
++
++void StackBounds::initialize()
++{
++    thread_info threadInfo;
++    get_thread_info(find_thread(NULL), &threadInfo);
++    m_origin = threadInfo.stack_end;
++    m_bound = estimateStackBound(m_origin);
++}
++
+ #elif OS(UNIX)
+ 
+ void StackBounds::initialize()
+diff --git a/Source/WebKit2/UIProcess/Launcher/qt/ProcessLauncherQt.cpp b/Source/WebKit2/UIProcess/Launcher/qt/ProcessLauncherQt.cpp
+index 7d02034..9d3a018 100644
+--- a/Source/WebKit2/UIProcess/Launcher/qt/ProcessLauncherQt.cpp
++++ b/Source/WebKit2/UIProcess/Launcher/qt/ProcessLauncherQt.cpp
+@@ -216,7 +216,7 @@ void ProcessLauncher::launchProcess()
+         delete webProcessOrSUIDHelper;
+         return;
+     }
+-#if OS(UNIX)
++#if OS(UNIX) && !OS(HAIKU)
+     setpriority(PRIO_PROCESS, webProcessOrSUIDHelper->pid(), 10);
+ #endif
+     RunLoop::main()->dispatch(bind(&WebKit::ProcessLauncher::didFinishLaunchingProcess, this, webProcessOrSUIDHelper, connector));
+-- 
+2.12.2
+
+
+From dd78d57061e497e78fd67b4b2edf12a13ddb1bf5 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 13 Aug 2016 08:53:38 +0000
+Subject: Haiku doesn't need pthread
+
+
+diff --git a/Tools/qmake/mkspecs/features/default_post.prf b/Tools/qmake/mkspecs/features/default_post.prf
+index 77375c6..b79046c 100644
+--- a/Tools/qmake/mkspecs/features/default_post.prf
++++ b/Tools/qmake/mkspecs/features/default_post.prf
+@@ -201,7 +201,7 @@ needToLink() {
+         linkAgainstLibrary($$library, $$eval(WEBKIT.$${library_identifier}.root_source_dir))
+         LIBS += $$eval(WEBKIT.$${library_identifier}.dependent_libs)
+     }
+-    posix:!darwin: LIBS += -lpthread
++    posix:!darwin:!haiku: LIBS += -lpthread
+ }
+ 
+ creating_module {
+-- 
+2.12.2
+
