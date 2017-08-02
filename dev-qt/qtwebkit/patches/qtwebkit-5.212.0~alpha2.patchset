@@ -953,7 +953,7 @@ index 9c827a3..1930027 100644
 From 6916eb2650d78bf98e2a299e46d4d3661a6480b6 Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
 Date: Mon, 17 Jul 2017 19:44:23 +1000
-Subject: UserAgent improvents
+Subject: UserAgent improvements
 
 
 diff --git a/Source/WebCore/platform/qt/UserAgentQt.cpp b/Source/WebCore/platform/qt/UserAgentQt.cpp
@@ -982,6 +982,156 @@ index fa564f9..71920ff 100644
  #elif OS(HURD)
              "GNU Hurd"
  #elif OS(LINUX)
+-- 
+2.13.1
+
+
+From e992f421bf46a1689b72b8ca3af5b1d142f6c3a4 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 21 Jul 2017 21:58:31 +1000
+Subject: Add support for notification icon
+
+
+diff --git a/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.cpp b/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.cpp
+index ccd1afb..5e1c22d 100644
+--- a/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.cpp
++++ b/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.cpp
+@@ -51,6 +51,82 @@ namespace WebCore {
+ 
+ #if ENABLE(NOTIFICATIONS)
+ 
++#if defined(Q_OS_HAIKU)
++
++static void appendBlobResolved(QByteArray& data, const QUrl& url, QString* contentType = 0)
++{
++    RefPtr<BlobData> blobData = static_cast<BlobRegistryImpl&>(blobRegistry()).getBlobDataFromURL(url);
++    if (!blobData)
++        return;
++
++    if (contentType)
++        *contentType = blobData->contentType();
++
++    BlobDataItemList::const_iterator it = blobData->items().begin();
++    const BlobDataItemList::const_iterator itend = blobData->items().end();
++    for (; it != itend; ++it) {
++        const BlobDataItem& blobItem = *it;
++        if (blobItem.type() == BlobDataItem::Type::Data)
++            data.append(reinterpret_cast<const char*>(blobItem.data().data()->data()) + static_cast<int>(blobItem.offset()), static_cast<int>(blobItem.length()));
++        else if (blobItem.type() == BlobDataItem::Type::File) {
++            // File types are not allowed here, so just ignore it.
++            RELEASE_ASSERT_WITH_MESSAGE(false, "File types are not allowed here");
++        } else
++            ASSERT_NOT_REACHED();
++    }
++}
++
++static void resolveBlobUrl(const QUrl& url, QUrl& resolvedUrl)
++{
++    RefPtr<BlobData> blobData = static_cast<BlobRegistryImpl&>(blobRegistry()).getBlobDataFromURL(url);
++    if (!blobData)
++        return;
++
++    QByteArray data;
++    QString contentType;
++    appendBlobResolved(data, url, &contentType);
++
++    QString dataUri(QStringLiteral("data:"));
++    dataUri.append(contentType);
++    dataUri.append(QStringLiteral(";base64,"));
++    dataUri.append(QString::fromLatin1(data.toBase64()));
++    resolvedUrl = QUrl(dataUri);
++}
++
++static QImage httpGetImage(QNetworkAccessManager *netMgr, const QUrl& src)
++{
++	QNetworkRequest request;
++	QUrl url = src;
++    if (url.scheme() == QLatin1String("blob"))
++        resolveBlobUrl(src, url);
++	request.setUrl(url);
++	QNetworkReply* reply = netMgr->get(request);
++
++	QEventLoop eventloop;
++    QObject::connect(reply, SIGNAL(finished()), &eventloop, SLOT(quit()));
++    QTimer::singleShot(3000, &eventloop, SLOT(quit()));
++    eventloop.exec();
++
++	QVariant redirectedUrl = reply->attribute(QNetworkRequest::RedirectionTargetAttribute);
++	QUrl redirectedTo = redirectedUrl.toUrl();
++	if (redirectedTo.isValid()) {
++		if (redirectedTo != reply->request().url())
++			return httpGetImage(netMgr, redirectedTo);
++		else
++			return QImage();
++	} else {
++	    if (reply->error() == QNetworkReply::NoError) {
++			QByteArray data = reply->readAll();
++			QImage image = QImage::fromData(data);
++			reply->deleteLater();
++			return image;
++	    }
++	}
++
++    return QImage();
++}
++#endif
++
+ const double notificationTimeout = 10.0;
+ 
+ bool NotificationPresenterClientQt::dumpNotification = false;
+@@ -218,8 +294,19 @@ void NotificationPresenterClientQt::displayNotification(Notification* notificati
+ #ifndef QT_NO_SYSTEMTRAYICON
+     wrapper->connect(m_systemTrayIcon.data(), SIGNAL(messageClicked()), wrapper, SLOT(notificationClicked()));
+     QMetaObject::invokeMethod(m_systemTrayIcon.data(), "show");
++#if defined(Q_OS_HAIKU)
++	m_netMgr = new QNetworkAccessManager();
++	QImage image = httpGetImage(m_netMgr, notification->iconURL());
++	QIcon icon(QPixmap::fromImage(image).scaled(32, 32));
++	QMetaObject::invokeMethod(m_systemTrayIcon.data(), "showMessage",
++		Q_ARG(QString, notification->title()),
++		Q_ARG(QString, notification->body()),
++		Q_ARG(QIcon, icon));
++    delete m_netMgr;
++#else
+     QMetaObject::invokeMethod(m_systemTrayIcon.data(), "showMessage", Q_ARG(QString, notification->title()), Q_ARG(QString, notification->body()));
+ #endif
++#endif
+ }
+ 
+ void NotificationPresenterClientQt::cancel(Notification* notification)
+diff --git a/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.h b/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.h
+index f53fe51..9f69a31 100644
+--- a/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.h
++++ b/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.h
+@@ -40,6 +40,18 @@
+ #include <QMultiHash>
+ #include <QScopedPointer>
+ 
++#if defined(Q_OS_HAIKU)
++#include <QUrl>
++#include <QNetworkAccessManager>
++#include <QNetworkReply>
++#include <QNetworkRequest>
++#include <QEventLoop>
++#include <QTimer>
++
++#include "BlobData.h"
++#include "BlobRegistryImpl.h"
++#endif
++
+ class QWebFrameAdapter;
+ class QWebPageAdapter;
+ 
+@@ -136,6 +148,9 @@ private:
+     QtPlatformPlugin m_platformPlugin;
+ #ifndef QT_NO_SYSTEMTRAYICON
+     QScopedPointer<QObject> m_systemTrayIcon;
++#if defined(Q_OS_HAIKU)
++	QNetworkAccessManager *m_netMgr;
++#endif
+ #endif
+ };
+ 
 -- 
 2.13.1
 
