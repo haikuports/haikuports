@@ -1,0 +1,188 @@
+SUMMARY="A fast password cracker"
+DESCRIPTION="A fast password cracker, currently available for many flavors of \
+Unix, Windows, DOS, and OpenVMS. Its primary purpose is to detect weak Unix \
+passwords. Besides several crypt(3) password hash types most commonly found on \
+various Unix systems, supported out of the box are Windows LM hashes, plus \
+lots of other hashes and ciphers in the community-enhanced version."
+HOMEPAGE="http://www.openwall.com/john"
+COPYRIGHT="1996-2013 Solar Designer
+	2014 John the Ripper '-jumbo' authors"
+LICENSE="GNU GPL v2
+	John the Ripper"
+REVISION="1"
+jumboVersion="1"
+SOURCE_URI="http://www.openwall.com/john/j/john-$portVersion-jumbo-$jumboVersion.tar.xz"
+CHECKSUM_SHA256="bac93d025995a051f055adbd7ce2f1975676cac6c74a6c7a3ee4cfdd9c160923"
+SOURCE_DIR="john-$portVersion-jumbo-$jumboVersion"
+# Upstream patches, can be dropped in the next version
+PATCHES="johntheripper-$portVersion-upstreamed.patchset
+	johntheripper-$portVersion.patchset"
+
+ARCHITECTURES="!x86_gcc2 x86_64"
+SECONDARY_ARCHITECTURES="x86"
+
+PROVIDES="
+	johntheripper$secondaryArchSuffix = $portVersion
+	cmd:john = $portVersion
+	"
+
+bins=(calc_stat cprepair genmkvpwd luks2john mkvcalcproba raw2dyna
+	tgtsnarf uaf2john wpapcap2john)
+syms=(base64conv dmg2john gpg2john hccap2john keepass2john keychain2john
+	keyring2john keystore2john kwallet2john pfx2john putty2john pwsafe2john
+	racf2john rar2john ssh2john truecrypt_volume2john unafs undrop unique
+	unshadow zip2john)
+
+for b in ${bins[@]} ${syms[@]}
+do
+	PROVIDES+="
+		cmd:$b = $portVersion
+		"
+done
+
+REQUIRES="
+	haiku$secondaryArchSuffix
+	lib:libcrypto$secondaryArchSuffix
+	lib:libgmp$secondaryArchSuffix
+	lib:libgomp$secondaryArchSuffix
+	lib:libz$secondaryArchSuffix
+	"
+
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel
+	devel:libcrypto$secondaryArchSuffix
+	devel:libgmp$secondaryArchSuffix
+	devel:libz$secondaryArchSuffix
+	"
+BUILD_PREREQUIRES="
+	cmd:awk
+	cmd:find
+	cmd:gcc$secondaryArchSuffix
+	cmd:grep
+	cmd:make
+	cmd:sed
+	"
+
+GLOBAL_WRITABLE_FILES="
+	settings/john/john.conf auto-merge
+	"
+USER_SETTINGS_FILES="
+	settings/john directory
+	settings/john/john.local.conf template $docDir/john.local.conf.example
+	"
+
+# Instruction sets for fallback chain
+instr=(ssse3 sse4.1 avx xop)
+# SSE2 is enabled by default for x86_64, but not for x86.
+# To check for enabled instruction set, run:
+# gcc -dM -E -x c /dev/null | grep -E "(MMX|SSE|AVX|XOP)"
+if [ "$effectiveTargetArchitecture" != "x86_64" ]; then
+	instr=(sse2 ${instr[@]})
+fi
+
+BUILD()
+{
+	local constantSettingsDir="$(finddir B_SYSTEM_SETTINGS_DIRECTORY)"
+	cat > haiku.config << EOF
+		#define CFG_FULL_NAME "$constantSettingsDir/john/john.conf"
+		#define CFG_ALT_NAME "$constantSettingsDir/john/john.ini"
+		#define CFG_PRIVATE_FULL_NAME "~config/john/john.conf"
+		#define CFG_PRIVATE_ALT_NAME "~config/john/john.ini"
+		#define CPU_FALLBACK 1
+		#define JOHN_SYSTEMWIDE 1
+		#define JOHN_SYSTEMWIDE_EXEC "$libExecDir/john"
+		#define JOHN_SYSTEMWIDE_HOME "$dataDir/john"
+		#define JOHN_PRIVATE_HOME "~data/john"
+EOF
+	local cfgFlags="--disable-native-tests --enable-openmp"
+
+	# TODO: somehow quote PWD without autotools acting up
+	export CFLAGS="-O2 -pipe -iquote $PWD -include haiku.config"
+	export LIBS="-Wl,--as-needed -lnetwork" # Need libnetwork for tgtsnarf
+
+	cd src
+	runConfigure ./configure $cfgFlags
+	make clean
+	make $jobArgs
+
+	for i in ${instr[@]}
+	do
+		mv ../run/john{,-non-$i}
+		CFLAGS="$CFLAGS -m$i" \
+			runConfigure ./configure $cfgFlags
+		make clean
+		make $jobArgs
+	done
+}
+
+INSTALL()
+{
+	install -d -m 755 "$dataDir/bash-completion/completions" \
+		"$dataDir/zsh/site-functions" \
+		"$dataDir/john" "$docDir" "$libExecDir/john" "$settingsDir/john" \
+		"$prefix/bin"
+
+	# configs
+	local constantSettingsDir="$(finddir B_SYSTEM_SETTINGS_DIRECTORY)"
+	sed run/john.conf > "$settingsDir/john/john.conf" \
+		-e "s|\$JOHN/john.local.conf|$constantSettingsDir/john/john.local.conf|g"
+
+	install -m 644 run/john.local.conf "$docDir/john.local.conf.example"
+	install -t "$dataDir/john" -m 644 run/*.conf
+	rm "$dataDir/john/"john{,.local}.conf
+
+	# docs
+	install -t "$docDir" -m 644 doc/*
+
+	# remove stuff that only devs need
+	rm "$docDir/"{AddressSanitizer-HOWTO.txt,INSTALL*}
+
+	# licenses
+	rm "$docDir/COPYING" # no need for another GPL v2 copy
+	rm "$docDir/"LICENSE{,.mpi} # john's mpi is licensed under the same terms
+	rm "$docDir/SIPcrack-LICENSE" # we don't have this installed
+
+	# completions
+	install -m 644 run/john.bash_completion \
+		"$dataDir/bash-completion/completions/john"
+	install -m 644 run/john.zsh_completion "$dataDir/zsh/site-functions/_john"
+
+	# bins
+	install -t "$prefix/bin" -m 755 run/john
+	install -t "$libExecDir/john" -m 755 run/john-non-*
+	for b in ${bins[@]}
+	do
+		install -t "$prefix/bin" -m 755 run/$b
+	done
+
+	# scripts
+	install -t "$libExecDir/john" -m 755 run/*.{pl,py,rb} run/benchmark-unify \
+		run/mailer run/makechr run/relbench
+
+	# data
+	install -t "$dataDir/john" -m 644 run/*.chr run/*.lst run/dictionary* \
+		run/stats
+
+	for s in ${syms[@]}
+	do
+		ln -s john "$prefix/bin/$s"
+	done
+}
+
+TEST()
+{
+	cd run
+
+	if ./john 2>&1 | grep -q execv; then
+		# Fallback chain
+		for (( i=${#instr[@]} - 1; i >= 0; i-- ))
+		do
+			if ! ./john-non-${instr[i]} 2>&1 | grep -q execv; then
+				./john-non-${instr[i]} --make_check
+				break
+			fi
+		done
+	else
+		./john --make_check
+	fi
+}
