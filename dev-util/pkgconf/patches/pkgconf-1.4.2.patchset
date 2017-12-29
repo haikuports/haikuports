@@ -1,0 +1,164 @@
+From bd82c5be63b1d14acfaa9b35e78531fe2f5ce5bf Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Tue, 3 Apr 2018 12:46:35 +0700
+Subject: libpkgconf: add support for Haiku
+
+client: use BELIBRARIES
+
+On Haiku, BELIBRARIES is the equivalent to LIBRARY_PATH on many other
+systems, while LIBRARY_PATH is instead the LD_LIBRARY_PATH of Haiku.
+
+pkg: bootstrap package search paths with Haiku's find_paths
+
+This commit adds build_default_pkgconfig_path. The function appends
+to the list given the default pkgconfig paths, and will supersede
+get_default_pkgconfig_path
+
+diff --git a/libpkgconf/client.c b/libpkgconf/client.c
+index 811e043..a832e83 100644
+--- a/libpkgconf/client.c
++++ b/libpkgconf/client.c
+@@ -78,7 +78,11 @@ pkgconf_client_init(pkgconf_client_t *client, pkgconf_error_handler_func_t error
+ 	pkgconf_path_build_from_environ("PKG_CONFIG_SYSTEM_INCLUDE_PATH", SYSTEM_INCLUDEDIR, &client->filter_includedirs, false);
+ 
+ 	/* GCC uses these environment variables to define system include paths, so we should check them. */
++#ifdef __HAIKU__
++	pkgconf_path_build_from_environ("BELIBRARIES", NULL, &client->filter_libdirs, false);
++#else
+ 	pkgconf_path_build_from_environ("LIBRARY_PATH", NULL, &client->filter_libdirs, false);
++#endif
+ 	pkgconf_path_build_from_environ("CPATH", NULL, &client->filter_includedirs, false);
+ 	pkgconf_path_build_from_environ("C_INCLUDE_PATH", NULL, &client->filter_includedirs, false);
+ 	pkgconf_path_build_from_environ("CPLUS_INCLUDE_PATH", NULL, &client->filter_includedirs, false);
+diff --git a/libpkgconf/pkg.c b/libpkgconf/pkg.c
+index 0feb4d6..67b52d7 100644
+--- a/libpkgconf/pkg.c
++++ b/libpkgconf/pkg.c
+@@ -49,11 +49,12 @@ str_has_suffix(const char *str, const char *suffix)
+ 	return !strncasecmp(str + str_len - suf_len, suffix, suf_len);
+ }
+ 
+-static inline const char *
+-get_default_pkgconfig_path(char *outbuf, size_t outlen)
++static inline void
++build_default_pkgconfig_path(pkgconf_list_t* dirlist)
+ {
+ #ifdef _WIN32
+ 	char namebuf[MAX_PATH];
++	char outbuf[MAX_PATH];
+ 	char *p;
+ 
+ 	int sizepath = GetModuleFileName(NULL, namebuf, sizeof namebuf);
+@@ -65,24 +66,35 @@ get_default_pkgconfig_path(char *outbuf, size_t outlen)
+ 	}
+ 	p = strrchr(namebuf, '/');
+ 	if (p == NULL)
+-		return PKG_DEFAULT_PATH;
++		pkgconf_path_split(PKG_DEFAULT_PATH, dirlist, true);
+ 
+ 	*p = '\0';
+-	pkgconf_strlcpy(outbuf, namebuf, outlen);
+-	pkgconf_strlcat(outbuf, "/", outlen);
+-	pkgconf_strlcat(outbuf, "../lib/pkgconfig", outlen);
+-	pkgconf_strlcat(outbuf, ";", outlen);
+-	pkgconf_strlcat(outbuf, namebuf, outlen);
+-	pkgconf_strlcat(outbuf, "/", outlen);
+-	pkgconf_strlcat(outbuf, "../share/pkgconfig", outlen);
+-
+-	return outbuf;
++	pkgconf_strlcpy(outbuf, namebuf, sizeof outbuf);
++	pkgconf_strlcat(outbuf, "/", sizeof outbuf);
++	pkgconf_strlcat(outbuf, "../lib/pkgconfig", sizeof outbuf);
++	pkgconf_path_add(outbuf, dirlist, true);
++	pkgconf_strlcpy(outbuf, namebuf, sizeof outbuf);
++	pkgconf_strlcat(outbuf, "/", sizeof outbuf);
++	pkgconf_strlcat(outbuf, "../share/pkgconfig", sizeof outbuf);
++	pkgconf_path_add(outbuf, dirlist, true);
++#elif __HAIKU__
++	char **paths;
++	size_t count;
++	if (find_paths(B_FIND_PATH_DEVELOP_LIB_DIRECTORY, "pkgconfig", &paths, &count) == B_OK) {
++		for (size_t i = 0; i < count; i++)
++			pkgconf_path_add(paths[i], dirlist, true);
++		free(paths);
++		paths = NULL;
++	}
++	if (find_paths(B_FIND_PATH_DATA_DIRECTORY, "pkgconfig", &paths, &count) == B_OK) {
++		for (size_t i = 0; i < count; i++)
++			pkgconf_path_add(paths[i], dirlist, true);
++		free(paths);
++		paths = NULL;
++	}
+ #else
+-	(void) outbuf;
+-	(void) outlen;
++	pkgconf_path_split(PKG_DEFAULT_PATH, dirlist, true);
+ #endif
+-
+-	return PKG_DEFAULT_PATH;
+ }
+ 
+ static const char *
+@@ -117,12 +129,8 @@ pkgconf_pkg_dir_list_build(pkgconf_client_t *client)
+ {
+ 	pkgconf_path_build_from_environ("PKG_CONFIG_PATH", NULL, &client->dir_list, true);
+ 
+-	if (!(client->flags & PKGCONF_PKG_PKGF_ENV_ONLY))
+-	{
+-		char pathbuf[PKGCONF_BUFSIZE];
+-
+-		pkgconf_path_build_from_environ("PKG_CONFIG_LIBDIR", get_default_pkgconfig_path(pathbuf, sizeof pathbuf), &client->dir_list, true);
+-	}
++	if (!(client->flags & PKGCONF_PKG_PKGF_ENV_ONLY) && (pkgconf_path_build_from_environ("PKG_CONFIG_LIBDIR", NULL, &client->dir_list, true)) < 1)
++		build_default_pkgconfig_path(&client->dir_list);
+ }
+ 
+ typedef void (*pkgconf_pkg_parser_keyword_func_t)(const pkgconf_client_t *client, pkgconf_pkg_t *pkg, const char *keyword, const size_t lineno, const ptrdiff_t offset, char *value);
+diff --git a/libpkgconf/stdinc.h b/libpkgconf/stdinc.h
+index 3b90853..ca3a7dc 100644
+--- a/libpkgconf/stdinc.h
++++ b/libpkgconf/stdinc.h
+@@ -53,6 +53,9 @@
+ #else
+ # define PATH_DEV_NULL	"/dev/null"
+ # define SIZE_FMT_SPECIFIER	"%zu"
++# ifdef __HAIKU__
++#  include <FindDirectory.h>
++# endif
+ # include <dirent.h>
+ # include <unistd.h>
+ # include <limits.h>
+diff --git a/tests/regress.sh b/tests/regress.sh
+index 7da53e6..0e505d3 100755
+--- a/tests/regress.sh
++++ b/tests/regress.sh
+@@ -79,7 +79,8 @@ variable_body()
+ 
+ keep_system_libs_body()
+ {
+-	export PKG_CONFIG_PATH="${selfdir}/lib1" LIBRARY_PATH="/test/local/lib"
++	export PKG_CONFIG_PATH="${selfdir}/lib1"
++	eval export "$LIBRARY_PATH_ENV"="/test/local/lib"
+ 	atf_check \
+ 		-o inline:"\n" \
+ 		pkgconf --libs-only-L cflags-libs-only
+diff --git a/tests/test_env.sh.in b/tests/test_env.sh.in
+index 229dd00..17ee1f5 100644
+--- a/tests/test_env.sh.in
++++ b/tests/test_env.sh.in
+@@ -22,10 +22,12 @@ done
+ #--- end kludge ---
+ 
+ selfdir="@abs_top_srcdir@/tests"
++LIBRARY_PATH_ENV="LIBRARY_PATH"
+ PATH_SEP=":"
+ SYSROOT_DIR="${selfdir}/test"
+ case "$(uname -s)" in
+ Msys|CYGWIN*) PATH_SEP=";";;
++Haiku) LIBRARY_PATH_ENV="BELIBRARIES";;
+ esac
+ 
+ prefix="@prefix@"
+-- 
+2.16.2
+
