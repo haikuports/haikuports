@@ -1,0 +1,170 @@
+From 1b3b1c744dfbeb0409cf3a8b44e0b949b1e32af3 Mon Sep 17 00:00:00 2001
+From: sfanxiang <sfanxiang@gmail.com>
+Date: Mon, 1 Jan 2018 01:30:18 +0800
+Subject: add support for Haiku
+
+
+diff --git a/src/disku.c b/src/disku.c
+index d50cebf..1761210 100644
+--- a/src/disku.c
++++ b/src/disku.c
+@@ -33,6 +33,11 @@
+ #include <sys/disk.h>
+ #endif
+ 
++#if defined(__HAIKU__)
++#include <drivers/Drivers.h>
++#include <fcntl.h>
++#endif
++
+ #include <unistd.h>
+ 
+ static void geometry_from_num_sectors(struct disk_geom *g, uint64_t nsects)
+@@ -95,8 +100,29 @@ static void os_disk_geometry(disk_desc *d, struct disk_geom *g)
+ 	g.d_nsecs = o / u;
+ 	g.d_c = g.d_nsecs / g.d_h / g.d_s;
+ }
++#elif defined(__HAIKU__)
++static void os_disk_geometry(disk_desc *d, struct disk_geom *g)
++{
++	device_geometry geom;
++	int fd;
++
++	if ((fd = open(d->d_dev, O_RDONLY)) < 0)
++		pr(FATAL, EM_OPENFAIL, d->d_dev, strerror(errno));
++
++	if (ioctl(fd, B_GET_GEOMETRY, &geom, sizeof(geom)) < 0) {
++		close(fd);
++		pr(FATAL, EM_IOCTLFAILED, "B_GET_GEOMETRY", strerror(errno));
++	}
++
++	close(fd);
++
++	g->d_c = geom.cylinder_count;
++	g->d_h = geom.head_count;
++	g->d_s = geom.sectors_per_track;
++	g->d_nsecs = ((uint64_t)g->d_c) * g->d_h * g->d_s;
++}
+ #else
+-#error Only Linux and FreeBSD supported
++#error Only Linux, FreeBSD and Haiku are supported
+ #endif
+ 
+ /*
+diff --git a/src/gpart.c b/src/gpart.c
+index 3b44a75..71aef4a 100644
+--- a/src/gpart.c
++++ b/src/gpart.c
+@@ -175,6 +175,10 @@ ssize_t bread(int fd, byte_t *buf, size_t ssize, size_t nsecs)
+ 			// ret < 0, an error case
+ 			if (errno == EINTR)
+ 				continue; // Rogue signal interruption, retry
++#ifdef __HAIKU__
++			if (errno == EINVAL)
++				return read_bytes;	// on Haiku, EOF causes EINVAL
++#endif
+ 			berrno = errno;
+ 			break;
+ 		}
+@@ -504,20 +508,28 @@ static void u_to_chs(disk_desc *d, unsigned long u, long *c, long *h, long *s)
+ 
+ static int on_cyl_boundary(disk_desc *d, s64_t sec)
+ {
++#ifndef __HAIKU__
+ 	struct disk_geom *g = &d->d_dg;
+ 
+ 	if (g->d_h && g->d_s)
+ 		return ((sec % (g->d_h * g->d_s)) == 0);
+ 	return (1);
++#else
++	return (1);
++#endif
+ }
+ 
+ static int on_head_boundary(disk_desc *d, s64_t sec)
+ {
++#ifndef __HAIKU__
+ 	struct disk_geom *g = &d->d_dg;
+ 
+ 	if (g->d_s)
+ 		return ((sec % g->d_s) == 0);
+ 	return (1);
++#else
++	return (1);
++#endif
+ }
+ 
+ static void print_partition(disk_desc *d, dos_part_entry *p, int inset, s64_t offset)
+@@ -936,8 +948,13 @@ static void do_guess_loop(disk_desc *d)
+ 	d->d_nsb = 0;
+ 	bincr = incr * d->d_ssize;
+ 
++#ifdef __HAIKU__
++	start = skipsec ? skipsec : incr;
++#else
+ 	start = skipsec ? skipsec : d->d_dg.d_s;
++#endif
+ 	d->d_nsb = start - incr;
++
+ 	start *= d->d_ssize;
+ 	if (l64seek(d->d_fd, start, SEEK_SET) == -1)
+ 		pr(FATAL, EM_SEEKFAILURE, d->d_dev);
+diff --git a/src/gpart.h b/src/gpart.h
+index d973d65..3b59e35 100644
+--- a/src/gpart.h
++++ b/src/gpart.h
+@@ -26,7 +26,35 @@
+ 
+ typedef uint8_t byte_t;
+ 
+-
++#ifdef __HAIKU__
++#	if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
++#		define htole16(x) (x)
++#		define htobe16(x) __builtin_bswap16(x)
++#		define htole32(x) (x)
++#		define htobe32(x) __builtin_bswap32(x)
++#		define htole64(x) (x)
++#		define htobe64(x) __builtin_bswap64(x)
++#		define le16toh(x) (x)
++#		define be16toh(x) __builtin_bswap16(x)
++#		define le32toh(x) (x)
++#		define be32toh(x) __builtin_bswap32(x)
++#		define le64toh(x) (x)
++#		define be64toh(x) __builtin_bswap64(x)
++#	else
++#		define htole16(x) __builtin_bswap16(x)
++#		define htobe16(x) (x)
++#		define htole32(x) __builtin_bswap32(x)
++#		define htobe32(x) (x)
++#		define htole64(x) __builtin_bswap64(x)
++#		define htobe64(x) (x)
++#		define le16toh(x) __builtin_bswap16(x)
++#		define be16toh(x) (x)
++#		define le32toh(x) __builtin_bswap32(x)
++#		define be32toh(x) (x)
++#		define le64toh(x) __builtin_bswap64(x)
++#		define be64toh(x) (x)
++#	endif
++#endif
+ 
+ #define le16(x) htole16(x)
+ #define be16(x) htobe16(x)
+diff --git a/src/l64seek.h b/src/l64seek.h
+index 669b655..1c88cf5 100644
+--- a/src/l64seek.h
++++ b/src/l64seek.h
+@@ -27,6 +27,10 @@
+  * offsets.
+  */
+ 
++#ifdef __HAIKU__
++typedef off_t loff_t;
++#endif
++
+ typedef loff_t off64_t;
+ typedef off64_t s64_t;
+ 
+-- 
+2.15.0
+
