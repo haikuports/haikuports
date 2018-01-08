@@ -1,0 +1,242 @@
+From c52e695a8a941e4e118df6c11fa8bc888fb1d28d Mon Sep 17 00:00:00 2001
+From: sfanxiang <sfanxiang@gmail.com>
+Date: Mon, 8 Jan 2018 10:10:48 +0000
+Subject: port to Haiku
+
+
+diff --git a/configure.in b/configure.in
+index d8c6668..fd6b42d 100644
+--- a/configure.in
++++ b/configure.in
+@@ -9,6 +9,7 @@ test ".$CFLAGS" = "." && CFLAGS=" "
+ 
+ # programs needed to build/install
+ AC_PROG_CC
++AC_PROG_CXX
+ AC_PROG_INSTALL
+ AC_PROG_RANLIB
+ 
+@@ -66,6 +67,8 @@ if test "x$enable_log_color" = "xyes"; then
+    CFLAGS="$CFLAGS -DENABLE_LOG_COLOR"
+ fi
+ 
++CXXFLAGS=$CFLAGS
++
+ # the generated files
+ AC_CONFIG_FILES([
+ Makefile
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 750ae3a..36e65e9 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -1,3 +1,5 @@
++AM_LDFLAGS = -lbnetapi -lnetwork
++
+ SUBDIRS = services
+ 
+ bin_PROGRAMS = yaddns
+@@ -5,6 +7,7 @@ bin_PROGRAMS = yaddns
+ yaddns_SOURCES = yaddns.c yaddns.h \
+ 	config.c config.h \
+ 	account.c account.h \
++	ifaddr.cc ifaddr.h \
+ 	request.c request.h \
+ 	log.c log.h \
+ 	util.c util.h \
+diff --git a/src/config.c b/src/config.c
+index 8f7b324..66c2a52 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -7,13 +7,15 @@
+ #include <getopt.h>
+ #include <limits.h>
+ 
++#include <FindDirectory.h>
++#include <fs_info.h>
++
+ #include "config.h"
+ #include "log.h"
+ #include "service.h"
+ #include "services.h"
+ #include "util.h"
+ 
+-#define CFG_DEFAULT_FILENAME "/etc/yaddns.conf"
+ #define CFG_DEFAULT_WANIFNAME "ppp0"
+ 
+ /*
+@@ -228,7 +230,17 @@ int config_parse(struct cfg *cfg, int argc, char **argv)
+ 
+         if(!cfgstr_is_set(&(cfg->cfgfile)))
+         {
+-                cfgstr_set(&(cfg->cfgfile), CFG_DEFAULT_FILENAME);
++                char filename[] = "/yaddns/yaddns.conf";
++
++                dev_t vol = dev_for_path("/boot");
++                static char buf[B_PATH_NAME_LENGTH + B_FILE_NAME_LENGTH
++                    + sizeof(filename)];
++
++                find_directory(B_SYSTEM_SETTINGS_DIRECTORY,
++                    vol, 0, buf, sizeof(buf));
++
++                strcpy(&buf[strlen(buf)], filename);
++                cfgstr_set(&(cfg->cfgfile), buf);
+         }
+ 
+         if(config_parse_file(cfg) != 0)
+diff --git a/src/ifaddr.cc b/src/ifaddr.cc
+new file mode 100644
+index 0000000..650d9a9
+--- /dev/null
++++ b/src/ifaddr.cc
+@@ -0,0 +1,28 @@
++#include "ifaddr.h"
++
++#include <NetworkInterface.h>
++#include <NetworkRoster.h>
++
++extern "C" {
++
++int getifaddr(const char *ifname, struct in_addr *addr)
++{
++	if(!ifname || ifname[0]=='\0')
++        {
++		return -1;
++        }
++
++	BNetworkInterface interface(ifname);
++	if (!interface.Exists()) return -1;
++
++	BNetworkInterfaceAddress address;
++	if (interface.GetAddressAt(0, address) != B_OK) return -1;
++
++	struct sockaddr sa = address.Address().SockAddr();
++	if (sa.sa_family != AF_INET) return -1;
++
++	*addr = ((struct sockaddr_in *)&sa)->sin_addr;
++	return 0;
++}
++
++}
+diff --git a/src/ifaddr.h b/src/ifaddr.h
+new file mode 100644
+index 0000000..3412483
+--- /dev/null
++++ b/src/ifaddr.h
+@@ -0,0 +1,16 @@
++#ifndef _IFADDR_H
++#define _IFADDR_H
++
++#include <sys/socket.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++int getifaddr(const char *ifname, struct in_addr *addr);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/src/util.c b/src/util.c
+index 624ab3e..80fdb4b 100644
+--- a/src/util.c
++++ b/src/util.c
+@@ -8,6 +8,7 @@
+ #include <time.h>
+ #include <errno.h>
+ 
++#include "ifaddr.h"
+ #include "util.h"
+ #include "log.h"
+ 
+@@ -90,42 +91,12 @@ time_t util_getuptime(void)
+ 
+ int util_getifaddr(const char *ifname, struct in_addr *addr)
+ {
+-        /* SIOCGIFADDR struct ifreq *  */
+-	int s;
+-	struct ifreq ifr;
+-	int ifrlen;
+-
+-	if(!ifname || ifname[0]=='\0')
+-        {
+-		return -1;
+-        }
+-
+-	s = socket(PF_INET, SOCK_DGRAM, 0);
+-	if(s < 0)
+-	{
+-		log_error("socket(PF_INET, SOCK_DGRAM): %s",
+-                          strerror(errno));
+-		return -1;
+-	}
+-
+-        memset(&ifr, 0, sizeof(ifr));
+-        ifr.ifr_addr.sa_family = AF_INET; /* IPv4 IP address */
+-	strncpy(ifr.ifr_name, ifname, IFNAMSIZ-1);
+-	ifrlen = sizeof(ifr);
+-
+-	if(ioctl(s, SIOCGIFADDR, &ifr, &ifrlen) < 0)
+-	{
+-		log_error("ioctl(s, SIOCGIFADDR, ...): %s",
+-                          strerror(errno));
+-		close(s);
++	if (getifaddr(ifname, addr) == 0) {
++		return 0;
++	} else {
++		log_error("getifaddr(ifname, addr) failed");
+ 		return -1;
+ 	}
+-
+-	*addr = ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr;
+-
+-	close(s);
+-
+-	return 0;
+ }
+ 
+ char *strdup_trim(const char *s)
+diff --git a/src/yaddns.c b/src/yaddns.c
+index 722d324..58a29d3 100644
+--- a/src/yaddns.c
++++ b/src/yaddns.c
+@@ -229,8 +229,6 @@ int main(int argc, char **argv)
+                 goto exit_clean;
+         }
+ 
+-        sig_blockall();
+-
+         sigemptyset(&unblocked);
+ 
+ 	/* config */
+@@ -250,12 +248,24 @@ int main(int argc, char **argv)
+         /* daemonize ? */
+         if(cfg.daemonize)
+         {
+-                if(daemon(0, 0) < 0)
++                pid_t res = fork();
++                if(res == -1)
+                 {
+                         log_error("Failed to daemonize !");
+                         ret = 1;
+                         goto exit_clean;
+                 }
++                else if(res != 0)
++                {
++                        _exit(0);
++                }
++                else
++                {
++                        chdir("/");
++                        freopen("/dev/null", "w", stdout);
++                        freopen("/dev/null", "w", stderr);
++                        freopen("/dev/null", "r", stdin);
++                }
+         }
+ 
+         /* create pid file ? */
+-- 
+2.15.0
+
