@@ -1,0 +1,88 @@
+From b386d1db8fbaac139f6207d956bf863b9a08da73 Mon Sep 17 00:00:00 2001
+From: Calvin Hill <calvin@hakobaito.co.uk>
+Date: Tue, 15 Aug 2017 20:24:28 +0100
+Subject: llvm: Add Haiku triple and more compilation fixes
+
+
+diff --git a/cmake/modules/HandleLLVMOptions.cmake b/cmake/modules/HandleLLVMOptions.cmake
+index 7126c4b..ff4abee 100644
+--- a/cmake/modules/HandleLLVMOptions.cmake
++++ b/cmake/modules/HandleLLVMOptions.cmake
+@@ -681,7 +681,7 @@ add_definitions( -D__STDC_LIMIT_MACROS )
+ if (UNIX AND
+     CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND
+     CMAKE_GENERATOR STREQUAL "Ninja")
+-  append("-fcolor-diagnostics" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
++  append("-fdiagnostics-color=auto" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+ endif()
+ 
+ # lld doesn't print colored diagnostics when invoked from Ninja
+diff --git a/lib/Support/Unix/Path.inc b/lib/Support/Unix/Path.inc
+index 45097eb..cf154e8 100644
+--- a/lib/Support/Unix/Path.inc
++++ b/lib/Support/Unix/Path.inc
+@@ -97,7 +97,7 @@
+ #define STATVFS_F_FRSIZE(vfs) static_cast<uint64_t>(vfs.f_bsize)
+ #endif
+ 
+-#if defined(__NetBSD__)
++#if defined(__NetBSD__) || defined(__HAIKU__) 
+ #define STATVFS_F_FLAG(vfs) (vfs).f_flag
+ #else
+ #define STATVFS_F_FLAG(vfs) (vfs).f_flags
+@@ -386,6 +386,9 @@ static bool is_local_impl(struct STATVFS &Vfs) {
+   StringRef fstype(Vfs.f_basetype);
+   // NFS is the only non-local fstype??
+   return !fstype.equals("nfs");
++#elif defined(__HAIKU__)
++  // Haiku doesn't support MNT_LOCAL so return false for now.
++  return false;
+ #else
+   return !!(STATVFS_F_FLAG(Vfs) & MNT_LOCAL);
+ #endif
+diff --git a/tools/llvm-config/llvm-config.cpp b/tools/llvm-config/llvm-config.cpp
+index 08b096a..739213c 100644
+--- a/tools/llvm-config/llvm-config.cpp
++++ b/tools/llvm-config/llvm-config.cpp
+@@ -332,11 +332,16 @@ int main(int argc, char **argv) {
+         ("-I" + ActiveIncludeDir + " " + "-I" + ActiveObjRoot + "/include");
+   } else {
+     ActivePrefix = CurrentExecPrefix;
++#ifdef __HAIKU__
++    ActiveIncludeDir = ActivePrefix + "/develop/headers";
++    ActiveLibDir = ActivePrefix + "/develop/lib" + LLVM_LIBDIR_SUFFIX;
++#else
+     ActiveIncludeDir = ActivePrefix + "/include";
++    ActiveLibDir = ActivePrefix + "/lib" + LLVM_LIBDIR_SUFFIX;
++#endif
+     SmallString<256> path(StringRef(LLVM_TOOLS_INSTALL_DIR));
+     sys::fs::make_absolute(ActivePrefix, path);
+     ActiveBinDir = path.str();
+-    ActiveLibDir = ActivePrefix + "/lib" + LLVM_LIBDIR_SUFFIX;
+     ActiveCMakeDir = ActiveLibDir + "/cmake/llvm";
+     ActiveIncludeOption = "-I" + ActiveIncludeDir;
+   }
+@@ -556,10 +561,16 @@ int main(int argc, char **argv) {
+         OS << (LLVM_HAS_GLOBAL_ISEL ? "ON" : "OFF") << '\n';
+       } else if (Arg == "--shared-mode") {
+         PrintSharedMode = true;
+-      } else if (Arg == "--obj-root") {
+-        OS << ActivePrefix << '\n';
+-      } else if (Arg == "--src-root") {
+-        OS << LLVM_SRC_ROOT << '\n';
++      } else if (Arg == "--obj-root" || Arg == "--src-root") {
++        if (IsInDevelopmentTree) {
++          if (Arg == "--obj-root")
++            OS << ActivePrefix << '\n';
++          else
++            OS << LLVM_SRC_ROOT << '\n';
++        } else {
++          llvm::errs() << "llvm-config: sources not installed\n";
++          exit(1);
++        }
+       } else if (Arg == "--ignore-libllvm") {
+         LinkDyLib = false;
+         LinkMode = BuiltSharedLibs ? LinkModeShared : LinkModeAuto;
+-- 
+2.14.2
+
