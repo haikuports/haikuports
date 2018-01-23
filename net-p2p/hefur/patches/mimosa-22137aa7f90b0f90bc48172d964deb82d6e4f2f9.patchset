@@ -1,0 +1,208 @@
+From 09c13139f8ccbf8953394b8ed33f1b312fcedb90 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Mon, 15 Jan 2018 22:08:24 +0700
+Subject: CMakeLists: Use CheckSymbolExists
+
+Replace CheckFunctionExists with CheckSymbolExists. This allows the use
+of macro definitions
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index de8a13e..094454b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -26,34 +26,34 @@ include(cmake/Flex.cmake)
+ include(cmake/Bison.cmake)
+ include(cmake/ProtocMimosa.cmake)
+ 
+-include(CheckFunctionExists)
++include(CheckSymbolExists)
+ 
+-check_function_exists(writev HAS_WRITEV)
++check_symbol_exists(writev sys/uio.h HAS_WRITEV)
+ if(HAS_WRITEV)
+   add_definitions(-DHAS_WRITEV)
+ endif()
+ 
+-check_function_exists(strchrnul HAS_STRCHRNUL)
++check_symbol_exists(strchrnul string.h HAS_STRCHRNUL)
+ if(HAS_STRCHRNUL)
+   add_definitions(-DHAS_STRCHRNUL)
+ endif()
+ 
+-check_function_exists(timegm HAS_TIMEGM)
++check_symbol_exists(timegm time.h HAS_TIMEGM)
+ if(HAS_TIMEGM)
+   add_definitions(-DHAS_TIMEGM)
+ endif()
+ 
+-check_function_exists(sched_setaffinity HAS_SCHED_SETAFFINITY)
++check_symbol_exists(sched_setaffinity sched.h HAS_SCHED_SETAFFINITY)
+ if(HAS_SCHED_SETAFFINITY)
+   add_definitions(-DHAS_SCHED_SETAFFINITY)
+ endif()
+ 
+-check_function_exists(poll HAS_POLL)
++check_symbol_exists(poll poll.h HAS_POLL)
+ if(HAS_POLL)
+   add_definitions(-DHAS_POLL)
+ endif()
+ 
+-check_function_exists(pipe HAS_PIPE)
++check_symbol_exists(pipe unistd.h HAS_PIPE)
+ if(HAS_PIPE)
+   add_definitions(-DHAS_PIPE)
+ endif()
+-- 
+2.15.0
+
+
+From d4d6447d782aefc4ff6e6729d93e0fbfc76af102 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Mon, 15 Jan 2018 22:19:13 +0700
+Subject: flat: Add support for system without mremap(2)
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 094454b..3153277 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -58,4 +58,9 @@ if(HAS_PIPE)
+   add_definitions(-DHAS_PIPE)
+ endif()
+ 
++check_symbol_exists(mremap sys/mman.h HAS_MREMAP)
++if(HAS_MREMAP)
++  add_definitions(-DHAS_MREMAP)
++endif()
++
+ add_subdirectory(mimosa)
+diff --git a/mimosa/flat/flat.cc b/mimosa/flat/flat.cc
+index d1ba086..7e6481a 100644
+--- a/mimosa/flat/flat.cc
++++ b/mimosa/flat/flat.cc
+@@ -1,3 +1,6 @@
++#ifndef HAS_MREMAP
++# include <stdlib.h>
++#endif
+ #include <sys/mman.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+@@ -96,9 +99,16 @@ namespace mimosa
+       if (size <= mapped_size_)
+         return true;
+ 
+-      void *addr = mremap(base_, mapped_size_, size, MREMAP_MAYMOVE);
++      void *addr;
++#ifdef HAS_MREMAP
++      addr = mremap(base_, mapped_size_, size, MREMAP_MAYMOVE);
+       if (addr == MAP_FAILED)
+         return false;
++#else
++      addr = realloc(base_, size);
++      if (addr == NULL)
++        return false;
++#endif
+ 
+       base_        = (uint8_t*)addr;
+       mapped_size_ = size;
+-- 
+2.15.0
+
+
+From bb9486898e516cc6f5287a33825314cdf5c99627 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Mon, 15 Jan 2018 22:22:21 +0700
+Subject: fs/copy: Use struct stat instead of struct stat64
+
+struct stat64 is Linux-only
+
+diff --git a/mimosa/fs/copy.cc b/mimosa/fs/copy.cc
+index 0b7b657..3fd9904 100644
+--- a/mimosa/fs/copy.cc
++++ b/mimosa/fs/copy.cc
+@@ -11,9 +11,9 @@ namespace mimosa
+     {
+       stream::DirectFdStream srcStream;
+ 
+-      struct ::stat64 st;
++      struct ::stat st;
+ 
+-      if (::stat64(src.c_str(), &st))
++      if (::stat(src.c_str(), &st))
+         return false;
+ 
+       if (!srcStream.open(src.c_str(), O_RDONLY))
+-- 
+2.15.0
+
+
+From c967e1edbea4f4abfa1b0a62a8d6bd5a7e02e584 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Tue, 16 Jan 2018 07:21:23 +0700
+Subject: mimosa: add Haiku support
+
+
+diff --git a/mimosa/compat/uio.hh b/mimosa/compat/uio.hh
+index 3da9531..8d3407b 100644
+--- a/mimosa/compat/uio.hh
++++ b/mimosa/compat/uio.hh
+@@ -3,7 +3,7 @@
+ # include <sys/types.h>
+ # include <cstdint>
+ 
+-# if defined(__unix__) || defined(__APPLE__)
++# if defined(__unix__) || defined(__APPLE__) || defined(__HAIKU__)
+ #  include <sys/uio.h>
+ # else
+ #  define IOV_MAX 128
+diff --git a/mimosa/net/print.hh b/mimosa/net/print.hh
+index de3f2a5..a0c0031 100644
+--- a/mimosa/net/print.hh
++++ b/mimosa/net/print.hh
+@@ -2,8 +2,9 @@
+ 
+ #include <sys/types.h>
+ 
+-#if defined(__unix__) || defined(__APPLE__)
++#if defined(__unix__) || defined(__APPLE__) || defined(__HAIKU__)
+ # include <sys/socket.h>
++# include <netdb.h>
+ #endif
+ 
+ #ifdef __WIN32__
+diff --git a/mimosa/preproc.hh b/mimosa/preproc.hh
+index 6ebb67e..d22c52a 100644
+--- a/mimosa/preproc.hh
++++ b/mimosa/preproc.hh
+@@ -6,7 +6,7 @@
+ #elif defined(__APPLE__)
+ # define MIMOSA_MAC
+ # define MIMOSA_UNIX
+-#elif defined(__unix__)
++#elif defined(__unix__) || defined(__HAIKU__)
+ # define MIMOSA_UNIX
+ #elif defined(__WIN32__)
+ # define MIMOSA_WIN
+diff --git a/mimosa/thread.cc b/mimosa/thread.cc
+index b141ba6..e79c3b8 100644
+--- a/mimosa/thread.cc
++++ b/mimosa/thread.cc
+@@ -88,6 +88,7 @@ namespace mimosa
+   {
+ #ifdef __WIN32__
+ #elif defined(__MACH__)
++#elif defined(__HAIKU__)
+ #else
+     pthread_setname_np(thread_, name.c_str());
+ #endif
+@@ -98,6 +99,7 @@ namespace mimosa
+ #ifdef __MACH__
+     pthread_setname_np(name.c_str());
+ #elif defined(__WIN32__)
++#elif defined(__HAIKU__)
+ #else
+     pthread_setname_np(pthread_self(), name.c_str());
+ #endif
+-- 
+2.15.0
+
