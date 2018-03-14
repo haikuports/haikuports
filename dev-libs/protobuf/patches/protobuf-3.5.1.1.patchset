@@ -1,0 +1,194 @@
+From a0a7e7af2961e4a71b0040b9af75d73515e9805d Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Wed, 17 May 2017 22:52:04 +0200
+Subject: use Atomic32 on 32-bit.
+
+
+diff --git a/src/google/protobuf/stubs/atomicops.h b/src/google/protobuf/stubs/atomicops.h
+index cb4553b..f260496 100644
+--- a/src/google/protobuf/stubs/atomicops.h
++++ b/src/google/protobuf/stubs/atomicops.h
+@@ -83,7 +83,11 @@ namespace internal {
+ 
+ // Use AtomicWord for a machine-sized pointer.  It will use the Atomic32 or
+ // Atomic64 routines below, depending on your architecture.
++#if defined(__HAIKU__) && !defined(GOOGLE_PROTOBUF_ARCH_64_BIT)
++typedef Atomic32 AtomicWord;
++#else
+ typedef intptr_t AtomicWord;
++#endif
+ 
+ // Atomically execute:
+ //      result = *ptr;
+-- 
+2.16.1
+
+
+From e18d785fd64bf6d987632353e77d386923d857ac Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Zolt=C3=A1n=20Mizsei?= <zmizsei@extrowerk.com>
+Date: Tue, 6 Feb 2018 21:44:49 +0100
+Subject: System lib support
+
+
+diff --git a/Makefile.am b/Makefile.am
+index 19a1607..1b3199e 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -9,30 +9,12 @@ AUTOMAKE_OPTIONS = foreign
+ SUBDIRS = . src
+ 
+ # Always include gmock in distributions.
+-DIST_SUBDIRS = $(subdirs) src conformance benchmarks
++DIST_SUBDIRS = src conformance benchmarks
+ 
+-# Build gmock before we build protobuf tests.  We don't add gmock to SUBDIRS
+-# because then "make check" would also build and run all of gmock's own tests,
+-# which takes a lot of time and is generally not useful to us.  Also, we don't
+-# want "make install" to recurse into gmock since we don't want to overwrite
+-# the installed version of gmock if there is one.
+ check-local:
+-	@echo "Making lib/libgmock.a lib/libgmock_main.a in gmock"
+-	@cd gmock && $(MAKE) $(AM_MAKEFLAGS) lib/libgmock.la lib/libgmock_main.la
+-	@cd gmock/gtest && $(MAKE) $(AM_MAKEFLAGS) lib/libgtest.la lib/libgtest_main.la
+ 
+-# We would like to clean gmock when "make clean" is invoked.  But we have to
+-# be careful because clean-local is also invoked during "make distclean", but
+-# "make distclean" already recurses into gmock because it's listed among the
+-# DIST_SUBDIRS.  distclean will delete gmock/Makefile, so if we then try to
+-# cd to the directory again and "make clean" it will fail.  So, check that the
+-# Makefile exists before recursing.
+ clean-local:
+-	@if test -e gmock/Makefile; then \
+-	  echo "Making clean in gmock"; \
+-	  cd gmock && $(MAKE) $(AM_MAKEFLAGS) clean; \
+-	fi; \
+-	if test -e conformance/Makefile; then \
++	@if test -e conformance/Makefile; then \
+ 	  echo "Making clean in conformance"; \
+ 	  cd conformance && $(MAKE) $(AM_MAKEFLAGS) clean; \
+ 	fi; \
+diff --git a/configure.ac b/configure.ac
+index 7ff20b1..837352d 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -200,12 +200,5 @@ AM_CONDITIONAL([OBJC_CONFORMANCE_TEST], [test $OBJC_CONFORMANCE_TEST = 1])
+ 
+ AX_CXX_COMPILE_STDCXX([11], [noext], [optional])
+ 
+-# HACK:  Make gmock's configure script pick up our copy of CFLAGS and CXXFLAGS,
+-#   since the flags added by ACX_CHECK_SUNCC must be used when compiling gmock
+-#   too.
+-export CFLAGS
+-export CXXFLAGS
+-AC_CONFIG_SUBDIRS([gmock])
+-
+ AC_CONFIG_FILES([Makefile src/Makefile benchmarks/Makefile conformance/Makefile protobuf.pc protobuf-lite.pc])
+ AC_OUTPUT
+diff --git a/src/Makefile.am b/src/Makefile.am
+index cdc2298..bc0cafe 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -761,11 +761,7 @@ check_PROGRAMS = protoc protobuf-test protobuf-lazy-descriptor-test \
+                  protobuf-lite-test test_plugin protobuf-lite-arena-test \
+                  no-warning-test $(GZCHECKPROGRAMS)
+ protobuf_test_LDADD = $(PTHREAD_LIBS) libprotobuf.la libprotoc.la \
+-                      ../gmock/gtest/lib/libgtest.la              \
+-                      ../gmock/lib/libgmock.la                    \
+-                      ../gmock/lib/libgmock_main.la
+-protobuf_test_CPPFLAGS = -I$(srcdir)/../gmock/gtest/include \
+-                         -I$(srcdir)/../gmock/include
++                      -lgtest -lgmock -lgmock_main
+ # Disable optimization for tests unless the user explicitly asked for it,
+ # since test_util.cc takes forever to compile with optimization (with GCC).
+ # See configure.ac for more info.
+@@ -854,12 +850,7 @@ nodist_protobuf_test_SOURCES = $(protoc_outputs)
+ # Run cpp_unittest again with PROTOBUF_TEST_NO_DESCRIPTORS defined.
+ protobuf_lazy_descriptor_test_LDADD = $(PTHREAD_LIBS) libprotobuf.la \
+                       libprotoc.la                                   \
+-                      ../gmock/gtest/lib/libgtest.la                 \
+-                      ../gmock/lib/libgmock.la                       \
+-                      ../gmock/lib/libgmock_main.la
+-protobuf_lazy_descriptor_test_CPPFLAGS = -I$(srcdir)/../gmock/include       \
+-                                         -I$(srcdir)/../gmock/gtest/include \
+-                                         -DPROTOBUF_TEST_NO_DESCRIPTORS
++                      -lgtest -lgmock -lgmock_main
+ protobuf_lazy_descriptor_test_CXXFLAGS = $(NO_OPT_CXXFLAGS)
+ protobuf_lazy_descriptor_test_SOURCES =                        \
+   google/protobuf/compiler/cpp/cpp_unittest.cc                 \
+@@ -879,11 +870,7 @@ COMMON_LITE_TEST_SOURCES =                                             \
+ # full runtime and we want to make sure this test builds without full
+ # runtime.
+ protobuf_lite_test_LDADD = $(PTHREAD_LIBS) libprotobuf-lite.la \
+-                           ../gmock/gtest/lib/libgtest.la      \
+-                           ../gmock/lib/libgmock.la            \
+-                           ../gmock/lib/libgmock_main.la
+-protobuf_lite_test_CPPFLAGS= -I$(srcdir)/../gmock/include \
+-                             -I$(srcdir)/../gmock/gtest/include
++                      -lgtest -lgmock -lgmock_main
+ protobuf_lite_test_CXXFLAGS = $(NO_OPT_CXXFLAGS)
+ protobuf_lite_test_SOURCES =                                           \
+   google/protobuf/lite_unittest.cc                                     \
+@@ -894,11 +881,7 @@ nodist_protobuf_lite_test_SOURCES = $(protoc_lite_outputs)
+ # gtest when building the test internally our memory sanitizer doesn't detect
+ # memory leaks (don't know why).
+ protobuf_lite_arena_test_LDADD = $(PTHREAD_LIBS) libprotobuf-lite.la \
+-                      ../gmock/gtest/lib/libgtest.la                 \
+-                      ../gmock/lib/libgmock.la                       \
+-                      ../gmock/lib/libgmock_main.la
+-protobuf_lite_arena_test_CPPFLAGS = -I$(srcdir)/../gmock/include       \
+-                                    -I$(srcdir)/../gmock/gtest/include
++                      -lgtest -lgmock -lgmock_main
+ protobuf_lite_arena_test_CXXFLAGS = $(NO_OPT_CXXFLAGS)
+ protobuf_lite_arena_test_SOURCES =       \
+   google/protobuf/lite_arena_unittest.cc \
+@@ -907,8 +890,7 @@ nodist_protobuf_lite_arena_test_SOURCES = $(protoc_lite_outputs)
+ 
+ # Test plugin binary.
+ test_plugin_LDADD = $(PTHREAD_LIBS) libprotobuf.la libprotoc.la \
+-                    ../gmock/gtest/lib/libgtest.la
+-test_plugin_CPPFLAGS = -I$(srcdir)/../gmock/gtest/include
++                    -lgtest
+ test_plugin_SOURCES =                                          \
+   google/protobuf/compiler/mock_code_generator.cc              \
+   google/protobuf/testing/file.cc                              \
+-- 
+2.16.1
+
+
+From 205ba4489a24858db2485aadea884bc3055155f2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Zolt=C3=A1n=20Mizsei?= <zmizsei@extrowerk.com>
+Date: Tue, 6 Feb 2018 21:48:45 +0100
+Subject: Do not fetch gtools/gmock
+
+
+diff --git a/autogen.sh b/autogen.sh
+index 9560aaf..07e47e5 100755
+--- a/autogen.sh
++++ b/autogen.sh
+@@ -27,23 +27,6 @@ __EOF__
+   exit 1
+ fi
+ 
+-# Check that gmock is present.  Usually it is already there since the
+-# directory is set up as an SVN external.
+-if test ! -e gmock; then
+-  echo "Google Mock not present.  Fetching gmock-1.7.0 from the web..."
+-  curl $curlopts -L -O https://github.com/google/googlemock/archive/release-1.7.0.zip
+-  unzip -q release-1.7.0.zip
+-  rm release-1.7.0.zip
+-  mv googlemock-release-1.7.0 gmock
+-fi
+-
+-if test ! -e gmock/gtest; then
+-  curl $curlopts -L -O https://github.com/google/googletest/archive/release-1.7.0.zip
+-  unzip -q release-1.7.0.zip
+-  rm release-1.7.0.zip
+-  mv googletest-release-1.7.0 gmock/gtest
+-fi
+-
+ set -ex
+ 
+ # TODO(kenton):  Remove the ",no-obsolete" part and fix the resulting warnings.
+-- 
+2.16.1
+

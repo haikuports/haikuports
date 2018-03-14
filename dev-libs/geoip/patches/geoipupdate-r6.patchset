@@ -1,0 +1,119 @@
+From f50fd9c259aee1fa429076ddafe0cfbbac43850f Mon Sep 17 00:00:00 2001
+From: fbrosson <fbrosson@localhost>
+Date: Fri, 25 Mar 2016 10:03:51 +0000
+Subject: Use time stamps, add usage and use trap.
+
+
+diff --git a/geoipupdate-r6.sh b/geoipupdate-r6.sh
+index 83b5810..aeb1e33 100644
+--- a/geoipupdate-r6.sh
++++ b/geoipupdate-r6.sh
+@@ -13,33 +13,94 @@ DATABASES="
+ 	asnum/GeoIPASNumv6
+ "
+ 
++usage ()
++{
++	echo "Usage: $0 [OPTION]"
++	echo "Update GeoIP/GeoLite files from the GeoIP mirror, MaxMind.com, if they already exist locally but are outdated."
++	echo
++	echo "Options:"
++	echo "  -a, --all    Update existing files (if their time stamps are older than those on the mirror) and download all other files thay may be downloaded from the mirror with this script. If a file exists but is empty then the file is downloaded regardless of its time stamp."
++	echo "  -f, --force  Download all files even if they are already up-to-date."
++	echo "  -h, --help   Print this message and exit."
++	echo
++	echo "Files that this script can update or download:"
++	echo "  GeoIP.dat             [similar to GeoLiteCountry.dat (1)]"
++	echo "  GeoIPv6.dat (2)"
++	echo "  GeoIPASNum.dat        [similar to GeoLiteASNum.dat (1)]"
++	echo "  GeoIPASNumv6.dat"
++	echo "  GeoLiteCity.dat (2)"
++	echo "  GeoLiteCityv6.dat (2)"
++	echo "(1) File which can only be updated with the geoipupdate utility."
++	echo "(2) File which can also be updated with the geoipupdate utility."
++	echo "Notes:"
++	echo "  Unlike geoipupdate, which sets the time stamps to the current time, this script sets the time stamps to those of the files on the GeoIP mirror."
++	echo "  Updates on the GeoIP mirror of the files this script downloads occur generally once per month, whereas updates of the files that geoipupdate downloads seem to occur more often."
++	exit 1
++}
++
+ if [ "${1}" = -f ] || [ "${1}" = --force ]; then
+ 	force=true
+ fi
+ 
++if [ "${1}" = -a ] || [ "${1}" = --all ]; then
++	all=true
++fi
++
++if [ "${1}" = -h ] || [ "${1}" = --help ]; then
++	usage
++fi
++
++[ "${force}" -o "${all}" ] && [ ! -d "${GEOIPDIR}" ] && mkdir -p "${GEOIPDIR}"
++
+ if [ -d "${GEOIPDIR}" ]; then
+ 	cd $GEOIPDIR
+ 	if [ -n "${DATABASES}" ]; then
+ 		TMPDIR=$(mktemp -d geoipupdate.XXXXXXXXXX)
++		trap "rm -rf $GEOIPDIR/$TMPDIR" EXIT
+ 
+ 		echo "Updating GeoIP databases..."
+ 
+ 		for db in $DATABASES; do
+ 			fname=$(basename $db)
++			echo -n "${GEOIPDIR}/${fname}.dat"
++			unset TIME_COND
++			if [ -f "${GEOIPDIR}/${fname}.dat" ]; then
++				if [ -s "${GEOIPDIR}/${fname}.dat" -a ! "${force}" ]; then
++					TIME_COND="${GEOIPDIR}/${fname}.dat"
++				fi
++			else
++				if [ ! "${force}" -a ! "${all}" ]; then
++					echo " skipped."
++					continue
++				fi
++			fi
++
++			curl --silent --remote-time --retry 3 --connect-timeout 60 --url \
++				"${GEOIP_MIRROR}/${db}.dat.gz" \
++				${TIME_COND+--time-cond "$TIME_COND"} \
++				--output "${TMPDIR}/${fname}.dat.gz"
+ 
+-			if [ -f "${GEOIPDIR}/${fname}.dat" ] || [ ${force} ]; then
+-				wget --no-verbose -t 3 -T 60 \
+-					"${GEOIP_MIRROR}/${db}.dat.gz" \
+-					-O "${TMPDIR}/${fname}.dat.gz"
+-				if [ $? -eq 0 ]; then
+-					gunzip -fdc "${TMPDIR}/${fname}.dat.gz" > "${TMPDIR}/${fname}.dat"
+-					mv "${TMPDIR}/${fname}.dat" "${GEOIPDIR}/${fname}.dat"
+-					chmod 0644 "${GEOIPDIR}/${fname}.dat"
+-					case ${fname} in
+-						GeoLite*) ln -sf ${fname}.dat `echo ${fname} | sed 's/GeoLite/GeoIP/'`.dat ;;
+-					esac
++			if [ $? -eq 0 ]; then
++				if [ -f "${TMPDIR}/${fname}.dat.gz" ]; then
++					gunzip "${TMPDIR}/${fname}.dat.gz" && \
++					mv -f "${TMPDIR}/${fname}.dat" "${GEOIPDIR}/${fname}.dat" && \
++					chmod 0644 "${GEOIPDIR}/${fname}.dat" && \
++					echo " updated." || echo " could not be updated."
++				else
++					echo " already up-to-date."
+ 				fi
++			else
++				echo " not updated."
+ 			fi
++			case ${fname} in
++				GeoLite*)
++					SYMLINK="GeoIP${fname#GeoLite}.dat"
++					if [ ! -e "${GEOIPDIR}/$SYMLINK" -o \
++						-h "${GEOIPDIR}/$SYMLINK" -a \
++						"`readlink "${GEOIPDIR}/$SYMLINK"`" != "${fname}.dat" ]; then
++						ln -sf "${fname}.dat" "${GEOIPDIR}/$SYMLINK"
++					fi
++			esac
+ 		done
+ 		[ -d "${TMPDIR}" ] && rm -rf $TMPDIR
+ 	fi
+-- 
+2.16.1
+
