@@ -1,32 +1,52 @@
-SUMMARY="A UNIX command interpreter (shell)"
+SUMMARY="A very advanced and programmable command interpreter (shell) for UNIX"
 DESCRIPTION="Zsh is a shell designed for interactive use, although it \
 is also a powerful scripting language. Many of the useful features of \
 bash, ksh, and tcsh were incorporated into zsh; plenty original features \
 were added."
 HOMEPAGE="https://zsh.org/"
-COPYRIGHT="1992-2018 Paul Falstad, Richard Coleman, Zoltán Hidvégi, \
-Andrew Main, Peter Stephenson, Sven Wishnowsky, and others"
-LICENSE="ZSH"
+COPYRIGHT="1992-2018 The Zsh Development Group"
+LICENSE="ZSH
+	GNU GPL v2"
 REVISION="1"
 SOURCE_URI="https://downloads.sf.net/zsh/zsh-$portVersion.tar.xz"
 CHECKSUM_SHA256="a8359b81d090425d497c6f3c724a7c21a81c614b03e7662ed347705d86958e53"
+SOURCE_URI_2="https://downloads.sf.net/zsh/zsh-$portVersion-doc.tar.xz"
+CHECKSUM_SHA256_2="b995c16a2ded516b6e07883932640fcca8b53b1b8a1934094a8a32ef087f52fc"
 PATCHES="zsh-$portVersion.patchset"
 
 ARCHITECTURES="?x86_gcc2 x86 x86_64"
+
+GLOBAL_WRITABLE_FILES="
+	settings/zsh directory keep-old
+	settings/zsh/zlogin
+	settings/zsh/zlogout
+	settings/zsh/zprofile keep-old
+	settings/zsh/zshenv keep-old
+	settings/zsh/zshrc
+	"
+USER_SETTINGS_FILES="
+	settings/zsh directory
+	settings/zsh/.zlogin
+	settings/zsh/.zlogout
+	settings/zsh/.zprofile
+	settings/zsh/.zshenv
+	settings/zsh/.zshrc
+	"
 
 PROVIDES="
 	zsh = $portVersion compat >= 5
 	cmd:zsh = $portVersion compat >= 5
 	cmd:zsh_$portVersion = $portVersion compat >= 5
-	#zsh breaks autoreconf
-	#cmd:zsh_$portVersion = $portVersion compat >= 5
 	"
 REQUIRES="
 	haiku
 	lib:libiconv
 	lib:libncursesw
 	lib:libpcre
-	lib:libiconv
+	"
+
+PROVIDES_doc="
+	zsh_doc = $portVersion
 	"
 
 BUILD_REQUIRES="
@@ -34,37 +54,36 @@ BUILD_REQUIRES="
 	devel:libiconv
 	devel:libncursesw
 	devel:libpcre
-	devel:libiconv
 	"
 BUILD_PREREQUIRES="
-	cmd:autoconf
+	cmd:autoreconf
 	cmd:awk
 	cmd:find
 	cmd:gcc
 	cmd:grep
-	cmd:libtoolize
-	cmd:ld
 	cmd:make
 	cmd:sed
 	"
 
 BUILD()
 {
-	autoreconf -fi
-	libtoolize -vfi
+	cp -rut . "$sourceDir2/zsh-$portVersion"/*
 
-	export LDFLAGS="-lnetwork -lbsd"
-	export CFLAGS="-D_BSD_SOURCE"
+	export LIBS="-Wl,--as-needed -lnetwork -lbsd"
+	export CPPFLAGS="-D_BSD_SOURCE"
+
+	autoreconf -vfi
 
 	runConfigure ./configure \
+		--htmldir="$developDocDir/html" \
+		--enable-etcdir="$sysconfDir/zsh" \
+		--enable-zlogin="$sysconfDir/zsh/zlogin" \
+		--enable-zlogout="$sysconfDir/zsh/zlogout" \
+		--enable-zprofile="$sysconfDir/zsh/zprofile" \
+		--enable-zshenv="$sysconfDir/zsh/zshenv" \
+		--enable-zshrc="$sysconfDir/zsh/zshrc" \
 		--enable-multibyte \
-		--enable-zshrc=`finddir B_USER_SETTINGS_DIRECTORY`/zsh/zshrc \
-		--enable-zshenv=`finddir B_USER_SETTINGS_DIRECTORY`/zsh/zshenv \
-		--enable-zprofile=`finddir B_USER_SETTINGS_DIRECTORY`/zsh/zprofile \
-		--enable-zlogin=`finddir B_USER_SETTINGS_DIRECTORY`/zsh/zlogin \
-		--enable-zlogout=`finddir B_USER_SETTINGS_DIRECTORY`/zsh/zlogout \
-		--sysconfdir=`finddir B_USER_SETTINGS_DIRECTORY`/zsh \
-		--enable-etcdir=`finddir B_USER_SETTINGS_DIRECTORY`/zsh \
+		--enable-function-subdirs \
 		--enable-pcre \
 		--enable-dynamic \
 		--enable-cap \
@@ -73,18 +92,54 @@ BUILD()
 		--with-tcsetpgrp \
 		--enable-zsh-secure-free
 
-	sed --in-place '/HAVE_WAIT3/d' config.h
 	make $jobArgs
 }
 
 INSTALL()
 {
 	make install
-	#zsh breaks autoreconf
-	#ln -s zsh $binDir/sh
+
+	install -d -m 755 "$settingsDir/zsh"
+
+	# Keep dots in B_USER_SETTINGS_DIRECTORY, if the user hasn't got any
+	# dots in their home directory
+	cat > "$settingsDir/zsh/zshenv" << EOF
+setopt EXTENDED_GLOB
+if [ -z ~/.z(login|logout|profile|shrc|shenv)(N) ]; then
+	ZDOTDIR="\$(finddir B_USER_SETTINGS_DIRECTORY)/zsh"
+fi
+unsetopt EXTENDED_GLOB
+EOF
+	# Source /etc/profile on startup, which contains important settings
+	cat > "$settingsDir/zsh/zprofile" << EOF
+# Emulate ksh as a walkaround for ksh-syntax within /etc/profile
+emulate ksh -c 'source /etc/profile'
+PS1="\${PS1/'\$PWD'/%~}"
+
+# Migration path for users who rely on the old behavior
+(
+setopt EXTENDED_GLOB
+if [[ -n \$ZDOTDIR && -z \$ZDOTDIR/.z(login|logout|profile|shrc|shenv)(#qN) ]]; then
+	for i in "\$HOME/config/settings/zsh"/z(login|logout|profile|shrc|shenv)(#qN)
+	do
+		local target=\$ZDOTDIR/.\$(basename "\$i")
+		echo "Symlinking \$i to \$target..."
+		ln -sv "\$i" "\$target"
+		unset target
+	done
+	[[ -e \$ZDOTDIR/.zshenv ]] && source \$ZDOTDIR/.zshenv
+fi
+)
+EOF
+
+	make install.html
+	install -t "$developDocDir" -m 644 Doc/*.pdf
+	packageEntries doc "$developDir"
 }
 
 TEST()
 {
-	make check
+	mkdir -p "$sourceDir/fakehome"
+
+	HOME="$sourceDir/fakehome" make check
 }
