@@ -1,0 +1,242 @@
+From 8999fe6e01a2040c8bf90a98a880e3c38d98c2ca Mon Sep 17 00:00:00 2001
+From: Sergei Reznikov <diver@gelios.net>
+Date: Tue, 22 May 2018 17:30:41 +0300
+Subject: WIP: fix build on Haiku
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4f2b822..f7c027d 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -32,8 +32,9 @@ endif()
+ 
+ find_package(Qt5Widgets "${REQUIRED_QT_VERSION}" REQUIRED)
+ find_package(Qt5LinguistTools "${REQUIRED_QT_VERSION}" REQUIRED)
+-find_package(Qt5X11Extras "${REQUIRED_QT_VERSION}" REQUIRED)
+-
++if (UNIX AND NOT HAIKU)
++	find_package(Qt5X11Extras "${REQUIRED_QT_VERSION}" REQUIRED)
++endif()
+ find_package(lxqt-build-tools "${REQUIRED_LXQT_BUILD_TOOLS_VERSION}" REQUIRED)
+ find_package(Fm "${REQUIRED_LIBFM_VERSION}" REQUIRED)
+ find_package(MenuCache "${REQUIRED_LIBMENUCACHE_VERSION}" REQUIRED)
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 0695854..89b173e 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -123,9 +123,14 @@ install(EXPORT
+     COMPONENT Devel
+ )
+ 
++IF(UNIX AND NOT HAIKU)
++target_link_libraries(${LIBFM_QT_LIBRARY_NAME}
++	Qt5::X11Extras
++)
++endif()
++
+ target_link_libraries(${LIBFM_QT_LIBRARY_NAME}
+     Qt5::Widgets
+-    Qt5::X11Extras
+     ${FM_LIBRARIES}
+     ${MENUCACHE_LIBRARIES}
+     ${XCB_LIBRARIES}
+diff --git a/src/applaunchcontext.cpp b/src/applaunchcontext.cpp
+index e599485..ea07648 100644
+--- a/src/applaunchcontext.cpp
++++ b/src/applaunchcontext.cpp
+@@ -19,8 +19,11 @@
+ 
+ 
+ #include "applaunchcontext.h"
+-#include <QX11Info>
+-#include <X11/Xlib.h>
++
++#ifndef Q_OS_HAIKU
++ #include <QX11Info>
++ #include <X11/Xlib.h>
++#endif
+ 
+ typedef struct _FmAppLaunchContext {
+   GAppLaunchContext parent;
+@@ -29,11 +32,13 @@ typedef struct _FmAppLaunchContext {
+ G_DEFINE_TYPE(FmAppLaunchContext, fm_app_launch_context, G_TYPE_APP_LAUNCH_CONTEXT)
+ 
+ static char* fm_app_launch_context_get_display(GAppLaunchContext * /*context*/, GAppInfo * /*info*/, GList * /*files*/) {
++#ifndef Q_OS_HAIKU
+   Display* dpy = QX11Info::display();
+   if(dpy) {
+     char* xstr = DisplayString(dpy);
+     return g_strdup(xstr);
+   }
++#endif
+   return nullptr;
+ }
+ 
+diff --git a/src/core/thumbnailjob.cpp b/src/core/thumbnailjob.cpp
+index 21e256a..2e7cd78 100644
+--- a/src/core/thumbnailjob.cpp
++++ b/src/core/thumbnailjob.cpp
+@@ -7,6 +7,15 @@
+ #include <QDir>
+ #include "thumbnailer.h"
+ 
++#ifdef Q_OS_HAIKU
++static inline void *
++mempcpy(void *to, const void *from, size_t size)
++{
++  memcpy(to, from, size);
++  return (unsigned char *)to + size;
++}
++#endif
++
+ namespace Fm {
+ 
+ QThreadPool* ThumbnailJob::threadPool_ = nullptr;
+diff --git a/src/folderview.cpp b/src/folderview.cpp
+index c9f2f05..cd35c01 100644
+--- a/src/folderview.cpp
++++ b/src/folderview.cpp
+@@ -42,7 +42,9 @@
+ #include <QMessageBox>
+ #include <QLineEdit>
+ #include <QTextEdit>
+-#include <QX11Info> // for XDS support
++#ifndef Q_OS_HAIKU
++ #include <QX11Info> // for XDS support
++#endif
+ #include <xcb/xcb.h> // for XDS support
+ #include "xdndworkaround.h" // for XDS support
+ #include "folderview_p.h"
+@@ -1030,6 +1032,7 @@ void FolderView::childDropEvent(QDropEvent* e) {
+     // NOTE: in theory, it's not possible to implement XDS with pure Qt.
+     // We achieved this with some dirty XCB/XDND workarounds.
+     // Please refer to XdndWorkaround::clientMessage() in xdndworkaround.cpp for details.
++#ifndef Q_OS_HAIKU
+     if(QX11Info::isPlatformX11() && e->mimeData()->hasFormat("XdndDirectSave0")) {
+         e->setDropAction(Qt::CopyAction);
+         const QWidget* targetWidget = childView()->viewport();
+@@ -1068,7 +1071,7 @@ void FolderView::childDropEvent(QDropEvent* e) {
+         e->accept(); // yeah! we've done with XDS so stop Qt from further event propagation.
+         return;
+     }
+-
++#endif
+     if(e->keyboardModifiers() == Qt::NoModifier) {
+         // if no key modifiers are used, popup a menu
+         // to ask the user for the action he/she wants to perform.
+diff --git a/src/libfmqt.cpp b/src/libfmqt.cpp
+index 2b01643..7376271 100644
+--- a/src/libfmqt.cpp
++++ b/src/libfmqt.cpp
+@@ -31,7 +31,9 @@ struct LibFmQtData {
+     ~LibFmQtData();
+ 
+     QTranslator translator;
++#ifndef Q_OS_HAIKU
+     XdndWorkaround workaround;
++#endif
+     int refCount;
+     Q_DISABLE_COPY(LibFmQtData)
+ };
+diff --git a/src/xdndworkaround.cpp b/src/xdndworkaround.cpp
+index f0a35d2..65de54a 100644
+--- a/src/xdndworkaround.cpp
++++ b/src/xdndworkaround.cpp
+@@ -21,7 +21,9 @@
+ #include "xdndworkaround.h"
+ #include <QApplication>
+ #include <QDebug>
+-#include <QX11Info>
++#ifndef Q_OS_HAIKU
++ #include <QX11Info>
++#endif
+ #include <QMimeData>
+ #include <QCursor>
+ #include <QWidget>
+@@ -44,72 +46,24 @@
+ #endif // (QT_VERSION >= QT_VERSION_CHECK(5, 4, 0))
+ 
+ XdndWorkaround::XdndWorkaround() {
+-    if(!QX11Info::isPlatformX11()) {
++//    if(!QX11Info::isPlatformX11()) {
+         return;
+     }
+ 
+     // we need to filter all X11 events
+-    qApp->installNativeEventFilter(this);
++//    qApp->installNativeEventFilter(this);
+ 
+-// This part is for Qt >= 5.4 only
+-#if (QT_VERSION >= QT_VERSION_CHECK(5, 4, 0))
+-    lastDrag_ = nullptr;
+ 
+-    // initialize xinput2 since newer versions of Qt5 uses it.
+-    static char xi_name[] = "XInputExtension";
+-    xcb_connection_t* conn = QX11Info::connection();
+-    xcb_query_extension_cookie_t cookie = xcb_query_extension(conn, strlen(xi_name), xi_name);
+-    xcb_generic_error_t* err = nullptr;
+-    xcb_query_extension_reply_t* reply = xcb_query_extension_reply(conn, cookie, &err);
+-    if(err == nullptr) {
+-        xinput2Enabled_ = true;
+-        xinputOpCode_ = reply->major_opcode;
+-        xinputEventBase_ = reply->first_event;
+-        xinputErrorBase_ = reply->first_error;
+-        // qDebug() << "xinput: " << m_xi2Enabled << m_xiOpCode << m_xiEventBase;
+-    }
+-    else {
+-        xinput2Enabled_ = false;
+-        free(err);
+-    }
+-    free(reply);
+-#endif // (QT_VERSION >= QT_VERSION_CHECK(5, 4, 0))
+-}
+ 
+ XdndWorkaround::~XdndWorkaround() {
+-    if(!QX11Info::isPlatformX11()) {
++//    if(!QX11Info::isPlatformX11()) {
+         return;
+-    }
+-    qApp->removeNativeEventFilter(this);
++//    }
++//    qApp->removeNativeEventFilter(this);
+ }
+ 
+-bool XdndWorkaround::nativeEventFilter(const QByteArray& eventType, void* message, long* /*result*/) {
+-    if(Q_LIKELY(eventType == "xcb_generic_event_t")) {
+-        xcb_generic_event_t* event = static_cast<xcb_generic_event_t*>(message);
+-        switch(event->response_type & ~0x80) {
+-        case XCB_CLIENT_MESSAGE:
+-            return clientMessage(reinterpret_cast<xcb_client_message_event_t*>(event));
+-        case XCB_SELECTION_NOTIFY:
+-            return selectionNotify(reinterpret_cast<xcb_selection_notify_event_t*>(event));
+-// This part is for Qt >= 5.4 only
+-#if (QT_VERSION >= QT_VERSION_CHECK(5, 4, 0))
+-        case XCB_SELECTION_REQUEST:
+-            return selectionRequest(reinterpret_cast<xcb_selection_request_event_t*>(event));
+-        case XCB_GE_GENERIC:
+-            // newer versions of Qt5 supports xinput2, which sends its mouse events via XGE.
+-            return genericEvent(reinterpret_cast<xcb_ge_generic_event_t*>(event));
+-        case XCB_BUTTON_RELEASE:
+-            // older versions of Qt5 receive mouse events via old XCB events.
+-            buttonRelease();
+-            break;
+-#endif // Qt >= 5.4
+-        default:
+-            break;
+-        }
+-    }
+-    return false;
+-}
+ 
++/*
+ // static
+ QByteArray XdndWorkaround::atomName(xcb_atom_t atom) {
+     QByteArray name;
+@@ -290,3 +244,4 @@ void XdndWorkaround::buttonRelease() {
+ }
+ 
+ #endif // QT_VERSION >= QT_VERSION_CHECK(5, 4, 0)
++*/
+-- 
+2.16.2
+
