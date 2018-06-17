@@ -1,4 +1,4 @@
-From f938d44c4e921b58db539dab602b82d13f06da8e Mon Sep 17 00:00:00 2001
+From 72cac1dfbba173b58516dd6df998e3ef255ee3eb Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Zolt=C3=A1n=20Mizsei?= <zmizsei@extrowerk.com>
 Date: Sat, 2 Sep 2017 12:11:30 +0200
 Subject: Install path fix
@@ -18,10 +18,10 @@ index 990d93c..068bea4 100644
  
  dnl XXX
 -- 
-2.13.1
+2.16.4
 
 
-From 1d2cf3a4c285401e1414d4d508b1596e9e03be55 Mon Sep 17 00:00:00 2001
+From d4111b6912ac637b4c2988fa8890a8784b0e75e6 Mon Sep 17 00:00:00 2001
 From: Sergei Reznikov <diver@gelios.net>
 Date: Sat, 2 Sep 2017 17:24:06 +0300
 Subject: enable icons in qtgui
@@ -54,5 +54,607 @@ index 4a16a65..593b19b 100644
  
      QStringList paths = QIcon::themeSearchPaths ();
 -- 
-2.13.1
+2.16.4
+
+
+From 0f6cf0a923a97bfe268093a800bc4547c7255d9d Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 17 Jun 2018 11:10:49 +1000
+Subject: Fix build for Qt 5.11
+
+
+diff --git a/src/qtui/info_bar.cc b/src/qtui/info_bar.cc
+index c764c2a..5179e96 100644
+--- a/src/qtui/info_bar.cc
++++ b/src/qtui/info_bar.cc
+@@ -255,8 +255,8 @@ void InfoBar::paintEvent (QPaintEvent *)
+         if (d.title.text ().isNull () && ! d.orig_title.isNull ())
+         {
+             QFontMetrics metrics = p.fontMetrics ();
+-            d.title = metrics.elidedText (d.orig_title, Qt::ElideRight,
+-             width () - ps.VisWidth - ps.Height - ps.Spacing);
++            d.title = QStaticText(metrics.elidedText (d.orig_title, Qt::ElideRight,
++             width () - ps.VisWidth - ps.Height - ps.Spacing));
+         }
+ 
+         p.setPen (QColor (255, 255, 255));
+-- 
+2.16.4
+
+
+From 856efd83cd27bfb51da80b239c7251c86fc02112 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 17 Jun 2018 15:17:02 +1000
+Subject: Add MediaKit output plugin
+
+
+diff --git a/configure.ac b/configure.ac
+index 068bea4..5ac84d8 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -596,6 +596,21 @@ if test "x$enable_filewriter" = "xyes" -a "x$enable_filewriter_mp3" != "xno"; th
+     )
+ fi
+ 
++dnl MediaKit
++dnl ==========
++
++AC_ARG_ENABLE(filewriter,
++    [AS_HELP_STRING([--disable-mediakit], [disable MediaKit output plugin (default=enabled)])],
++    [enable_mediakit=$enableval],
++    [enable_mediakit=yes]
++)
++
++have_mediakit=yes
++
++if test "x$enable_mediakit" != "xno"; then
++    OUTPUT_PLUGINS="$OUTPUT_PLUGINS mediakit"
++fi
++
+ dnl Vorbis and FLAC support support reuse input plugin checks.
+ 
+ if test "x$enable_filewriter" = "xyes" -a "x$have_vorbis" = "xyes"; then
+@@ -738,6 +753,7 @@ echo "  Jack Audio Connection Kit:              $have_jack"
+ echo "  Open Sound System:                      $have_oss4"
+ echo "  PulseAudio:                             $have_pulse"
+ echo "  Simple DirectMedia Layer:               $have_sdlout"
++echo "  MediaKit:                               $have_mediakit"
+ echo "  Sndio:                                  $have_sndio"
+ echo "  Win32 waveOut:                          $HAVE_MSWINDOWS"
+ echo "  FileWriter:                             $enable_filewriter"
+diff --git a/src/mediakit/Makefile b/src/mediakit/Makefile
+new file mode 100644
+index 0000000..5d59cc1
+--- /dev/null
++++ b/src/mediakit/Makefile
+@@ -0,0 +1,13 @@
++PLUGIN = mediakit${PLUGIN_SUFFIX}
++
++SRCS = mediakit.cc ringbuffer.cc sndplayer.cc
++
++include ../../buildsys.mk
++include ../../extra.mk
++
++plugindir := ${plugindir}/${OUTPUT_PLUGIN_DIR}
++
++LD = ${CXX}
++CPPFLAGS += -I../..
++CXXFLAGS += ${PLUGIN_CFLAGS}
++LIBS += -lbe -lmedia
+diff --git a/src/mediakit/mediakit.cc b/src/mediakit/mediakit.cc
+new file mode 100644
+index 0000000..bc4d8a6
+--- /dev/null
++++ b/src/mediakit/mediakit.cc
+@@ -0,0 +1,175 @@
++/*
++ * Haiku MediaKit Output Plugin for Audacious
++ * Copyright 2018 Gerasim Troeglazov (3dEyes**)
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions, and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions, and the following disclaimer in the documentation
++ *    provided with the distribution.
++ *
++ * This software is provided "as is" and without any warranty, express or
++ * implied. In no event shall the authors be liable for any damages arising from
++ * the use of this software.
++ */
++
++#include <math.h>
++#include <pthread.h>
++#include <string.h>
++#include <stdio.h>
++#include <sys/time.h>
++
++#include <libaudcore/audstrings.h>
++#include <libaudcore/i18n.h>
++#include <libaudcore/plugin.h>
++#include <libaudcore/ringbuf.h>
++#include <libaudcore/runtime.h>
++
++#include "sndplayer.h"
++
++static SndPlayer player;
++
++class MediaKitOutput : public OutputPlugin
++{
++public:
++    static const char about[];
++    static const char * const defaults[];
++
++    static constexpr PluginInfo info = {
++        N_("MediaKit Output"),
++        PACKAGE,
++        about
++    };
++
++    constexpr MediaKitOutput () : OutputPlugin (info, 1) {}
++
++    bool init ();
++    void cleanup ();
++
++    StereoVolume get_volume ();
++    void set_volume (StereoVolume v);
++
++    bool open_audio (int aud_format, int rate, int chans, String & error);
++    void close_audio ();
++
++    void period_wait ();
++    int write_audio (const void * data, int size);
++    void drain ();
++
++    int get_delay ();
++
++    void pause (bool pause);
++    void flush ();
++};
++
++EXPORT MediaKitOutput aud_plugin_instance;
++
++const char MediaKitOutput::about[] =
++ N_("Haiku MediaKit Output Plugin for Audacious\n"
++    "Copyright 2018 Gerasim Troeglazov (3dEyes**)");
++
++const char * const MediaKitOutput::defaults[] = {
++ "vol_left", "100",
++ "vol_right", "100",
++ nullptr};
++
++static volatile int vol_left, vol_right;
++static bool paused_flag;
++
++bool MediaKitOutput::init ()
++{
++    aud_config_set_defaults ("sdlout", defaults);
++
++    vol_left = aud_get_int ("sdlout", "vol_left");
++    vol_right = aud_get_int ("sdlout", "vol_right");
++    
++    return true;
++}
++
++void MediaKitOutput::cleanup ()
++{
++}
++
++StereoVolume MediaKitOutput::get_volume ()
++{
++    return {vol_left, vol_right};
++}
++
++void MediaKitOutput::set_volume (StereoVolume v)
++{
++    vol_left = v.left;
++    vol_right = v.right;
++
++	if (player.isOK())
++		player.setVolume(vol_left, vol_right);
++
++    aud_set_int ("mediakit", "vol_left", v.left);
++    aud_set_int ("mediakit", "vol_right", v.right);
++}
++
++bool MediaKitOutput::open_audio (int format, int rate, int chan, String & error)
++{
++    if (format != FMT_S16_NE)
++    {
++        error = String ("MediaKit error: Only signed 16-bit, native endian audio is supported.");
++        return false;
++    }
++
++    player.channels = (float)chan;
++    player.sample_rate = (float)rate;
++
++	player.stop();
++	bool status = player.start();
++	if (!status) {
++		error = String ("MediaKit error: not started.");
++	} else {
++		player.setVolume(vol_left, vol_right);
++	}
++
++    paused_flag = !status;
++
++    return status;
++}
++
++void MediaKitOutput::close_audio ()
++{
++    player.stop();
++}
++
++void MediaKitOutput::period_wait ()
++{
++}
++
++int MediaKitOutput::write_audio (const void * data, int len)
++{
++	if (len <= 0 || !player.isOK())
++		return 0;
++
++	player.write( (unsigned char*)data, len );
++
++    return len;
++}
++
++void MediaKitOutput::drain ()
++{
++}
++
++int MediaKitOutput::get_delay ()
++{
++    return 0;
++}
++
++void MediaKitOutput::pause (bool pause)
++{
++    paused_flag = pause;
++}
++
++void MediaKitOutput::flush ()
++{
++	if (player.isOK())
++		player.flush();
++}
+diff --git a/src/mediakit/ringbuffer.cc b/src/mediakit/ringbuffer.cc
+new file mode 100644
+index 0000000..ebd22f6
+--- /dev/null
++++ b/src/mediakit/ringbuffer.cc
+@@ -0,0 +1,129 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "ringbuffer.h"
++
++RingBuffer::RingBuffer( int size )
++{
++	 initialized = false;
++     Buffer = new unsigned char[size];
++     if(Buffer!=NULL) {
++     	memset( Buffer, 0, size );
++	    BufferSize = size;     	
++     } else {
++     	BufferSize = 0;
++     }
++     reader = 0;
++     writer = 0;
++     writeBytesAvailable = size;
++     if((locker=create_sem(1,"locker")) >= B_OK) {
++     	initialized = true;
++     } else {
++     	if(Buffer!=NULL) {
++     		delete[] Buffer;     		
++     	}
++     }
++}
++
++RingBuffer::~RingBuffer( )
++{
++	 if(initialized) {
++     	delete[] Buffer;
++     	delete_sem(locker);
++	 }
++}
++
++bool 
++RingBuffer::Empty( void )
++{
++     memset( Buffer, 0, BufferSize );
++     reader = 0;
++     writer = 0;
++     writeBytesAvailable = BufferSize;
++     return true;
++}
++
++int 
++RingBuffer::Read( unsigned char *data, int size )
++{	
++	 acquire_sem(locker);
++	 
++     if( data == 0 || size <= 0 || writeBytesAvailable == BufferSize ) {
++     	 release_sem(locker);
++         return 0;
++     }
++
++     int readBytesAvailable = BufferSize - writeBytesAvailable;
++
++     if( size > readBytesAvailable ) {
++         size = readBytesAvailable;
++     }
++
++     if(size > BufferSize - reader) {
++         int len = BufferSize - reader;
++         memcpy(data, Buffer + reader, len);
++         memcpy(data + len, Buffer, size-len);
++     } else {
++         memcpy(data, Buffer + reader, size);
++     }
++
++     reader = (reader + size) % BufferSize;
++     writeBytesAvailable += size;
++	 
++	 release_sem(locker);
++     return size;
++}
++
++int 
++RingBuffer::Write( unsigned char *data, int size )
++{
++	 acquire_sem(locker);
++	 
++     if( data == 0 || size <= 0 || writeBytesAvailable == 0 ) {
++     	 release_sem(locker);
++         return 0;
++     }
++
++     if( size > writeBytesAvailable ) {
++         size = writeBytesAvailable;
++     }
++
++     if(size > BufferSize - writer) {
++         int len = BufferSize - writer;
++         memcpy(Buffer + writer, data, len);
++         memcpy(Buffer, data+len, size-len);
++     } else {
++         memcpy(Buffer + writer, data, size);
++     }
++
++     writer = (writer + size) % BufferSize;
++     writeBytesAvailable -= size;
++
++	 release_sem(locker);	 
++     return size;
++}
++
++int 
++RingBuffer::GetSize( void )
++{
++     return BufferSize;
++}
++
++int 
++RingBuffer::GetWriteAvailable( void )
++{
++     return writeBytesAvailable;
++}
++
++int 
++RingBuffer::GetReadAvailable( void )
++{
++     return BufferSize - writeBytesAvailable;
++}
++
++status_t 
++RingBuffer::InitCheck( void )
++{
++	return initialized?B_OK:B_ERROR;
++}
+diff --git a/src/mediakit/ringbuffer.h b/src/mediakit/ringbuffer.h
+new file mode 100644
+index 0000000..4715632
+--- /dev/null
++++ b/src/mediakit/ringbuffer.h
+@@ -0,0 +1,31 @@
++#ifndef __RING_BUFFER_H__
++#define __RING_BUFFER_H__
++
++#include <OS.h>
++
++class RingBuffer {
++
++public:
++     RingBuffer(int size);
++     ~RingBuffer();
++     int Read( unsigned char* dataPtr, int numBytes );
++     int Write( unsigned char *dataPtr, int numBytes );
++     
++     bool Empty( void );
++     int GetSize( );
++     int GetWriteAvailable( );
++     int GetReadAvailable( );
++     status_t InitCheck( );
++private:
++     unsigned char *Buffer;
++     int BufferSize;
++     int reader;
++     int writer;
++     int writeBytesAvailable;
++     
++     sem_id locker;
++     
++     bool 	initialized;
++};
++
++#endif
+diff --git a/src/mediakit/sndplayer.cc b/src/mediakit/sndplayer.cc
+new file mode 100644
+index 0000000..b796b24
+--- /dev/null
++++ b/src/mediakit/sndplayer.cc
+@@ -0,0 +1,113 @@
++#include <string.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <SoundPlayer.h>
++
++#include "sndplayer.h"
++
++static void proc(void *cookie, void *buffer, size_t len, const media_raw_audio_format &format)
++{
++	RingBuffer *ring = (RingBuffer*)cookie;
++	unsigned char* ptr = (unsigned char*)buffer;
++
++	size_t readed = ring->Read(ptr,len);
++
++	if(readed < len)
++		memset(ptr+readed, 0, len - readed);
++}
++
++SndPlayer::SndPlayer()
++{	
++	channels = sample_rate = delay = 0;
++	player = NULL;
++	_isOK = true;
++}
++
++bool SndPlayer::start()
++{
++	size_t gSoundBufferSize = 8192 * sizeof(short);
++		
++	media_raw_audio_format form = {
++		sample_rate,
++		channels,
++		media_raw_audio_format::B_AUDIO_SHORT,
++		B_MEDIA_LITTLE_ENDIAN,
++		gSoundBufferSize
++	};
++	
++	ring = new RingBuffer(gSoundBufferSize * 3);
++	if(ring->InitCheck() != B_OK) {
++		delete ring; ring = 0;
++		return false;
++	}
++			
++	player = new BSoundPlayer(&form, "Audacious", proc, NULL, (void*)ring);
++	
++	if(player->InitCheck() != B_OK) {
++		delete player;
++		player = NULL;
++		return false;
++	}
++	
++	player->Start();
++	player->SetHasData(true);	
++
++	_isOK = true;
++
++	return player != NULL;
++}
++void SndPlayer::stop()
++{
++	if ( player )
++	{
++		if(player) {
++			player->Stop();
++			delete player;
++			delete ring;
++		}
++	
++		player = NULL;
++		ring = NULL;
++	}	
++}
++
++void SndPlayer::flush()
++{
++	ring->Empty();
++}
++
++void SndPlayer::setVolume(int left, int right)
++{
++	if (player!=NULL) {
++		float left_f = (float)left / 100.0;
++		float right_f = (float)right / 100.0;
++		player->SetVolume((left_f + right_f) / 2.0);
++	}
++}
++
++double SndPlayer::getLatency()
++{
++	double lat = player->Latency() / (ring->GetSize()*4.0);	
++
++	return lat;
++}
++
++bool SndPlayer::write( unsigned char *src_ptr, size_t size)
++{	
++	while ( size > 0 && size % 4 )
++		size--;
++	if ( size <= 0 )
++		return false;
++
++	size_t len = size;
++
++	for(;;) {
++			size_t len2 = ring->Write(src_ptr, len);
++			if (len2 == len)break;
++			len -= len2;
++			src_ptr += len2;
++			snooze(100);
++	}
++
++	return true;
++}
+diff --git a/src/mediakit/sndplayer.h b/src/mediakit/sndplayer.h
+new file mode 100644
+index 0000000..bd042c3
+--- /dev/null
++++ b/src/mediakit/sndplayer.h
+@@ -0,0 +1,36 @@
++#ifndef SNDPLAY_H
++#define SNDPLAY_H
++
++#include <SoundPlayer.h>
++
++#include "ringbuffer.h"
++
++class SndPlayer
++{
++public:
++	SndPlayer();
++	inline ~SndPlayer() { stop();}
++	inline bool isOK() const {return _isOK;}
++	inline bool isOpen() const {return player!=NULL;}
++
++	bool start();
++	void stop();
++
++	double getLatency();
++
++	bool write( unsigned char *src_ptr, size_t size);
++	
++	void flush();
++	void setVolume(int left, int right);
++
++	double delay;
++	uchar channels;
++	float sample_rate;
++
++private:
++	bool _isOK;
++	BSoundPlayer *player;
++	RingBuffer *ring;
++};
++
++#endif
+-- 
+2.16.4
 
