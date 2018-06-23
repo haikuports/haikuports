@@ -1,0 +1,390 @@
+From 3c509673672dfacba862e92ade239cbce93ec3d9 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Wed, 10 Sep 2014 16:24:50 +0000
+Subject: gcc2 patch
+
+
+diff --git a/src/tar.c b/src/tar.c
+index 3f844a8..551907a 100644
+--- a/src/tar.c
++++ b/src/tar.c
+@@ -548,11 +548,10 @@ static struct argp_option options[] = {
+    N_("cancel the effect of --delay-directory-restore option"), GRID+1 },
+   {"sort", SORT_OPTION, N_("ORDER"), 0,
+ #if D_INO_IN_DIRENT
+-   N_("directory sorting order: none (default), name or inode")
++   N_("directory sorting order: none (default), name or inode"), GRID+1 },
+ #else
+-   N_("directory sorting order: none (default) or name")
++   N_("directory sorting order: none (default) or name"), GRID+1 },
+ #endif
+-     , GRID+1 },
+ #undef GRID
+ 
+ #define GRID 55
+-- 
+2.2.2
+
+
+From 3269fb640f76f56b450231ae78576c855da9dda1 Mon Sep 17 00:00:00 2001
+From: fbrosson <fbrosson@localhost>
+Date: Sun, 5 Jun 2016 18:48:22 +0000
+Subject: Use __attribute__ only if gcc > 2.95
+
+
+diff --git a/lib/wordsplit.h b/lib/wordsplit.h
+index 575865b..7c787a7 100644
+--- a/lib/wordsplit.h
++++ b/lib/wordsplit.h
+@@ -40,9 +40,17 @@ struct wordsplit
+   const char *ws_escape;
+   void (*ws_alloc_die) (struct wordsplit * wsp);
+   void (*ws_error) (const char *, ...)
++#if 2 < __GNUC__ + (95 < __GNUC_MINOR__)
+     __WORDSPLIT_ATTRIBUTE_FORMAT ((__printf__, 1, 2));
++#else
++    ;
++#endif
+   void (*ws_debug) (const char *, ...)
++#if 2 < __GNUC__ + (95 < __GNUC_MINOR__)
+     __WORDSPLIT_ATTRIBUTE_FORMAT ((__printf__, 1, 2));
++#else
++    ;
++#endif
+ 
+   const char **ws_env;
+   const char *(*ws_getvar) (const char *, size_t, void *);
+-- 
+2.7.0
+
+
+From 67150aab60b3e8219fbd63a2234b229241083ec5 Mon Sep 17 00:00:00 2001
+From: fbrosson <fbrosson@localhost>
+Date: Fri, 22 Jun 2018 20:30:40 +0000
+Subject: C89 fixes for gcc2 compatibility
+
+
+diff --git a/gnu/backupfile.c b/gnu/backupfile.c
+index 22f54d3..45f07de 100644
+--- a/gnu/backupfile.c
++++ b/gnu/backupfile.c
+@@ -219,6 +219,7 @@ numbered_backup (char **buffer, size_t buffer_size, size_t filelen,
+       char *q;
+       bool all_9s;
+       size_t versionlen;
++      size_t new_buffer_size;
+ 
+       if (_D_EXACT_NAMLEN (dp) < baselen + 4)
+         continue;
+@@ -250,12 +251,13 @@ numbered_backup (char **buffer, size_t buffer_size, size_t filelen,
+ 
+       versionlenmax = all_9s + versionlen;
+       result = (all_9s ? BACKUP_IS_LONGER : BACKUP_IS_SAME_LENGTH);
+-      size_t new_buffer_size = filelen + 2 + versionlenmax + 2;
++      new_buffer_size = filelen + 2 + versionlenmax + 2;
+       if (buffer_size < new_buffer_size)
+         {
++          char *new_buf;
+           if (! xalloc_oversized (new_buffer_size, 2))
+             new_buffer_size *= 2;
+-          char *new_buf = realloc (buf, new_buffer_size);
++          new_buf = realloc (buf, new_buffer_size);
+           if (!new_buf)
+             {
+               *buffer = buf;
+@@ -293,26 +295,34 @@ backupfile_internal (char const *file, enum backup_type backup_type, bool rename
+ {
+   ptrdiff_t base_offset = last_component (file) - file;
+   size_t filelen = base_offset + strlen (file + base_offset);
++  size_t simple_backup_suffix_size;
++  size_t backup_suffix_size_guess;
++  enum { GUESS = sizeof ".~12345~" };
++  ssize_t ssize;
++  char *s;
++  DIR *dirp;
+ 
+   if (! simple_backup_suffix)
+     set_simple_backup_suffix (NULL);
+ 
+   /* Allow room for simple or ".~N~" backups.  The guess must be at
+      least sizeof ".~1~", but otherwise will be adjusted as needed.  */
+-  size_t simple_backup_suffix_size = strlen (simple_backup_suffix) + 1;
+-  size_t backup_suffix_size_guess = simple_backup_suffix_size;
+-  enum { GUESS = sizeof ".~12345~" };
++  simple_backup_suffix_size = strlen (simple_backup_suffix) + 1;
++  backup_suffix_size_guess = simple_backup_suffix_size;
+   if (backup_suffix_size_guess < GUESS)
+     backup_suffix_size_guess = GUESS;
+ 
+-  ssize_t ssize = filelen + backup_suffix_size_guess + 1;
+-  char *s = malloc (ssize);
++  ssize = filelen + backup_suffix_size_guess + 1;
++  s = malloc (ssize);
+   if (!s)
+     return s;
+ 
+-  DIR *dirp = NULL;
++  dirp = NULL;
+   while (true)
+     {
++      int sdir;
++      unsigned flags;
++      int e;
+       memcpy (s, file, filelen + 1);
+ 
+       if (backup_type == simple_backups)
+@@ -346,16 +356,16 @@ backupfile_internal (char const *file, enum backup_type backup_type, bool rename
+       if (! rename)
+         break;
+ 
+-      int sdir = dirp ? dirfd (dirp) : -1;
++      sdir = dirp ? dirfd (dirp) : -1;
+       if (sdir < 0)
+         {
+           sdir = AT_FDCWD;
+           base_offset = 0;
+         }
+-      unsigned flags = backup_type == simple_backups ? 0 : RENAME_NOREPLACE;
++      flags = backup_type == simple_backups ? 0 : RENAME_NOREPLACE;
+       if (renameat2 (AT_FDCWD, file, sdir, s + base_offset, flags) == 0)
+         break;
+-      int e = errno;
++      e = errno;
+       if (e != EEXIST)
+         {
+           if (dirp)
+diff --git a/gnu/parse-datetime.y b/gnu/parse-datetime.y
+index f8da02d..6c962ae 100644
+--- a/gnu/parse-datetime.y
++++ b/gnu/parse-datetime.y
+@@ -405,8 +405,9 @@ time_zone_str (int time_zone, char time_zone_buf[TIME_ZONE_BUFSIZE])
+   char *p = time_zone_buf;
+   char sign = time_zone < 0 ? '-' : '+';
+   int hour = abs (time_zone / (60 * 60));
++  int offset_from_hour;
+   p += sprintf (time_zone_buf, "%c%02d", sign, hour);
+-  int offset_from_hour = abs (time_zone % (60 * 60));
++  offset_from_hour = abs (time_zone % (60 * 60));
+   if (offset_from_hour != 0)
+     {
+       int mm = offset_from_hour / 60;
+@@ -477,9 +478,9 @@ debug_print_current_time (char const *item, parser_control *pc)
+ 
+   if (pc->days_seen && !pc->debug_days_seen)
+     {
++      char tmp[DBGBUFSIZE];
+       if (space)
+         fputc (' ', stderr);
+-      char tmp[DBGBUFSIZE];
+       fprintf (stderr, _("%s (day ordinal=%"PRIdMAX" number=%d)"),
+                str_days (pc, tmp, sizeof tmp),
+                pc->day_ordinal, pc->day_number);
+@@ -1414,6 +1415,7 @@ yylex (union YYSTYPE *lvalp, parser_control *pc)
+ 
+   for (;;)
+     {
++      ptrdiff_t count;
+       while (c = *pc->input, c_isspace (c))
+         pc->input++;
+ 
+@@ -1531,7 +1533,7 @@ yylex (union YYSTYPE *lvalp, parser_control *pc)
+       if (c != '(')
+         return to_uchar (*pc->input++);
+ 
+-      ptrdiff_t count = 0;
++      count = 0;
+       do
+         {
+           c = *pc->input++;
+@@ -1617,12 +1619,12 @@ debug_strfdatetime (struct tm const *tm, parser_control const *pc,
+   if (pc && m < n && pc->zones_seen)
+     {
+       int tz = pc->time_zone;
++      char time_zone_buf[TIME_ZONE_BUFSIZE];
+ 
+       /* Account for DST if tLOCAL_ZONE was seen.  */
+       if (pc->local_zones_seen && !pc->zones_seen && 0 < pc->local_isdst)
+         tz += 60 * 60;
+ 
+-      char time_zone_buf[TIME_ZONE_BUFSIZE];
+       snprintf (&buf[m], n - m, " TZ=%s", time_zone_str (tz, time_zone_buf));
+     }
+   return buf;
+@@ -1720,9 +1722,10 @@ parse_datetime (struct timespec *result, char const *p,
+ {
+   char const *tzstring = getenv ("TZ");
+   timezone_t tz = tzalloc (tzstring);
++  bool ok;
+   if (!tz)
+     return false;
+-  bool ok = parse_datetime2 (result, p, now, 0, tz, tzstring);
++  ok = parse_datetime2 (result, p, now, 0, tz, tzstring);
+   tzfree (tz);
+   return ok;
+ }
+@@ -1749,6 +1752,12 @@ parse_datetime2 (struct timespec *result, char const *p,
+      Use heap allocation if TZ's length exceeds this.  */
+   enum { TZBUFSIZE = 100 };
+   char tz1buf[TZBUFSIZE];
++  time_t Start;
++  int Start_ns;
++  unsigned char c;
++  timezone_t tz;
++  struct tm tmp;
++  parser_control pc;
+ 
+   struct timespec gettime_buffer;
+   if (! now)
+@@ -1757,14 +1766,13 @@ parse_datetime2 (struct timespec *result, char const *p,
+       now = &gettime_buffer;
+     }
+ 
+-  time_t Start = now->tv_sec;
+-  int Start_ns = now->tv_nsec;
++  Start = now->tv_sec;
++  Start_ns = now->tv_nsec;
+ 
+-  unsigned char c;
+   while (c = *p, c_isspace (c))
+     p++;
+ 
+-  timezone_t tz = tzdefault;
++  tz = tzdefault;
+ 
+   if (strncmp (p, "TZ=\"", 4) == 0)
+     {
+@@ -1809,7 +1817,6 @@ parse_datetime2 (struct timespec *result, char const *p,
+           }
+     }
+ 
+-  struct tm tmp;
+   if (! localtime_rz (tz, &now->tv_sec, &tmp))
+     goto fail;
+ 
+@@ -1819,7 +1826,6 @@ parse_datetime2 (struct timespec *result, char const *p,
+   if (*p == '\0')
+     p = "0";
+ 
+-  parser_control pc;
+   pc.input = p;
+   pc.parse_datetime_debug = (flags & PARSE_DATETIME_DEBUG) != 0;
+   if (INT_ADD_WRAPV (tmp.tm_year, TM_YEAR_BASE, &pc.year.value))
+@@ -1869,11 +1875,12 @@ parse_datetime2 (struct timespec *result, char const *p,
+     for (quarter = 1; quarter <= 3; quarter++)
+       {
+         intmax_t iprobe;
++        time_t probe;
++        struct tm probe_tm;
+         if (INT_ADD_WRAPV (Start, quarter * (90 * 24 * 60 * 60), &iprobe)
+             || time_overflow (iprobe))
+           break;
+-        time_t probe = iprobe;
+-        struct tm probe_tm;
++        probe = iprobe;
+         if (localtime_rz (tz, &probe, &probe_tm) && probe_tm.tm_zone
+             && probe_tm.tm_isdst != pc.local_time_zone_table[0].value)
+           {
+@@ -1970,6 +1977,8 @@ parse_datetime2 (struct timespec *result, char const *p,
+     *result = pc.seconds;
+   else
+     {
++      char dbg_ord[DBGBUFSIZE];
++
+       if (1 < (pc.times_seen | pc.dates_seen | pc.days_seen | pc.dsts_seen
+                | (pc.local_zones_seen + pc.zones_seen)))
+         {
+@@ -2061,9 +2070,10 @@ parse_datetime2 (struct timespec *result, char const *p,
+                  by setting TZ="XXX1:00" and try mktime again.  */
+ 
+               char tz2buf[sizeof "XXX" - 1 + TIME_ZONE_BUFSIZE];
++              timezone_t tz2;
+               tz2buf[0] = tz2buf[1] = tz2buf[2] = 'X';
+               time_zone_str (pc.time_zone, &tz2buf[3]);
+-              timezone_t tz2 = tzalloc (tz2buf);
++              tz2 = tzalloc (tz2buf);
+               if (!tz2)
+                 {
+                   if (pc.parse_datetime_debug)
+@@ -2089,8 +2099,6 @@ parse_datetime2 (struct timespec *result, char const *p,
+             }
+         }
+ 
+-      char dbg_ord[DBGBUFSIZE];
+-
+       if (pc.days_seen && ! pc.dates_seen)
+         {
+           intmax_t dayincr;
+@@ -2146,6 +2154,7 @@ parse_datetime2 (struct timespec *result, char const *p,
+       /* Add relative date.  */
+       if (pc.rel.year | pc.rel.month | pc.rel.day)
+         {
++          int year, month, day;
+           if (pc.parse_datetime_debug)
+             {
+               if ((pc.rel.year != 0 || pc.rel.month != 0) && tm.tm_mday != 15)
+@@ -2158,7 +2167,6 @@ parse_datetime2 (struct timespec *result, char const *p,
+                               "it is recommended to specify noon\n"));
+             }
+ 
+-          int year, month, day;
+           if (INT_ADD_WRAPV (tm.tm_year, pc.rel.year, &year)
+               || INT_ADD_WRAPV (tm.tm_mon, pc.rel.month, &month)
+               || INT_ADD_WRAPV (tm.tm_mday, pc.rel.day, &day))
+@@ -2229,9 +2237,9 @@ parse_datetime2 (struct timespec *result, char const *p,
+                   && (tm.tm_mday != day
+                       || (pc.rel.month == 0 && tm.tm_mon != month)))
+                 {
++                  char tm_year_buf[TM_YEAR_BUFSIZE];
+                   dbg_printf (_("warning: month/year adjustment resulted in "
+                                 "shifted dates:\n"));
+-                  char tm_year_buf[TM_YEAR_BUFSIZE];
+                   dbg_printf (_("     adjusted Y M D: %s %02d %02d\n"),
+                               tm_year_str (year, tm_year_buf), month + 1, day);
+                   dbg_printf (_("   normalized Y M D: %s %02d %02d\n"),
+@@ -2311,6 +2319,7 @@ parse_datetime2 (struct timespec *result, char const *p,
+         if (pc.parse_datetime_debug
+             && (pc.rel.hour | pc.rel.minutes | pc.rel.seconds | pc.rel.ns))
+           {
++            struct tm lmt;
+             dbg_printf (_("after time adjustment (%+"PRIdMAX" hours, "
+                           "%+"PRIdMAX" minutes, "
+                           "%+"PRIdMAX" seconds, %+d ns),\n"),
+@@ -2329,7 +2338,6 @@ parse_datetime2 (struct timespec *result, char const *p,
+                places.
+ 
+                'tm.tm_isdst' contains the date after date adjustment.  */
+-            struct tm lmt;
+             if (tm.tm_isdst != -1 && localtime_rz (tz, &result->tv_sec, &lmt)
+                 && tm.tm_isdst != lmt.tm_isdst)
+               dbg_printf (_("warning: daylight saving time changed after "
+@@ -2340,6 +2348,10 @@ parse_datetime2 (struct timespec *result, char const *p,
+ 
+   if (pc.parse_datetime_debug)
+     {
++      intmax_t sec;
++      int nsec;
++      struct tm gmt, lmt;
++      bool got_utc;
+       /* Special case: using 'date -u' simply set TZ=UTC0 */
+       if (! tzstring)
+         dbg_printf (_("timezone: system default\n"));
+@@ -2348,13 +2360,12 @@ parse_datetime2 (struct timespec *result, char const *p,
+       else
+         dbg_printf (_("timezone: TZ=\"%s\" environment value\n"), tzstring);
+ 
+-      intmax_t sec = result->tv_sec;
+-      int nsec = result->tv_nsec;
++      sec = result->tv_sec;
++      nsec = result->tv_nsec;
+       dbg_printf (_("final: %"PRIdMAX".%09d (epoch-seconds)\n"),
+                   sec, nsec);
+ 
+-      struct tm gmt, lmt;
+-      bool got_utc = !!gmtime_r (&result->tv_sec, &gmt);
++      got_utc = !!gmtime_r (&result->tv_sec, &gmt);
+       if (got_utc)
+         dbg_printf (_("final: %s (UTC)\n"),
+                     debug_strfdatetime (&gmt, NULL,
+-- 
+2.18.0
+
