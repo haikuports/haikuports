@@ -1,0 +1,765 @@
+From a0db0ad4ef54e89d61d55bd350326e3b2baf9776 Mon Sep 17 00:00:00 2001
+From: Niels Sascha Reedijk <niels.reedijk@gmail.com>
+Date: Wed, 20 Sep 2017 17:36:59 +0000
+Subject: [PATCH 1/9] Haiku: reduce stack memory to 16MB (max on Haiku)
+
+---
+ src/librustdoc/lib.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/librustdoc/lib.rs b/src/librustdoc/lib.rs
+index 059d416989..f628edbfab 100644
+--- a/src/librustdoc/lib.rs
++++ b/src/librustdoc/lib.rs
+@@ -102,7 +102,7 @@ struct Output {
+ }
+ 
+ pub fn main() {
+-    const STACK_SIZE: usize = 32_000_000; // 32MB
++    const STACK_SIZE: usize = 16_000_000; // 16MB on Haiku
+     rustc_driver::set_sigpipe_handler();
+     env_logger::init();
+     let res = std::thread::Builder::new().stack_size(STACK_SIZE).spawn(move || {
+-- 
+2.16.4
+
+
+From 02cd183d8c0679fa2cb9cc7da9fd259dae11c203 Mon Sep 17 00:00:00 2001
+From: Niels Sascha Reedijk <niels.reedijk@gmail.com>
+Date: Wed, 9 May 2018 17:31:41 +0000
+Subject: [PATCH 2/9] Haiku: there is no setpriority on this platform.
+
+---
+ src/bootstrap/lib.rs | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/bootstrap/lib.rs b/src/bootstrap/lib.rs
+index e53fef0678..ad71386ce6 100644
+--- a/src/bootstrap/lib.rs
++++ b/src/bootstrap/lib.rs
+@@ -177,7 +177,7 @@ mod toolstate;
+ #[cfg(windows)]
+ mod job;
+ 
+-#[cfg(unix)]
++#[cfg(all(unix, not(target_os = "haiku")))]
+ mod job {
+     use libc;
+ 
+@@ -188,7 +188,7 @@ mod job {
+     }
+ }
+ 
+-#[cfg(not(any(unix, windows)))]
++#[cfg(any(target_os = "haiku", not(any(unix, windows))))]
+ mod job {
+     pub unsafe fn setup(_build: &mut ::Build) {
+     }
+-- 
+2.16.4
+
+
+From 9bb7ba3ff02e7d081f51e828daad071cb7ea9b2b Mon Sep 17 00:00:00 2001
+From: Niels Sascha Reedijk <niels.reedijk@gmail.com>
+Date: Thu, 7 Jun 2018 21:13:17 +0200
+Subject: [PATCH 3/9] Haiku: Revert "std: Handle OS errors when joining
+ threads"
+
+This reverts commit dc7c7ba0c9f401f5597a245e05ee9e8d760715d3.
+
+There is an issue with threading in cargo, where thread::join fails after completing a build. This prevents building Rust on Haiku (as the build system kills itself after failure).
+
+The problem is documented at rust-on-haiku.com issue #10
+---
+ src/libstd/sys/unix/thread.rs    | 3 +--
+ src/libstd/sys/windows/c.rs      | 1 -
+ src/libstd/sys/windows/thread.rs | 6 +-----
+ src/libstd/thread/mod.rs         | 5 -----
+ 4 files changed, 2 insertions(+), 13 deletions(-)
+
+diff --git a/src/libstd/sys/unix/thread.rs b/src/libstd/sys/unix/thread.rs
+index 9e38880803..5f2bbf7dc1 100644
+--- a/src/libstd/sys/unix/thread.rs
++++ b/src/libstd/sys/unix/thread.rs
+@@ -175,8 +175,7 @@ impl Thread {
+         unsafe {
+             let ret = libc::pthread_join(self.id, ptr::null_mut());
+             mem::forget(self);
+-            assert!(ret == 0,
+-                    "failed to join thread: {}", io::Error::from_raw_os_error(ret));
++            debug_assert_eq!(ret, 0);
+         }
+     }
+ 
+diff --git a/src/libstd/sys/windows/c.rs b/src/libstd/sys/windows/c.rs
+index 6d929f2136..8a6cba2968 100644
+--- a/src/libstd/sys/windows/c.rs
++++ b/src/libstd/sys/windows/c.rs
+@@ -269,7 +269,6 @@ pub const FILE_END: DWORD = 2;
+ 
+ pub const WAIT_OBJECT_0: DWORD = 0x00000000;
+ pub const WAIT_TIMEOUT: DWORD = 258;
+-pub const WAIT_FAILED: DWORD = 0xFFFFFFFF;
+ 
+ #[cfg(target_env = "msvc")]
+ #[cfg(feature = "backtrace")]
+diff --git a/src/libstd/sys/windows/thread.rs b/src/libstd/sys/windows/thread.rs
+index b6f63303dc..2826975f60 100644
+--- a/src/libstd/sys/windows/thread.rs
++++ b/src/libstd/sys/windows/thread.rs
+@@ -66,11 +66,7 @@ impl Thread {
+     }
+ 
+     pub fn join(self) {
+-        let rc = unsafe { c::WaitForSingleObject(self.handle.raw(), c::INFINITE) };
+-        if rc == c::WAIT_FAILED {
+-            panic!("failed to join on thread: {}",
+-                   io::Error::last_os_error());
+-        }
++        unsafe { c::WaitForSingleObject(self.handle.raw(), c::INFINITE); }
+     }
+ 
+     pub fn yield_now() {
+diff --git a/src/libstd/thread/mod.rs b/src/libstd/thread/mod.rs
+index 1b976b79b4..63c487d0e4 100644
+--- a/src/libstd/thread/mod.rs
++++ b/src/libstd/thread/mod.rs
+@@ -1303,11 +1303,6 @@ impl<T> JoinHandle<T> {
+     /// [`Err`]: ../../std/result/enum.Result.html#variant.Err
+     /// [`panic`]: ../../std/macro.panic.html
+     ///
+-    /// # Panics
+-    ///
+-    /// This function may panic on some platforms if a thread attempts to join
+-    /// itself or otherwise may create a deadlock with joining threads.
+-    ///
+     /// # Examples
+     ///
+     /// ```
+-- 
+2.16.4
+
+
+From 710ece3e310bc486a4f87b4fc6e7ed8b560c0252 Mon Sep 17 00:00:00 2001
+From: Niels Sascha Reedijk <niels.reedijk@gmail.com>
+Date: Sat, 9 Jun 2018 14:08:45 +0000
+Subject: [PATCH 4/9] Haiku: make it explicit that Haiku uses position
+ independent executables on x86_64
+
+With the switch to gcc 7 the linker scripts don't always explicitly
+add the `-pie` flag anymore. This creates build failures on x86_64.
+Interestingly enough, adding this flag on i686 will lead to executables
+that fail to run when ASLR is enabled, so let's keep it x86_64 only.
+---
+ src/librustc_target/spec/x86_64_unknown_haiku.rs | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/librustc_target/spec/x86_64_unknown_haiku.rs b/src/librustc_target/spec/x86_64_unknown_haiku.rs
+index 1e78461861..c910fd8d40 100644
+--- a/src/librustc_target/spec/x86_64_unknown_haiku.rs
++++ b/src/librustc_target/spec/x86_64_unknown_haiku.rs
+@@ -16,6 +16,8 @@ pub fn target() -> TargetResult {
+     base.max_atomic_width = Some(64);
+     base.pre_link_args.insert(LinkerFlavor::Gcc, vec!["-m64".to_string()]);
+     base.stack_probes = true;
++    // This option is required to build executables on Haiku x86_64
++    base.position_independent_executables = true; 
+ 
+     Ok(Target {
+         llvm_target: "x86_64-unknown-haiku".to_string(),
+-- 
+2.16.4
+
+
+From d743f18f4b29f28f937bc2a168b4b282306e5e4b Mon Sep 17 00:00:00 2001
+From: Niels Sascha Reedijk <niels.reedijk@gmail.com>
+Date: Fri, 22 Jun 2018 19:10:04 +0000
+Subject: [PATCH 5/9] Haiku: move to libc 0.2.41, which contains proper
+ definitions for RTLD_LAZY and RTLD_GLOBAL
+
+---
+ src/Cargo.lock | 88 +++++++++++++++++++++++++++++-----------------------------
+ src/liblibc    |  2 +-
+ 2 files changed, 45 insertions(+), 45 deletions(-)
+
+diff --git a/src/Cargo.lock b/src/Cargo.lock
+index ea2d146ff6..a1caa4439d 100644
+--- a/src/Cargo.lock
++++ b/src/Cargo.lock
+@@ -95,7 +95,7 @@ name = "atty"
+ version = "0.2.8"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "termion 1.5.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "winapi 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+@@ -107,7 +107,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "backtrace-sys 0.1.16 (registry+https://github.com/rust-lang/crates.io-index)",
+  "cfg-if 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "rustc-demangle 0.1.7 (registry+https://github.com/rust-lang/crates.io-index)",
+  "winapi 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+@@ -118,7 +118,7 @@ version = "0.1.16"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "cc 1.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+ [[package]]
+@@ -150,7 +150,7 @@ dependencies = [
+  "filetime 0.1.15 (registry+https://github.com/rust-lang/crates.io-index)",
+  "getopts 0.2.17 (registry+https://github.com/rust-lang/crates.io-index)",
+  "lazy_static 0.2.11 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "num_cpus 1.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+  "petgraph 0.4.12 (registry+https://github.com/rust-lang/crates.io-index)",
+  "pretty_assertions 0.5.1 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -219,7 +219,7 @@ dependencies = [
+  "jobserver 0.1.11 (registry+https://github.com/rust-lang/crates.io-index)",
+  "lazy_static 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+  "lazycell 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "libgit2-sys 0.7.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "log 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "miow 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -392,7 +392,7 @@ name = "commoncrypto-sys"
+ version = "0.2.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+ [[package]]
+@@ -412,7 +412,7 @@ dependencies = [
+  "filetime 0.1.15 (registry+https://github.com/rust-lang/crates.io-index)",
+  "getopts 0.2.17 (registry+https://github.com/rust-lang/crates.io-index)",
+  "lazy_static 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "log 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "miow 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "regex 0.2.10 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -431,7 +431,7 @@ dependencies = [
+  "diff 0.1.11 (registry+https://github.com/rust-lang/crates.io-index)",
+  "filetime 0.1.15 (registry+https://github.com/rust-lang/crates.io-index)",
+  "getopts 0.2.17 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "log 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "miow 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "serde 1.0.40 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -458,7 +458,7 @@ version = "0.5.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "core-foundation-sys 0.5.1 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+ [[package]]
+@@ -466,7 +466,7 @@ name = "core-foundation-sys"
+ version = "0.5.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+ [[package]]
+@@ -535,7 +535,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "curl-sys 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
+  "kernel32-sys 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "openssl-probe 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+  "openssl-sys 0.9.28 (registry+https://github.com/rust-lang/crates.io-index)",
+  "schannel 0.1.12 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -549,7 +549,7 @@ version = "0.4.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "cc 1.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "libz-sys 1.0.18 (registry+https://github.com/rust-lang/crates.io-index)",
+  "openssl-sys 0.9.28 (registry+https://github.com/rust-lang/crates.io-index)",
+  "pkg-config 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -708,7 +708,7 @@ version = "0.1.15"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "cfg-if 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "redox_syscall 0.1.37 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+@@ -718,7 +718,7 @@ version = "0.2.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "cfg-if 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "redox_syscall 0.1.37 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+@@ -740,7 +740,7 @@ name = "flate2"
+ version = "1.0.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "miniz-sys 0.1.10 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+@@ -771,7 +771,7 @@ name = "fs2"
+ version = "0.4.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "winapi 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+@@ -814,7 +814,7 @@ version = "0.7.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "bitflags 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "libgit2-sys 0.7.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "log 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "openssl-probe 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -986,7 +986,7 @@ name = "jobserver"
+ version = "0.1.11"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "log 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "rand 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+@@ -1056,7 +1056,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "libc"
+-version = "0.2.40"
++version = "0.2.41"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ 
+ [[package]]
+@@ -1067,7 +1067,7 @@ dependencies = [
+  "cc 1.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
+  "cmake 0.1.30 (registry+https://github.com/rust-lang/crates.io-index)",
+  "curl-sys 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "libssh2-sys 0.2.6 (registry+https://github.com/rust-lang/crates.io-index)",
+  "libz-sys 1.0.18 (registry+https://github.com/rust-lang/crates.io-index)",
+  "openssl-sys 0.9.28 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -1080,7 +1080,7 @@ version = "0.2.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "cmake 0.1.30 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "libz-sys 1.0.18 (registry+https://github.com/rust-lang/crates.io-index)",
+  "openssl-sys 0.9.28 (registry+https://github.com/rust-lang/crates.io-index)",
+  "pkg-config 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -1092,7 +1092,7 @@ version = "1.0.18"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "cc 1.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "pkg-config 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
+  "vcpkg 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+@@ -1132,7 +1132,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "cc 1.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
+  "filetime 0.1.15 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "pkg-config 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+@@ -1199,7 +1199,7 @@ name = "memchr"
+ version = "2.0.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+ [[package]]
+@@ -1213,7 +1213,7 @@ version = "0.1.10"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "cc 1.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+ [[package]]
+@@ -1278,7 +1278,7 @@ name = "num_cpus"
+ version = "1.8.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+ [[package]]
+@@ -1294,7 +1294,7 @@ dependencies = [
+  "bitflags 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "foreign-types 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)",
+  "lazy_static 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "openssl-sys 0.9.28 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+@@ -1309,7 +1309,7 @@ version = "0.9.28"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "cc 1.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "pkg-config 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
+  "vcpkg 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+@@ -1361,7 +1361,7 @@ name = "parking_lot_core"
+ version = "0.2.14"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "rand 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
+  "smallvec 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+  "winapi 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -1553,7 +1553,7 @@ version = "0.3.22"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "fuchsia-zircon 0.3.3 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "rand 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+@@ -1563,7 +1563,7 @@ version = "0.4.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "fuchsia-zircon 0.3.3 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "winapi 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+@@ -1583,7 +1583,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "crossbeam-deque 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+  "lazy_static 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "num_cpus 1.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+  "rand 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+@@ -2009,7 +2009,7 @@ dependencies = [
+  "bitflags 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "build_helper 0.1.0",
+  "cc 1.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "rustc_cratesio_shim 0.0.0",
+ ]
+ 
+@@ -2174,7 +2174,7 @@ dependencies = [
+  "env_logger 0.5.8 (registry+https://github.com/rust-lang/crates.io-index)",
+  "flate2 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "jobserver 0.1.11 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "log 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "num_cpus 1.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+  "rustc 0.0.0",
+@@ -2282,7 +2282,7 @@ dependencies = [
+  "getopts 0.2.17 (registry+https://github.com/rust-lang/crates.io-index)",
+  "itertools 0.7.8 (registry+https://github.com/rust-lang/crates.io-index)",
+  "lazy_static 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "log 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "regex 0.2.10 (registry+https://github.com/rust-lang/crates.io-index)",
+  "rustc-ap-rustc_target 121.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -2444,7 +2444,7 @@ version = "0.3.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "cfg-if 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "winapi 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+@@ -2622,7 +2622,7 @@ name = "syntex_errors"
+ version = "0.52.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "log 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
+  "rustc-serialize 0.3.24 (registry+https://github.com/rust-lang/crates.io-index)",
+  "syntex_pos 0.52.0 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -2644,7 +2644,7 @@ version = "0.52.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "bitflags 0.7.0 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "log 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
+  "rustc-serialize 0.3.24 (registry+https://github.com/rust-lang/crates.io-index)",
+  "syntex_errors 0.52.0 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -2659,7 +2659,7 @@ version = "0.4.15"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "filetime 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "redox_syscall 0.1.37 (registry+https://github.com/rust-lang/crates.io-index)",
+  "xattr 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+@@ -2678,7 +2678,7 @@ name = "tempfile"
+ version = "3.0.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "rand 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
+  "redox_syscall 0.1.37 (registry+https://github.com/rust-lang/crates.io-index)",
+  "remove_dir_all 0.5.1 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -2730,7 +2730,7 @@ name = "termion"
+ version = "1.5.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "redox_syscall 0.1.37 (registry+https://github.com/rust-lang/crates.io-index)",
+  "redox_termios 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+@@ -2774,7 +2774,7 @@ name = "time"
+ version = "0.1.39"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "redox_syscall 0.1.37 (registry+https://github.com/rust-lang/crates.io-index)",
+  "winapi 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+@@ -3001,7 +3001,7 @@ name = "xattr"
+ version = "0.2.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+ [[package]]
+@@ -3106,7 +3106,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ "checksum lazy_static 0.2.11 (registry+https://github.com/rust-lang/crates.io-index)" = "76f033c7ad61445c5b347c7382dd1237847eb1bce590fe50365dcb33d546be73"
+ "checksum lazy_static 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)" = "c8f31047daa365f19be14b47c29df4f7c3b581832407daabe6ae77397619237d"
+ "checksum lazycell 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)" = "a6f08839bc70ef4a3fe1d566d5350f519c5912ea86be0df1740a7d247c7fc0ef"
+-"checksum libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)" = "6fd41f331ac7c5b8ac259b8bf82c75c0fb2e469bbf37d2becbba9a6a2221965b"
++"checksum libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)" = "ac8ebf8343a981e2fa97042b14768f02ed3e1d602eac06cae6166df3c8ced206"
+ "checksum libgit2-sys 0.7.1 (registry+https://github.com/rust-lang/crates.io-index)" = "1ecbd6428006c321c29b6c8a895f0d90152f1cf4fd8faab69fc436a3d9594f63"
+ "checksum libssh2-sys 0.2.6 (registry+https://github.com/rust-lang/crates.io-index)" = "0db4ec23611747ef772db1c4d650f8bd762f07b461727ec998f953c614024b75"
+ "checksum libz-sys 1.0.18 (registry+https://github.com/rust-lang/crates.io-index)" = "87f737ad6cc6fd6eefe3d9dc5412f1573865bded441300904d2f42269e140f16"
+-- 
+2.16.4
+
+
+From d20be1ca798d39a01e82e9373dfa79c4da946e26 Mon Sep 17 00:00:00 2001
+From: Niels Sascha Reedijk <niels.reedijk@gmail.com>
+Date: Fri, 22 Jun 2018 19:18:59 +0000
+Subject: [PATCH 7/9] Haiku: use a fixed version of backtrace for Haiku
+
+---
+ src/Cargo.lock | 16 ++++++++--------
+ src/Cargo.toml |  1 +
+ 2 files changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/src/Cargo.lock b/src/Cargo.lock
+index a1caa4439d..bef3e0702a 100644
+--- a/src/Cargo.lock
++++ b/src/Cargo.lock
+@@ -103,9 +103,9 @@ dependencies = [
+ [[package]]
+ name = "backtrace"
+ version = "0.3.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
++source = "git+https://github.com/nielx/backtrace-rs?branch=haiku-0.3.6#663beca1e8a476209b478fc28c776d2e633c001e"
+ dependencies = [
+- "backtrace-sys 0.1.16 (registry+https://github.com/rust-lang/crates.io-index)",
++ "backtrace-sys 0.1.16 (git+https://github.com/nielx/backtrace-rs?branch=haiku-0.3.6)",
+  "cfg-if 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+  "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+  "rustc-demangle 0.1.7 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -115,7 +115,7 @@ dependencies = [
+ [[package]]
+ name = "backtrace-sys"
+ version = "0.1.16"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
++source = "git+https://github.com/nielx/backtrace-rs?branch=haiku-0.3.6#663beca1e8a476209b478fc28c776d2e633c001e"
+ dependencies = [
+  "cc 1.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
+  "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -669,7 +669,7 @@ name = "error-chain"
+ version = "0.11.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "backtrace 0.3.6 (registry+https://github.com/rust-lang/crates.io-index)",
++ "backtrace 0.3.6 (git+https://github.com/nielx/backtrace-rs?branch=haiku-0.3.6)",
+ ]
+ 
+ [[package]]
+@@ -684,7 +684,7 @@ name = "failure"
+ version = "0.1.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "backtrace 0.3.6 (registry+https://github.com/rust-lang/crates.io-index)",
++ "backtrace 0.3.6 (git+https://github.com/nielx/backtrace-rs?branch=haiku-0.3.6)",
+  "failure_derive 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+@@ -1741,7 +1741,7 @@ name = "rustc"
+ version = "0.0.0"
+ dependencies = [
+  "arena 0.0.0",
+- "backtrace 0.3.6 (registry+https://github.com/rust-lang/crates.io-index)",
++ "backtrace 0.3.6 (git+https://github.com/nielx/backtrace-rs?branch=haiku-0.3.6)",
+  "bitflags 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "byteorder 1.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
+  "flate2 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -3025,8 +3025,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ "checksum arrayvec 0.4.7 (registry+https://github.com/rust-lang/crates.io-index)" = "a1e964f9e24d588183fcb43503abda40d288c8657dfc27311516ce2f05675aef"
+ "checksum assert_cli 0.5.4 (registry+https://github.com/rust-lang/crates.io-index)" = "72342c21057a3cb5f7c2d849bf7999a83795434dd36d74fa8c24680581bd1930"
+ "checksum atty 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)" = "af80143d6f7608d746df1520709e5d141c96f240b0e62b0aa41bdfb53374d9d4"
+-"checksum backtrace 0.3.6 (registry+https://github.com/rust-lang/crates.io-index)" = "ebbe525f66f42d207968308ee86bc2dd60aa5fab535b22e616323a173d097d8e"
+-"checksum backtrace-sys 0.1.16 (registry+https://github.com/rust-lang/crates.io-index)" = "44585761d6161b0f57afc49482ab6bd067e4edef48c12a152c237eb0203f7661"
++"checksum backtrace 0.3.6 (git+https://github.com/nielx/backtrace-rs?branch=haiku-0.3.6)" = "<none>"
++"checksum backtrace-sys 0.1.16 (git+https://github.com/nielx/backtrace-rs?branch=haiku-0.3.6)" = "<none>"
+ "checksum bitflags 0.7.0 (registry+https://github.com/rust-lang/crates.io-index)" = "aad18937a628ec6abcd26d1489012cc0e18c21798210f491af69ded9b881106d"
+ "checksum bitflags 0.9.1 (registry+https://github.com/rust-lang/crates.io-index)" = "4efd02e230a02e18f92fc2735f44597385ed02ad8f831e7c1c1156ee5e1ab3a5"
+ "checksum bitflags 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)" = "b3c30d3802dfb7281680d6285f2ccdaa8c2d8fee41f93805dba5c4cf50dc23cf"
+diff --git a/src/Cargo.toml b/src/Cargo.toml
+index 35858ee286..e3fdaf106d 100644
+--- a/src/Cargo.toml
++++ b/src/Cargo.toml
+@@ -65,3 +65,4 @@ cargo = { path = "tools/cargo" }
+ # for crates.io
+ rustfmt-nightly = { path = "tools/rustfmt" }
+ clippy_lints = { path = "tools/clippy/clippy_lints" }
++backtrace = { git = "https://github.com/nielx/backtrace-rs", branch = "haiku-0.3.6" }
+-- 
+2.16.4
+
+
+From ccb8daca4d4dbdc0f575e42d4bb13ee5f6f99527 Mon Sep 17 00:00:00 2001
+From: Niels Sascha Reedijk <niels.reedijk@gmail.com>
+Date: Fri, 22 Jun 2018 20:11:40 +0000
+Subject: [PATCH 8/9] Haiku: hotfix for socket2 for missing constants in libc
+
+---
+ src/Cargo.lock | 8 ++++----
+ src/Cargo.toml | 1 +
+ 2 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/src/Cargo.lock b/src/Cargo.lock
+index bef3e0702a..25713ea807 100644
+--- a/src/Cargo.lock
++++ b/src/Cargo.lock
+@@ -539,7 +539,7 @@ dependencies = [
+  "openssl-probe 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+  "openssl-sys 0.9.28 (registry+https://github.com/rust-lang/crates.io-index)",
+  "schannel 0.1.12 (registry+https://github.com/rust-lang/crates.io-index)",
+- "socket2 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
++ "socket2 0.3.5 (git+https://github.com/nielx/socket2-rs?branch=haiku-0.3.5)",
+  "winapi 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+@@ -1221,7 +1221,7 @@ name = "miow"
+ version = "0.3.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "socket2 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
++ "socket2 0.3.5 (git+https://github.com/nielx/socket2-rs?branch=haiku-0.3.5)",
+  "winapi 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+@@ -2441,7 +2441,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ [[package]]
+ name = "socket2"
+ version = "0.3.5"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
++source = "git+https://github.com/nielx/socket2-rs?branch=haiku-0.3.5#78a6592b5732bfdfefc2fd6a04846083b1671636"
+ dependencies = [
+  "cfg-if 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+  "libc 0.2.41 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -3201,7 +3201,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ "checksum siphasher 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)" = "0df90a788073e8d0235a67e50441d47db7c8ad9debd91cbf43736a2a92d36537"
+ "checksum skeptic 0.13.2 (registry+https://github.com/rust-lang/crates.io-index)" = "c8431f8fca168e2db4be547bd8329eac70d095dff1444fee4b0fa0fabc7df75a"
+ "checksum smallvec 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)" = "44db0ecb22921ef790d17ae13a3f6d15784183ff5f2a01aa32098c7498d2b4b9"
+-"checksum socket2 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)" = "ff606e0486e88f5fc6cfeb3966e434fb409abbc7a3ab495238f70a1ca97f789d"
++"checksum socket2 0.3.5 (git+https://github.com/nielx/socket2-rs?branch=haiku-0.3.5)" = "<none>"
+ "checksum stable_deref_trait 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)" = "15132e0e364248108c5e2c02e3ab539be8d6f5d52a01ca9bbf27ed657316f02b"
+ "checksum string_cache 0.7.1 (registry+https://github.com/rust-lang/crates.io-index)" = "39cb4173bcbd1319da31faa5468a7e3870683d7a237150b0b0aaafd546f6ad12"
+ "checksum string_cache_codegen 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)" = "479cde50c3539481f33906a387f2bd17c8e87cb848c35b6021d41fb81ff9b4d7"
+diff --git a/src/Cargo.toml b/src/Cargo.toml
+index e3fdaf106d..a1e6b280db 100644
+--- a/src/Cargo.toml
++++ b/src/Cargo.toml
+@@ -66,3 +66,4 @@ cargo = { path = "tools/cargo" }
+ rustfmt-nightly = { path = "tools/rustfmt" }
+ clippy_lints = { path = "tools/clippy/clippy_lints" }
+ backtrace = { git = "https://github.com/nielx/backtrace-rs", branch = "haiku-0.3.6" }
++socket2 = { git = "https://github.com/nielx/socket2-rs", branch = "haiku-0.3.5" }
+-- 
+2.16.4
+
+
+From edd2d028bb1d8624cff2739397027ac8d9eb2e42 Mon Sep 17 00:00:00 2001
+From: Niels Sascha Reedijk <niels.reedijk@gmail.com>
+Date: Mon, 2 Jul 2018 21:12:34 +0200
+Subject: [PATCH 9/9] The stack size is also okay if the current limit matches
+ the maximum
+
+NOTE: this is actually an incorrect patch, but it works on Haiku because
+it gets the proper response. This patch will be improved in the mainline.
+---
+ src/librustc_driver/lib.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/librustc_driver/lib.rs b/src/librustc_driver/lib.rs
+index a1052ca6c3..2edee1d011 100644
+--- a/src/librustc_driver/lib.rs
++++ b/src/librustc_driver/lib.rs
+@@ -1489,7 +1489,7 @@ pub fn in_rustc_thread<F, R>(f: F) -> Result<R, Box<Any + Send>>
+             let err = io::Error::last_os_error();
+             error!("in_rustc_thread: error calling getrlimit: {}", err);
+             true
+-        } else if rlim.rlim_max < STACK_SIZE as libc::rlim_t {
++        } else if rlim.rlim_max <= STACK_SIZE as libc::rlim_t {
+             true
+         } else {
+             std::rt::deinit_stack_guard();
+-- 
+2.16.4
+
