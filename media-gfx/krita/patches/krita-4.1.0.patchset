@@ -1,0 +1,198 @@
+From 8e1f56e954955e22cb1e98f3ec02be844646d1d6 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 29 Jun 2018 21:43:43 +1000
+Subject: Fix haiku build
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 31b6a55..e81f2d0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -327,7 +327,7 @@ set_package_properties(Qt5QuickWidgets PROPERTIES
+         PURPOSE "Optionally used for the touch gui for Krita")
+ endif()
+ 
+-if (NOT WIN32 AND NOT APPLE)
++if (NOT WIN32 AND NOT APPLE AND NOT HAIKU)
+ 
+     find_package(Qt5 ${MIN_QT_VERSION} REQUIRED X11Extras)
+ 
+diff --git a/krita/main.cc b/krita/main.cc
+index 7add3ee..413aa4d 100644
+--- a/krita/main.cc
++++ b/krita/main.cc
+@@ -203,7 +203,7 @@ extern "C" int main(int argc, char **argv)
+     }
+ 
+ 
+-#ifdef Q_OS_LINUX
++#if defined(Q_OS_LINUX)
+     {
+         QByteArray originalXdgDataDirs = qgetenv("XDG_DATA_DIRS");
+         if (originalXdgDataDirs.isEmpty()) {
+@@ -212,6 +212,9 @@ extern "C" int main(int argc, char **argv)
+         }
+         qputenv("XDG_DATA_DIRS", QFile::encodeName(root + "share") + ":" + originalXdgDataDirs);
+     }
++#elif defined(Q_OS_HAIKU)
++	qputenv("KRITA_PLUGIN_PATH", QFile::encodeName(root + "lib"));
++    qputenv("XDG_DATA_DIRS", QFile::encodeName(root + "share") + ":" + qgetenv("XDG_DATA_DIRS"));
+ #else
+     qputenv("XDG_DATA_DIRS", QFile::encodeName(root + "share"));
+ #endif
+diff --git a/libs/image/kis_image_config.cpp b/libs/image/kis_image_config.cpp
+index 014aef5..a705e5f 100644
+--- a/libs/image/kis_image_config.cpp
++++ b/libs/image/kis_image_config.cpp
+@@ -359,6 +359,8 @@ void KisImageConfig::setLazyFrameCreationEnabled(bool value)
+ #elif defined Q_OS_OSX
+ #include <sys/types.h>
+ #include <sys/sysctl.h>
++#elif defined Q_OS_HAIKU
++#include <OS.h>
+ #endif
+ 
+ #include <kis_debug.h>
+@@ -389,6 +391,13 @@ int KisImageConfig::totalRAM()
+     if(!error) {
+         totalMemory = physmem >> 20;
+     }
++#elif defined Q_OS_HAIKU
++	system_info info;
++	error = get_system_info(&info) == B_OK?0:1;
++	if (!error) {
++		uint64_t size = (info.max_pages * B_PAGE_SIZE);
++    	totalMemory = size >> 20;
++	}
+ #elif defined Q_OS_WIN
+     MEMORYSTATUSEX status;
+     status.dwLength = sizeof(status);
+diff --git a/libs/ui/CMakeLists.txt b/libs/ui/CMakeLists.txt
+index fe7af22..7a6fe44 100644
+--- a/libs/ui/CMakeLists.txt
++++ b/libs/ui/CMakeLists.txt
+@@ -430,7 +430,7 @@ if(UNIX)
+         input/wintab/kis_tablet_support.cpp
+         qtlockedfile/qtlockedfile_unix.cpp
+         )
+-    if(NOT APPLE)
++    if(NOT APPLE AND NOT HAIKU)
+         set(kritaui_LIB_SRCS
+             ${kritaui_LIB_SRCS}
+             input/wintab/qxcbconnection_xi2.cpp
+@@ -543,7 +543,7 @@ if (HAVE_KIO)
+     target_link_libraries(kritaui KF5::KIOCore)
+ endif() 
+ 
+-if (NOT WIN32 AND NOT APPLE)
++if (NOT WIN32 AND NOT APPLE AND NOT HAIKU)
+   target_link_libraries(kritaui ${X11_X11_LIB}
+                                 ${X11_Xinput_LIB}
+                                 ${XCB_LIBRARIES})
+@@ -554,11 +554,17 @@ if(APPLE)
+     target_link_libraries(kritaui ${APPKIT_LIBRARY})
+ endif ()
+ 
++if(HAIKU)
++    target_link_libraries(kritaui network)
++    target_link_libraries(kritaui expat)
++    target_link_libraries(kritaui iconv)
++    target_link_libraries(kritaui intl)
++endif ()
+ 
+ target_link_libraries(kritaui ${OPENEXR_LIBRARIES})
+ 
+ # Add VSync disable workaround
+-if(NOT WIN32 AND NOT APPLE)
++if(NOT WIN32 AND NOT APPLE NOT HAIKU)
+     target_link_libraries(kritaui ${CMAKE_DL_LIBS} Qt5::X11Extras)
+ endif()
+ 
+diff --git a/libs/ui/widgets/kis_floating_message.cpp b/libs/ui/widgets/kis_floating_message.cpp
+index be98d8b..8c94a5a 100644
+--- a/libs/ui/widgets/kis_floating_message.cpp
++++ b/libs/ui/widgets/kis_floating_message.cpp
+@@ -129,6 +129,7 @@ KisFloatingMessage::KisFloatingMessage(const QString &message, QWidget *parent,
+     , m_priority(priority)
+     , m_alignment(alignment)
+ {
++#ifndef Q_OS_HAIKU
+     m_icon = KisIconUtils::loadIcon("calligrakrita").pixmap(256, 256).toImage();
+ 
+     setWindowFlags(Qt::FramelessWindowHint | Qt::ToolTip);
+@@ -139,6 +140,7 @@ KisFloatingMessage::KisFloatingMessage(const QString &message, QWidget *parent,
+ 
+     m_timer.setSingleShot( true );
+     connect(&m_timer, SIGNAL(timeout()), SLOT(startFade()));
++#endif
+ }
+ 
+ void KisFloatingMessage::tryOverrideMessage(const QString message,
+@@ -160,12 +162,13 @@ void KisFloatingMessage::tryOverrideMessage(const QString message,
+ 
+ void KisFloatingMessage::showMessage()
+ {
+-
++#ifndef Q_OS_HAIKU
+     setGeometry(determineMetrics(fontMetrics().width('x')));
+     setWindowOpacity(OSD_WINDOW_OPACITY);
+ 
+     QWidget::setVisible(true);
+     m_timer.start(m_timeout);
++#endif
+ }
+ 
+ void KisFloatingMessage::setShowOverParent(bool show)
+diff --git a/libs/widgetutils/KoResourcePaths.cpp b/libs/widgetutils/KoResourcePaths.cpp
+index 1ea1d30..8aff647 100644
+--- a/libs/widgetutils/KoResourcePaths.cpp
++++ b/libs/widgetutils/KoResourcePaths.cpp
+@@ -115,7 +115,7 @@ QString getInstallationPrefix() {
+      debugWidgetUtils << ">>>>>>>>>>>" << bundlePath;
+      return bundlePath;
+ #else
+-    #ifdef Q_OS_QWIN
++    #if defined(Q_OS_QWIN)
+         QDir appdir(qApp->applicationDirPath());
+ 
+         // Corrects for mismatched case errors in path (qtdeclarative fails to load)
+@@ -127,6 +127,8 @@ QString getInstallationPrefix() {
+         appdir.setPath(correctedPath);
+         appdir.cdUp();
+         return appdir.canonicalPath();
++    #elif defined(Q_OS_HAIKU)
++		return qApp->applicationDirPath() + "/";
+     #else
+         return qApp->applicationDirPath() + "/../";
+     #endif
+diff --git a/libs/widgetutils/kis_icon_utils.cpp b/libs/widgetutils/kis_icon_utils.cpp
+index 408174f..7be9ee8 100644
+--- a/libs/widgetutils/kis_icon_utils.cpp
++++ b/libs/widgetutils/kis_icon_utils.cpp
+@@ -29,8 +29,10 @@
+ 
+ #include <KoIcon.h>
+ #if QT_VERSION >= 0x050900
++#if !defined(Q_OS_HAIKU)
+ #define CACHE_ICONS
+ #endif
++#endif
+ 
+ namespace KisIconUtils
+ {
+diff --git a/plugins/dockers/CMakeLists.txt b/plugins/dockers/CMakeLists.txt
+index 9429916..b090ab1 100644
+--- a/plugins/dockers/CMakeLists.txt
++++ b/plugins/dockers/CMakeLists.txt
+@@ -12,7 +12,7 @@ add_subdirectory(compositiondocker)
+ add_subdirectory(patterndocker)
+ add_subdirectory(griddocker)
+ add_subdirectory(arrangedocker)
+-if(HAVE_OCIO)
++if(HAVE_OCIO AND NOT HAIKU)
+     add_subdirectory(lut)
+ endif()
+ add_subdirectory(overview)
+-- 
+2.16.4
+
