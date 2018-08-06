@@ -1,0 +1,2118 @@
+From 3c86dc978b5babad5d17fe3f110bb52e7d683472 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Mon, 30 Jul 2018 20:43:21 +1000
+Subject: Fix build for Haiku
+
+
+diff --git a/Source/JavaScriptCore/dfg/DFGByteCodeParser.cpp b/Source/JavaScriptCore/dfg/DFGByteCodeParser.cpp
+index 8e93a7e..0d4c02d 100644
+--- a/Source/JavaScriptCore/dfg/DFGByteCodeParser.cpp
++++ b/Source/JavaScriptCore/dfg/DFGByteCodeParser.cpp
+@@ -4397,7 +4397,7 @@ bool ByteCodeParser::parseBlock(unsigned limit)
+                     nodeType = GetGlobalVar;
+                 else
+                     nodeType = GetGlobalLexicalVariable;
+-                Node* value = addToGraph(nodeType, OpInfo(operand), OpInfo(prediction));
++                Node* value = addToGraph(nodeType, OpInfo((void*)operand), OpInfo(prediction));
+                 if (resolveType == GlobalLexicalVar || resolveType == GlobalLexicalVarWithVarInjectionChecks)
+                     addToGraph(CheckNotEmpty, value);
+                 set(VirtualRegister(dst), value);
+@@ -4427,7 +4427,7 @@ bool ByteCodeParser::parseBlock(unsigned limit)
+                 }
+                 SpeculatedType prediction = getPrediction();
+                 set(VirtualRegister(dst),
+-                    addToGraph(GetClosureVar, OpInfo(operand), OpInfo(prediction), scopeNode));
++                    addToGraph(GetClosureVar, OpInfo((void*)operand), OpInfo(prediction), scopeNode));
+                 break;
+             }
+             case UnresolvedProperty:
+@@ -4500,7 +4500,7 @@ bool ByteCodeParser::parseBlock(unsigned limit)
+             case GlobalVarWithVarInjectionChecks: {
+                 if (getPutInfo.initializationMode() != Initialization && (resolveType == GlobalLexicalVar || resolveType == GlobalLexicalVarWithVarInjectionChecks)) {
+                     SpeculatedType prediction = SpecEmpty;
+-                    Node* value = addToGraph(GetGlobalLexicalVariable, OpInfo(operand), OpInfo(prediction));
++                    Node* value = addToGraph(GetGlobalLexicalVariable, OpInfo((void*)operand), OpInfo(prediction));
+                     addToGraph(CheckNotEmpty, value);
+                 }
+ 
+@@ -4510,7 +4510,7 @@ bool ByteCodeParser::parseBlock(unsigned limit)
+                     ASSERT_UNUSED(entry, watchpoints == entry.watchpointSet());
+                 }
+                 Node* valueNode = get(VirtualRegister(value));
+-                addToGraph(PutGlobalVariable, OpInfo(operand), weakJSConstant(scopeObject), valueNode);
++                addToGraph(PutGlobalVariable, OpInfo((void*)operand), weakJSConstant(scopeObject), valueNode);
+                 if (watchpoints && watchpoints->state() != IsInvalidated) {
+                     // Must happen after the store. See comment for GetGlobalVar.
+                     addToGraph(NotifyWrite, OpInfo(watchpoints));
+@@ -4525,7 +4525,7 @@ bool ByteCodeParser::parseBlock(unsigned limit)
+                 Node* scopeNode = get(VirtualRegister(scope));
+                 Node* valueNode = get(VirtualRegister(value));
+ 
+-                addToGraph(PutClosureVar, OpInfo(operand), scopeNode, valueNode);
++                addToGraph(PutClosureVar, OpInfo((void*)operand), scopeNode, valueNode);
+ 
+                 if (watchpoints && watchpoints->state() != IsInvalidated) {
+                     // Must happen after the store. See comment for GetGlobalVar.
+diff --git a/Source/JavaScriptCore/heap/HeapStatistics.cpp b/Source/JavaScriptCore/heap/HeapStatistics.cpp
+index 12d12ce..15ed177 100644
+--- a/Source/JavaScriptCore/heap/HeapStatistics.cpp
++++ b/Source/JavaScriptCore/heap/HeapStatistics.cpp
+@@ -47,7 +47,7 @@ double HeapStatistics::s_endTime = 0.0;
+ Vector<double>* HeapStatistics::s_pauseTimeStarts = 0;
+ Vector<double>* HeapStatistics::s_pauseTimeEnds = 0;
+ 
+-#if OS(UNIX) 
++#if OS(UNIX) && !OS(HAIKU)
+ 
+ void HeapStatistics::initialize()
+ {
+diff --git a/Source/JavaScriptCore/heap/MachineStackMarker.cpp b/Source/JavaScriptCore/heap/MachineStackMarker.cpp
+index 883914f..3f96e5f 100644
+--- a/Source/JavaScriptCore/heap/MachineStackMarker.cpp
++++ b/Source/JavaScriptCore/heap/MachineStackMarker.cpp
+@@ -23,16 +23,14 @@
+ #include "MachineStackMarker.h"
+ 
+ #include "ConservativeRoots.h"
+-#include "GPRInfo.h"
+ #include "Heap.h"
+ #include "JSArray.h"
+ #include "JSCInlines.h"
+-#include "LLIntPCRanges.h"
+-#include "MacroAssembler.h"
+ #include "VM.h"
+ #include <setjmp.h>
+ #include <stdlib.h>
+ #include <wtf/StdLibExtras.h>
++#include <wtf/Platform.h>
+ 
+ #if OS(DARWIN)
+ 
+@@ -65,55 +63,27 @@
+ #if USE(PTHREADS) && !OS(WINDOWS) && !OS(DARWIN)
+ #include <signal.h>
+ 
+-// We use SIGUSR2 to suspend and resume machine threads in JavaScriptCore.
+ static const int SigThreadSuspendResume = SIGUSR2;
+-static StaticLock globalSignalLock;
+-thread_local static std::atomic<JSC::MachineThreads::Thread*> threadLocalCurrentThread;
+ 
+-static void pthreadSignalHandlerSuspendResume(int, siginfo_t*, void* ucontext)
++#if defined(SA_RESTART)
++static void pthreadSignalHandlerSuspendResume(int)
+ {
+-    // Touching thread local atomic types from signal handlers is allowed.
+-    JSC::MachineThreads::Thread* thread = threadLocalCurrentThread.load();
+-
+-    if (thread->suspended.load(std::memory_order_acquire)) {
+-        // This is signal handler invocation that is intended to be used to resume sigsuspend.
+-        // So this handler invocation itself should not process.
+-        //
+-        // When signal comes, first, the system calls signal handler. And later, sigsuspend will be resumed. Signal handler invocation always precedes.
+-        // So, the problem never happens that suspended.store(true, ...) will be executed before the handler is called.
+-        // http://pubs.opengroup.org/onlinepubs/009695399/functions/sigsuspend.html
+-        return;
+-    }
+-
+-    ucontext_t* userContext = static_cast<ucontext_t*>(ucontext);
+-#if CPU(PPC)
+-    thread->suspendedMachineContext = *userContext->uc_mcontext.uc_regs;
+-#else
+-    thread->suspendedMachineContext = userContext->uc_mcontext;
+-#endif
+-
+-    // Allow suspend caller to see that this thread is suspended.
+-    // sem_post is async-signal-safe function. It means that we can call this from a signal handler.
+-    // http://pubs.opengroup.org/onlinepubs/009695399/functions/xsh_chap02_04.html#tag_02_04_03
+-    //
+-    // And sem_post emits memory barrier that ensures that suspendedMachineContext is correctly saved.
+-    // http://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap04.html#tag_04_11
+-    sem_post(&thread->semaphoreForSuspendResume);
+-
+-    // Reaching here, SigThreadSuspendResume is blocked in this handler (this is configured by sigaction's sa_mask).
+-    // So before calling sigsuspend, SigThreadSuspendResume to this thread is deferred. This ensures that the handler is not executed recursively.
+-    sigset_t blockedSignalSet;
+-    sigfillset(&blockedSignalSet);
+-    sigdelset(&blockedSignalSet, SigThreadSuspendResume);
+-    sigsuspend(&blockedSignalSet);
+-
+-    // Allow resume caller to see that this thread is resumed.
+-    sem_post(&thread->semaphoreForSuspendResume);
++    sigset_t signalSet;
++    sigemptyset(&signalSet);
++    sigaddset(&signalSet, SigThreadSuspendResume);
++    sigsuspend(&signalSet);
+ }
++#endif // defined(SA_RESTART)
+ #endif // USE(PTHREADS) && !OS(WINDOWS) && !OS(DARWIN)
+ 
+ #endif
+ 
++// HAIKU hooks on POSIX, but adds some specifics. So it can't be part of the
++// #if-chain above.
++#if OS(HAIKU)
++#include <OS.h>
++#endif
++
+ using namespace WTF;
+ 
+ namespace JSC {
+@@ -184,6 +154,8 @@ static inline PlatformThread getCurrentPlatformThread()
+     return pthread_mach_thread_np(pthread_self());
+ #elif OS(WINDOWS)
+     return GetCurrentThreadId();
++#elif OS(HAIKU)
++    return find_thread(NULL);
+ #elif USE(PTHREADS)
+     return pthread_self();
+ #endif
+@@ -225,7 +197,7 @@ Thread* MachineThreads::Thread::createForCurrentThread()
+ 
+ bool MachineThreads::Thread::operator==(const PlatformThread& other) const
+ {
+-#if OS(DARWIN) || OS(WINDOWS)
++#if OS(DARWIN) || OS(WINDOWS) || OS(HAIKU)
+     return platformThread == other;
+ #elif USE(PTHREADS)
+     return !!pthread_equal(platformThread, other);
+@@ -333,35 +305,24 @@ MachineThreads::Thread::Thread(const PlatformThread& platThread, void* base, voi
+     , stackBase(base)
+     , stackEnd(end)
+ {
+-#if OS(WINDOWS)
+-    ASSERT(platformThread == GetCurrentThreadId());
+-    bool isSuccessful =
+-        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
+-            &platformThreadHandle, 0, FALSE, DUPLICATE_SAME_ACCESS);
+-    RELEASE_ASSERT(isSuccessful);
+-#elif USE(PTHREADS) && !OS(DARWIN)
+-    threadLocalCurrentThread.store(this);
+-
+-    // Signal handlers are process global configuration.
+-    static std::once_flag initializeSignalHandler;
+-    std::call_once(initializeSignalHandler, [] {
+-        // Intentionally block SigThreadSuspendResume in the handler.
+-        // SigThreadSuspendResume will be allowed in the handler by sigsuspend.
+-        struct sigaction action;
+-        sigemptyset(&action.sa_mask);
+-        sigaddset(&action.sa_mask, SigThreadSuspendResume);
+-
+-        action.sa_sigaction = pthreadSignalHandlerSuspendResume;
+-        action.sa_flags = SA_RESTART | SA_SIGINFO;
+-        sigaction(SigThreadSuspendResume, &action, 0);
+-    });
++#if USE(PTHREADS) && !OS(WINDOWS) && !OS(DARWIN) && defined(SA_RESTART)
++    // if we have SA_RESTART, enable SIGUSR2 debugging mechanism
++    struct sigaction action;
++    action.sa_handler = pthreadSignalHandlerSuspendResume;
++    sigemptyset(&action.sa_mask);
++    action.sa_flags = SA_RESTART;
++    sigaction(SigThreadSuspendResume, &action, 0);
+ 
+     sigset_t mask;
+     sigemptyset(&mask);
+     sigaddset(&mask, SigThreadSuspendResume);
+     pthread_sigmask(SIG_UNBLOCK, &mask, 0);
+-
+-    sem_init(&semaphoreForSuspendResume, /* Only available in this process. */ 0, /* Initial value for the semaphore. */ 0);
++#elif OS(WINDOWS)
++    ASSERT(platformThread == GetCurrentThreadId());
++    bool isSuccessful =
++        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
++            &platformThreadHandle, 0, FALSE, DUPLICATE_SAME_ACCESS);
++    RELEASE_ASSERT(isSuccessful);
+ #endif
+ }
+ 
+@@ -369,8 +330,6 @@ MachineThreads::Thread::~Thread()
+ {
+ #if OS(WINDOWS)
+     CloseHandle(platformThreadHandle);
+-#elif USE(PTHREADS) && !OS(DARWIN)
+-    sem_destroy(&semaphoreForSuspendResume);
+ #endif
+ }
+ 
+@@ -379,32 +338,15 @@ bool MachineThreads::Thread::suspend()
+ #if OS(DARWIN)
+     kern_return_t result = thread_suspend(platformThread);
+     return result == KERN_SUCCESS;
++#elif OS(HAIKU)
++    status_t result = suspend_thread(platformThread);
++    return result == B_OK;
+ #elif OS(WINDOWS)
+     bool threadIsSuspended = (SuspendThread(platformThreadHandle) != (DWORD)-1);
+     ASSERT(threadIsSuspended);
+     return threadIsSuspended;
+ #elif USE(PTHREADS)
+-    ASSERT_WITH_MESSAGE(getCurrentPlatformThread() != platformThread, "Currently we don't support suspend the current thread itself.");
+-    {
+-        // During suspend, suspend or resume should not be executed from the other threads.
+-        // We use global lock instead of per thread lock.
+-        // Consider the following case, there are threads A and B.
+-        // And A attempt to suspend B and B attempt to suspend A.
+-        // A and B send signals. And later, signals are delivered to A and B.
+-        // In that case, both will be suspended.
+-        LockHolder lock(globalSignalLock);
+-        if (!suspendCount) {
+-            // Ideally, we would like to use pthread_sigqueue. It allows us to pass the argument to the signal handler.
+-            // But it can be used in a few platforms, like Linux.
+-            // Instead, we use Thread* stored in the thread local storage to pass it to the signal handler.
+-            if (pthread_kill(platformThread, SigThreadSuspendResume) == ESRCH)
+-                return false;
+-            sem_wait(&semaphoreForSuspendResume);
+-            // Release barrier ensures that this operation is always executed after all the above processing is done.
+-            suspended.store(true, std::memory_order_release);
+-        }
+-        ++suspendCount;
+-    }
++    pthread_kill(platformThread, SigThreadSuspendResume);
+     return true;
+ #else
+ #error Need a way to suspend threads on this platform
+@@ -415,28 +357,12 @@ void MachineThreads::Thread::resume()
+ {
+ #if OS(DARWIN)
+     thread_resume(platformThread);
++#elif OS(HAIKU)
++    resume_thread(platformThread);
+ #elif OS(WINDOWS)
+     ResumeThread(platformThreadHandle);
+ #elif USE(PTHREADS)
+-    {
+-        // During resume, suspend or resume should not be executed from the other threads.
+-        LockHolder lock(globalSignalLock);
+-        if (suspendCount == 1) {
+-            // When allowing SigThreadSuspendResume interrupt in the signal handler by sigsuspend and SigThreadSuspendResume is actually issued,
+-            // the signal handler itself will be called once again.
+-            // There are several ways to distinguish the handler invocation for suspend and resume.
+-            // 1. Use different signal numbers. And check the signal number in the handler.
+-            // 2. Use some arguments to distinguish suspend and resume in the handler. If pthread_sigqueue can be used, we can take this.
+-            // 3. Use thread local storage with atomic variables in the signal handler.
+-            // In this implementaiton, we take (3). suspended flag is used to distinguish it.
+-            if (pthread_kill(platformThread, SigThreadSuspendResume) == ESRCH)
+-                return;
+-            sem_wait(&semaphoreForSuspendResume);
+-            // Release barrier ensures that this operation is always executed after all the above processing is done.
+-            suspended.store(false, std::memory_order_release);
+-        }
+-        --suspendCount;
+-    }
++    pthread_kill(platformThread, SigThreadSuspendResume);
+ #else
+ #error Need a way to resume threads on this platform
+ #endif
+@@ -481,18 +407,20 @@ size_t MachineThreads::Thread::getRegisters(Thread::Registers& registers)
+     regs.ContextFlags = CONTEXT_INTEGER | CONTEXT_CONTROL;
+     GetThreadContext(platformThreadHandle, &regs);
+     return sizeof(CONTEXT);
++#elif OS(HAIKU)
++	get_thread_info(platformThread, &regs);
++	return sizeof(thread_info);
+ #elif USE(PTHREADS)
+-    pthread_attr_init(&regs.attribute);
++    pthread_attr_init(&regs);
+ #if HAVE(PTHREAD_NP_H) || OS(NETBSD)
+ #if !OS(OPENBSD)
+     // e.g. on FreeBSD 5.4, neundorf@kde.org
+-    pthread_attr_get_np(platformThread, &regs.attribute);
++    pthread_attr_get_np(platformThread, &regs);
+ #endif
+ #else
+     // FIXME: this function is non-portable; other POSIX systems may have different np alternatives
+-    pthread_getattr_np(platformThread, &regs.attribute);
++    pthread_getattr_np(platformThread, &regs);
+ #endif
+-    regs.machineContext = suspendedMachineContext;
+     return 0;
+ #else
+ #error Need a way to get thread registers on this platform
+@@ -534,6 +462,9 @@ void* MachineThreads::Thread::Registers::stackPointer() const
+ #endif // __DARWIN_UNIX03
+ 
+ // end OS(DARWIN)
++#elif OS(HAIKU)
++    return reinterpret_cast<void*>(regs.stack_base);
++
+ #elif OS(WINDOWS)
+ 
+ #if CPU(ARM)
+@@ -549,40 +480,6 @@ void* MachineThreads::Thread::Registers::stackPointer() const
+ #endif
+ 
+ #elif USE(PTHREADS)
+-
+-#if OS(FREEBSD) && ENABLE(JIT)
+-
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_esp);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_rsp);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.__gregs[_REG_SP]);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_gpregs.gp_sp);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_regs[29]);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#elif defined(__GLIBC__) && ENABLE(JIT)
+-
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_ESP]);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_RSP]);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.arm_sp);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.sp);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[29]);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#else
+     void* stackBase = 0;
+     size_t stackSize = 0;
+ #if OS(OPENBSD)
+@@ -591,13 +488,11 @@ void* MachineThreads::Thread::Registers::stackPointer() const
+     stackBase = (void*)((size_t) ss.ss_sp - ss.ss_size);
+     stackSize = ss.ss_size;
+ #else
+-    int rc = pthread_attr_getstack(&regs.attribute, &stackBase, &stackSize);
++    int rc = pthread_attr_getstack(&regs, &stackBase, &stackSize);
+ #endif
+     (void)rc; // FIXME: Deal with error code somehow? Seems fatal.
+     ASSERT(stackBase);
+     return static_cast<char*>(stackBase) + stackSize;
+-#endif
+-
+ #else
+ #error Need a way to get the stack pointer for another thread on this platform
+ #endif
+@@ -649,39 +544,6 @@ void* MachineThreads::Thread::Registers::framePointer() const
+ #error Unknown Architecture
+ #endif
+ 
+-#elif OS(FREEBSD)
+-
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_ebp);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_rbp);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.__gregs[_REG_FP]);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_gpregs.gp_x[29]);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_regs[30]);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#elif defined(__GLIBC__)
+-
+-// The following sequence depends on glibc's sys/ucontext.h.
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_EBP]);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_RBP]);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.arm_fp);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.regs[29]);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[30]);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+ #else
+ #error Need a way to get the frame pointer for another thread on this platform
+ #endif
+@@ -731,141 +593,17 @@ void* MachineThreads::Thread::Registers::instructionPointer() const
+ #error Unknown Architecture
+ #endif
+ 
+-#elif OS(FREEBSD)
+-
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_eip);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_rip);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.__gregs[_REG_PC]);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_gpregs.gp_elr);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_pc);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#elif defined(__GLIBC__)
+-
+-// The following sequence depends on glibc's sys/ucontext.h.
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_EIP]);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_RIP]);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.arm_pc);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.pc);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.pc);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+ #else
+ #error Need a way to get the instruction pointer for another thread on this platform
+ #endif
+ }
+-void* MachineThreads::Thread::Registers::llintPC() const
+-{
+-    // LLInt uses regT4 as PC.
+-#if OS(DARWIN)
+-
+-#if __DARWIN_UNIX03
+-
+-#if CPU(X86)
+-    static_assert(LLInt::LLIntPC == X86Registers::esi, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>(regs.__esi);
+-#elif CPU(X86_64)
+-    static_assert(LLInt::LLIntPC == X86Registers::r8, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>(regs.__r8);
+-#elif CPU(ARM)
+-    static_assert(LLInt::LLIntPC == ARMRegisters::r8, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>(regs.__r[8]);
+-#elif CPU(ARM64)
+-    static_assert(LLInt::LLIntPC == ARM64Registers::x4, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>(regs.__x[4]);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#else // !__DARWIN_UNIX03
+-#if CPU(X86)
+-    static_assert(LLInt::LLIntPC == X86Registers::esi, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>(regs.esi);
+-#elif CPU(X86_64)
+-    static_assert(LLInt::LLIntPC == X86Registers::r8, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>(regs.r8);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#endif // __DARWIN_UNIX03
+-
+-// end OS(DARWIN)
+-#elif OS(WINDOWS)
+-
+-#if CPU(ARM)
+-    static_assert(LLInt::LLIntPC == ARMRegisters::r8, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>((uintptr_t) regs.R8);
+-#elif CPU(MIPS)
+-#error Dont know what to do with mips. Do we even need this?
+-#elif CPU(X86)
+-    static_assert(LLInt::LLIntPC == X86Registers::esi, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>((uintptr_t) regs.Esi);
+-#elif CPU(X86_64)
+-    static_assert(LLInt::LLIntPC == X86Registers::r10, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>((uintptr_t) regs.R10);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#elif OS(FREEBSD)
+-
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_esi);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_r8);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.__gregs[_REG_R8]);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_gpregs.gp_x[4]);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_regs[12]);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#elif defined(__GLIBC__)
+-
+-// The following sequence depends on glibc's sys/ucontext.h.
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_ESI]);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_R8]);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.arm_r8);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.regs[4]);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[12]);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#else
+-#error Need a way to get the LLIntPC for another thread on this platform
+-#endif
+-}
+ #endif // ENABLE(SAMPLING_PROFILER)
+ 
+ void MachineThreads::Thread::freeRegisters(Thread::Registers& registers)
+ {
+     Thread::Registers::PlatformRegisters& regs = registers.regs;
+-#if USE(PTHREADS) && !OS(WINDOWS) && !OS(DARWIN)
+-    pthread_attr_destroy(&regs.attribute);
++#if USE(PTHREADS) && !OS(WINDOWS) && !OS(DARWIN) && !OS(HAIKU)
++    pthread_attr_destroy(&regs);
+ #else
+     UNUSED_PARAM(regs);
+ #endif
+diff --git a/Source/JavaScriptCore/heap/MachineStackMarker.h b/Source/JavaScriptCore/heap/MachineStackMarker.h
+index a16f0da..6b7473e 100644
+--- a/Source/JavaScriptCore/heap/MachineStackMarker.h
++++ b/Source/JavaScriptCore/heap/MachineStackMarker.h
+@@ -29,24 +29,16 @@
+ 
+ #if OS(DARWIN)
+ #include <mach/thread_act.h>
+-#endif
+-
+-#if USE(PTHREADS) && !OS(WINDOWS) && !OS(DARWIN)
+-#include <semaphore.h>
+-#include <signal.h>
+-// Using signal.h didn't make mcontext_t and ucontext_t available on FreeBSD.
+-// This bug has been fixed in FreeBSD 11.0-CURRENT, so this workaround can be
+-// removed after FreeBSD 10.x goes EOL.
+-// https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=207079
+-#if OS(FREEBSD)
+-#include <ucontext.h>
+-#endif
++#elif OS(HAIKU)
++#include <OS.h>
+ #endif
+ 
+ #if OS(DARWIN)
+ typedef mach_port_t PlatformThread;
+ #elif OS(WINDOWS)
+ typedef DWORD PlatformThread;
++#elif OS(HAIKU)
++typedef thread_id PlatformThread;
+ #elif USE(PTHREADS)
+ typedef pthread_t PlatformThread;
+ #endif // OS(DARWIN)
+@@ -84,7 +76,6 @@ public:
+ #if ENABLE(SAMPLING_PROFILER)
+             void* framePointer() const;
+             void* instructionPointer() const;
+-            void* llintPC() const;
+ #endif // ENABLE(SAMPLING_PROFILER)
+             
+ #if OS(DARWIN)
+@@ -106,11 +97,10 @@ public:
+             
+ #elif OS(WINDOWS)
+             typedef CONTEXT PlatformRegisters;
++#elif OS(HAIKU)
++            typedef thread_info PlatformRegisters;
+ #elif USE(PTHREADS)
+-            struct PlatformRegisters {
+-                pthread_attr_t attribute;
+-                mcontext_t machineContext;
+-            };
++            typedef pthread_attr_t PlatformRegisters;
+ #else
+ #error Need a thread register struct for this platform
+ #endif
+@@ -133,11 +123,6 @@ public:
+         void* stackEnd;
+ #if OS(WINDOWS)
+         HANDLE platformThreadHandle;
+-#elif USE(PTHREADS) && !OS(DARWIN)
+-        sem_t semaphoreForSuspendResume;
+-        mcontext_t suspendedMachineContext;
+-        int suspendCount { 0 };
+-        std::atomic<bool> suspended { false };
+ #endif
+     };
+ 
+diff --git a/Source/ThirdParty/ANGLE/src/common/platform.h b/Source/ThirdParty/ANGLE/src/common/platform.h
+index 56db297..c98bfdd 100644
+--- a/Source/ThirdParty/ANGLE/src/common/platform.h
++++ b/Source/ThirdParty/ANGLE/src/common/platform.h
+@@ -26,6 +26,7 @@
+       defined(__DragonFly__) || \
+       defined(__sun) || \
+       defined(__GLIBC__) || \
++      defined(__HAIKU__) || \
+       defined(__GNU__) || \
+       defined(__QNX__)
+ #   define ANGLE_PLATFORM_POSIX 1
+diff --git a/Source/ThirdParty/gtest/include/gtest/internal/gtest-port.h b/Source/ThirdParty/gtest/include/gtest/internal/gtest-port.h
+index e8c6ae0..d72dee9 100644
+--- a/Source/ThirdParty/gtest/include/gtest/internal/gtest-port.h
++++ b/Source/ThirdParty/gtest/include/gtest/internal/gtest-port.h
+@@ -223,7 +223,7 @@
+ #define GTEST_OS_LINUX 1
+ #elif defined __GNU__
+ #define GTEST_OS_HURD 1
+-#elif defined(__FreeBSD__) || defined(__DragonFly__) || defined(__FreeBSD_kernel__)
++#elif defined(__FreeBSD__) || defined(__DragonFly__) || defined(__FreeBSD_kernel__) || defined(__HAIKU__)
+ #define GTEST_OS_FREEBSD 1
+ #elif defined __MVS__
+ #define GTEST_OS_ZOS 1
+diff --git a/Source/WTF/wtf/DateMath.cpp b/Source/WTF/wtf/DateMath.cpp
+index 80086b3..836da0f 100644
+--- a/Source/WTF/wtf/DateMath.cpp
++++ b/Source/WTF/wtf/DateMath.cpp
+@@ -432,7 +432,7 @@ static int32_t calculateUTCOffset()
+     localt.tm_zone = 0;
+ #endif
+ 
+-#if HAVE(TIMEGM)
++#if HAVE(TIMEGM) && !OS(HAIKU)
+     time_t utcOffset = timegm(&localt) - mktime(&localt);
+ #else
+     // Using a canned date of 01/01/2009 on platforms with weaker date-handling foo.
+diff --git a/Source/WTF/wtf/InlineASM.h b/Source/WTF/wtf/InlineASM.h
+index 965e281..b2129b1 100644
+--- a/Source/WTF/wtf/InlineASM.h
++++ b/Source/WTF/wtf/InlineASM.h
+@@ -40,7 +40,7 @@
+ #define THUMB_FUNC_PARAM(name)
+ #endif
+ 
+-#if (OS(LINUX) || OS(FREEBSD)) && CPU(X86_64)
++#if (OS(LINUX) || OS(FREEBSD) || OS(HAIKU)) && CPU(X86_64)
+ #define GLOBAL_REFERENCE(name) #name "@plt"
+ #elif CPU(X86) && COMPILER(MINGW)
+ #define GLOBAL_REFERENCE(name) "@" #name "@4"
+@@ -82,6 +82,7 @@
+ #elif   OS(LINUX)               \
+     || OS(FREEBSD)             \
+     || OS(OPENBSD)             \
++    || OS(HAIKU)               \
+     || OS(HURD)                \
+     || OS(NETBSD)              \
+     || COMPILER(MINGW)
+diff --git a/Source/WTF/wtf/Platform.h b/Source/WTF/wtf/Platform.h
+index 191f309..abda8bb 100644
+--- a/Source/WTF/wtf/Platform.h
++++ b/Source/WTF/wtf/Platform.h
+@@ -399,6 +399,11 @@
+ #define WTF_OS_NETBSD 1
+ #endif
+ 
++/* OS(HAIKU) - Haiku  */
++#if defined(__HAIKU__)
++#define WTF_OS_HAIKU 1
++#endif
++
+ /* OS(OPENBSD) - OpenBSD */
+ #ifdef __OpenBSD__
+ #define WTF_OS_OPENBSD 1
+@@ -424,6 +429,7 @@
+     || OS(HURD)             \
+     || OS(LINUX)            \
+     || OS(NETBSD)           \
++    || OS(HAIKU)           \
+     || OS(OPENBSD)          \
+     || OS(SOLARIS)          \
+     || defined(unix)        \
+diff --git a/Source/WTF/wtf/ProcessID.h b/Source/WTF/wtf/ProcessID.h
+index f84716e..ca7c266 100644
+--- a/Source/WTF/wtf/ProcessID.h
++++ b/Source/WTF/wtf/ProcessID.h
+@@ -41,7 +41,7 @@ inline int getCurrentProcessID()
+ #if OS(WINDOWS)
+     return GetCurrentProcessId();
+ #else
+-    return getpid();
++    return ::getpid();
+ #endif
+ }
+ 
+diff --git a/Source/WTF/wtf/StackBounds.cpp b/Source/WTF/wtf/StackBounds.cpp
+index f308ac1..f33a676 100644
+--- a/Source/WTF/wtf/StackBounds.cpp
++++ b/Source/WTF/wtf/StackBounds.cpp
+@@ -31,6 +31,10 @@
+ 
+ #include <windows.h>
+ 
++#elif OS(HAIKU)
++
++#include <OS.h>
++
+ #elif OS(SOLARIS)
+ 
+ #include <thread.h>
+@@ -46,6 +50,16 @@
+ 
+ namespace WTF {
+ 
++#if OS(HAIKU)
++
++static const ptrdiff_t estimateStackSize = 128 * sizeof(void*) *1024;
++static void* estimateStackBound(void *origin)
++{
++    return static_cast<char*>(origin) - estimateStackSize;
++}
++
++#endif
++
+ #if OS(DARWIN)
+ 
+ void StackBounds::initialize()
+@@ -90,6 +104,16 @@ void StackBounds::initialize()
+ #endif
+ }
+ 
++#elif OS(HAIKU)
++
++void StackBounds::initialize()
++{
++    thread_info threadInfo;
++    get_thread_info(find_thread(NULL), &threadInfo);
++    m_origin = threadInfo.stack_end;
++    m_bound = estimateStackBound(m_origin);
++}
++
+ #elif OS(UNIX)
+ 
+ void StackBounds::initialize()
+diff --git a/Source/WebCore/bindings/js/JSMediaStreamTrackCustom.cpp b/Source/WebCore/bindings/js/JSMediaStreamTrackCustom.cpp
+index 55154b8..24481e6 100644
+--- a/Source/WebCore/bindings/js/JSMediaStreamTrackCustom.cpp
++++ b/Source/WebCore/bindings/js/JSMediaStreamTrackCustom.cpp
+@@ -127,7 +127,7 @@ JSC::JSValue JSMediaStreamTrack::getCapabilities(ExecState& state)
+             facingModes.reserveCapacity(modes.size());
+ 
+             for (auto& mode : modes)
+-                facingModes.append(RealtimeMediaSourceSettings::facingMode(mode));
++                facingModes.append(QString(RealtimeMediaSourceSettings::facingMode(mode)));
+         }
+ 
+         object->putDirect(state.vm(), Identifier::fromString(&state, "facingMode"), jsArray(&state, castedThis->globalObject(), facingModes), DontDelete | ReadOnly);
+diff --git a/Source/WebCore/platform/FileSystem.cpp b/Source/WebCore/platform/FileSystem.cpp
+index 1db7e03..4d2b532 100644
+--- a/Source/WebCore/platform/FileSystem.cpp
++++ b/Source/WebCore/platform/FileSystem.cpp
+@@ -149,7 +149,7 @@ bool excludeFromBackup(const String&)
+ 
+ MappedFileData::~MappedFileData()
+ {
+-#if !OS(WINDOWS)
++#if !OS(WINDOWS) || OS(HAIKU)
+     if (!m_fileData)
+         return;
+     munmap(m_fileData, m_fileSize);
+@@ -158,7 +158,7 @@ MappedFileData::~MappedFileData()
+ 
+ MappedFileData::MappedFileData(const String& filePath, bool& success)
+ {
+-#if OS(WINDOWS)
++#if OS(WINDOWS) || OS(HAIKU)
+     // FIXME: Implement mapping
+     success = false;
+ #else
+diff --git a/Source/WebCore/platform/qt/UserAgentQt.cpp b/Source/WebCore/platform/qt/UserAgentQt.cpp
+index fc5eab7..207f57f 100644
+--- a/Source/WebCore/platform/qt/UserAgentQt.cpp
++++ b/Source/WebCore/platform/qt/UserAgentQt.cpp
+@@ -62,7 +62,7 @@ String UserAgentQt::standardUserAgent(const String &applicationNameForUserAgent,
+ 
+         // Platform.
+         ua = ua.arg(
+-#if OS(MAC_OS_X)
++#if OS(MAC_OS_X) || OS(HAIKU)
+             QStringLiteral("Macintosh; ")
+ #elif OS(WINDOWS)
+             QStringLiteral("")
+@@ -94,6 +94,12 @@ String UserAgentQt::standardUserAgent(const String &applicationNameForUserAgent,
+ 
+ #elif OS(FREEBSD)
+             "FreeBSD"
++#elif OS(HAIKU)
++#if CPU(X86) || CPU(X86_64)
++            "Intel Haiku R1 x86"
++#else
++            "Haiku R1"
++#endif
+ #elif OS(HURD)
+             "GNU Hurd"
+ #elif OS(LINUX)
+diff --git a/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.cpp b/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.cpp
+index ccd1afb..c096f14 100644
+--- a/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.cpp
++++ b/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.cpp
+@@ -51,6 +51,82 @@ namespace WebCore {
+ 
+ #if ENABLE(NOTIFICATIONS)
+ 
++#if defined(Q_OS_HAIKU)
++
++static void appendBlobResolved(QByteArray& data, const QUrl& url, QString* contentType = 0)
++{
++    RefPtr<BlobData> blobData = static_cast<BlobRegistryImpl&>(blobRegistry()).getBlobDataFromURL(url);
++    if (!blobData)
++        return;
++
++    if (contentType)
++        *contentType = blobData->contentType();
++
++    BlobDataItemList::const_iterator it = blobData->items().begin();
++    const BlobDataItemList::const_iterator itend = blobData->items().end();
++    for (; it != itend; ++it) {
++        const BlobDataItem& blobItem = *it;
++        if (blobItem.type() == BlobDataItem::Type::Data)
++            data.append(reinterpret_cast<const char*>(blobItem.data().data()->data()) + static_cast<int>(blobItem.offset()), static_cast<int>(blobItem.length()));
++        else if (blobItem.type() == BlobDataItem::Type::File) {
++            // File types are not allowed here, so just ignore it.
++            RELEASE_ASSERT_WITH_MESSAGE(false, "File types are not allowed here");
++        } else
++            ASSERT_NOT_REACHED();
++    }
++}
++
++static void resolveBlobUrl(const QUrl& url, QUrl& resolvedUrl)
++{
++    RefPtr<BlobData> blobData = static_cast<BlobRegistryImpl&>(blobRegistry()).getBlobDataFromURL(url);
++    if (!blobData)
++        return;
++
++    QByteArray data;
++    QString contentType;
++    appendBlobResolved(data, url, &contentType);
++
++    QString dataUri(QStringLiteral("data:"));
++    dataUri.append(contentType);
++    dataUri.append(QStringLiteral(";base64,"));
++    dataUri.append(QString::fromLatin1(data.toBase64()));
++    resolvedUrl = QUrl(dataUri);
++}
++
++static QImage httpGetImage(QNetworkAccessManager *netMgr, const QUrl& src)
++{
++	QNetworkRequest request;
++	QUrl url = src;
++    if (url.scheme() == QLatin1String("blob"))
++        resolveBlobUrl(src, url);
++	request.setUrl(url);
++	QNetworkReply* reply = netMgr->get(request);
++
++	QEventLoop eventloop;
++    QObject::connect(reply, SIGNAL(finished()), &eventloop, SLOT(quit()));
++    QTimer::singleShot(3000, &eventloop, SLOT(quit()));
++    eventloop.exec();
++
++	QVariant redirectedUrl = reply->attribute(QNetworkRequest::RedirectionTargetAttribute);
++	QUrl redirectedTo = redirectedUrl.toUrl();
++	if (redirectedTo.isValid()) {
++		if (redirectedTo != reply->request().url())
++			return httpGetImage(netMgr, redirectedTo);
++		else
++			return QImage();
++	} else {
++	    if (reply->error() == QNetworkReply::NoError) {
++			QByteArray data = reply->readAll();
++			QImage image = QImage::fromData(data);
++			reply->deleteLater();
++			return image;
++	    }
++	}
++
++    return QImage();
++}
++#endif
++
+ const double notificationTimeout = 10.0;
+ 
+ bool NotificationPresenterClientQt::dumpNotification = false;
+@@ -218,8 +294,19 @@ void NotificationPresenterClientQt::displayNotification(Notification* notificati
+ #ifndef QT_NO_SYSTEMTRAYICON
+     wrapper->connect(m_systemTrayIcon.data(), SIGNAL(messageClicked()), wrapper, SLOT(notificationClicked()));
+     QMetaObject::invokeMethod(m_systemTrayIcon.data(), "show");
++#if defined(Q_OS_HAIKU)
++	m_netMgr = new QNetworkAccessManager();
++	QImage image = httpGetImage(m_netMgr, notification->iconURL());
++	QIcon icon(QPixmap::fromImage(image).scaled(32, 32));
++	QMetaObject::invokeMethod(m_systemTrayIcon.data(), "showMessage",
++		Q_ARG(QString, notification->title()),
++		Q_ARG(QString, notification->body()),
++		Q_ARG(QIcon, icon));
++    delete m_netMgr;
++#else
+     QMetaObject::invokeMethod(m_systemTrayIcon.data(), "showMessage", Q_ARG(QString, notification->title()), Q_ARG(QString, notification->body()));
+ #endif
++#endif
+ }
+ 
+ void NotificationPresenterClientQt::cancel(Notification* notification)
+diff --git a/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.h b/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.h
+index f53fe51..9f69a31 100644
+--- a/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.h
++++ b/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.h
+@@ -40,6 +40,18 @@
+ #include <QMultiHash>
+ #include <QScopedPointer>
+ 
++#if defined(Q_OS_HAIKU)
++#include <QUrl>
++#include <QNetworkAccessManager>
++#include <QNetworkReply>
++#include <QNetworkRequest>
++#include <QEventLoop>
++#include <QTimer>
++
++#include "BlobData.h"
++#include "BlobRegistryImpl.h"
++#endif
++
+ class QWebFrameAdapter;
+ class QWebPageAdapter;
+ 
+@@ -136,6 +148,9 @@ private:
+     QtPlatformPlugin m_platformPlugin;
+ #ifndef QT_NO_SYSTEMTRAYICON
+     QScopedPointer<QObject> m_systemTrayIcon;
++#if defined(Q_OS_HAIKU)
++	QNetworkAccessManager *m_netMgr;
++#endif
+ #endif
+ };
+ 
+diff --git a/Source/WebKit/qt/WebCoreSupport/QWebFrameAdapter.cpp b/Source/WebKit/qt/WebCoreSupport/QWebFrameAdapter.cpp
+index df28e9f..b9abc0b 100644
+--- a/Source/WebKit/qt/WebCoreSupport/QWebFrameAdapter.cpp
++++ b/Source/WebKit/qt/WebCoreSupport/QWebFrameAdapter.cpp
+@@ -964,6 +964,9 @@ void QWebFrameAdapter::setViewportSize(const QSize& size)
+     if (view->needsLayout())
+         view->layout();
+     view->adjustViewSize();
++
++    if (view->needsLayout())
++        view->layout();
+ }
+ 
+ 
+diff --git a/Source/WebKit2/CMakeLists.txt b/Source/WebKit2/CMakeLists.txt
+index aa7863c..2907f6f 100644
+--- a/Source/WebKit2/CMakeLists.txt
++++ b/Source/WebKit2/CMakeLists.txt
+@@ -743,6 +743,12 @@ set(PluginProcess_LIBRARIES
+     WebKit2
+ )
+ 
++if (HAIKU)
++	list(APPEND WebKit2_LIBRARIES network)
++	list(APPEND WebProcess_LIBRARIES network)
++	list(APPEND NetworkProcess_LIBRARIES network)
++endif ()
++
+ if (COMPILER_IS_GCC_OR_CLANG)
+     set(ATOMIC_TEST_SOURCE
+     "
+diff --git a/Source/WebKit2/UIProcess/Launcher/qt/ProcessLauncherQt.cpp b/Source/WebKit2/UIProcess/Launcher/qt/ProcessLauncherQt.cpp
+index 51a3ffb..bbf3cb0 100644
+--- a/Source/WebKit2/UIProcess/Launcher/qt/ProcessLauncherQt.cpp
++++ b/Source/WebKit2/UIProcess/Launcher/qt/ProcessLauncherQt.cpp
+@@ -223,7 +223,7 @@ void ProcessLauncher::launchProcess()
+         delete webProcessOrSUIDHelper;
+         return;
+     }
+-#if OS(UNIX)
++#if OS(UNIX) && !OS(HAIKU)
+     setpriority(PRIO_PROCESS, webProcessOrSUIDHelper->pid(), 10);
+ #endif
+     RefPtr<ProcessLauncher> protector(this);
+-- 
+2.16.4
+
+
+From 01bb69f94e9df50baae69751a9c2b4f8aa71aeec Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Tue, 31 Jul 2018 21:15:51 +1000
+Subject: Fix build with gcc7
+
+
+diff --git a/Source/WebCore/dom/SlotAssignment.h b/Source/WebCore/dom/SlotAssignment.h
+index 0fcd4df..6672ce3 100644
+--- a/Source/WebCore/dom/SlotAssignment.h
++++ b/Source/WebCore/dom/SlotAssignment.h
+@@ -28,6 +28,8 @@
+ 
+ #if ENABLE(SHADOW_DOM) || ENABLE(DETAILS_ELEMENT)
+ 
++#include <functional>
++
+ #include <wtf/HashMap.h>
+ #include <wtf/HashSet.h>
+ #include <wtf/Vector.h>
+-- 
+2.16.4
+
+
+From c93ab7a0f196e85abbd327dc42323feba861ec77 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Mon, 6 Aug 2018 19:05:44 +1000
+Subject: Enable SubtleCrypto via gnutls
+
+
+diff --git a/Source/WebCore/PlatformQt.cmake b/Source/WebCore/PlatformQt.cmake
+index 49c76a8..a3077a4 100644
+--- a/Source/WebCore/PlatformQt.cmake
++++ b/Source/WebCore/PlatformQt.cmake
+@@ -73,7 +73,8 @@ list(APPEND WebCore_SOURCES
+ 
+     platform/audio/qt/AudioBusQt.cpp
+ 
+-    platform/crypto/qt/CryptoDigestQt.cpp
++#    platform/crypto/qt/CryptoDigestQt.cpp
++    platform/crypto/gnutls/CryptoDigestGnuTLS.cpp
+ 
+     platform/graphics/ImageSource.cpp
+     platform/graphics/PlatformDisplay.cpp
+@@ -254,6 +255,52 @@ if (ENABLE_SMOOTH_SCROLLING)
+     )
+ endif ()
+ 
++if (ENABLE_SUBTLE_CRYPTO)
++    list(APPEND WebCore_SOURCES
++        crypto/CryptoAlgorithm.cpp
++        crypto/CryptoAlgorithmDescriptionBuilder.cpp
++        crypto/CryptoAlgorithmRegistry.cpp
++        crypto/CryptoKey.cpp
++        crypto/CryptoKeyPair.cpp
++        crypto/SubtleCrypto.cpp
++
++        crypto/algorithms/CryptoAlgorithmAES_CBC.cpp
++        crypto/algorithms/CryptoAlgorithmAES_KW.cpp
++        crypto/algorithms/CryptoAlgorithmHMAC.cpp
++        crypto/algorithms/CryptoAlgorithmRSAES_PKCS1_v1_5.cpp
++        crypto/algorithms/CryptoAlgorithmRSASSA_PKCS1_v1_5.cpp
++        crypto/algorithms/CryptoAlgorithmRSA_OAEP.cpp
++        crypto/algorithms/CryptoAlgorithmSHA1.cpp
++        crypto/algorithms/CryptoAlgorithmSHA224.cpp
++        crypto/algorithms/CryptoAlgorithmSHA256.cpp
++        crypto/algorithms/CryptoAlgorithmSHA384.cpp
++        crypto/algorithms/CryptoAlgorithmSHA512.cpp
++
++        crypto/gnutls/CryptoAlgorithmAES_CBCGnuTLS.cpp
++        crypto/gnutls/CryptoAlgorithmAES_KWGnuTLS.cpp
++        crypto/gnutls/CryptoAlgorithmHMACGnuTLS.cpp
++        crypto/gnutls/CryptoAlgorithmRSAES_PKCS1_v1_5GnuTLS.cpp
++        crypto/gnutls/CryptoAlgorithmRSASSA_PKCS1_v1_5GnuTLS.cpp
++        crypto/gnutls/CryptoAlgorithmRSA_OAEPGnuTLS.cpp
++        crypto/gnutls/CryptoAlgorithmRegistryGnuTLS.cpp
++        crypto/gnutls/CryptoKeyRSAGnuTLS.cpp
++        crypto/gnutls/SerializedCryptoKeyWrapGnuTLS.cpp
++
++        crypto/keys/CryptoKeyAES.cpp
++        crypto/keys/CryptoKeyDataOctetSequence.cpp
++        crypto/keys/CryptoKeyDataRSAComponents.cpp
++        crypto/keys/CryptoKeyHMAC.cpp
++        crypto/keys/CryptoKeySerializationRaw.cpp
++    )
++
++    list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
++        ${GNUTLS_INCLUDE_DIRS}
++    )
++    list(APPEND WebCore_LIBRARIES
++        ${GNUTLS_LIBRARIES}
++    )
++endif ()
++
+ # Do it in the WebCore to support SHARED_CORE since WebKitWidgets won't load WebKit in that case.
+ # This should match the opposite statement in WebKit/PlatformQt.cmake
+ if (SHARED_CORE)
+diff --git a/Source/WebCore/crypto/CryptoKey.cpp b/Source/WebCore/crypto/CryptoKey.cpp
+index 53d1c1e..99a90e2 100644
+--- a/Source/WebCore/crypto/CryptoKey.cpp
++++ b/Source/WebCore/crypto/CryptoKey.cpp
+@@ -91,7 +91,7 @@ Vector<String> CryptoKey::usages() const
+     return result;
+ }
+ 
+-#if !OS(DARWIN) || PLATFORM(EFL) || PLATFORM(GTK)
++#if !OS(DARWIN) || PLATFORM(EFL) || PLATFORM(GTK) || OS(HAIKU)
+ Vector<uint8_t> CryptoKey::randomData(size_t size)
+ {
+     Vector<uint8_t> result(size);
+diff --git a/Source/WebCore/crypto/gnutls/CryptoAlgorithmAES_CBCGnuTLS.cpp b/Source/WebCore/crypto/gnutls/CryptoAlgorithmAES_CBCGnuTLS.cpp
+new file mode 100644
+index 0000000..c287650
+--- /dev/null
++++ b/Source/WebCore/crypto/gnutls/CryptoAlgorithmAES_CBCGnuTLS.cpp
+@@ -0,0 +1,173 @@
++/*
++ * Copyright (C) 2014 Igalia S.L. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "CryptoAlgorithmAES_CBC.h"
++
++#if ENABLE(SUBTLE_CRYPTO)
++
++#include "CryptoAlgorithmAesCbcParams.h"
++#include "CryptoKeyAES.h"
++#include <gnutls/gnutls.h>
++#include <gnutls/crypto.h>
++
++namespace WebCore {
++	
++enum {
++    CryptoNoErr = 0,
++    CryptoDataErr,
++    CryptoNotSupportedErr,
++    CryptoInvalidAccessErr,
++    CryptoTypeMismatchErr,
++    CryptoExceededQuotaErr,
++    CryptoSyntaxErr,
++    CryptoOperationErr
++};
++
++static gnutls_cipher_hd_t createCipher(const CryptoAlgorithmAesCbcParams& parameters, const CryptoKeyAES& key, gnutls_cipher_algorithm_t algorithm)
++{
++    ASSERT(sizeof(parameters.iv) == gnutls_cipher_get_iv_size(algorithm));
++
++    size_t keyLengthInBytes = key.key().size();
++    if (keyLengthInBytes != 16 && keyLengthInBytes != 24 && keyLengthInBytes != 32)
++        return 0;
++
++    gnutls_datum_t gnutlsKey;
++    gnutlsKey.data = const_cast<unsigned char*>(key.key().data());
++    gnutlsKey.size = keyLengthInBytes;
++
++    gnutls_datum_t gnutlsIv;
++    gnutlsIv.data = const_cast<unsigned char *>(reinterpret_cast<const unsigned char*>(parameters.iv.data()));
++    gnutlsIv.size = sizeof(parameters.iv);
++
++    gnutls_cipher_hd_t cipher;
++    int ret = gnutls_cipher_init(&cipher, algorithm, &gnutlsKey, &gnutlsIv);
++    if (ret != GNUTLS_E_SUCCESS)
++        return 0;
++
++    return cipher;
++}
++
++void CryptoAlgorithmAES_CBC::platformEncrypt(const CryptoAlgorithmAesCbcParams& parameters, const CryptoKeyAES& key, const CryptoOperationData& data, VectorCallback&& callback, VoidCallback&& failureCallback, ExceptionCode& ec)
++{
++    // in this context, AES_256_CBC is a valid algorithm also for 128 and 192
++    gnutls_cipher_algorithm_t algorithm = GNUTLS_CIPHER_AES_128_CBC;
++
++    gnutls_cipher_hd_t cipher = createCipher(parameters, key, algorithm);
++    if (!cipher) {
++        ec = CryptoDataErr;
++        failureCallback();
++        return;
++    }
++
++    uint8_t blockSize = gnutls_cipher_get_block_size(algorithm);
++    size_t dataSize = data.second;
++
++    uint8_t paddingSize = blockSize - (dataSize % blockSize);
++    size_t paddedSize = (dataSize / blockSize) * blockSize;
++    size_t cipherTextSize = paddedSize + blockSize;
++
++    Vector<uint8_t> result(cipherTextSize);
++
++    // Encrypt all data except last unpadded octets
++    int ret;
++    if (paddedSize > 0) {
++        ret = gnutls_cipher_encrypt2(cipher, (void *) data.first, paddedSize, (void *) result.data(), paddedSize);
++        if (ret != GNUTLS_E_SUCCESS) {
++            gnutls_cipher_deinit(cipher);
++            ec = CryptoOperationErr;
++            failureCallback();
++            return;
++        }
++    }
++
++    // Add PKCS7 padding <http://tools.ietf.org/html/rfc5652#section-6.3>
++    // and encrypt last block
++    memcpy(result.data() + paddedSize, data.first + paddedSize, blockSize - paddingSize);
++    memset(result.data() + cipherTextSize - paddingSize, paddingSize, paddingSize);
++
++    // Encrypt last block with padding
++    ret = gnutls_cipher_encrypt2(cipher, result.data() + paddedSize, blockSize, (void *) (result.data() + paddedSize), blockSize);
++    if (ret != GNUTLS_E_SUCCESS) {
++        gnutls_cipher_deinit(cipher);
++            ec = CryptoOperationErr;
++        failureCallback();
++        return;
++    }
++
++    gnutls_cipher_deinit(cipher);
++    callback(result);
++}
++
++void CryptoAlgorithmAES_CBC::platformDecrypt(const CryptoAlgorithmAesCbcParams& parameters, const CryptoKeyAES& key, const CryptoOperationData& data, VectorCallback&& callback, VoidCallback&& failureCallback, ExceptionCode& ec)
++{
++    // in this context, AES_256_CBC is a valid algorithm also for 128 and 192
++    gnutls_cipher_algorithm_t algorithm = GNUTLS_CIPHER_AES_128_CBC;
++
++    gnutls_cipher_hd_t cipher = createCipher(parameters, key, algorithm);
++    if (!cipher) {
++        ec = CryptoDataErr;
++        failureCallback();
++        return;
++    }
++
++    Vector<uint8_t> result(data.second);
++    int ret = gnutls_cipher_decrypt2(cipher, data.first, data.second, (void *) result.data(), result.size());
++    if (ret != GNUTLS_E_SUCCESS) {
++        gnutls_cipher_deinit(cipher);
++        ec = CryptoOperationErr;
++        failureCallback();
++        return;
++    }
++
++    // Remove PKCS7 padding <http://tools.ietf.org/html/rfc5652#section-6.3>
++    size_t dataSize = result.size();
++    uint8_t blockSize = gnutls_cipher_get_block_size(algorithm);
++    uint8_t paddingSize = result.data() [dataSize - 1];
++    if (!paddingSize || paddingSize > blockSize) {
++        gnutls_cipher_deinit(cipher);
++        ec = CryptoDataErr;
++        failureCallback();
++        return;
++    }
++    // Check sanity of the whole padding
++    for (int i = 1; i < paddingSize; i++) {
++        if (result.data() [dataSize - i] != paddingSize) {
++            gnutls_cipher_deinit(cipher);
++            ec = CryptoDataErr;
++            failureCallback();
++            return;
++        }
++    }
++
++    result.shrink(dataSize - paddingSize);
++
++    gnutls_cipher_deinit(cipher);
++    callback(result);
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(SUBTLE_CRYPTO)
+diff --git a/Source/WebCore/crypto/gnutls/CryptoAlgorithmAES_KWGnuTLS.cpp b/Source/WebCore/crypto/gnutls/CryptoAlgorithmAES_KWGnuTLS.cpp
+new file mode 100644
+index 0000000..cf7bf95
+--- /dev/null
++++ b/Source/WebCore/crypto/gnutls/CryptoAlgorithmAES_KWGnuTLS.cpp
+@@ -0,0 +1,61 @@
++/*
++ * Copyright (C) 2014 Igalia S.L. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "CryptoAlgorithmAES_KW.h"
++
++#if ENABLE(SUBTLE_CRYPTO)
++
++#include "CryptoKeyAES.h"
++#include "ExceptionCode.h"
++#include "NotImplemented.h"
++
++namespace WebCore {
++
++void CryptoAlgorithmAES_KW::platformEncrypt(const CryptoKeyAES& key, const CryptoOperationData& data, VectorCallback&& callback, VoidCallback&& failureCallback, ExceptionCode& ec)
++{
++    notImplemented();
++    ec = NOT_SUPPORTED_ERR;
++    failureCallback();
++
++    UNUSED_PARAM(key);
++    UNUSED_PARAM(data);
++    UNUSED_PARAM(callback);
++}
++
++void CryptoAlgorithmAES_KW::platformDecrypt(const CryptoKeyAES& key, const CryptoOperationData& data, VectorCallback&& callback, VoidCallback&& failureCallback, ExceptionCode& ec)
++{
++    notImplemented();
++    ec = NOT_SUPPORTED_ERR;
++    failureCallback();
++
++    UNUSED_PARAM(key);
++    UNUSED_PARAM(data);
++    UNUSED_PARAM(callback);
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(SUBTLE_CRYPTO)
+diff --git a/Source/WebCore/crypto/gnutls/CryptoAlgorithmHMACGnuTLS.cpp b/Source/WebCore/crypto/gnutls/CryptoAlgorithmHMACGnuTLS.cpp
+new file mode 100644
+index 0000000..cc98561
+--- /dev/null
++++ b/Source/WebCore/crypto/gnutls/CryptoAlgorithmHMACGnuTLS.cpp
+@@ -0,0 +1,104 @@
++/*
++ * Copyright (C) 2014 Igalia S.L. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "CryptoAlgorithmHMAC.h"
++
++#if ENABLE(SUBTLE_CRYPTO)
++
++#include "CryptoAlgorithmHmacParams.h"
++#include "CryptoKeyHMAC.h"
++#include "ExceptionCode.h"
++#include <gnutls/gnutls.h>
++#include <gnutls/crypto.h>
++#include <wtf/CryptographicUtilities.h>
++
++namespace WebCore {
++
++static gnutls_mac_algorithm_t getGnutlsDigestAlgorithm(CryptoAlgorithmIdentifier hashFunction)
++{
++    switch (hashFunction) {
++    case CryptoAlgorithmIdentifier::SHA_1:
++        return GNUTLS_MAC_SHA1;
++    case CryptoAlgorithmIdentifier::SHA_224:
++        return GNUTLS_MAC_SHA224;
++    case CryptoAlgorithmIdentifier::SHA_256:
++        return GNUTLS_MAC_SHA256;
++    case CryptoAlgorithmIdentifier::SHA_384:
++        return GNUTLS_MAC_SHA384;
++    case CryptoAlgorithmIdentifier::SHA_512:
++        return GNUTLS_MAC_SHA512;
++    default:
++        return GNUTLS_MAC_UNKNOWN;
++    }
++}
++
++static Vector<uint8_t> calculateSignature(gnutls_mac_algorithm_t algorithm, const Vector<uint8_t>& key, const CryptoOperationData& data)
++{
++    size_t digestLength = gnutls_hmac_get_len(algorithm);
++
++    Vector<uint8_t> result(digestLength);
++    const void* keyData = key.data() ? key.data() : reinterpret_cast<const uint8_t*>("");
++    int ret = gnutls_hmac_fast(algorithm, keyData, key.size(), data.first, data.second, result.data());
++    ASSERT(ret == GNUTLS_E_SUCCESS);
++    UNUSED_PARAM(ret);
++
++    return result;
++}
++
++void CryptoAlgorithmHMAC::platformSign(const CryptoAlgorithmHmacParams& parameters, const CryptoKeyHMAC& key, const CryptoOperationData& data, VectorCallback&& callback, VoidCallback&& failureCallback, ExceptionCode& ec)
++{
++    gnutls_mac_algorithm_t algorithm = getGnutlsDigestAlgorithm(parameters.hash);
++    if (algorithm == GNUTLS_MAC_UNKNOWN) {
++        ec = NOT_SUPPORTED_ERR;
++        failureCallback();
++        return;
++    }
++
++    Vector<uint8_t> signature = calculateSignature(algorithm, key.key(), data);
++
++    callback(signature);
++}
++
++void CryptoAlgorithmHMAC::platformVerify(const CryptoAlgorithmHmacParams& parameters, const CryptoKeyHMAC& key, const CryptoOperationData& expectedSignature, const CryptoOperationData& data, BoolCallback&& callback, VoidCallback&& failureCallback, ExceptionCode& ec)
++{
++    gnutls_mac_algorithm_t algorithm = getGnutlsDigestAlgorithm(parameters.hash);
++    if (algorithm == GNUTLS_MAC_UNKNOWN) {
++        ec = NOT_SUPPORTED_ERR;
++        failureCallback();
++        return;
++    }
++
++    Vector<uint8_t> signature = calculateSignature(algorithm, key.key(), data);
++
++    // Using a constant time comparison to prevent timing attacks.
++    bool result = signature.size() == expectedSignature.second && !constantTimeMemcmp(signature.data(), expectedSignature.first, signature.size());
++
++    callback(result);
++}
++
++}
++
++#endif // ENABLE(SUBTLE_CRYPTO)
+diff --git a/Source/WebCore/crypto/gnutls/CryptoAlgorithmRSAES_PKCS1_v1_5GnuTLS.cpp b/Source/WebCore/crypto/gnutls/CryptoAlgorithmRSAES_PKCS1_v1_5GnuTLS.cpp
+new file mode 100644
+index 0000000..fbfe1c4
+--- /dev/null
++++ b/Source/WebCore/crypto/gnutls/CryptoAlgorithmRSAES_PKCS1_v1_5GnuTLS.cpp
+@@ -0,0 +1,61 @@
++/*
++ * Copyright (C) 2014 Igalia S.L. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "CryptoAlgorithmRSAES_PKCS1_v1_5.h"
++
++#if ENABLE(SUBTLE_CRYPTO)
++
++#include "CryptoKeyRSA.h"
++#include "ExceptionCode.h"
++#include "NotImplemented.h"
++
++namespace WebCore {
++
++void CryptoAlgorithmRSAES_PKCS1_v1_5::platformEncrypt(const CryptoKeyRSA& key, const CryptoOperationData& data, VectorCallback&& callback, VoidCallback&& failureCallback, ExceptionCode& ec)
++{
++    notImplemented();
++    ec = NOT_SUPPORTED_ERR;
++    failureCallback();
++
++    UNUSED_PARAM(key);
++    UNUSED_PARAM(data);
++    UNUSED_PARAM(callback);
++}
++
++void CryptoAlgorithmRSAES_PKCS1_v1_5::platformDecrypt(const CryptoKeyRSA& key, const CryptoOperationData& data, VectorCallback&& callback, VoidCallback&& failureCallback, ExceptionCode& ec)
++{
++    notImplemented();
++    ec = NOT_SUPPORTED_ERR;
++    failureCallback();
++
++    UNUSED_PARAM(key);
++    UNUSED_PARAM(data);
++    UNUSED_PARAM(callback);
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(SUBTLE_CRYPTO)
+diff --git a/Source/WebCore/crypto/gnutls/CryptoAlgorithmRSASSA_PKCS1_v1_5GnuTLS.cpp b/Source/WebCore/crypto/gnutls/CryptoAlgorithmRSASSA_PKCS1_v1_5GnuTLS.cpp
+new file mode 100644
+index 0000000..3e606bc
+--- /dev/null
++++ b/Source/WebCore/crypto/gnutls/CryptoAlgorithmRSASSA_PKCS1_v1_5GnuTLS.cpp
+@@ -0,0 +1,67 @@
++/*
++ * Copyright (C) 2014 Igalia S.L. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "CryptoAlgorithmRSASSA_PKCS1_v1_5.h"
++
++#if ENABLE(SUBTLE_CRYPTO)
++
++#include "CryptoAlgorithmRsaSsaParams.h"
++#include "CryptoKeyRSA.h"
++#include "ExceptionCode.h"
++#include "NotImplemented.h"
++
++namespace WebCore {
++
++void CryptoAlgorithmRSASSA_PKCS1_v1_5::platformSign(const CryptoAlgorithmRsaSsaParams& parameters, const CryptoKeyRSA& key, const CryptoOperationData& data, VectorCallback&& callback, VoidCallback&& failureCallback, ExceptionCode& ec)
++{
++    notImplemented();
++    ec = NOT_SUPPORTED_ERR;
++    failureCallback();
++
++    UNUSED_PARAM(parameters);
++    UNUSED_PARAM(key);
++    UNUSED_PARAM(data);
++    UNUSED_PARAM(callback);
++    UNUSED_PARAM(ec);
++}
++
++void CryptoAlgorithmRSASSA_PKCS1_v1_5::platformVerify(const CryptoAlgorithmRsaSsaParams& parameters, const CryptoKeyRSA& key, const CryptoOperationData& signature, const CryptoOperationData& data, BoolCallback&& callback, VoidCallback&& failureCallback, ExceptionCode& ec)
++{
++    notImplemented();
++    ec = NOT_SUPPORTED_ERR;
++    failureCallback();
++
++    UNUSED_PARAM(parameters);
++    UNUSED_PARAM(key);
++    UNUSED_PARAM(signature);
++    UNUSED_PARAM(data);
++    UNUSED_PARAM(callback);
++    UNUSED_PARAM(ec);
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(SUBTLE_CRYPTO)
+diff --git a/Source/WebCore/crypto/gnutls/CryptoAlgorithmRSA_OAEPGnuTLS.cpp b/Source/WebCore/crypto/gnutls/CryptoAlgorithmRSA_OAEPGnuTLS.cpp
+new file mode 100644
+index 0000000..5e5b436
+--- /dev/null
++++ b/Source/WebCore/crypto/gnutls/CryptoAlgorithmRSA_OAEPGnuTLS.cpp
+@@ -0,0 +1,64 @@
++/*
++ * Copyright (C) 2014 Igalia S.L. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "CryptoAlgorithmRSA_OAEP.h"
++
++#if ENABLE(SUBTLE_CRYPTO)
++
++#include "CryptoAlgorithmRsaOaepParams.h"
++#include "CryptoKeyRSA.h"
++#include "ExceptionCode.h"
++#include "NotImplemented.h"
++
++namespace WebCore {
++
++void CryptoAlgorithmRSA_OAEP::platformEncrypt(const CryptoAlgorithmRsaOaepParams& parameters, const CryptoKeyRSA& key, const CryptoOperationData& data, VectorCallback&& callback, VoidCallback&& failureCallback, ExceptionCode& ec)
++{
++    notImplemented();
++    ec = NOT_SUPPORTED_ERR;
++    failureCallback();
++
++    UNUSED_PARAM(parameters);
++    UNUSED_PARAM(key);
++    UNUSED_PARAM(data);
++    UNUSED_PARAM(callback);
++}
++
++void CryptoAlgorithmRSA_OAEP::platformDecrypt(const CryptoAlgorithmRsaOaepParams& parameters, const CryptoKeyRSA& key, const CryptoOperationData& data, VectorCallback&& callback, VoidCallback&& failureCallback, ExceptionCode& ec)
++{
++    notImplemented();
++    ec = NOT_SUPPORTED_ERR;
++    failureCallback();
++
++    UNUSED_PARAM(parameters);
++    UNUSED_PARAM(key);
++    UNUSED_PARAM(data);
++    UNUSED_PARAM(callback);
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(SUBTLE_CRYPTO)
+diff --git a/Source/WebCore/crypto/gnutls/CryptoAlgorithmRegistryGnuTLS.cpp b/Source/WebCore/crypto/gnutls/CryptoAlgorithmRegistryGnuTLS.cpp
+new file mode 100644
+index 0000000..34cbf9d
+--- /dev/null
++++ b/Source/WebCore/crypto/gnutls/CryptoAlgorithmRegistryGnuTLS.cpp
+@@ -0,0 +1,62 @@
++/*
++ * Copyright (C) 2014 Igalia S.L. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "CryptoAlgorithmRegistry.h"
++
++#if ENABLE(SUBTLE_CRYPTO)
++
++#include "CryptoAlgorithmAES_CBC.h"
++#include "CryptoAlgorithmAES_KW.h"
++#include "CryptoAlgorithmHMAC.h"
++#include "CryptoAlgorithmRSAES_PKCS1_v1_5.h"
++#include "CryptoAlgorithmRSASSA_PKCS1_v1_5.h"
++#include "CryptoAlgorithmRSA_OAEP.h"
++#include "CryptoAlgorithmSHA1.h"
++#include "CryptoAlgorithmSHA224.h"
++#include "CryptoAlgorithmSHA256.h"
++#include "CryptoAlgorithmSHA384.h"
++#include "CryptoAlgorithmSHA512.h"
++
++namespace WebCore {
++
++void CryptoAlgorithmRegistry::platformRegisterAlgorithms()
++{
++    registerAlgorithm<CryptoAlgorithmAES_CBC>();
++    registerAlgorithm<CryptoAlgorithmAES_KW>();
++    registerAlgorithm<CryptoAlgorithmHMAC>();
++    registerAlgorithm<CryptoAlgorithmRSAES_PKCS1_v1_5>();
++    registerAlgorithm<CryptoAlgorithmRSASSA_PKCS1_v1_5>();
++    registerAlgorithm<CryptoAlgorithmRSA_OAEP>();
++    registerAlgorithm<CryptoAlgorithmSHA1>();
++    registerAlgorithm<CryptoAlgorithmSHA224>();
++    registerAlgorithm<CryptoAlgorithmSHA256>();
++    registerAlgorithm<CryptoAlgorithmSHA384>();
++    registerAlgorithm<CryptoAlgorithmSHA512>();
++}
++
++}
++
++#endif // ENABLE(SUBTLE_CRYPTO)
+diff --git a/Source/WebCore/crypto/gnutls/CryptoKeyRSAGnuTLS.cpp b/Source/WebCore/crypto/gnutls/CryptoKeyRSAGnuTLS.cpp
+new file mode 100644
+index 0000000..d7045a5
+--- /dev/null
++++ b/Source/WebCore/crypto/gnutls/CryptoKeyRSAGnuTLS.cpp
+@@ -0,0 +1,115 @@
++/*
++ * Copyright (C) 2014 Igalia S.L. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "CryptoKeyRSA.h"
++
++#if ENABLE(SUBTLE_CRYPTO)
++
++#include "CryptoAlgorithmDescriptionBuilder.h"
++#include "CryptoAlgorithmRegistry.h"
++#include "CryptoKeyDataRSAComponents.h"
++#include "CryptoKeyPair.h"
++#include "NotImplemented.h"
++
++namespace WebCore {
++
++struct _PlatformRSAKeyGnuTLS {
++};
++
++CryptoKeyRSA::CryptoKeyRSA(CryptoAlgorithmIdentifier identifier, CryptoAlgorithmIdentifier hash, bool hasHash, CryptoKeyType type, PlatformRSAKey platformKey, bool extractable, CryptoKeyUsage usage)
++    : CryptoKey(identifier, type, extractable, usage)
++    , m_platformKey(platformKey)
++    , m_restrictedToSpecificHash(hasHash)
++    , m_hash(hash)
++{
++    notImplemented();
++}
++
++RefPtr<CryptoKeyRSA> CryptoKeyRSA::create(CryptoAlgorithmIdentifier identifier, CryptoAlgorithmIdentifier hash, bool hasHash, const CryptoKeyDataRSAComponents& keyData, bool extractable, CryptoKeyUsage usage)
++{
++    notImplemented();
++    UNUSED_PARAM(identifier);
++    UNUSED_PARAM(hash);
++    UNUSED_PARAM(hasHash);
++    UNUSED_PARAM(keyData);
++    UNUSED_PARAM(extractable);
++    UNUSED_PARAM(usage);
++
++    return nullptr;
++}
++
++CryptoKeyRSA::~CryptoKeyRSA()
++{
++    notImplemented();
++}
++
++bool CryptoKeyRSA::isRestrictedToHash(CryptoAlgorithmIdentifier& identifier) const
++{
++    if (!m_restrictedToSpecificHash)
++        return false;
++
++    identifier = m_hash;
++    return true;
++}
++
++size_t CryptoKeyRSA::keySizeInBits() const
++{
++    notImplemented();
++    return 0;
++}
++
++void CryptoKeyRSA::buildAlgorithmDescription(CryptoAlgorithmDescriptionBuilder& builder) const
++{
++    notImplemented();
++    UNUSED_PARAM(builder);
++}
++
++std::unique_ptr<CryptoKeyData> CryptoKeyRSA::exportData() const
++{
++    ASSERT(extractable());
++
++    notImplemented();
++    return nullptr;
++}
++
++void CryptoKeyRSA::generatePair(CryptoAlgorithmIdentifier algorithm, CryptoAlgorithmIdentifier hash, bool hasHash, unsigned modulusLength, const Vector<uint8_t>& publicExponent, bool extractable, CryptoKeyUsage usage, KeyPairCallback callback, VoidCallback failureCallback)
++{
++    notImplemented();
++    failureCallback();
++
++    UNUSED_PARAM(algorithm);
++    UNUSED_PARAM(hash);
++    UNUSED_PARAM(hasHash);
++    UNUSED_PARAM(modulusLength);
++    UNUSED_PARAM(publicExponent);
++    UNUSED_PARAM(extractable);
++    UNUSED_PARAM(usage);
++    UNUSED_PARAM(callback);
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(SUBTLE_CRYPTO)
+diff --git a/Source/WebCore/crypto/gnutls/SerializedCryptoKeyWrapGnuTLS.cpp b/Source/WebCore/crypto/gnutls/SerializedCryptoKeyWrapGnuTLS.cpp
+new file mode 100644
+index 0000000..949989f
+--- /dev/null
++++ b/Source/WebCore/crypto/gnutls/SerializedCryptoKeyWrapGnuTLS.cpp
+@@ -0,0 +1,65 @@
++/*
++ * Copyright (C) 2014 Igalia S.L. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "SerializedCryptoKeyWrap.h"
++
++#if ENABLE(SUBTLE_CRYPTO)
++
++#include "NotImplemented.h"
++
++namespace WebCore {
++
++bool getDefaultWebCryptoMasterKey(Vector<uint8_t>& masterKey)
++{
++    notImplemented();
++    UNUSED_PARAM(masterKey);
++
++    return false;
++}
++
++bool wrapSerializedCryptoKey(const Vector<uint8_t>& masterKey, const Vector<uint8_t>& key, Vector<uint8_t>& result)
++{
++    notImplemented();
++    UNUSED_PARAM(masterKey);
++    UNUSED_PARAM(key);
++    UNUSED_PARAM(result);
++
++    return false;
++}
++
++bool unwrapSerializedCryptoKey(const Vector<uint8_t>& masterKey, const Vector<uint8_t>& wrappedKey, Vector<uint8_t>& key)
++{
++    notImplemented();
++    UNUSED_PARAM(masterKey);
++    UNUSED_PARAM(wrappedKey);
++    UNUSED_PARAM(key);
++
++    return false;
++}
++
++}
++
++#endif // ENABLE(SUBTLE_CRYPTO)
+diff --git a/Source/WebCore/crypto/keys/CryptoKeyRSA.h b/Source/WebCore/crypto/keys/CryptoKeyRSA.h
+index 17d24a9..dcd2c9e 100644
+--- a/Source/WebCore/crypto/keys/CryptoKeyRSA.h
++++ b/Source/WebCore/crypto/keys/CryptoKeyRSA.h
+@@ -36,7 +36,7 @@ typedef struct _CCRSACryptor *CCRSACryptorRef;
+ typedef CCRSACryptorRef PlatformRSAKey;
+ #endif
+ 
+-#if PLATFORM(GTK) || PLATFORM(EFL)
++#if PLATFORM(GTK) || PLATFORM(EFL) || OS(HAIKU)
+ typedef struct _PlatformRSAKeyGnuTLS PlatformRSAKeyGnuTLS;
+ typedef PlatformRSAKeyGnuTLS *PlatformRSAKey;
+ #endif
+diff --git a/Source/WebCore/platform/crypto/gnutls/CryptoDigestGnuTLS.cpp b/Source/WebCore/platform/crypto/gnutls/CryptoDigestGnuTLS.cpp
+new file mode 100644
+index 0000000..89a5d81
+--- /dev/null
++++ b/Source/WebCore/platform/crypto/gnutls/CryptoDigestGnuTLS.cpp
+@@ -0,0 +1,102 @@
++/*
++ * Copyright (C) 2014 Igalia S.L. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "CryptoDigest.h"
++
++#include <gnutls/gnutls.h>
++#include <gnutls/crypto.h>
++
++namespace WebCore {
++
++struct CryptoDigestContext {
++    gnutls_digest_algorithm_t algorithm;
++    gnutls_hash_hd_t hash;
++};
++
++CryptoDigest::CryptoDigest()
++    : m_context(new CryptoDigestContext)
++{
++}
++
++CryptoDigest::~CryptoDigest()
++{
++    gnutls_hash_deinit(m_context->hash, 0);
++}
++
++std::unique_ptr<CryptoDigest> CryptoDigest::create(CryptoDigest::Algorithm algorithm)
++{
++    gnutls_digest_algorithm_t gnutlsAlgorithm;
++
++    switch (algorithm) {
++    case CryptoDigest::Algorithm::SHA_1: {
++        gnutlsAlgorithm = GNUTLS_DIG_SHA1;
++        break;
++    }
++    case CryptoDigest::Algorithm::SHA_224: {
++        gnutlsAlgorithm = GNUTLS_DIG_SHA224;
++        break;
++    }
++    case CryptoDigest::Algorithm::SHA_256: {
++        gnutlsAlgorithm = GNUTLS_DIG_SHA256;
++        break;
++    }
++    case CryptoDigest::Algorithm::SHA_384: {
++        gnutlsAlgorithm = GNUTLS_DIG_SHA384;
++        break;
++    }
++    case CryptoDigest::Algorithm::SHA_512: {
++        gnutlsAlgorithm = GNUTLS_DIG_SHA512;
++        break;
++    }
++    }
++
++    std::unique_ptr<CryptoDigest> digest(new CryptoDigest);
++    digest->m_context->algorithm = gnutlsAlgorithm;
++
++    int ret = gnutls_hash_init(&digest->m_context->hash, gnutlsAlgorithm);
++    if (ret != GNUTLS_E_SUCCESS)
++        return nullptr;
++
++    return digest;
++}
++
++void CryptoDigest::addBytes(const void* input, size_t length)
++{
++    gnutls_hash(m_context->hash, input, length);
++}
++
++Vector<uint8_t> CryptoDigest::computeHash()
++{
++    Vector<uint8_t> result;
++    int digestLen = gnutls_hash_get_len(m_context->algorithm);
++    result.resize(digestLen);
++
++    gnutls_hash_output(m_context->hash, result.data());
++
++    return result;
++}
++
++} // namespace WebCore
+diff --git a/Source/cmake/OptionsQt.cmake b/Source/cmake/OptionsQt.cmake
+index 003fdca..8b55902 100644
+--- a/Source/cmake/OptionsQt.cmake
++++ b/Source/cmake/OptionsQt.cmake
+@@ -726,6 +726,13 @@ if (ENABLE_X11_TARGET)
+     endif ()
+ endif ()
+ 
++if (ENABLE_SUBTLE_CRYPTO)
++    find_package(GnuTLS 3.0.0)
++    if (NOT GNUTLS_FOUND)
++        message(FATAL_ERROR "GnuTLS is needed for ENABLE_SUBTLE_CRYPTO")
++    endif ()
++endif ()
++
+ if (NOT ENABLE_VIDEO)
+     set(USE_MEDIA_FOUNDATION OFF)
+     set(USE_QT_MULTIMEDIA OFF)
+-- 
+2.16.4
+
