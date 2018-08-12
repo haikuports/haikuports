@@ -1,0 +1,137 @@
+SUMMARY="The Glasgow Haskell Compiler"
+DESCRIPTION="
+The Glorious Glasgow Haskell Compilation system (GHC) is a compiler for Haskell.
+
+Haskell is \"the\" standard lazy functional programming language.
+"
+HOMEPAGE="https://www.haskell.org/ghc/"
+COPYRIGHT="The Glasgow Haskell Team"
+LICENSE="BSD (3-clause)
+	GNU LGPL v2.1"
+
+VENDOR="jessicah.org"
+
+SOURCE_URI_1="https://www.haskell.org/ghc/dist/7.8.3/ghc-7.8.3-src.tar.bz2"
+SOURCE_URI_2="https://pulkomandy.tk/drop/ghc-7.8.3-i386-unknown-haiku.tar.gz"
+
+CHECKSUM_SHA256_1="2358826f8424bf571dcc313bd882422fe108a340d6e37db4339ff6d5d6ac3f37"
+CHECKSUM_SHA256_2="23b1a7a13b7ec07b7768d35e8ce9334131e57b7ab652b0ad3aa0faa559630d15"
+
+REVISION="11"
+
+ARCHITECTURES="x86"
+SECONDARY_ARCHITECTURES="x86"
+
+PATCHES="ghc-$portVersion.patchset"
+
+GLOBAL_WRITABLE_FILES="
+	settings/ghc directory keep-old
+	"
+
+PROVIDES="
+	ghc$secondaryArchSuffix = $portVersion
+	cmd:ghc
+	cmd:ghci
+	cmd:ghc_pkg
+	cmd:haddock
+	cmd:hp2ps
+	cmd:hpc
+	cmd:hsc2hs
+	cmd:runghc
+	cmd:runghc_$portVersion
+	cmd:runhaskell
+	cmd:ghc_$portVersion
+	cmd:ghc_pkg_$portVersion
+	cmd:ghci_$portVersion
+	cmd:haddock_ghc_$portVersion
+	"
+
+REQUIRES="
+	haiku$secondaryArchSuffix >= $haikuVersion
+	lib:libz$secondaryArchSuffix
+	lib:libiconv$secondaryArchSuffix
+	lib:libncursesw$secondaryArchSuffix >= 5
+	"
+
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel >= $haikuVersion
+	haiku_devel >= $haikuVersion
+	devel:libz$secondaryArchSuffix
+	devel:libiconv$secondaryArchSuffix
+	devel:libncursesw$secondaryArchSuffix >= 5
+	"
+
+BUILD_PREREQUIRES="
+	cmd:gcc$secondaryArchSuffix
+	cmd:ld$secondaryArchSuffix
+	cmd:make
+	cmd:tar
+	cmd:perl
+	cmd:sed
+	cmd:find
+	cmd:sort
+	cmd:awk
+	cmd:grep
+	cmd:autoconf
+	"
+
+BUILD()
+{
+	echo "Installing bootstrap GHC..."
+	pwd
+	# 1. Extract, configure, and install the bindist bootstrap GHC
+	ln -sf /sources-2/ ghc-bootstrap
+	pushd ghc-bootstrap
+	pushd ghc-7.8.3
+	configure --prefix=/tmp/bootstrap
+	make install
+	popd
+	popd
+	
+	# 2. Build GHC using the bootstrap compiler; we create a "dyn" only install
+	echo "Building GHC proper..."
+	if [ ! -e flag.configured ] ; then
+	
+	cat > mk/build.mk <<-EOF
+		V = 0
+		GhcLibWays = dyn
+		SRC_HC_OPTS     = -O -H64m
+		GhcStage1HcOpts = -O -fasm
+		GhcStage2HcOpts = -O2 -fasm
+		GhcHcOpts       = -Rghc-timing
+		GhcLibHcOpts    = -O2
+		
+		DYNAMIC_BY_DEFAULT = YES
+		
+		NoFibWays =
+		STRIP_CMD = :
+EOF
+
+	# haikuporter's buildspec confuses GHC, so we omit it, and we can't
+	# have a gcc2 GHC, so just install directly into $prefix/bin
+		runConfigure --omit-buildspec --omit-dirs binDir configure --bindir=$prefix/bin --with-ghc=/tmp/bootstrap/bin/ghc --with-gcc=/bin/gcc-x86
+		touch ../flag.configured
+	else
+		echo "Skipping configure..."
+	fi
+	make $jobArgs
+}
+
+INSTALL()
+{
+	export GHC_PACKAGE_PATH=$settingsDir/ghc/package.conf.d
+	/tmp/bootstrap/bin/ghc-pkg init $GHC_PACKAGE_PATH
+	unset GHC_PACKAGE_PATH
+	# 1. Install our new GHC
+	echo "Installing GHC!"
+	make install
+	
+	# 2. Move package.conf.d to settings
+	sed -i -e '/^PKGCONF=/c\
+	PKGCONF='"$settingsDir"'/ghc/package.conf.d' $prefix/bin/ghc-pkg-$portVersion
+	unset GHC_PACKAGE_PATH
+
+	# move package.conf.d files to the right place...
+	mv $libDir/ghc-$portVersion/package.conf.d/*.conf $settingsDir/ghc/package.conf.d/
+	$prefix/bin/ghc-pkg recache
+}
