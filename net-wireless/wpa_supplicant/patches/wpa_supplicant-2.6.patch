@@ -1051,3 +1051,217 @@ diff -upr wpa_supplicant-2.6.orig/src/rsn_supp/wpa.c wpa_supplicant-2.6/src/rsn_
  		if (wpa_supplicant_decrypt_key_data(sm, key, ver, key_data,
  						    &key_data_len))
  			goto out;
+
+--- a/src/utils/os_unix.c
++++ b/src/utils/os_unix.c
+@@ -6,11 +6,15 @@
+  * See README for more details.
+  */
+ 
++#ifndef _GNU_SOURCE
++#define _GNU_SOURCE
++#endif
+ #include "includes.h"
+ 
+ #include <time.h>
+ #include <sys/wait.h>
+-
++#include <sys/syscall.h>
++#include <unistd.h>
+ #ifdef ANDROID
+ #include <sys/capability.h>
+ #include <sys/prctl.h>
+@@ -223,6 +227,10 @@ void os_daemonize_terminate(const char *
+ 
+ int os_get_random(unsigned char *buf, size_t len)
+ {
++#ifdef SYS_getrandom
++    int gr = TEMP_FAILURE_RETRY(syscall(SYS_getrandom, buf, len, 0));
++    return (gr != -1 && gr == len) ? 0 : -1;
++#else
+ 	FILE *f;
+ 	size_t rc;
+ 
+@@ -232,10 +240,13 @@ int os_get_random(unsigned char *buf, si
+ 		return -1;
+ 	}
+ 
++    setbuf(f, NULL);
++
+ 	rc = fread(buf, 1, len, f);
+ 	fclose(f);
+ 
+ 	return rc != len ? -1 : 0;
++#endif
+ }
+ 
+ 
+--- a/src/utils/os.h
++++ b/src/utils/os.h
+@@ -253,7 +253,7 @@ int os_file_exists(const char *fname);
+  *
+  * Caller is responsible for freeing the returned buffer with os_free().
+  */
+-void * os_zalloc(size_t size);
++void * os_zalloc(size_t size) __attribute((malloc, alloc_size(1)));
+ 
+ /**
+  * os_calloc - Allocate and zero memory for an array
+@@ -267,6 +267,8 @@ void * os_zalloc(size_t size);
+  *
+  * Caller is responsible for freeing the returned buffer with os_free().
+  */
++
++__attribute((malloc, alloc_size(1,2)))
+ static inline void * os_calloc(size_t nmemb, size_t size)
+ {
+ 	if (size && nmemb > (~(size_t) 0) / size)
+
+commit 89971d8b1e328a2f79699c953625d1671fd40384
+Author: Jouni Malinen <j@w1.fi>
+Date:   Mon Jul 17 12:06:17 2017 +0300
+
+    OpenSSL: Clear default_passwd_cb more thoroughly
+    
+    Previously, the pointer to strdup passwd was left in OpenSSL library
+    default_passwd_cb_userdata and even the default_passwd_cb was left set
+    on an error path. To avoid unexpected behavior if something were to
+    manage to use there pointers, clear them explicitly once done with
+    loading of the private key.
+    
+    Signed-off-by: Jouni Malinen <j@w1.fi>
+
+diff --git a/src/crypto/tls_openssl.c b/src/crypto/tls_openssl.c
+index c790b53ea..903c38cff 100644
+--- a/src/crypto/tls_openssl.c
++++ b/src/crypto/tls_openssl.c
+@@ -2775,6 +2775,19 @@ static int tls_connection_engine_private_key(struct tls_connection *conn)
+ }
+ 
+ 
++static void tls_clear_default_passwd_cb(SSL_CTX *ssl_ctx, SSL *ssl)
++{
++#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
++	if (ssl) {
++		SSL_set_default_passwd_cb(ssl, NULL);
++		SSL_set_default_passwd_cb_userdata(ssl, NULL);
++	}
++#endif /* >= 1.1.0f && !LibreSSL */
++	SSL_CTX_set_default_passwd_cb(ssl_ctx, NULL);
++	SSL_CTX_set_default_passwd_cb_userdata(ssl_ctx, NULL);
++}
++
++
+ static int tls_connection_private_key(struct tls_data *data,
+ 				      struct tls_connection *conn,
+ 				      const char *private_key,
+@@ -2891,14 +2904,12 @@ static int tls_connection_private_key(struct tls_data *data,
+ 	if (!ok) {
+ 		tls_show_errors(MSG_INFO, __func__,
+ 				"Failed to load private key");
++		tls_clear_default_passwd_cb(ssl_ctx, conn->ssl);
+ 		os_free(passwd);
+ 		return -1;
+ 	}
+ 	ERR_clear_error();
+-#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
+-	SSL_set_default_passwd_cb(conn->ssl, NULL);
+-#endif /* >= 1.1.0f && !LibreSSL */
+-	SSL_CTX_set_default_passwd_cb(ssl_ctx, NULL);
++	tls_clear_default_passwd_cb(ssl_ctx, conn->ssl);
+ 	os_free(passwd);
+ 
+ 	if (!SSL_check_private_key(conn->ssl)) {
+@@ -2941,13 +2952,14 @@ static int tls_global_private_key(struct tls_data *data,
+ 	    tls_read_pkcs12(data, NULL, private_key, passwd)) {
+ 		tls_show_errors(MSG_INFO, __func__,
+ 				"Failed to load private key");
++		tls_clear_default_passwd_cb(ssl_ctx, NULL);
+ 		os_free(passwd);
+ 		ERR_clear_error();
+ 		return -1;
+ 	}
++	tls_clear_default_passwd_cb(ssl_ctx, NULL);
+ 	os_free(passwd);
+ 	ERR_clear_error();
+-	SSL_CTX_set_default_passwd_cb(ssl_ctx, NULL);
+ 
+ 	if (!SSL_CTX_check_private_key(ssl_ctx)) {
+ 		tls_show_errors(MSG_INFO, __func__,
+commit f665c93e1d28fbab3d9127a8c3985cc32940824f
+Author: Beniamino Galvani <bgalvani@redhat.com>
+Date:   Sun Jul 9 11:14:10 2017 +0200
+
+    OpenSSL: Fix private key password handling with OpenSSL >= 1.1.0f
+    
+    Since OpenSSL version 1.1.0f, SSL_use_PrivateKey_file() uses the
+    callback from the SSL object instead of the one from the CTX, so let's
+    set the callback on both SSL and CTX. Note that
+    SSL_set_default_passwd_cb*() is available only in 1.1.0.
+    
+    Signed-off-by: Beniamino Galvani <bgalvani@redhat.com>
+
+diff --git a/src/crypto/tls_openssl.c b/src/crypto/tls_openssl.c
+index fd94eaf46..c790b53ea 100644
+--- a/src/crypto/tls_openssl.c
++++ b/src/crypto/tls_openssl.c
+@@ -2796,6 +2796,15 @@ static int tls_connection_private_key(struct tls_data *data,
+ 	} else
+ 		passwd = NULL;
+ 
++#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
++	/*
++	 * In OpenSSL >= 1.1.0f SSL_use_PrivateKey_file() uses the callback
++	 * from the SSL object. See OpenSSL commit d61461a75253.
++	 */
++	SSL_set_default_passwd_cb(conn->ssl, tls_passwd_cb);
++	SSL_set_default_passwd_cb_userdata(conn->ssl, passwd);
++#endif /* >= 1.1.0f && !LibreSSL */
++	/* Keep these for OpenSSL < 1.1.0f */
+ 	SSL_CTX_set_default_passwd_cb(ssl_ctx, tls_passwd_cb);
+ 	SSL_CTX_set_default_passwd_cb_userdata(ssl_ctx, passwd);
+ 
+@@ -2886,6 +2895,9 @@ static int tls_connection_private_key(struct tls_data *data,
+ 		return -1;
+ 	}
+ 	ERR_clear_error();
++#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
++	SSL_set_default_passwd_cb(conn->ssl, NULL);
++#endif /* >= 1.1.0f && !LibreSSL */
+ 	SSL_CTX_set_default_passwd_cb(ssl_ctx, NULL);
+ 	os_free(passwd);
+ 
+--- a/wpa_supplicant/wpa_supplicant.c
++++ b/wpa_supplicant/wpa_supplicant.c
+@@ -123,6 +123,22 @@ int wpa_set_wep_keys(struct wpa_supplica
+ 	return set;
+ }
+ 
++static void wpa_supplicant_handle_sigusr1(int sig,
++				     void *signal_ctx)
++{
++	/* Increase verbosity (by decreasing the debug level) and wrap back
++	 * to MSG_INFO when needed.
++	 */
++	if (wpa_debug_level)
++		wpa_debug_level--;
++	else
++		wpa_debug_level = MSG_INFO;
++	
++	wpa_printf(MSG_INFO, "Signal %d received - changing debug level to %s", sig,
++	           (wpa_debug_level == MSG_INFO) ? "INFO" :
++	               ((wpa_debug_level == MSG_DEBUG) ? "DEBUG" :
++	                   ((wpa_debug_level == MSG_MSGDUMP) ? "MSGDUMP" : "UNKNOWN")));
++}
+ 
+ int wpa_supplicant_set_wpa_none_key(struct wpa_supplicant *wpa_s,
+ 				    struct wpa_ssid *ssid)
+@@ -4124,6 +4140,8 @@ int wpa_supplicant_run(struct wpa_global
+ 	eloop_register_signal_terminate(wpa_supplicant_terminate, global);
+ 	eloop_register_signal_reconfig(wpa_supplicant_reconfig, global);
+ 
++	eloop_register_signal(SIGUSR1, wpa_supplicant_handle_sigusr1, NULL);
++
+ 	eloop_run();
+ 
+ 	return 0;
