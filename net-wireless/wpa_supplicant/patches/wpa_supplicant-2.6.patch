@@ -1265,3 +1265,2492 @@ index fd94eaf46..c790b53ea 100644
  	eloop_run();
  
  	return 0;
+
+Haiku specific patches
+diff --git a/.gitignore wpa_supplicant-2.0/.gitignore
+new file mode 100644
+index 0000000..02ecd61
+--- /dev/null
++++ wpa_supplicant-2.0/.gitignore
+@@ -0,0 +1,6 @@
++*.d
++*.o
++*.rsrc
++/wpa_supplicant/wpa_cli
++/wpa_supplicant/wpa_passphrase
++/wpa_supplicant/wpa_supplicant
+diff --git a/src/drivers/driver_haiku_events.cpp wpa_supplicant-2.0/src/drivers/driver_haiku_events.cpp
+new file mode 100644
+index 0000000..27af03c
+--- /dev/null
++++ wpa_supplicant-2.0/src/drivers/driver_haiku_events.cpp
+@@ -0,0 +1,103 @@
++/*
++ * WPA Supplicant - Haiku event handling routines
++ * Copyright (c) 2010, Axel DÃ¶rfler, axeld@pinc-software.de.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * Alternatively, this software may be distributed under the terms of BSD
++ * license.
++ *
++ * See README and COPYING for more details.
++ *
++ * This file can be used as a starting point for layer2 packet implementation.
++ */
++
++#include <Application.h>
++#include <Looper.h>
++#include <String.h>
++
++#include <net_notifications.h>
++
++#include <new>
++
++
++class EventLooper : public BLooper {
++public:
++	EventLooper(void *context, void *driverData, const char *interfaceName,
++		void (*callback)(void *, void *, int))
++		:
++		fContext(context),
++		fDriverData(driverData),
++		fInterfaceName(interfaceName),
++		fCallback(callback),
++		fQuitting(false)
++	{
++		start_watching_network(B_WATCH_NETWORK_WLAN_CHANGES, this);
++	}
++
++	virtual ~EventLooper()
++	{
++		fQuitting = true;
++		stop_watching_network(this);
++	}
++
++protected:
++	virtual void MessageReceived(BMessage *message)
++	{
++		if (message->what != B_NETWORK_MONITOR) {
++			BLooper::MessageReceived(message);
++			return;
++		}
++
++		if (fQuitting)
++			return;
++
++		BString interfaceName;
++		if (message->FindString("interface", &interfaceName) != B_OK)
++			return;
++
++		if (fInterfaceName.FindFirst(interfaceName) < 0) {
++			// The notification is for some other interface
++			return;
++		}
++
++		message->AddPointer("callback", (void *)fCallback);
++		message->AddPointer("context", fContext);
++		message->AddPointer("data", fDriverData);
++		be_app->PostMessage(message);
++	}
++
++private:
++	void *fContext;
++	void *fDriverData;
++	BString fInterfaceName;
++	void (*fCallback)(void *, void *, int);
++	bool fQuitting;
++};
++
++
++extern "C" void
++haiku_unregister_events(void *events)
++{
++	EventLooper *eventLooper = (EventLooper *)events;
++	if (eventLooper->Lock())
++		eventLooper->Quit();
++}
++
++
++extern "C" int
++haiku_register_events(void *ctx, void *drv, const char *ifname, void **events,
++	void (*callback)(void *ctx, void *drv, int opcode))
++{
++	EventLooper *eventLooper = new(std::nothrow) EventLooper(ctx, drv, ifname,
++		callback);
++	if (eventLooper == NULL)
++		return B_NO_MEMORY;
++
++	eventLooper->Run();
++
++	*events = eventLooper;
++	return 0;
++}
+diff --git a/src/drivers/drivers.mak wpa_supplicant-2.0/src/drivers/drivers.mak
+index c7a98d3..a1d4b84 100644
+--- a/src/drivers/drivers.mak
++++ wpa_supplicant-2.0/src/drivers/drivers.mak
+@@ -51,9 +51,15 @@ CONFIG_L2_PACKET=freebsd
+ endif
+ DRV_CFLAGS += -DCONFIG_DRIVER_BSD
+ DRV_OBJS += ../src/drivers/driver_bsd.o
++ifneq ($(CONFIG_L2_PACKET), haiku)
+ CONFIG_L2_FREEBSD=y
+ CONFIG_DNET_PCAP=y
+ endif
++endif
++
++ifeq ($(CONFIG_L2_PACKET), haiku)
++DRV_OBJS += ../src/drivers/driver_haiku_events.o
++endif
+ 
+ ifdef CONFIG_DRIVER_TEST
+ DRV_CFLAGS += -DCONFIG_DRIVER_TEST
+diff --git a/src/l2_packet/l2_packet_haiku.c wpa_supplicant-2.0/src/l2_packet/l2_packet_haiku.c
+new file mode 100644
+index 0000000..9410d43
+--- /dev/null
++++ wpa_supplicant-2.0/src/l2_packet/l2_packet_haiku.c
+@@ -0,0 +1,241 @@
++/*
++ * WPA Supplicant - Layer2 packet handling for Haiku
++ * Copyright (c) 2010, Axel DÃ¶rfler, axeld@pinc-software.de.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * Alternatively, this software may be distributed under the terms of BSD
++ * license.
++ *
++ * See README and COPYING for more details.
++ *
++ * This file can be used as a starting point for layer2 packet implementation.
++ */
++
++#include "includes.h"
++
++#include "common.h"
++#include "eloop.h"
++#include "l2_packet.h"
++
++#include <net/ethernet.h>
++#include <net/if_dl.h>
++#include <sys/sockio.h>
++
++
++struct l2_packet_data {
++	char ifname[IF_NAMESIZE];
++	union {
++		struct sockaddr_dl link_address;
++		struct sockaddr_storage link_storage;
++	};
++	void (*rx_callback)(void *ctx, const u8 *src_addr,
++			    const u8 *buf, size_t len);
++	void *rx_callback_ctx;
++	int l2_hdr; /* whether to include layer 2 (Ethernet) header data
++		     * buffers */
++	int rx_fd;
++	int tx_fd;
++};
++
++
++int l2_packet_get_own_addr(struct l2_packet_data *l2, u8 *addr)
++{
++	os_memcpy(addr, LLADDR(&l2->link_address), ETH_ALEN);
++	return 0;
++}
++
++
++#if 0
++static void
++dump_block(const u8* buffer, int size, const char* prefix)
++{
++	const int DUMPED_BLOCK_SIZE = 16;
++	int i;
++
++	for (i = 0; i < size;) {
++		int start = i;
++
++		printf("%s%04x ", prefix, i);
++		for (; i < start + DUMPED_BLOCK_SIZE; i++) {
++			if (!(i % 4))
++				printf(" ");
++
++			if (i >= size)
++				printf("  ");
++			else
++				printf("%02x", *(unsigned char*)(buffer + i));
++		}
++		printf("  ");
++
++		for (i = start; i < start + DUMPED_BLOCK_SIZE; i++) {
++			if (i < size) {
++				char c = buffer[i];
++
++				if (c < 30)
++					printf(".");
++				else
++					printf("%c", c);
++			} else
++				break;
++		}
++		printf("\n");
++	}
++}
++#endif
++
++
++int l2_packet_send(struct l2_packet_data *l2, const u8 *dst_addr, u16 proto,
++		   const u8 *buf, size_t len)
++{
++	int result = -1;
++	struct sockaddr_dl to;
++
++	if (l2 == NULL)
++		return -1;
++
++	if (l2->l2_hdr) {
++		int result = send(l2->tx_fd, buf, len, 0);
++		if (result < 0)
++			printf("l2_packet_send failed to send: %s", strerror(errno));
++		return result;
++	}
++
++	memset(&to, 0, sizeof(struct sockaddr_dl));
++	to.sdl_len = sizeof(struct sockaddr_dl);
++	to.sdl_family = AF_LINK;
++	to.sdl_e_type = htons(proto);
++	to.sdl_alen = ETHER_ADDR_LEN;
++	memcpy(LLADDR(&to), dst_addr, ETHER_ADDR_LEN);
++
++	result = sendto(l2->tx_fd, buf, len, 0, (struct sockaddr*)&to,
++		sizeof(struct sockaddr_dl));
++	if (result < 0)
++		printf("l2_packet_send failed to send: %s", strerror(errno));
++
++	return result;
++}
++
++
++static void l2_packet_receive(int sock, void *eloop_ctx, void *sock_ctx)
++{
++	struct l2_packet_data *l2 = eloop_ctx;
++	struct sockaddr_dl from;
++	socklen_t fromLength = sizeof(struct sockaddr_dl);
++	ssize_t bytesReceived;
++	u8 buffer[2300];
++
++	bytesReceived = recvfrom(l2->rx_fd, buffer, sizeof(buffer), MSG_TRUNC,
++				 (struct sockaddr*)&from, &fromLength);
++
++	if (bytesReceived <= 0)
++		return;
++
++	l2->rx_callback(l2->rx_callback_ctx, LLADDR(&from), buffer, bytesReceived);
++}
++
++
++struct l2_packet_data * l2_packet_init(
++	const char *ifname, const u8 *own_addr, unsigned short protocol,
++	void (*rx_callback)(void *ctx, const u8 *src_addr,
++			    const u8 *buf, size_t len),
++	void *rx_callback_ctx, int l2_hdr)
++{
++	struct l2_packet_data *l2;
++	struct ifreq request;
++
++	/* check if the interface exists */
++	if (if_nametoindex(ifname) == 0)
++		return NULL;
++
++	l2 = os_zalloc(sizeof(struct l2_packet_data));
++	if (l2 == NULL)
++		return NULL;
++	os_strlcpy(l2->ifname, ifname, sizeof(l2->ifname));
++	l2->rx_callback = rx_callback;
++	l2->rx_callback_ctx = rx_callback_ctx;
++	l2->l2_hdr = l2_hdr;
++
++	/* open connection for sending and receiving frames */
++	l2->tx_fd = socket(AF_LINK, SOCK_DGRAM, 0);
++	if (l2->tx_fd < 0)
++		goto err1;
++
++	/* retrieve link address */
++	strlcpy(request.ifr_name, ifname, IF_NAMESIZE);
++	if (ioctl(l2->tx_fd, SIOCGIFADDR, &request, sizeof(struct ifreq)) < 0)
++		goto err2;
++
++	memcpy(&l2->link_address, &request.ifr_addr, request.ifr_addr.sa_len);
++
++	if (l2_hdr) {
++		/* we need to preserve the L2 header - this is only
++		   possible by using a dedicated socket.
++		 */
++
++		/* open connection for monitoring frames */
++		l2->rx_fd = socket(AF_LINK, SOCK_DGRAM, 0);
++		if (l2->rx_fd < 0)
++			goto err2;
++
++		/* start monitoring */
++		if (ioctl(l2->rx_fd, SIOCSPACKETCAP, &request,
++			  sizeof(struct ifreq)) < 0)
++			goto err2;
++	} else {
++		/* bind to protocol */
++		l2->link_address.sdl_e_type = htons(protocol);
++
++		if (bind(l2->tx_fd, (struct sockaddr *)&l2->link_address,
++				((struct sockaddr *)&l2->link_address)->sa_len) < 0)
++			goto err2;
++
++		/* we can use the same socket to receive our packets */
++		l2->rx_fd = l2->tx_fd;
++	}
++
++	eloop_register_read_sock(l2->rx_fd, l2_packet_receive, l2, NULL);
++
++	return l2;
++
++err2:
++	close(l2->tx_fd);
++err1:
++	os_free(l2);
++	return NULL;
++}
++
++
++void l2_packet_deinit(struct l2_packet_data *l2)
++{
++	if (l2 == NULL)
++		return;
++
++	if (l2->rx_fd >= 0) {
++		eloop_unregister_read_sock(l2->rx_fd);
++
++		close(l2->rx_fd);
++		if (l2->rx_fd != l2->tx_fd) {
++			/* we aren't bound to the protocol and use two different sockets
++				for sending and receiving */
++			close(l2->rx_fd);
++		}
++	}
++
++	os_free(l2);
++}
++
++
++int l2_packet_get_ip_addr(struct l2_packet_data *l2, char *buf, size_t len)
++{
++	/* TODO: get interface IP address */
++	return -1;
++}
++
++
++void l2_packet_notify_auth_start(struct l2_packet_data *l2)
++{
++	/* This function can be left empty */
++}
+diff --git a/src/utils/os_unix.c wpa_supplicant-2.0/src/utils/os_unix.c
+index 23a93be..5e164d6 100644
+--- a/src/utils/os_unix.c
++++ wpa_supplicant-2.0/src/utils/os_unix.c
+@@ -155,9 +155,9 @@ static int os_daemon(int nochdir, int noclose)
+ 
+ int os_daemonize(const char *pid_file)
+ {
+-#if defined(__uClinux__) || defined(__sun__)
++#if defined(__uClinux__) || defined(__sun__) || defined(__HAIKU__)
+ 	return -1;
+-#else /* defined(__uClinux__) || defined(__sun__) */
++#else /* defined(__uClinux__) || defined(__sun__) || defined(__HAIKU__) */
+ 	if (os_daemon(0, 0)) {
+ 		perror("daemon");
+ 		return -1;
+@@ -172,7 +172,7 @@ int os_daemonize(const char *pid_file)
+ 	}
+ 
+ 	return -0;
+-#endif /* defined(__uClinux__) || defined(__sun__) */
++#endif /* defined(__uClinux__) || defined(__sun__) || defined(__HAIKU__) */
+ }
+ 
+ 
+diff --git a/src/utils/wpa_debug.h wpa_supplicant-2.0/src/utils/wpa_debug.h
+index 339c749..78509b6 100644
+--- a/src/utils/wpa_debug.h
++++ wpa_supplicant-2.0/src/utils/wpa_debug.h
+@@ -82,7 +82,7 @@ void wpa_hexdump(int level, const char *title, const u8 *buf, size_t len);
+ static inline void wpa_hexdump_buf(int level, const char *title,
+ 				   const struct wpabuf *buf)
+ {
+-	wpa_hexdump(level, title, buf ? wpabuf_head(buf) : NULL,
++	wpa_hexdump(level, title, buf ? (const u8 *)wpabuf_head(buf) : NULL,
+ 		    buf ? wpabuf_len(buf) : 0);
+ }
+ 
+@@ -104,7 +104,7 @@ void wpa_hexdump_key(int level, const char *title, const u8 *buf, size_t len);
+ static inline void wpa_hexdump_buf_key(int level, const char *title,
+ 				       const struct wpabuf *buf)
+ {
+-	wpa_hexdump_key(level, title, buf ? wpabuf_head(buf) : NULL,
++	wpa_hexdump_key(level, title, buf ? (const u8 *)wpabuf_head(buf) : NULL,
+ 			buf ? wpabuf_len(buf) : 0);
+ }
+ 
+diff --git a/wpa_supplicant/.config wpa_supplicant-2.0/wpa_supplicant/.config
+new file mode 100644
+index 0000000..7d73f13
+--- /dev/null
++++ wpa_supplicant-2.0/wpa_supplicant/.config
+@@ -0,0 +1,374 @@
++# for OpenSSL
++CFLAGS += -I/boot/common/include
++LIBS += -L/boot/common/lib
++
++# for private Haiku headers
++CFLAGS += -I/system/develop/headers/private/libs/compat/freebsd_network/compat
++CFLAGS += -I/system/develop/headers/private/libs/compat/freebsd_wlan
++CFLAGS += -I/system/develop/headers/private/net
++CFLAGS += -Wno-multichar
++
++# Driver interface for FreeBSD net80211 layer (e.g., Atheros driver)
++CONFIG_DRIVER_BSD=y
++
++# Enable IEEE 802.1X Supplicant (automatically included if any EAP method is
++# included)
++#CONFIG_IEEE8021X_EAPOL=y
++
++# EAP-MD5
++#CONFIG_EAP_MD5=y
++
++# EAP-MSCHAPv2
++#CONFIG_EAP_MSCHAPV2=y
++
++# EAP-TLS
++#CONFIG_EAP_TLS=y
++
++# EAL-PEAP
++#CONFIG_EAP_PEAP=y
++
++# EAP-TTLS
++#CONFIG_EAP_TTLS=y
++
++# EAP-FAST
++# Note: Default OpenSSL package does not include support for all the
++# functionality needed for EAP-FAST. If EAP-FAST is enabled with OpenSSL,
++# the OpenSSL library must be patched (openssl-0.9.8d-tls-extensions.patch)
++# to add the needed functions.
++#CONFIG_EAP_FAST=y
++
++# EAP-GTC
++#CONFIG_EAP_GTC=y
++
++# EAP-OTP
++#CONFIG_EAP_OTP=y
++
++# EAP-SIM (enable CONFIG_PCSC, if EAP-SIM is used)
++#CONFIG_EAP_SIM=y
++
++# EAP-PSK (experimental; this is _not_ needed for WPA-PSK)
++#CONFIG_EAP_PSK=y
++
++# EAP-pwd (secure authentication using only a password)
++#CONFIG_EAP_PWD=y
++
++# EAP-PAX
++#CONFIG_EAP_PAX=y
++
++# LEAP
++#CONFIG_EAP_LEAP=y
++
++# EAP-AKA (enable CONFIG_PCSC, if EAP-AKA is used)
++#CONFIG_EAP_AKA=y
++
++# EAP-AKA' (enable CONFIG_PCSC, if EAP-AKA' is used).
++# This requires CONFIG_EAP_AKA to be enabled, too.
++#CONFIG_EAP_AKA_PRIME=y
++
++# EAP-SAKE
++#CONFIG_EAP_SAKE=y
++
++# EAP-GPSK
++#CONFIG_EAP_GPSK=y
++# Include support for optional SHA256 cipher suite in EAP-GPSK
++#CONFIG_EAP_GPSK_SHA256=y
++
++# EAP-TNC and related Trusted Network Connect support (experimental)
++#CONFIG_EAP_TNC=y
++
++# Wi-Fi Protected Setup (WPS)
++#CONFIG_WPS=y
++# Enable WSC 2.0 support
++#CONFIG_WPS2=y
++# Enable WPS external registrar functionality
++#CONFIG_WPS_ER=y
++# Disable credentials for an open network by default when acting as a WPS
++# registrar.
++#CONFIG_WPS_REG_DISABLE_OPEN=y
++# Enable WPS support with NFC config method
++#CONFIG_WPS_NFC=y
++
++# EAP-IKEv2
++#CONFIG_EAP_IKEV2=y
++
++# PKCS#12 (PFX) support (used to read private key and certificate file from
++# a file that usually has extension .p12 or .pfx)
++#CONFIG_PKCS12=y
++
++# Smartcard support (i.e., private key on a smartcard), e.g., with openssl
++# engine.
++#CONFIG_SMARTCARD=y
++
++# PC/SC interface for smartcards (USIM, GSM SIM)
++# Enable this if EAP-SIM or EAP-AKA is included
++#CONFIG_PCSC=y
++
++# Support HT overrides (disable HT/HT40, mask MCS rates, etc.)
++#CONFIG_HT_OVERRIDES=y
++
++# Development testing
++#CONFIG_EAPOL_TEST=y
++
++# Select control interface backend for external programs, e.g, wpa_cli:
++# unix = UNIX domain sockets (default for Linux/*BSD)
++# udp = UDP sockets using localhost (127.0.0.1)
++# named_pipe = Windows Named Pipe (default for Windows)
++# udp-remote = UDP sockets with remote access (only for tests systems/purpose)
++# y = use default (backwards compatibility)
++# If this option is commented out, control interface is not included in the
++# build.
++#CONFIG_CTRL_IFACE=y
++
++# Remove debugging code that is printing out debug message to stdout.
++# This can be used to reduce the size of the wpa_supplicant considerably
++# if debugging code is not needed. The size reduction can be around 35%
++# (e.g., 90 kB).
++#CONFIG_NO_STDOUT_DEBUG=y
++
++# Select configuration backend:
++# file = text file (e.g., wpa_supplicant.conf; note: the configuration file
++#	path is given on command line, not here; this option is just used to
++#	select the backend that allows configuration files to be used)
++# winreg = Windows registry (see win_example.reg for an example)
++CONFIG_BACKEND=none
++
++# Remove configuration write functionality (i.e., to allow the configuration
++# file to be updated based on runtime configuration changes). The runtime
++# configuration can still be changed, the changes are just not going to be
++# persistent over restarts. This option can be used to reduce code size by
++# about 3.5 kB.
++CONFIG_NO_CONFIG_WRITE=y
++
++# Remove support for configuration blobs to reduce code size by about 1.5 kB.
++CONFIG_NO_CONFIG_BLOBS=y
++
++# Select program entry point implementation:
++# main = UNIX/POSIX like main() function (default)
++# main_winsvc = Windows service (read parameters from registry)
++# main_none = Very basic example (development use only)
++CONFIG_MAIN=main_haiku
++
++# Select wrapper for operatins system and C library specific functions
++# unix = UNIX/POSIX like systems (default)
++# win32 = Windows systems
++# none = Empty template
++#CONFIG_OS=haiku
++
++# Select event loop implementation
++# eloop = select() loop (default)
++# eloop_win = Windows events and WaitForMultipleObject() loop
++# eloop_none = Empty template
++#CONFIG_ELOOP=eloop
++
++# Should we use poll instead of select? Select is used by default.
++#CONFIG_ELOOP_POLL=y
++
++# Select layer 2 packet implementation
++# linux = Linux packet socket (default)
++# pcap = libpcap/libdnet/WinPcap
++# freebsd = FreeBSD libpcap
++# winpcap = WinPcap with receive thread
++# ndis = Windows NDISUIO (note: requires CONFIG_USE_NDISUIO=y)
++# none = Empty template
++CONFIG_L2_PACKET=haiku
++
++# PeerKey handshake for Station to Station Link (IEEE 802.11e DLS)
++CONFIG_PEERKEY=y
++
++# IEEE 802.11w (management frame protection), also known as PMF
++# Driver support is also needed for IEEE 802.11w.
++#CONFIG_IEEE80211W=y
++
++# Select TLS implementation
++# openssl = OpenSSL (default)
++# gnutls = GnuTLS
++# internal = Internal TLSv1 implementation (experimental)
++# none = Empty template
++#CONFIG_TLS=openssl
++
++# TLS-based EAP methods require at least TLS v1.0. Newer version of TLS (v1.1)
++# can be enabled to get a stronger construction of messages when block ciphers
++# are used. It should be noted that some existing TLS v1.0 -based
++# implementation may not be compatible with TLS v1.1 message (ClientHello is
++# sent prior to negotiating which version will be used)
++#CONFIG_TLSV11=y
++
++# TLS-based EAP methods require at least TLS v1.0. Newer version of TLS (v1.2)
++# can be enabled to enable use of stronger crypto algorithms. It should be
++# noted that some existing TLS v1.0 -based implementation may not be compatible
++# with TLS v1.2 message (ClientHello is sent prior to negotiating which version
++# will be used)
++#CONFIG_TLSV12=y
++
++# If CONFIG_TLS=internal is used, additional library and include paths are
++# needed for LibTomMath. Alternatively, an integrated, minimal version of
++# LibTomMath can be used. See beginning of libtommath.c for details on benefits
++# and drawbacks of this option.
++#CONFIG_INTERNAL_LIBTOMMATH=y
++#ifndef CONFIG_INTERNAL_LIBTOMMATH
++#LTM_PATH=/usr/src/libtommath-0.39
++#CFLAGS += -I$(LTM_PATH)
++#LIBS += -L$(LTM_PATH)
++#LIBS_p += -L$(LTM_PATH)
++#endif
++# At the cost of about 4 kB of additional binary size, the internal LibTomMath
++# can be configured to include faster routines for exptmod, sqr, and div to
++# speed up DH and RSA calculation considerably
++#CONFIG_INTERNAL_LIBTOMMATH_FAST=y
++
++# Include NDIS event processing through WMI into wpa_supplicant/wpasvc.
++# This is only for Windows builds and requires WMI-related header files and
++# WbemUuid.Lib from Platform SDK even when building with MinGW.
++#CONFIG_NDIS_EVENTS_INTEGRATED=y
++#PLATFORMSDKLIB="/opt/Program Files/Microsoft Platform SDK/Lib"
++
++# Add support for old DBus control interface
++# (fi.epitest.hostap.WPASupplicant)
++#CONFIG_CTRL_IFACE_DBUS=y
++
++# Add support for new DBus control interface
++# (fi.w1.hostap.wpa_supplicant1)
++#CONFIG_CTRL_IFACE_DBUS_NEW=y
++
++# Add introspection support for new DBus control interface
++#CONFIG_CTRL_IFACE_DBUS_INTRO=y
++
++# Add support for loading EAP methods dynamically as shared libraries.
++# When this option is enabled, each EAP method can be either included
++# statically (CONFIG_EAP_<method>=y) or dynamically (CONFIG_EAP_<method>=dyn).
++# Dynamic EAP methods are build as shared objects (eap_*.so) and they need to
++# be loaded in the beginning of the wpa_supplicant configuration file
++# (see load_dynamic_eap parameter in the example file) before being used in
++# the network blocks.
++#
++# Note that some shared parts of EAP methods are included in the main program
++# and in order to be able to use dynamic EAP methods using these parts, the
++# main program must have been build with the EAP method enabled (=y or =dyn).
++# This means that EAP-TLS/PEAP/TTLS/FAST cannot be added as dynamic libraries
++# unless at least one of them was included in the main build to force inclusion
++# of the shared code. Similarly, at least one of EAP-SIM/AKA must be included
++# in the main build to be able to load these methods dynamically.
++#
++# Please also note that using dynamic libraries will increase the total binary
++# size. Thus, it may not be the best option for targets that have limited
++# amount of memory/flash.
++#CONFIG_DYNAMIC_EAP_METHODS=y
++
++# IEEE Std 802.11r-2008 (Fast BSS Transition)
++#CONFIG_IEEE80211R=y
++
++# Add support for writing debug log to a file (/tmp/wpa_supplicant-log-#.txt)
++#CONFIG_DEBUG_FILE=y
++
++# Send debug messages to syslog instead of stdout
++#CONFIG_DEBUG_SYSLOG=y
++# Set syslog facility for debug messages
++#CONFIG_DEBUG_SYSLOG_FACILITY=LOG_DAEMON
++
++# Add support for sending all debug messages (regardless of debug verbosity)
++# to the Linux kernel tracing facility. This helps debug the entire stack by
++# making it easy to record everything happening from the driver up into the
++# same file, e.g., using trace-cmd.
++#CONFIG_DEBUG_LINUX_TRACING=y
++
++# Enable privilege separation (see README 'Privilege separation' for details)
++#CONFIG_PRIVSEP=y
++
++# Enable mitigation against certain attacks against TKIP by delaying Michael
++# MIC error reports by a random amount of time between 0 and 60 seconds
++#CONFIG_DELAYED_MIC_ERROR_REPORT=y
++
++# Enable tracing code for developer debugging
++# This tracks use of memory allocations and other registrations and reports
++# incorrect use with a backtrace of call (or allocation) location.
++#CONFIG_WPA_TRACE=y
++# For BSD, uncomment these.
++#LIBS += -lexecinfo
++#LIBS_p += -lexecinfo
++#LIBS_c += -lexecinfo
++
++# Use libbfd to get more details for developer debugging
++# This enables use of libbfd to get more detailed symbols for the backtraces
++# generated by CONFIG_WPA_TRACE=y.
++#CONFIG_WPA_TRACE_BFD=y
++# For BSD, uncomment these.
++#LIBS += -lbfd -liberty -lz
++#LIBS_p += -lbfd -liberty -lz
++#LIBS_c += -lbfd -liberty -lz
++
++# wpa_supplicant depends on strong random number generation being available
++# from the operating system. os_get_random() function is used to fetch random
++# data when needed, e.g., for key generation. On Linux and BSD systems, this
++# works by reading /dev/urandom. It should be noted that the OS entropy pool
++# needs to be properly initialized before wpa_supplicant is started. This is
++# important especially on embedded devices that do not have a hardware random
++# number generator and may by default start up with minimal entropy available
++# for random number generation.
++#
++# As a safety net, wpa_supplicant is by default trying to internally collect
++# additional entropy for generating random data to mix in with the data fetched
++# from the OS. This by itself is not considered to be very strong, but it may
++# help in cases where the system pool is not initialized properly. However, it
++# is very strongly recommended that the system pool is initialized with enough
++# entropy either by using hardware assisted random number generator or by
++# storing state over device reboots.
++#
++# wpa_supplicant can be configured to maintain its own entropy store over
++# restarts to enhance random number generation. This is not perfect, but it is
++# much more secure than using the same sequence of random numbers after every
++# reboot. This can be enabled with -e<entropy file> command line option. The
++# specified file needs to be readable and writable by wpa_supplicant.
++#
++# If the os_get_random() is known to provide strong random data (e.g., on
++# Linux/BSD, the board in question is known to have reliable source of random
++# data from /dev/urandom), the internal wpa_supplicant random pool can be
++# disabled. This will save some in binary size and CPU use. However, this
++# should only be considered for builds that are known to be used on devices
++# that meet the requirements described above.
++#CONFIG_NO_RANDOM_POOL=y
++
++# IEEE 802.11n (High Throughput) support (mainly for AP mode)
++#CONFIG_IEEE80211N=y
++
++# Wireless Network Management (IEEE Std 802.11v-2011)
++# Note: This is experimental and not complete implementation.
++#CONFIG_WNM=y
++
++# Interworking (IEEE 802.11u)
++# This can be used to enable functionality to improve interworking with
++# external networks (GAS/ANQP to learn more about the networks and network
++# selection based on available credentials).
++#CONFIG_INTERWORKING=y
++
++# Hotspot 2.0
++#CONFIG_HS20=y
++
++# AP mode operations with wpa_supplicant
++# This can be used for controlling AP mode operations with wpa_supplicant. It
++# should be noted that this is mainly aimed at simple cases like
++# WPA2-Personal while more complex configurations like WPA2-Enterprise with an
++# external RADIUS server can be supported with hostapd.
++#CONFIG_AP=y
++
++# P2P (Wi-Fi Direct)
++# This can be used to enable P2P support in wpa_supplicant. See README-P2P for
++# more information on P2P operations.
++#CONFIG_P2P=y
++
++# Autoscan
++# This can be used to enable automatic scan support in wpa_supplicant.
++#Â See wpa_supplicant.conf for more information on autoscan usage.
++#
++# Enabling directly a module will enable autoscan support.
++# For exponential module:
++#CONFIG_AUTOSCAN_EXPONENTIAL=y
++# For periodic module:
++#CONFIG_AUTOSCAN_PERIODIC=y
++
++# Password (and passphrase, etc.) backend for external storage
++# These optional mechanisms can be used to add support for storing passwords
++# and other secrets in external (to wpa_supplicant) location. This allows, for
++# example, operating system specific key storage to be used
++#
++# External password backend for testing purposes (developer use)
++#CONFIG_EXT_PASSWORD_TEST=y
+diff --git a/wpa_supplicant/Makefile wpa_supplicant-2.0/wpa_supplicant/Makefile
+index 65fef41..d9e2cff 100644
+--- a/wpa_supplicant/Makefile
++++ b/wpa_supplicant/Makefile
+@@ -692,9 +692,11 @@ OBJS += ../src/eap_peer/eap.o ../src/eap_peer/eap_methods.o
+ NEED_EAP_COMMON=y
+ ifdef CONFIG_DYNAMIC_EAP_METHODS
+ CFLAGS += -DCONFIG_DYNAMIC_EAP_METHODS
++ifneq ($(CONFIG_L2_PACKET), haiku)
+ LIBS += -ldl -rdynamic
+ endif
+ endif
++endif
+ 
+ ifdef CONFIG_AP
+ NEED_80211_COMMON=y
+@@ -1039,11 +1041,23 @@ ifdef TLS_FUNCS
+ ifdef CONFIG_SMARTCARD
+ ifndef CONFIG_NATIVE_WINDOWS
+ ifneq ($(CONFIG_L2_PACKET), freebsd)
++ifneq ($(CONFIG_L2_PACKET), haiku)
+ LIBS += -ldl
+ endif
+ endif
+ endif
+ endif
++endif
++
++ifeq ($(CONFIG_L2_PACKET), haiku)
++OBJS += WirelessConfigDialog.o
++OBJS += notify_haiku.o
++LIBS += -lnetwork -lbe -lbnetapi
++LIBS_c += -lnetwork
++ifeq ($(shell $(CC) -dumpversion | cut -d. -f1), 4)
++LIBS += -lstdc++
++endif
++endif
+ 
+ ifndef TLS_FUNCS
+ OBJS += ../src/crypto/tls_none.o
+@@ -1506,9 +1520,18 @@ wpa_priv: $(BCHECK) $(OBJS_priv)
+ 
+ $(OBJS_c) $(OBJS_t) $(OBJS_t2) $(OBJS) $(BCHECK) $(EXTRA_progs): .config
+ 
++ifneq ($(CONFIG_L2_PACKET), haiku)
++wpa_supplicant: $(BCHECK) $(OBJS) $(EXTRA_progs)
++	$(Q)$(LDO) $(LDFLAGS) -o wpa_supplicant $(OBJS) $(LIBS) $(EXTRALIBS)
++	@$(E) "  LD " $@
++else
+ wpa_supplicant: $(BCHECK) $(OBJS) $(EXTRA_progs)
+ 	$(Q)$(LDO) $(LDFLAGS) -o wpa_supplicant $(OBJS) $(LIBS) $(EXTRALIBS)
+ 	@$(E) "  LD " $@
++	rc -o wpa_supplicant.rsrc wpa_supplicant.rdef
++	xres -o wpa_supplicant wpa_supplicant.rsrc
++	mimeset -F wpa_supplicant
++endif
+ 
+ eapol_test: $(OBJS_t)
+ 	$(Q)$(LDO) $(LDFLAGS) -o eapol_test $(OBJS_t) $(LIBS)
+@@ -1570,6 +1593,10 @@ eap_ikev2.so: ../src/eap_peer/eap_ikev2.c ../src/eap_peer/ikev2.c ../src/eap_com
+ 	$(Q)$(CC) -c -o $@ $(CFLAGS) $<
+ 	@$(E) "  CC " $<
+ 
++%.o: %.cpp
++	$(Q)$(CC) -c -o $@ $(CFLAGS) $<
++	@$(E) "  CPP " $<
++
+ %.service: %.service.in
+ 	sed -e 's|\@BINDIR\@|$(BINDIR)|g' $< >$@
+ 
+diff --git a/wpa_supplicant/WirelessConfigDialog.cpp wpa_supplicant-2.0/wpa_supplicant/WirelessConfigDialog.cpp
+new file mode 100644
+index 0000000..6fdad6a
+--- /dev/null
++++ wpa_supplicant-2.0/wpa_supplicant/WirelessConfigDialog.cpp
+@@ -0,0 +1,293 @@
++/*
++ * WPA Supplicant - Wireless Config Dialog
++ * Copyright (c) 2011, Michael Lotz <mmlr@mlotz.ch>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * Alternatively, this software may be distributed under the terms of BSD
++ * license.
++ *
++ * See README and COPYING for more details.
++ */
++
++#include <Button.h>
++#include <CheckBox.h>
++#include <GridLayout.h>
++#include <GridView.h>
++#include <GroupLayout.h>
++#include <GroupView.h>
++#include <MenuField.h>
++#include <MenuItem.h>
++#include <NetworkDevice.h>
++#include <PopUpMenu.h>
++#include <SpaceLayoutItem.h>
++#include <TextControl.h>
++#include <Window.h>
++#include <View.h>
++
++#include <new>
++
++static const uint32 kMessageCancel = 'btcl';
++static const uint32 kMessageOk = 'btok';
++
++
++class WirelessConfigView : public BView {
++public:
++	WirelessConfigView()
++		:
++		BView("WirelessConfigView", B_WILL_DRAW),
++		fPassword(NULL)
++	{
++		SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));
++
++		BGroupLayout* rootLayout = new(std::nothrow) BGroupLayout(B_VERTICAL);
++		if (rootLayout == NULL)
++			return;
++
++		SetLayout(rootLayout);
++
++		BGridView* controls = new(std::nothrow) BGridView();
++		if (controls == NULL)
++			return;
++
++		BGridLayout* layout = controls->GridLayout();
++
++		float inset = ceilf(be_plain_font->Size() * 0.7);
++		rootLayout->SetInsets(inset, inset, inset, inset);
++		rootLayout->SetSpacing(inset);
++		layout->SetSpacing(inset, inset);
++
++		fNetworkName = new(std::nothrow) BTextControl("Network Name:", "",
++			NULL);
++		if (fNetworkName == NULL)
++			return;
++
++		int32 row = 0;
++		layout->AddItem(fNetworkName->CreateLabelLayoutItem(), 0, row);
++		layout->AddItem(fNetworkName->CreateTextViewLayoutItem(), 1, row++);
++
++		BPopUpMenu* authMenu = new(std::nothrow) BPopUpMenu("authMode");
++		if (authMenu == NULL)
++			return;
++
++		fAuthOpen = new(std::nothrow) BMenuItem("Open", NULL);
++		authMenu->AddItem(fAuthOpen);
++		fAuthWEP = new(std::nothrow) BMenuItem("WEP", NULL);
++		authMenu->AddItem(fAuthWEP);
++		fAuthWPA = new(std::nothrow) BMenuItem("WPA/WPA2", NULL);
++		authMenu->AddItem(fAuthWPA);
++
++		BMenuField* authMenuField = new(std::nothrow) BMenuField(
++			"Authentication:", authMenu);
++		if (authMenuField == NULL)
++			return;
++
++		layout->AddItem(authMenuField->CreateLabelLayoutItem(), 0, row);
++		layout->AddItem(authMenuField->CreateMenuBarLayoutItem(), 1, row++);
++
++		fPassword = new(std::nothrow) BTextControl("Password:", "", NULL);
++		if (fPassword == NULL)
++			return;
++
++		BLayoutItem* layoutItem = fPassword->CreateTextViewLayoutItem();
++		layoutItem->SetExplicitMinSize(BSize(fPassword->StringWidth(
++				"0123456789012345678901234567890123456789") + inset,
++			B_SIZE_UNSET));
++
++		layout->AddItem(fPassword->CreateLabelLayoutItem(), 0, row);
++		layout->AddItem(layoutItem, 1, row++);
++
++		fPersist = new(std::nothrow) BCheckBox("Store this configuration");
++		layout->AddItem(BSpaceLayoutItem::CreateGlue(), 0, row);
++		layout->AddView(fPersist, 1, row++);
++
++		BGroupView* buttons = new(std::nothrow) BGroupView(B_HORIZONTAL);
++		if (buttons == NULL)
++			return;
++
++		fCancelButton = new(std::nothrow) BButton("Cancel",
++			new BMessage(kMessageCancel));
++		buttons->GroupLayout()->AddView(fCancelButton);
++
++		buttons->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
++
++		fOkButton = new(std::nothrow) BButton("OK", new BMessage(kMessageOk));
++		buttons->GroupLayout()->AddView(fOkButton);
++
++		rootLayout->AddView(controls);
++		rootLayout->AddView(buttons);
++	}
++
++	virtual void
++	AttachedToWindow()
++	{
++		fCancelButton->SetTarget(Window());
++		fOkButton->SetTarget(Window());
++		fOkButton->MakeDefault(true);
++		fPassword->MakeFocus(true);
++	}
++
++	void
++	SetUp(const BMessage& message)
++	{
++		BString networkName;
++		if (message.FindString("name", &networkName) == B_OK)
++			fNetworkName->SetText(networkName);
++
++		uint32 authMode;
++		if (message.FindUInt32("authentication", &authMode) != B_OK)
++			authMode = B_NETWORK_AUTHENTICATION_NONE;
++
++		switch (authMode) {
++			default:
++			case B_NETWORK_AUTHENTICATION_NONE:
++				fAuthOpen->SetMarked(true);
++				break;
++			case B_NETWORK_AUTHENTICATION_WEP:
++				fAuthWEP->SetMarked(true);
++				break;
++			case B_NETWORK_AUTHENTICATION_WPA:
++			case B_NETWORK_AUTHENTICATION_WPA2:
++				fAuthWPA->SetMarked(true);
++				break;
++		}
++
++		BString password;
++		if (message.FindString("password", &password) == B_OK)
++			fPassword->SetText(password);
++	}
++
++	void
++	Complete(BMessage& message)
++	{
++		message.RemoveName("name");
++		message.AddString("name", fNetworkName->Text());
++
++		uint32 authMode = B_NETWORK_AUTHENTICATION_NONE;
++		if (fAuthWEP->IsMarked())
++			authMode = B_NETWORK_AUTHENTICATION_WEP;
++		else if (fAuthWPA->IsMarked())
++			authMode = B_NETWORK_AUTHENTICATION_WPA;
++
++		message.RemoveName("authentication");
++		message.AddUInt32("authentication", authMode);
++
++		message.RemoveName("password");
++		message.AddString("password", fPassword->Text());
++
++		message.RemoveName("persistent");
++		message.AddBool("persistent", fPersist->Value() != 0);
++	}
++
++private:
++	BTextControl* fNetworkName;
++	BMenuItem* fAuthOpen;
++	BMenuItem* fAuthWEP;
++	BMenuItem* fAuthWPA;
++	BTextControl* fPassword;
++	BCheckBox* fPersist;
++	BButton* fCancelButton;
++	BButton* fOkButton;
++};
++
++
++class WirelessConfigWindow : public BWindow {
++public:
++	WirelessConfigWindow(BRect frame)
++		:
++		BWindow(BRect(50, 50, 269, 302), "Connect Wireless Network",
++			B_TITLED_WINDOW, B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS
++				| B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS),
++		fConfigView(NULL),
++		fDoneSem(-1),
++		fResult(B_ERROR)
++	{
++		fDoneSem = create_sem(0, "wireless config done");
++		if (fDoneSem < 0)
++			return;
++
++		BLayout* layout = new(std::nothrow) BGroupLayout(B_HORIZONTAL);
++		if (layout == NULL)
++			return;
++
++		SetLayout(layout);
++
++		fConfigView = new(std::nothrow) WirelessConfigView();
++		if (fConfigView == NULL)
++			return;
++
++		layout->AddView(fConfigView);
++	}
++
++	virtual
++	~WirelessConfigWindow()
++	{
++		if (fDoneSem >= 0)
++			delete_sem(fDoneSem);
++	}
++
++	virtual void
++	DispatchMessage(BMessage* message, BHandler* handler)
++	{
++		int8 key;
++		if (message->what == B_KEY_DOWN
++			&& message->FindInt8("byte", 0, &key) == B_OK
++			&& key == B_ESCAPE) {
++			PostMessage(kMessageCancel);
++		}
++
++		BWindow::DispatchMessage(message, handler);
++	}
++
++	virtual void
++	MessageReceived(BMessage* message)
++	{
++		switch (message->what) {
++			case kMessageCancel:
++			case kMessageOk:
++				fResult = message->what == kMessageCancel ? B_CANCELED : B_OK;
++				release_sem(fDoneSem);
++				return;
++		}
++
++		BWindow::MessageReceived(message);
++	}
++
++	status_t
++	WaitForDialog(BMessage& message)
++	{
++		
++		fConfigView->SetUp(message);
++
++		CenterOnScreen();
++		Show();
++
++		while (acquire_sem(fDoneSem) == B_INTERRUPTED);
++
++		status_t result = fResult;
++		fConfigView->Complete(message);
++
++		LockLooper();
++		Quit();
++		return result;
++	}
++
++private:
++	WirelessConfigView* fConfigView;
++	sem_id fDoneSem;
++	status_t fResult;
++};
++
++
++status_t
++wireless_config_dialog(BMessage& message)
++{
++	WirelessConfigWindow* configWindow
++		= new(std::nothrow) WirelessConfigWindow(BRect(100, 100, 200, 200));
++	if (configWindow == NULL)
++		return B_NO_MEMORY;
++
++	return configWindow->WaitForDialog(message);
++}
+diff --git a/wpa_supplicant/WirelessConfigDialog.h wpa_supplicant-2.0/wpa_supplicant/WirelessConfigDialog.h
+new file mode 100644
+index 0000000..38e898b
+--- /dev/null
++++ wpa_supplicant-2.0/wpa_supplicant/WirelessConfigDialog.h
+@@ -0,0 +1 @@
++status_t wireless_config_dialog(BMessage& message);
+diff --git a/wpa_supplicant/bss.c wpa_supplicant-2.0/wpa_supplicant/bss.c
+index 87b7db8..e6da734 100644
+--- a/wpa_supplicant/bss.c
++++ wpa_supplicant-2.0/wpa_supplicant/bss.c
+@@ -353,7 +353,7 @@ static struct wpa_bss * wpa_bss_add(struct wpa_supplicant *wpa_s,
+ static int are_ies_equal(const struct wpa_bss *old,
+ 			 const struct wpa_scan_res *new, u32 ie)
+ {
+-	const u8 *old_ie, *new_ie;
++	const u8 *old_ie = NULL, *new_ie = NULL;
+ 	struct wpabuf *old_ie_buff = NULL;
+ 	struct wpabuf *new_ie_buff = NULL;
+ 	int new_ie_len, old_ie_len, ret, is_multi;
+diff --git a/wpa_supplicant/config.c wpa_supplicant-2.0/wpa_supplicant/config.c
+index 0fab07a..54b3683 100644
+--- a/wpa_supplicant/config.c
++++ wpa_supplicant-2.0/wpa_supplicant/config.c
+@@ -2120,6 +2120,7 @@ int wpa_config_set_quoted(struct wpa_ssid *ssid, const char *var,
+ }
+ 
+ 
++#ifndef NO_CONFIG_WRITE
+ /**
+  * wpa_config_get_all - Get all options from network configuration
+  * @ssid: Pointer to network configuration data
+@@ -2182,7 +2183,6 @@ err:
+ }
+ 
+ 
+-#ifndef NO_CONFIG_WRITE
+ /**
+  * wpa_config_get - Get a variable in network configuration
+  * @ssid: Pointer to network configuration data
+@@ -2257,7 +2257,7 @@ char * wpa_config_get_no_key(struct wpa_ssid *ssid, const char *var)
+ 
+ 	return NULL;
+ }
+-#endif /* NO_CONFIG_WRITE */
++#endif // !NO_CONFIG_WRITE
+ 
+ 
+ /**
+diff --git a/wpa_supplicant/main_haiku.cpp wpa_supplicant-2.0/wpa_supplicant/main_haiku.cpp
+new file mode 100644
+index 0000000..e9b0c8a
+--- /dev/null
++++ wpa_supplicant-2.0/wpa_supplicant/main_haiku.cpp
+@@ -0,0 +1,863 @@
++/*
++ * WPA Supplicant / Haiku entrypoint
++ * Copyright (c) 2011, Michael Lotz <mmlr@mlotz.ch>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * Alternatively, this software may be distributed under the terms of BSD
++ * license.
++ *
++ * See README and COPYING for more details.
++ */
++
++#include <Application.h>
++#include <KeyStore.h>
++#include <Locker.h>
++#include <MessageQueue.h>
++#include <MessageRunner.h>
++#include <NetworkDevice.h>
++#include <NetworkRoster.h>
++#include <ObjectList.h>
++#include <String.h>
++
++#include <net_notifications.h>
++
++#include "WirelessConfigDialog.h"
++#include "WPASupplicant.h" // private header currently inside Haiku
++
++#include <new>
++
++extern "C" {
++#include "utils/includes.h"
++#include "utils/common.h"
++#include "utils/eloop.h"
++#include "common/defs.h"
++
++#include "config.h"
++#include "notify.h"
++#include "notify_haiku.h"
++#include "wpa_supplicant_i.h"
++}
++
++extern "C" {
++#include <net/if_types.h>
++#include <net80211/ieee80211_ioctl.h>
++#include <sys/sockio.h>
++}
++
++
++static const uint32 kMsgJoinTimeout = 'jnto';
++static const char *kWPASupplicantKeyring = "wpa_supplicant";
++
++
++typedef	bool (*StateChangeCallback)(const wpa_supplicant *interface,
++	BMessage *message, void *data);
++
++
++class StateChangeWatchingEntry {
++public:
++								StateChangeWatchingEntry(
++									const wpa_supplicant *interface,
++									StateChangeCallback callback,
++									void *data);
++
++
++		bool					MessageReceived(
++									const wpa_supplicant *interface,
++									BMessage *message);
++
++private:
++		const wpa_supplicant *	fInterface;
++		StateChangeCallback		fCallback;
++		void *					fData;
++};
++
++
++StateChangeWatchingEntry::StateChangeWatchingEntry(
++	const wpa_supplicant *interface, StateChangeCallback callback, void *data)
++	:
++	fInterface(interface),
++	fCallback(callback),
++	fData(data)
++{
++}
++
++
++bool
++StateChangeWatchingEntry::MessageReceived(const wpa_supplicant *interface,
++	BMessage *message)
++{
++	if (interface != fInterface)
++		return false;
++
++	return fCallback(interface, message, fData);
++}
++
++
++class WPASupplicantApp : public BApplication {
++public:
++								WPASupplicantApp();
++virtual							~WPASupplicantApp();
++
++		status_t				InitCheck();
++
++virtual	void					ReadyToRun();
++virtual	void					MessageReceived(BMessage *message);
++
++		status_t				RunSupplicantInMainThread();
++
++private:
++static	int32					_SupplicantThread(void *data);
++static	void					_EventLoopProcessEvents(int sock,
++									void *eventLoopContext, void *data);
++
++		status_t				_EnqueueAndNotify(BMessage *message);
++		status_t				_NotifyEventLoop();
++
++		bool					_CheckAskForConfig(BMessage *message);
++
++		status_t				_JoinNetwork(BMessage *message);
++		status_t				_LeaveNetwork(BMessage *message);
++
++		status_t				_NotifyNetworkEvent(BMessage *message);
++
++static	void					_SuccessfullyJoined(
++									const wpa_supplicant *interface,
++									const BMessage &joinRequest);
++static	void					_FailedToJoin(const wpa_supplicant *interface,
++									const BMessage &joinRequest);
++
++static	bool					_InterfaceStateChangeCallback(
++									const wpa_supplicant *interface,
++									BMessage *message, void *data);
++
++		status_t				_StartWatchingInterfaceChanges(
++									const wpa_supplicant *interface,
++									StateChangeCallback callback, void *data);
++		void					_NotifyInterfaceStateChanged(BMessage *message);
++
++static	void					_SendReplyIfNeeded(BMessage &message,
++									status_t status);
++
++		status_t				fInitStatus;
++		thread_id				fSupplicantThread;
++		BMessageQueue			fEventQueue;
++
++		int						fNotifySockets[2];
++
++		BObjectList<StateChangeWatchingEntry>
++								fWatchingEntryList;
++		BLocker					fWatchingEntryListLocker;
++
++		wpa_global *			fWPAGlobal;
++		wpa_params				fWPAParameters;
++};
++
++
++WPASupplicantApp::WPASupplicantApp()
++	:
++	BApplication(kWPASupplicantSignature),
++	fInitStatus(B_NO_INIT),
++	fSupplicantThread(-1),
++	fWPAGlobal(NULL)
++{
++	fNotifySockets[0] = fNotifySockets[1] = -1;
++
++	fInitStatus = BApplication::InitCheck();
++	if (fInitStatus != B_OK)
++		return;
++
++	memset(&fWPAParameters, 0, sizeof(fWPAParameters));
++	//fWPAParameters.wpa_debug_level = MSG_DEBUG;
++
++	fWPAGlobal = wpa_supplicant_init(&fWPAParameters);
++	if (fWPAGlobal == NULL) {
++		fInitStatus = B_ERROR;
++		return;
++	}
++
++	if (socketpair(AF_LOCAL, SOCK_STREAM, 0, fNotifySockets) != 0) {
++		fInitStatus = errno;
++		return;
++	}
++}
++
++
++WPASupplicantApp::~WPASupplicantApp()
++{
++	if (fWPAGlobal == NULL)
++		return;
++
++	wpa_supplicant_terminate_proc(fWPAGlobal);
++
++	// Wake the event loop up so it'll process the quit request and exit.
++	_NotifyEventLoop();
++
++	int32 result;
++	wait_for_thread(fSupplicantThread, &result);
++
++	wpa_supplicant_deinit(fWPAGlobal);
++
++	close(fNotifySockets[0]);
++	close(fNotifySockets[1]);
++}
++
++
++status_t
++WPASupplicantApp::InitCheck()
++{
++	return fInitStatus;
++}
++
++
++void
++WPASupplicantApp::ReadyToRun()
++{
++	fSupplicantThread = spawn_thread(_SupplicantThread,
++		"wpa_supplicant thread", B_NORMAL_PRIORITY, this);
++	if (fSupplicantThread < 0 || resume_thread(fSupplicantThread))
++		PostMessage(B_QUIT_REQUESTED);
++}
++
++
++void
++WPASupplicantApp::MessageReceived(BMessage *message)
++{
++	switch (message->what) {
++		case kMsgWPAJoinNetwork:
++		{
++			if (_CheckAskForConfig(message)) {
++				status_t status = wireless_config_dialog(*message);
++				if (status != B_OK) {
++					_SendReplyIfNeeded(*message, status);
++					return;
++				}
++			}
++
++			_EnqueueAndNotify(DetachCurrentMessage());
++				// The event processing code will send the reply.
++			return;
++		}
++
++		case kMsgWPALeaveNetwork:
++		{
++			_EnqueueAndNotify(DetachCurrentMessage());
++				// The event processing code will send the reply.
++			return;
++		}
++
++		case B_NETWORK_MONITOR:
++		{
++			BMessage *copy = new BMessage();
++			*copy = *message;
++			_EnqueueAndNotify(copy);
++			return;
++		}
++
++		case kMsgSupplicantStateChanged:
++		case kMsgJoinTimeout:
++		{
++			_NotifyInterfaceStateChanged(message);
++			return;
++		}
++	}
++
++	BApplication::MessageReceived(message);
++}
++
++
++int32
++WPASupplicantApp::_SupplicantThread(void *data)
++{
++	WPASupplicantApp *app = (WPASupplicantApp *)data;
++
++	// Register our notify socket with the polling event loop.
++	if (eloop_register_read_sock(app->fNotifySockets[0],
++			_EventLoopProcessEvents, app->fWPAGlobal, app) != 0) {
++		return B_ERROR;
++	}
++
++	wpa_supplicant_run(app->fWPAGlobal);
++
++	eloop_unregister_read_sock(app->fNotifySockets[0]);
++
++	// There are two reasons why the supplicant thread quit:
++	// 1.	The event loop was terminated because of a signal or error and the
++	//		application is still there and running.
++	// 2.	The app has quit and stopped the event loop.
++	//
++	// In case of 2. we're done, but in case of 1. we need to quit the still
++	// running application. We use the app messenger to reach the app if it is
++	// still running. If it already quit the SendMessage() will simply fail.
++
++	be_app_messenger.SendMessage(B_QUIT_REQUESTED);
++	return B_OK;
++}
++
++
++status_t
++WPASupplicantApp::_EnqueueAndNotify(BMessage *message)
++{
++	if (!fEventQueue.Lock())
++		return B_ERROR;
++
++	fEventQueue.AddMessage(message);
++	fEventQueue.Unlock();
++
++	return _NotifyEventLoop();
++}
++
++
++status_t
++WPASupplicantApp::_NotifyEventLoop()
++{
++	// This will interrupt the event loop and cause the message queue to be
++	// processed through the installed handler.
++	uint8 byte = 0;
++	ssize_t written = write(fNotifySockets[1], &byte, sizeof(byte));
++	if (written < 0)
++		return written;
++
++	return written == sizeof(byte) ? B_OK : B_ERROR;
++}
++
++
++void
++WPASupplicantApp::_EventLoopProcessEvents(int sock, void *eventLoopContext,
++	void *data)
++{
++	// This function is called from the event loop only.
++
++	WPASupplicantApp *app = (WPASupplicantApp *)data;
++
++	uint8 bytes[25];
++	read(app->fNotifySockets[0], bytes, sizeof(bytes));
++		// discard them, they are just here to wake the event loop
++
++	BMessageQueue &queue = app->fEventQueue;
++	if (!queue.Lock())
++		return;
++
++	while (true) {
++		BMessage *message = queue.FindMessage((int32)0);
++		if (message == NULL)
++			break;
++
++		queue.RemoveMessage(message);
++
++		bool needsReply = false;
++		bool deleteMessage = true;
++		status_t status = B_MESSAGE_NOT_UNDERSTOOD;
++		switch (message->what) {
++			case kMsgWPAJoinNetwork:
++				status = app->_JoinNetwork(message);
++				needsReply = status != B_OK;
++				deleteMessage = needsReply;
++				break;
++
++			case kMsgWPALeaveNetwork:
++				status = app->_LeaveNetwork(message);
++				needsReply = status != B_OK;
++				deleteMessage = needsReply;
++				break;
++
++			case B_NETWORK_MONITOR:
++				app->_NotifyNetworkEvent(message);
++				break;
++		}
++
++		if (needsReply)
++			_SendReplyIfNeeded(*message, status);
++		if (deleteMessage)
++			delete message;
++	}
++
++	queue.Unlock();
++}
++
++
++bool
++WPASupplicantApp::_CheckAskForConfig(BMessage *message)
++{
++	bool force = false;
++	if (message->FindBool("forceDialog", &force) == B_OK && force)
++		return true;
++
++	if (!message->HasString("name"))
++		return true;
++
++	uint32 authMode = B_NETWORK_AUTHENTICATION_NONE;
++	if (message->FindUInt32("authentication", &authMode) != B_OK)
++		return true;
++
++	if (authMode <= B_NETWORK_AUTHENTICATION_NONE
++		|| message->HasString("password")) {
++		return false;
++	}
++
++	// Try looking up the password in the keystore.
++	const char *name = message->FindString("name");
++
++	// TODO: Use the bssid as an optional secondary identifier to allow for
++	// overlapping network names.
++	BPasswordKey key;
++	BKeyStore keyStore;
++	if (keyStore.GetKey(kWPASupplicantKeyring, B_KEY_TYPE_PASSWORD,
++			name, key) != B_OK) {
++		return true;
++	}
++
++	message->AddString("password", key.Password());
++	return false;
++}
++
++
++status_t
++WPASupplicantApp::_JoinNetwork(BMessage *message)
++{
++	const char *interfaceName = NULL;
++	status_t status = message->FindString("device", &interfaceName);
++	if (status != B_OK)
++		return status;
++
++	// Check if we already registered this interface.
++	wpa_supplicant *interface = wpa_supplicant_get_iface(fWPAGlobal,
++		interfaceName);
++	if (interface == NULL) {
++		wpa_interface interfaceOptions;
++		memset(&interfaceOptions, 0, sizeof(wpa_interface));
++
++		interfaceOptions.ifname = interfaceName;
++
++		interface = wpa_supplicant_add_iface(fWPAGlobal, &interfaceOptions);
++		if (interface == NULL)
++			return B_NO_MEMORY;
++	} else {
++		// Disable everything
++		wpa_supplicant_disable_network(interface, NULL);
++
++		// Try to remove any existing network
++		while (true) {
++			wpa_ssid *network = wpa_config_get_network(interface->conf, 0);
++			if (network == NULL)
++				break;
++
++			wpas_notify_network_removed(interface, network);
++			wpa_config_remove_network(interface->conf, network->id);
++		}
++	}
++
++	const char *networkName = NULL;
++	status = message->FindString("name", &networkName);
++	if (status != B_OK)
++		return status;
++
++	uint32 authMode = B_NETWORK_AUTHENTICATION_NONE;
++	status = message->FindUInt32("authentication", &authMode);
++	if (status != B_OK)
++		return status;
++
++	const char *password = NULL;
++	if (authMode > B_NETWORK_AUTHENTICATION_NONE) {
++		status = message->FindString("password", &password);
++		if (status != B_OK)
++			return status;
++	}
++
++	wpa_ssid *network = wpa_config_add_network(interface->conf);
++	if (network == NULL)
++		return B_NO_MEMORY;
++
++	wpas_notify_network_added(interface, network);
++
++	network->disabled = 1;
++	wpa_config_set_network_defaults(network);
++
++	// Fill in the info from the join request
++
++	// The format includes the quotes
++	BString value;
++	value = "\"";
++	value += networkName;
++	value += "\"";
++	int result = wpa_config_set(network, "ssid", value.String(), 0);
++
++	if (result == 0)
++		result = wpa_config_set(network, "scan_ssid", "1", 1);
++
++	if (authMode >= B_NETWORK_AUTHENTICATION_WPA) {
++		if (result == 0)
++			result = wpa_config_set(network, "proto", "WPA RSN", 2);
++		if (result == 0)
++			result = wpa_config_set(network, "key_mgmt", "WPA-PSK", 3);
++		if (result == 0)
++			result = wpa_config_set(network, "pairwise", "CCMP TKIP NONE", 4);
++		if (result == 0) {
++			result = wpa_config_set(network, "group",
++				"CCMP TKIP WEP104 WEP40", 5);
++		}
++	} else {
++		// Open or WEP.
++		if (result == 0)
++			result = wpa_config_set(network, "key_mgmt", "NONE", 6);
++	}
++
++	if (result == 0) {
++		if (authMode == B_NETWORK_AUTHENTICATION_WEP) {
++			if (strncmp("0x", password, 2) == 0) {
++				// interpret as hex key
++				// TODO: make this non-ambiguous
++				result = wpa_config_set(network, "wep_key0", password + 2, 7);
++			} else {
++				value = "\"";
++				value += password;
++				value += "\"";
++				result = wpa_config_set(network, "wep_key0", value.String(), 8);
++			}
++
++			if (result == 0)
++				result = wpa_config_set(network, "wep_tx_keyidx", "0", 9);
++		} else if (authMode >= B_NETWORK_AUTHENTICATION_WPA) {
++			// WPA/WPA2
++			value = "\"";
++			value += password;
++			value += "\"";
++			result = wpa_config_set(network, "psk", value.String(), 10);
++
++			if (result == 0) {
++				// We need to actually "apply" the PSK
++				wpa_config_update_psk(network);
++			}
++		}
++
++		if (result != 0) {
++			// The key format is invalid, we need to ask for another password.
++			BMessage newJoinRequest = *message;
++			newJoinRequest.RemoveName("password");
++			newJoinRequest.AddString("error", "Password format invalid");
++			newJoinRequest.AddBool("forceDialog", true);
++			PostMessage(&newJoinRequest);
++		}
++	}
++
++	if (result != 0) {
++		wpas_notify_network_removed(interface, network);
++		wpa_config_remove_network(interface->conf, network->id);
++		return B_ERROR;
++	}
++
++	// Set up watching for the completion event
++	_StartWatchingInterfaceChanges(interface, _InterfaceStateChangeCallback,
++		message);
++
++	// Now attempt to connect
++	wpa_supplicant_select_network(interface, network);
++
++	// Use a message runner to return a timeout and stop watching after a while
++	BMessage timeout(kMsgJoinTimeout);
++	timeout.AddPointer("interface", interface);
++
++	BMessageRunner::StartSending(be_app_messenger, &timeout,
++		15 * 1000 * 1000, 1);
++		// Note that we don't need to cancel this. If joining works before the
++		// timeout happens, it will take the StateChangeWatchingEntry with it
++		// and the timeout message won't match anything and be discarded.
++
++	return B_OK;
++}
++
++
++status_t
++WPASupplicantApp::_LeaveNetwork(BMessage *message)
++{
++	const char *interfaceName = NULL;
++	status_t status = message->FindString("device", &interfaceName);
++	if (status != B_OK)
++		return status;
++
++	wpa_supplicant *interface = wpa_supplicant_get_iface(fWPAGlobal,
++		interfaceName);
++	if (interface == NULL)
++		return B_ENTRY_NOT_FOUND;
++
++	if (wpa_supplicant_remove_iface(fWPAGlobal, interface, 0) != 0)
++		return B_ERROR;
++
++	return B_OK;
++}
++
++
++status_t
++WPASupplicantApp::_NotifyNetworkEvent(BMessage *message)
++{
++	// Verify that the interface is still there.
++	BString interfaceName;
++	if (message->FindString("interface", &interfaceName) != B_OK)
++		return B_ERROR;
++
++	interfaceName.Prepend("/dev/");
++	wpa_supplicant *interface = wpa_supplicant_get_iface(fWPAGlobal,
++		interfaceName.String());
++	if (interface == NULL)
++		return B_ENTRY_NOT_FOUND;
++
++	void (*callback)(void *context, void *data, int opcode) = NULL;
++	status_t result = message->FindPointer("callback", (void **)&callback);
++	if (result != B_OK)
++		return result;
++
++	void *context = NULL;
++	result = message->FindPointer("context", &context);
++	if (result != B_OK)
++		return result;
++
++	void *data = NULL;
++	message->FindPointer("data", &data);
++
++	callback(context, data, message->FindInt32("opcode"));
++	return B_OK;
++}
++
++
++void
++WPASupplicantApp::_SuccessfullyJoined(const wpa_supplicant *interface,
++	const BMessage &joinRequest)
++{
++	// We successfully connected with this configuration, store the config,
++	// if requested, by adding a persistent network on the network device.
++	if (!joinRequest.FindBool("persistent"))
++		return;
++
++	wpa_ssid *networkConfig = interface->current_ssid;
++	if (networkConfig == NULL)
++		return;
++
++	wireless_network network;
++	memset(network.name, 0, sizeof(network.name));
++	memcpy(network.name, networkConfig->ssid,
++		min_c(sizeof(network.name), networkConfig->ssid_len));
++
++	//network.address.SetToLinkLevel((uint8 *)interface->bssid, ETH_ALEN);
++		// TODO: Decide if we want to do this, it limits the network to
++		// a specific base station instead of a "service set" that might
++		// consist of more than one base station. On the other hand it makes
++		// the network unique so the right one is connected in case of name
++		// conflicts. It should probably be used as a hint, as in "preferred"
++		// base station.
++
++	if (joinRequest.FindUInt32("authentication",
++			&network.authentication_mode) != B_OK) {
++		return;
++	}
++
++	if (network.authentication_mode > B_NETWORK_AUTHENTICATION_NONE) {
++		const char *password = NULL;
++		if (joinRequest.FindString("password", &password) != B_OK)
++			return;
++
++		BString networkName(network.name, sizeof(network.name));
++		BPasswordKey key(password, B_KEY_PURPOSE_NETWORK, networkName);
++
++		BKeyStore keyStore;
++		keyStore.AddKeyring(kWPASupplicantKeyring);
++		keyStore.AddKey(kWPASupplicantKeyring, key);
++	}
++
++	switch (interface->pairwise_cipher) {
++		case WPA_CIPHER_NONE:
++			network.cipher = B_NETWORK_CIPHER_NONE;
++			break;
++		case WPA_CIPHER_TKIP:
++			network.cipher = B_NETWORK_CIPHER_TKIP;
++			break;
++		case WPA_CIPHER_CCMP:
++			network.cipher = B_NETWORK_CIPHER_CCMP;
++			break;
++	}
++
++	switch (interface->group_cipher) {
++		case WPA_CIPHER_NONE:
++			network.group_cipher = B_NETWORK_CIPHER_NONE;
++			break;
++		case WPA_CIPHER_WEP40:
++			network.group_cipher = B_NETWORK_CIPHER_WEP_40;
++			break;
++		case WPA_CIPHER_WEP104:
++			network.group_cipher = B_NETWORK_CIPHER_WEP_104;
++			break;
++		case WPA_CIPHER_TKIP:
++			network.group_cipher = B_NETWORK_CIPHER_TKIP;
++			break;
++		case WPA_CIPHER_CCMP:
++			network.group_cipher = B_NETWORK_CIPHER_CCMP;
++			break;
++	}
++
++	switch (interface->key_mgmt) {
++		case WPA_KEY_MGMT_IEEE8021X:
++			network.key_mode = B_KEY_MODE_IEEE802_1X;
++			break;
++		case WPA_KEY_MGMT_PSK:
++			network.key_mode = B_KEY_MODE_PSK;
++			break;
++		case WPA_KEY_MGMT_NONE:
++			network.key_mode = B_KEY_MODE_NONE;
++			break;
++		case WPA_KEY_MGMT_FT_IEEE8021X:
++			network.key_mode = B_KEY_MODE_FT_IEEE802_1X;
++			break;
++		case WPA_KEY_MGMT_FT_PSK:
++			network.key_mode = B_KEY_MODE_FT_PSK;
++			break;
++		case WPA_KEY_MGMT_IEEE8021X_SHA256:
++			network.key_mode = B_KEY_MODE_IEEE802_1X_SHA256;
++			break;
++		case WPA_KEY_MGMT_PSK_SHA256:
++			network.key_mode = B_KEY_MODE_PSK_SHA256;
++			break;
++	}
++
++	BNetworkRoster::Default().AddPersistentNetwork(network);
++}
++
++
++void
++WPASupplicantApp::_FailedToJoin(const wpa_supplicant *interface,
++	const BMessage &joinRequest)
++{
++	BMessage leaveRequest = joinRequest;
++	leaveRequest.what = kMsgWPALeaveNetwork;
++	be_app->PostMessage(&leaveRequest);
++
++	BMessage newJoinRequest = joinRequest;
++	newJoinRequest.AddString("error", "Failed to join network");
++	newJoinRequest.AddBool("forceDialog", true);
++	be_app->PostMessage(&newJoinRequest);
++}
++
++
++bool
++WPASupplicantApp::_InterfaceStateChangeCallback(const wpa_supplicant *interface,
++	BMessage *message, void *data)
++{
++	// We wait for the completion state notification
++	// TODO: We should also use the disconnect as an error case when joining,
++	// but due to the event queue being serialized any disconnect happening
++	// due to a new connect attempt would trigger that state. Either we need
++	// to have the disconnect happen synchronously before joining again or
++	// we need a way to discern one disconnect from the other, for example if
++	// there was a way to tell from which network we disconnected.
++
++	BMessage *originalMessage = (BMessage *)data;
++
++	int32 newState;
++	status_t result = B_ERROR;
++	if (message->what == kMsgJoinTimeout) {
++		_FailedToJoin(interface, *originalMessage);
++		result = B_TIMED_OUT;
++	} else if (message->FindInt32("newState", &newState) == B_OK) {
++		switch (newState) {
++			case WPA_COMPLETED:
++			{
++				if (originalMessage->what != kMsgWPAJoinNetwork)
++					return false;
++
++				_SuccessfullyJoined(interface, *originalMessage);
++				result = B_OK;
++				break;
++			}
++
++			case WPA_DISCONNECTED:
++			{
++				if (originalMessage->what != kMsgWPALeaveNetwork)
++					return false;
++
++				result = B_OK;
++				break;
++			}
++
++			default:
++				return false;
++		}
++	}
++
++	_SendReplyIfNeeded(*originalMessage, result);
++	delete originalMessage;
++	return true;
++}
++
++
++status_t
++WPASupplicantApp::_StartWatchingInterfaceChanges(
++	const wpa_supplicant *interface, StateChangeCallback callback, void *data)
++{
++	StateChangeWatchingEntry *entry
++		= new(std::nothrow) StateChangeWatchingEntry(interface, callback, data);
++	if (entry == NULL)
++		return B_NO_MEMORY;
++
++	if (!fWatchingEntryListLocker.Lock()) {
++		delete entry;
++		return B_ERROR;
++	}
++
++	status_t result = B_OK;
++	if (!fWatchingEntryList.AddItem(entry)) {
++		result = B_ERROR;
++		delete entry;
++	}
++
++	fWatchingEntryListLocker.Unlock();
++	return result;
++}
++
++
++void
++WPASupplicantApp::_NotifyInterfaceStateChanged(BMessage *message)
++{
++	const wpa_supplicant *interface;
++	if (message->FindPointer("interface", (void **)&interface) != B_OK)
++		return;
++
++	if (!fWatchingEntryListLocker.Lock())
++		return;
++
++	for (int32 i = 0; i < fWatchingEntryList.CountItems(); i++) {
++		StateChangeWatchingEntry *entry = fWatchingEntryList.ItemAt(i);
++		if (entry->MessageReceived(interface, message)) {
++			delete fWatchingEntryList.RemoveItemAt(i);
++			i--;
++		}
++	}
++
++	fWatchingEntryListLocker.Unlock();
++}
++
++
++void
++WPASupplicantApp::_SendReplyIfNeeded(BMessage &message, status_t status)
++{
++	if (!message.IsSourceWaiting())
++		return;
++
++	BMessage reply;
++	reply.AddInt32("status", status);
++	message.SendReply(&reply);
++}
++
++
++int
++main(int argc, char *argv[])
++{
++	WPASupplicantApp *app = new(std::nothrow) WPASupplicantApp();
++	if (app == NULL)
++		return B_NO_MEMORY;
++	if (app->InitCheck() != B_OK)
++		return app->InitCheck();
++
++	app->Run();
++	delete app;
++	return 0;
++}
+diff --git a/wpa_supplicant/notify.c wpa_supplicant-2.0/wpa_supplicant/notify.c
+index 9251f62..43a4263 100644
+--- a/wpa_supplicant/notify.c
++++ wpa_supplicant-2.0/wpa_supplicant/notify.c
+@@ -23,6 +23,10 @@
+ #include "sme.h"
+ #include "notify.h"
+ 
++#ifdef __HAIKU__
++#include "notify_haiku.h"
++#endif
++
+ int wpas_notify_supplicant_initialized(struct wpa_global *global)
+ {
+ #ifdef CONFIG_DBUS
+@@ -79,6 +83,10 @@ void wpas_notify_state_changed(struct wpa_supplicant *wpa_s,
+ 	/* notify the new DBus API */
+ 	wpas_dbus_signal_prop_changed(wpa_s, WPAS_DBUS_PROP_STATE);
+ 
++#ifdef __HAIKU__
++	wpa_supplicant_haiku_notify_state_change(wpa_s, new_state, old_state);
++#endif
++
+ #ifdef CONFIG_P2P
+ 	if (new_state == WPA_COMPLETED)
+ 		wpas_p2p_notif_connected(wpa_s);
+diff --git a/wpa_supplicant/notify_haiku.cpp wpa_supplicant-2.0/wpa_supplicant/notify_haiku.cpp
+new file mode 100644
+index 0000000..abc63e0
+--- /dev/null
++++ wpa_supplicant-2.0/wpa_supplicant/notify_haiku.cpp
+@@ -0,0 +1,37 @@
++/*
++ * WPA Supplicant / Haiku notification functions
++ * Copyright (c) 2011, Michael Lotz <mmlr@mlotz.ch>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * Alternatively, this software may be distributed under the terms of BSD
++ * license.
++ *
++ * See README and COPYING for more details.
++ */
++
++extern "C" {
++#include "utils/includes.h"
++#include "utils/common.h"
++#include "common/defs.h"
++#include "config.h"
++
++#include "notify_haiku.h"
++}
++
++#include <Application.h>
++#include <Message.h>
++
++
++void
++wpa_supplicant_haiku_notify_state_change(struct wpa_supplicant *wpa_s,
++	enum wpa_states new_state, enum wpa_states old_state)
++{
++	BMessage message(kMsgSupplicantStateChanged);
++	message.AddPointer("interface", wpa_s);
++	message.AddInt32("oldState", old_state);
++	message.AddInt32("newState", new_state);
++	be_app->PostMessage(&message);
++}
+diff --git a/wpa_supplicant/notify_haiku.h wpa_supplicant-2.0/wpa_supplicant/notify_haiku.h
+new file mode 100644
+index 0000000..db1a61c
+--- /dev/null
++++ wpa_supplicant-2.0/wpa_supplicant/notify_haiku.h
+@@ -0,0 +1,26 @@
++/*
++ * WPA Supplicant / Haiku notification functions
++ * Copyright (c) 2011, Michael Lotz <mmlr@mlotz.ch>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * Alternatively, this software may be distributed under the terms of BSD
++ * license.
++ *
++ * See README and COPYING for more details.
++ */
++
++#ifndef NOTIFY_HAIKU_H
++#define NOTIFY_HAIKU_H
++
++static const uint32_t kMsgSupplicantStateChanged = 'stch';
++
++struct wpa_supplicant;
++enum wpa_states;
++
++void wpa_supplicant_haiku_notify_state_change(struct wpa_supplicant *wpa_s,
++	enum wpa_states new_state, enum wpa_states old_state);
++
++#endif
+diff --git a/wpa_supplicant/wpa_supplicant.c wpa_supplicant-2.0/wpa_supplicant/wpa_supplicant.c
+index 0fb4d0f..61c0811 100644
+--- a/wpa_supplicant/wpa_supplicant.c
++++ wpa_supplicant-2.0/wpa_supplicant/wpa_supplicant.c
+@@ -655,8 +655,8 @@ void wpa_supplicant_set_state(struct wpa_supplicant *wpa_s,
+ 		wpa_supplicant_notify_scanning(wpa_s, 0);
+ 
+ 	if (state == WPA_COMPLETED && wpa_s->new_connection) {
+-#if defined(CONFIG_CTRL_IFACE) || !defined(CONFIG_NO_STDOUT_DEBUG)
+ 		struct wpa_ssid *ssid = wpa_s->current_ssid;
++#if defined(CONFIG_CTRL_IFACE) || !defined(CONFIG_NO_STDOUT_DEBUG)
+ 		wpa_msg(wpa_s, MSG_INFO, WPA_EVENT_CONNECTED "- Connection to "
+ 			MACSTR " completed [id=%d id_str=%s]",
+ 			MAC2STR(wpa_s->bssid),
+diff --git a/wpa_supplicant/wpa_supplicant.rdef wpa_supplicant-2.0/wpa_supplicant/wpa_supplicant.rdef
+new file mode 100644
+index 0000000..0766b97
+--- a/src/drivers/driver_bsd.c	2016-10-02 18:51:11.044040192 +0000
++++ b/src/drivers/driver_bsd.c	2018-08-17 03:56:38.730595328 +0000
+@@ -44,6 +44,18 @@
+ #if __NetBSD__
+ #include <net80211/ieee80211_netbsd.h>
+ #endif
++#ifdef __HAIKU__
++#include <NetworkNotifications.h>
++
++#include <net/if.h>
++#include <net/if_media.h>
++#include <net/ethernet.h>
++#include <sys/sockio.h>
++
++#include "net80211/ieee80211.h"
++#include "net80211/ieee80211_ioctl.h"
++#include "net80211/ieee80211_crypto.h"
++#endif /* __HAIKU__ */
+ 
+ #include "l2_packet/l2_packet.h"
+ 
+@@ -56,6 +68,12 @@
+ 	struct dl_list	ifaces;			/* list of interfaces */
+ };
+ 
++#ifdef __HAIKU__
++void haiku_unregister_events(void *drv);
++int haiku_register_events(void *ctx, void *drv, const char *ifname,
++	void **events, void (*callback)(void *ctx, void *drv, int opcode));
++#endif
++
+ struct bsd_driver_data {
+ 	struct dl_list	list;
+ 	struct bsd_driver_global *global;
+@@ -73,6 +91,9 @@
+ 	int	prev_privacy;	/* privacy state to restore on deinit */
+ 	int	prev_wpa;	/* wpa state to restore on deinit */
+ 	enum ieee80211_opmode opmode;	/* operation mode */
++#ifdef __HAIKU__
++	void	*events;
++#endif
+ };
+ 
+ /* Generic functions for hostapd and wpa_supplicant */
+@@ -121,7 +142,7 @@
+ 	ireq.i_data = (void *) arg;
+ 	ireq.i_len = arg_len;
+ 
+-	if (ioctl(drv->global->sock, SIOCS80211, &ireq) < 0) {
++	if (ioctl(drv->global->sock, SIOCS80211, &ireq, sizeof(ireq)) < 0) {
+ 		wpa_printf(MSG_ERROR, "ioctl[SIOCS80211, op=%u, val=%u, "
+ 			   "arg_len=%u]: %s", op, val, arg_len,
+ 			   strerror(errno));
+@@ -142,7 +163,7 @@
+ 	ireq->i_len = arg_len;
+ 	ireq->i_data = arg;
+ 
+-	if (ioctl(drv->global->sock, SIOCG80211, ireq) < 0) {
++	if (ioctl(drv->global->sock, SIOCG80211,  ireq, sizeof(*ireq)) < 0) {
+ 		wpa_printf(MSG_ERROR, "ioctl[SIOCS80211, op=%u, "
+ 			   "arg_len=%u]: %s", op, arg_len, strerror(errno));
+ 		return -1;
+@@ -183,7 +204,7 @@
+ 	os_memset(&ifr, 0, sizeof(ifr));
+ 	os_strlcpy(ifr.ifr_name, drv->ifname, sizeof(ifr.ifr_name));
+ 	ifr.ifr_data = (void *)&nwid;
+-	if (ioctl(drv->global->sock, SIOCG80211NWID, &ifr) < 0 ||
++	if (ioctl(drv->global->sock, SIOCG80211NWID,  &ifr, sizeof(ifr)) < 0 ||
+ 	    nwid.i_len > IEEE80211_NWID_LEN)
+ 		return -1;
+ 	os_memcpy(ssid, nwid.i_nwid, nwid.i_len);
+@@ -206,7 +227,7 @@
+ 	os_memset(&ifr, 0, sizeof(ifr));
+ 	os_strlcpy(ifr.ifr_name, drv->ifname, sizeof(ifr.ifr_name));
+ 	ifr.ifr_data = (void *)&nwid;
+-	return ioctl(drv->global->sock, SIOCS80211NWID, &ifr);
++	return ioctl(drv->global->sock, SIOCS80211NWID, &ifr, sizeof(ifr));
+ #else
+ 	return set80211var(drv, IEEE80211_IOC_SSID, ssid, ssid_len);
+ #endif
+@@ -221,7 +242,7 @@
+ 	os_memset(&ifmr, 0, sizeof(ifmr));
+ 	os_strlcpy(ifmr.ifm_name, drv->ifname, sizeof(ifmr.ifm_name));
+ 
+-	if (ioctl(drv->global->sock, SIOCGIFMEDIA, &ifmr) < 0) {
++	if (ioctl(drv->global->sock, SIOCGIFMEDIA, &ifmr, sizeof(ifmr)) < 0) {
+ 		wpa_printf(MSG_ERROR, "%s: SIOCGIFMEDIA %s", __func__,
+ 			   strerror(errno));
+ 		return -1;
+@@ -240,7 +261,7 @@
+ 	os_strlcpy(ifr.ifr_name, drv->ifname, sizeof(ifr.ifr_name));
+ 	ifr.ifr_media = media;
+ 
+-	if (ioctl(drv->global->sock, SIOCSIFMEDIA, &ifr) < 0) {
++	if (ioctl(drv->global->sock, SIOCSIFMEDIA, &ifr, sizeof(ifr)) < 0) {
+ 		wpa_printf(MSG_ERROR, "%s: SIOCSIFMEDIA %s", __func__,
+ 			   strerror(errno));
+ 		return -1;
+@@ -297,13 +318,14 @@
+ static int
+ bsd_ctrl_iface(void *priv, int enable)
+ {
++#ifndef __HAIKU__
+ 	struct bsd_driver_data *drv = priv;
+ 	struct ifreq ifr;
+ 
+ 	os_memset(&ifr, 0, sizeof(ifr));
+ 	os_strlcpy(ifr.ifr_name, drv->ifname, sizeof(ifr.ifr_name));
+ 
+-	if (ioctl(drv->global->sock, SIOCGIFFLAGS, &ifr) < 0) {
++	if (ioctl(drv->global->sock, SIOCGIFFLAGS, &ifr, sizeof(ifr)) < 0) {
+ 		wpa_printf(MSG_ERROR, "ioctl[SIOCGIFFLAGS]: %s",
+ 			   strerror(errno));
+ 		return -1;
+@@ -313,6 +335,10 @@
+ 	if (enable) {
+ 		if (ifr.ifr_flags & IFF_UP)
+ 			return 0;
++#else /* !__HAIKU__ */
++	return set80211var(priv, enable ? IEEE80211_IOC_HAIKU_COMPAT_WLAN_UP
++			: IEEE80211_IOC_HAIKU_COMPAT_WLAN_DOWN, NULL, 0);
++#endif /* __HAIKU__ */
+ 		ifr.ifr_flags |= IFF_UP;
+ 	} else {
+ 		if (!(ifr.ifr_flags & IFF_UP))
+@@ -543,6 +569,7 @@
+ 	return bsd_ctrl_iface(priv, 1);
+ }
+ 
++#ifndef __HAIKU__
+ static void
+ bsd_new_sta(void *priv, void *ctx, u8 addr[IEEE80211_ADDR_LEN])
+ {
+@@ -570,6 +597,7 @@
+ no_ie:
+ 	drv_event_assoc(ctx, addr, iebuf, ielen, 0);
+ }
++#endif // !__HAIKU__
+ 
+ static int
+ bsd_send_eapol(void *priv, const u8 *addr, const u8 *data, size_t data_len,
+@@ -618,7 +646,7 @@
+ 	os_memset(&creq, 0, sizeof(creq));
+ 	os_strlcpy(creq.i_name, drv->ifname, sizeof(creq.i_name));
+ 	creq.i_channel = (u_int16_t)channel;
+-	return ioctl(drv->global->sock, SIOCS80211CHANNEL, &creq);
++	return ioctl(drv->global->sock, SIOCS80211CHANNEL, &creq, sizeof(creq));
+ #else /* SIOCS80211CHANNEL */
+ 	return set80211param(priv, IEEE80211_IOC_CHANNEL, channel);
+ #endif /* SIOCS80211CHANNEL */
+@@ -636,6 +664,7 @@
+ 	return 0;
+ }
+ 
++#ifndef __HAIKU__
+ static size_t
+ rtbuf_len(void)
+ {
+@@ -651,6 +680,7 @@
+ 
+ 	return len;
+ }
++#endif // !__HAIKU__
+ 
+ #ifdef HOSTAPD
+ 
+@@ -956,7 +986,7 @@
+ 	struct ieee80211_bssid bs;
+ 
+ 	os_strlcpy(bs.i_name, drv->ifname, sizeof(bs.i_name));
+-	if (ioctl(drv->global->sock, SIOCG80211BSSID, &bs) < 0)
++	if (ioctl(drv->global->sock, SIOCG80211BSSID, &bs, sizeof(bs)) < 0)
+ 		return -1;
+ 	os_memcpy(bssid, bs.i_bssid, sizeof(bs.i_bssid));
+ 	return 0;
+@@ -1068,7 +1098,7 @@
+ 	wpa_printf(MSG_DEBUG,
+ 		"%s: ssid '%.*s' wpa ie len %u pairwise %u group %u key mgmt %u"
+ 		, __func__
+-		   , (unsigned int) params->ssid_len, params->ssid
++		   , (int) params->ssid_len, params->ssid
+ 		, (unsigned int) params->wpa_ie_len
+ 		, params->pairwise_suite
+ 		, params->group_suite
+@@ -1207,6 +1237,23 @@
+ #endif /* IEEE80211_IOC_SCAN_MAX_SSID */
+ }
+ 
++#ifdef __HAIKU__
++static void
++wpa_driver_haiku_event(void *ctx, void *drv, int opcode)
++{
++	switch (opcode) {
++		case B_NETWORK_WLAN_JOINED:
++			wpa_supplicant_event(ctx, EVENT_ASSOC, NULL);
++			break;
++		case B_NETWORK_WLAN_LEFT:
++			wpa_supplicant_event(ctx, EVENT_DISASSOC, NULL);
++			break;
++		case B_NETWORK_WLAN_SCANNED:
++			wpa_supplicant_event(ctx, EVENT_SCAN_RESULTS, NULL);
++			break;
++	}
++}
++#else // !__HAIKU__
+ static void
+ wpa_driver_bsd_event_receive(int sock, void *ctx, void *sock_ctx)
+ {
+@@ -1353,6 +1400,7 @@
+ 		break;
+ 	}
+ }
++#endif	// !__HAIKU__
+ 
+ static void
+ wpa_driver_bsd_add_scan_entry(struct wpa_scan_results *res,
+@@ -1371,6 +1419,9 @@
+ 	if (result == NULL)
+ 		return;
+ 	os_memcpy(result->bssid, sr->isr_bssid, ETH_ALEN);
++#ifdef __HAIKU__
++	result->freq = sr->isr_chan.ic_freq;
++#else
+ 	result->freq = sr->isr_freq;
+ 	result->beacon_int = sr->isr_intval;
+ 	result->caps = sr->isr_capinfo;
+@@ -1445,7 +1496,7 @@
+ 
+ 	pos = buf;
+ 	rest = len;
+-	while (rest >= sizeof(struct ieee80211req_scan_result)) {
++	while (rest >= (int) sizeof(struct ieee80211req_scan_result)) {
+ 		sr = (struct ieee80211req_scan_result *)pos;
+ 		wpa_driver_bsd_add_scan_entry(res, sr);
+ 		pos += sr->isr_len;
+@@ -1628,6 +1679,10 @@
+ 	if (drv->ifindex != 0 && !drv->if_removed) {
+ 		wpa_driver_bsd_set_wpa(drv, 0);
+ 
++#ifdef __HAIKU__
++	haiku_unregister_events(drv->events);
++#endif
++
+ 		/* NB: mark interface down */
+ 		bsd_ctrl_iface(drv, 0);
+ 
+@@ -1676,13 +1731,19 @@
+ 		goto fail1;
+ 	}
+ 
++#ifndef __HAIKU__
+ 	global->route = socket(PF_ROUTE, SOCK_RAW, 0);
+ 	if (global->route < 0) {
+ 		wpa_printf(MSG_ERROR, "socket[PF_ROUTE,SOCK_RAW]: %s",
+ 			   strerror(errno));
+ 		goto fail;
++#else
++	if (haiku_register_events(ctx, drv, ifname, &drv->events,
++			wpa_driver_haiku_event) != 0) {
++		goto fail;
++	}
++#endif
+ 	}
+-
+ 	global->event_buf_len = rtbuf_len();
+ 	global->event_buf = os_malloc(global->event_buf_len);
+ 	if (global->event_buf == NULL) {
