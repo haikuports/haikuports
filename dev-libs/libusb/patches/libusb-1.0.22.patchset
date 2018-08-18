@@ -134,3 +134,87 @@ index 5baf53d..d371f01 100644
 -- 
 2.16.4
 
+
+From 3732447bc4ba8841312096a804a3d882abe887d3 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sat, 18 Aug 2018 11:08:16 +0200
+Subject: implement clear_halt and provide reset_device
+
+Fix crashes in ec2drv.
+
+diff --git a/libusb/os/haiku_usb.h b/libusb/os/haiku_usb.h
+index d51ae9e..1e4e863 100644
+--- a/libusb/os/haiku_usb.h
++++ b/libusb/os/haiku_usb.h
+@@ -69,6 +69,7 @@ public:
+ 	int			ReleaseInterface(int);
+ 	int			SetConfiguration(int);
+ 	int			SetAltSetting(int, int);
++	int			ClearHalt(int endpoint);
+ 	status_t		SubmitTransfer(struct usbi_transfer *);
+ 	status_t		CancelTransfer(USBTransfer *);
+ 	bool			InitCheck();
+diff --git a/libusb/os/haiku_usb_backend.cpp b/libusb/os/haiku_usb_backend.cpp
+index bac8297..765a0d7 100644
+--- a/libusb/os/haiku_usb_backend.cpp
++++ b/libusb/os/haiku_usb_backend.cpp
+@@ -310,6 +310,23 @@ USBDeviceHandle::SetAltSetting(int inumber, int alt)
+ }
+ 
+ 
++int
++USBDeviceHandle::ClearHalt(int endpoint)
++{
++	usb_raw_command command;
++	command.control.request_type = USB_REQTYPE_ENDPOINT_OUT;
++	command.control.request = USB_REQUEST_CLEAR_FEATURE;
++	command.control.value = USB_FEATURE_ENDPOINT_HALT;
++	command.control.index = endpoint;
++	command.control.length = 0;
++
++	if (ioctl(fRawFD, B_USB_RAW_COMMAND_CONTROL_TRANSFER, &command, sizeof(command)) ||
++			command.control.status != B_USB_RAW_STATUS_SUCCESS) {
++		return _errno_to_libusb(command.config.status);
++	}
++}
++
++
+ USBDevice::USBDevice(const char *path)
+ 	:
+ 	fPath(NULL),
+diff --git a/libusb/os/haiku_usb_raw.cpp b/libusb/os/haiku_usb_raw.cpp
+index c81658f..e46ce5e 100644
+--- a/libusb/os/haiku_usb_raw.cpp
++++ b/libusb/os/haiku_usb_raw.cpp
+@@ -129,10 +129,17 @@ haiku_set_altsetting(struct libusb_device_handle *dev_handle, int interface_numb
+ }
+ 
+ static int
+-haiku_clear_halt(libusb_device_handle*, unsigned char)
++haiku_clear_halt(libusb_device_handle* dev_handle, unsigned char endpoint)
++{
++	USBDeviceHandle *handle = *((USBDeviceHandle **)dev_handle->os_priv);
++	return handle->ClearHalt(endpoint);
++}
++
++static int
++haiku_reset_device(libusb_device_handle*)
+ {
+ 	/* TODO */
+-	return 0;
++	return LIBUSB_ERROR_NOT_SUPPORTED;
+ }
+ 
+ static int
+@@ -226,7 +233,7 @@ const struct usbi_os_backend usbi_backend = {
+ 
+ 	/*.set_interface_altsetting =*/ haiku_set_altsetting,
+ 	/*.clear_halt =*/ haiku_clear_halt,
+-	/*.reset_device =*/ NULL,
++	/*.reset_device =*/ haiku_reset_device,
+ 
+ 	/*.alloc_streams =*/ NULL,
+ 	/*.free_streams =*/ NULL,
+-- 
+2.16.4
+
