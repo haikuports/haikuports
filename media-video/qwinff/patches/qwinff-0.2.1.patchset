@@ -1,0 +1,478 @@
+From 6febcd95e5edc992baccddcdc78a56560fbe58d3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Zolt=C3=A1n=20Mizsei?= <zmizsei@extrowerk.com>
+Date: Mon, 30 Apr 2018 11:10:53 +0200
+Subject: Applied patches from rpmfusion
+
+
+diff --git a/src/converter/conversionparameters.cpp b/src/converter/conversionparameters.cpp
+index 8a44f6e..ee07e0c 100644
+--- a/src/converter/conversionparameters.cpp
++++ b/src/converter/conversionparameters.cpp
+@@ -132,7 +132,7 @@ void ConversionParameters::copyConfigurationFrom(const ConversionParameters &src
+ }
+ 
+ ConversionParameters
+-ConversionParameters::fromFFmpegParameters(const QString &params_str)
++ConversionParameters::fromFFmpegParameters(const QString &globals_str, const QString &params_str)
+ {
+     ConversionParameters result;
+     QStringList args = params_str.split(" ", QString::SkipEmptyParts);
+@@ -148,13 +148,14 @@ ConversionParameters::fromFFmpegParameters(const QString &params_str)
+         }
+     }
+ 
++    result.ffmpeg_globals = globals_str;
+     result.ffmpeg_options = args.join(" "); // unrecognized arguments
+ 
+     return result;
+ }
+ 
+ ConversionParameters
+-ConversionParameters::fromFFmpegParameters(const char *params_str)
++ConversionParameters::fromFFmpegParameters(const char *globals_str, const char *params_str)
+ {
+-    return fromFFmpegParameters(QString(params_str));
++    return fromFFmpegParameters(QString(globals_str), QString(params_str));
+ }
+diff --git a/src/converter/conversionparameters.h b/src/converter/conversionparameters.h
+index d7ecdf4..080a692 100644
+--- a/src/converter/conversionparameters.h
++++ b/src/converter/conversionparameters.h
+@@ -30,6 +30,7 @@ public:
+     int threads; ///< how many threads to use in conversion
+ 
+     bool disable_audio;
++    bool copy_audio;
+     int audio_bitrate;
+     int audio_sample_rate;
+     bool audio_keep_sample_rate; ///< whether to keep original audio sample rate
+@@ -37,6 +38,7 @@ public:
+     int audio_volume; ///< output volume in binary percent (256 is normal, 512 is double)
+ 
+     bool disable_video;
++    bool copy_video;
+     bool video_same_quality; ///< whether to keep all video quality (-sameq option in ffmpeg)
+     bool video_deinterlace;
+     int video_bitrate;
+@@ -49,6 +51,7 @@ public:
+     /* FFmpeg Specific Options */
+     /*! Additional options passed to the ffmpeg transcoder.
+         These options will be overriden by other specific options. */
++    QString ffmpeg_globals;
+     QString ffmpeg_options;
+ 
+     /* MEncoder Specific Options */
+@@ -75,8 +78,8 @@ public:
+ 
+     /*! Generate a ConversionParameters from ffmpeg command line options.
+         This function ignores input and output file options. */
+-    static ConversionParameters fromFFmpegParameters(const QString& params_str);
+-    static ConversionParameters fromFFmpegParameters(const char *params_str);
++	static ConversionParameters fromFFmpegParameters(const QString& globals_str, const QString& params_str);
++	static ConversionParameters fromFFmpegParameters(const char *globals_str, const char *params_str);
+ 
+     ConversionParameters()
+     {
+diff --git a/src/converter/ffmpeginterface.cpp b/src/converter/ffmpeginterface.cpp
+index 395e379..2397d85 100644
+--- a/src/converter/ffmpeginterface.cpp
++++ b/src/converter/ffmpeginterface.cpp
+@@ -130,6 +130,9 @@ namespace inner {
+         const int CODEC_DESC = 3;
+ 
+         ffmpeg_codec_info.clear();
++        audio_encoders.push_back("copy");
++        video_encoders.push_back("copy");
++        subtitle_encoders.push_back("copy");
+         while (ffmpeg_process.canReadLine()) {
+             QString line(ffmpeg_process.readLine());
+             ffmpeg_codec_info.append(line);
+@@ -361,6 +364,14 @@ QStringList FFmpegInterface::Private::getOptionList(const ConversionParameters &
+     // overwrite if file exists
+     list.append("-y");
+ 
++    /* ==== Additional Global Options ==== */
++    if (!o.ffmpeg_globals.isEmpty()) {
++        QList<QString> additional_globals =
++                o.ffmpeg_globals.split(" ", QString::SkipEmptyParts);
++        foreach (QString opt, additional_globals)
++            list.append(opt);
++    }
++
+     if (!bNeedsAudioFilter) {
+         /* in this configuration, input is read from file
+            arguments: -i <infile>
+@@ -403,6 +414,9 @@ QStringList FFmpegInterface::Private::getOptionList(const ConversionParameters &
+     // Audio Options
+     if (o.disable_audio) {
+         list.append("-an"); // no audio
++    } else if (o.copy_audio) { // copy audio data (no re-encode)
++        list.append("-acodec");
++        list.append("copy");
+     } else { // audio enabled
+ 
+         // audio bitrate in kb/s
+@@ -444,6 +458,9 @@ QStringList FFmpegInterface::Private::getOptionList(const ConversionParameters &
+     // Video Options
+     if (o.disable_video || !probe.hasVideo()) {
+         list.append("-vn"); // no video
++    } else if (o.copy_video) { // copy video data (no re-encode)
++        list.append("-vcodec");
++        list.append("copy");
+     } else { // video enabled
+ 
+         // same video quality as source
+diff --git a/src/converter/presets.cpp b/src/converter/presets.cpp
+index 8449b61..960197c 100644
+--- a/src/converter/presets.cpp
++++ b/src/converter/presets.cpp
+@@ -128,6 +128,12 @@ bool Presets::Private::readElementData(QXmlStreamReader &xml, Preset& target)
+ 
+     if (property_name == "label") {
+         target.label = property_value;
++    } else if (property_name == "globals") {
++        Version ffmpegVersion(FFmpegInterface::getFFmpegVersionInfo());
++        if (versionrange_str.isEmpty()
++                || VersionRange(versionrange_str).containsVersion(ffmpegVersion)) {
++            target.globals = property_value;
++        }
+     } else if (property_name == "params") {
+         Version ffmpegVersion(FFmpegInterface::getFFmpegVersionInfo());
+         if (versionrange_str.isEmpty()
+@@ -154,9 +160,9 @@ void Presets::Private::removeUnavailablePresets()
+     if (!FFmpegInterface::getSubtitleEncoders(subtitle_encoders))
+         Q_ASSERT(subtitle_encoders.isEmpty());
+ 
+-    QRegExp audio_codec_pattern("-acodec\\s+([^ ]+)");
+-    QRegExp video_codec_pattern("-vcodec\\s+([^ ]+)");
+-    QRegExp subtitle_codec_pattern("-scodec\\s+([^ ]+)");
++    QRegExp audio_codec_pattern("-(c:a|codec:a|acodec)\\s+([^ ]+)");
++    QRegExp video_codec_pattern("-(c:v|codec:v|vcodec)\\s+([^ ]+)");
++    QRegExp subtitle_codec_pattern("-(c:s|codec:s|scodec)\\s+([^ ]+)");
+ 
+     QMultiMap<QString, Preset>::iterator it = presets.begin();
+     while (it!=presets.end()) {
+@@ -165,21 +171,21 @@ void Presets::Private::removeUnavailablePresets()
+ 
+         // Check unavailable audio presets
+         if (audio_codec_pattern.indexIn(params) != -1) {
+-            if (!audio_encoders.contains(audio_codec_pattern.cap(1))) {
++            if (!audio_encoders.contains(audio_codec_pattern.cap(2))) {
+                 remove = true;
+             }
+         }
+ 
+         // Check unavailable video presets
+         if (!remove && video_codec_pattern.indexIn(params) != -1) {
+-            if (!video_encoders.contains(video_codec_pattern.cap(1))) {
++            if (!video_encoders.contains(video_codec_pattern.cap(2))) {
+                 remove = true;
+             }
+         }
+ 
+         // Check unavailable subtitle presets
+         if (!remove && subtitle_codec_pattern.indexIn(params) != -1) {
+-            if (!subtitle_encoders.contains(subtitle_codec_pattern.cap(1))) {
++            if (!subtitle_encoders.contains(subtitle_codec_pattern.cap(2))) {
+                 remove = true;
+             }
+         }
+diff --git a/src/converter/presets.h b/src/converter/presets.h
+index 4b8c488..02b12d1 100644
+--- a/src/converter/presets.h
++++ b/src/converter/presets.h
+@@ -28,6 +28,7 @@ public:
+     QString extension;
+     QString label;
+     QString category;
++    QString globals;
+     QString parameters;
+ 
+     /*! Sorting requires less-than operator.
+diff --git a/src/presets.xml b/src/presets.xml
+index 2683de7..127d69a 100644
+--- a/src/presets.xml
++++ b/src/presets.xml
+@@ -1,6 +1,36 @@
+ <?xml version="1.0"?>
+ <presets>
+ 
++  <!-- Matroska -->
++  <MKVCopy>
++    <label>MKV Copy (cutting)</label>
++    <globals>-strict strict</globals>
++    <params>-map 0 -vcodec copy -acodec copy -scodec copy</params>
++    <extension>mkv</extension>
++    <category>Matroska</category>
++  </MKVCopy>
++  <MKVWideLR264>
++    <label>MKV H.264 Widescreen 896x504</label>
++    <globals>-strict strict</globals>
++    <params>-map 0 -q:v 2 -c:v libx264 -preset slow -s 896:504 -c:a copy -scodec copy</params>
++    <extension>mkv</extension>
++    <category>Matroska</category>
++  </MKVWideLR264>
++  <MKVWideHD264>
++    <label>MKV H.264 Widescreen 1280x720</label>
++    <globals>-strict strict</globals>
++    <params>-map 0 -q:v 2 -c:v libx264 -preset slow -s 1280:720 -c:a copy -scodec copy</params>
++    <extension>mkv</extension>
++    <category>Matroska</category>
++  </MKVWideHD264>
++  <MKVWideFHD264>
++    <label>MKV H.264 Widescreen 1920x1080</label>
++    <globals>-strict strict</globals>
++    <params>-map 0 -q:v 2 -c:v libx264 -preset slow -s 1920:1080 -c:a copy -scodec copy</params>
++    <extension>mkv</extension>
++    <category>Matroska</category>
++  </MKVWideFHD264>
++
+   <!-- MPEG4 -->
+   <MPEG4Auto>
+     <label>MPEG-4 Auto</label>
+diff --git a/src/ui/addtaskwizard.cpp b/src/ui/addtaskwizard.cpp
+index d683093..b50f3ba 100644
+--- a/src/ui/addtaskwizard.cpp
++++ b/src/ui/addtaskwizard.cpp
+@@ -256,7 +256,7 @@ void AddTaskWizard::slotPresetSelected(int index)
+     if (!m_presets->findPresetById(id, preset)) {
+         return; // assert false
+     }
+-    *m_current_param = ConversionParameters::fromFFmpegParameters(preset.parameters);
++    *m_current_param = ConversionParameters::fromFFmpegParameters(preset.globals, preset.parameters);
+ }
+ 
+ // This function is executed when the users presses "Finish"
+diff --git a/src/ui/conversionparameterdialog.cpp b/src/ui/conversionparameterdialog.cpp
+index d58561d..3537c82 100644
+--- a/src/ui/conversionparameterdialog.cpp
++++ b/src/ui/conversionparameterdialog.cpp
+@@ -59,6 +59,10 @@ ConversionParameterDialog::ConversionParameterDialog(QWidget *parent) :
+     connect(ui->btnPreview, SIGNAL(clicked()),
+             this, SLOT(preview_time_selection()));
+     connect(ui->btnInteractiveCutting, SIGNAL(clicked()), SLOT(interactive_cutting()));
++    connect(ui->chkDisableAudio, SIGNAL(toggled(bool)), SLOT(audio_tab_update_enabled_widgets()));
++    connect(ui->chkCopyAudio, SIGNAL(toggled(bool)), SLOT(audio_tab_update_enabled_widgets()));
++    connect(ui->chkDisableVideo, SIGNAL(toggled(bool)), SLOT(video_tab_update_enabled_widgets()));
++    connect(ui->chkCopyVideo, SIGNAL(toggled(bool)), SLOT(video_tab_update_enabled_widgets()));
+ 
+     // Hide speed-changing options if sox is not available.
+     m_enableAudioProcessing = AudioFilter::available();
+@@ -126,10 +130,12 @@ AbstractPreviewer *ConversionParameterDialog::create_previewer()
+ void ConversionParameterDialog::read_fields(const ConversionParameters& param)
+ {
+     // Additional Options
++    ui->txtFFmpegGlobals->setPlainText(param.ffmpeg_globals);
+     ui->txtFFmpegOptions->setPlainText(param.ffmpeg_options);
+ 
+     // Audio Options
+     ui->chkDisableAudio->setChecked(param.disable_audio);
++    ui->chkCopyAudio->setChecked(param.copy_audio);
+ 
+     ui->spinAudioBitrate->setValue(param.audio_bitrate);
+ 
+@@ -144,6 +150,7 @@ void ConversionParameterDialog::read_fields(const ConversionParameters& param)
+ 
+     // Video Options
+     ui->chkDisableVideo->setChecked(param.disable_video);
++    ui->chkCopyVideo->setChecked(param.copy_video);
+ 
+     ui->spinVideoBitrate->setValue(param.video_bitrate);
+ 
+@@ -207,10 +214,12 @@ void ConversionParameterDialog::read_fields(const ConversionParameters& param)
+ void ConversionParameterDialog::write_fields(ConversionParameters& param)
+ {
+     // Additional Options
+-    param = param.fromFFmpegParameters(ui->txtFFmpegOptions->toPlainText());
++    param = param.fromFFmpegParameters(ui->txtFFmpegGlobals->toPlainText(),
++                                       ui->txtFFmpegOptions->toPlainText());
+ 
+     // Audio Options
+     param.disable_audio = ui->chkDisableAudio->isChecked();
++    param.copy_audio = ui->chkCopyAudio->isChecked();
+     param.audio_sample_rate = ui->cbAudioSampleRate->currentText().toInt();
+     param.audio_bitrate = ui->spinAudioBitrate->value();
+     param.audio_channels = ui->spinChannels->value();
+@@ -218,6 +227,7 @@ void ConversionParameterDialog::write_fields(ConversionParameters& param)
+ 
+     // Video Options
+     param.disable_video = ui->chkDisableVideo->isChecked();
++    param.copy_video = ui->chkCopyVideo->isChecked();
+     param.video_bitrate = ui->spinVideoBitrate->value();
+     param.video_same_quality = ui->chkVideoSameQuality->isChecked();
+     param.video_deinterlace = ui->chkDeinterlace->isChecked();
+@@ -249,3 +259,23 @@ void ConversionParameterDialog::write_fields(ConversionParameters& param)
+     }
+ 
+ }
++
++void ConversionParameterDialog::audio_tab_update_enabled_widgets()
++{
++    bool disable_audio = ui->chkDisableAudio->isChecked();
++    bool copy_audio = ui->chkCopyAudio->isChecked();
++
++    ui->chkDisableAudio->setEnabled(true); // always enabled
++    ui->chkCopyAudio->setEnabled(!disable_audio);
++    ui->groupAudioOptions->setEnabled(!disable_audio && !copy_audio);
++}
++
++void ConversionParameterDialog::video_tab_update_enabled_widgets()
++{
++    bool disable_video= ui->chkDisableVideo->isChecked();
++    bool copy_video = ui->chkCopyVideo->isChecked();
++
++    ui->chkDisableVideo->setEnabled(true); // always enabled
++    ui->chkCopyVideo->setEnabled(!disable_video);
++    ui->groupVideoOptions->setEnabled(!disable_video && !copy_video);
++}
+diff --git a/src/ui/conversionparameterdialog.h b/src/ui/conversionparameterdialog.h
+index ca44e59..4e88f1a 100644
+--- a/src/ui/conversionparameterdialog.h
++++ b/src/ui/conversionparameterdialog.h
+@@ -51,6 +51,8 @@ private slots:
+     void preview_time_selection();
+     void interactive_cutting();
+     AbstractPreviewer *create_previewer();
++    void audio_tab_update_enabled_widgets();
++    void video_tab_update_enabled_widgets();
+ 
+ private:
+     Ui::ConversionParameterDialog *ui;
+diff --git a/src/ui/conversionparameterdialog.ui b/src/ui/conversionparameterdialog.ui
+index da88f88..1f73f4f 100644
+--- a/src/ui/conversionparameterdialog.ui
++++ b/src/ui/conversionparameterdialog.ui
+@@ -33,11 +33,22 @@
+         </attribute>
+         <layout class="QVBoxLayout" name="verticalLayout_2">
+          <item>
+-          <widget class="QCheckBox" name="chkDisableAudio">
+-           <property name="text">
+-            <string>Disable Audio</string>
+-           </property>
+-          </widget>
++          <layout class="QHBoxLayout" name="horizontalLayout_11">
++           <item>
++            <widget class="QCheckBox" name="chkDisableAudio">
++             <property name="text">
++              <string>Disable Audio</string>
++             </property>
++            </widget>
++           </item>
++           <item>
++            <widget class="QCheckBox" name="chkCopyAudio">
++             <property name="text">
++              <string>Copy Audio (Do not re-encode)</string>
++             </property>
++            </widget>
++           </item>
++          </layout>
+          </item>
+          <item>
+           <widget class="QGroupBox" name="groupAudioOptions">
+@@ -173,11 +184,22 @@
+         </attribute>
+         <layout class="QVBoxLayout" name="verticalLayout_3">
+          <item>
+-          <widget class="QCheckBox" name="chkDisableVideo">
+-           <property name="text">
+-            <string>Disable Video</string>
+-           </property>
+-          </widget>
++          <layout class="QHBoxLayout" name="horizontalLayout_13">
++           <item>
++            <widget class="QCheckBox" name="chkDisableVideo">
++             <property name="text">
++              <string>Disable Video</string>
++             </property>
++            </widget>
++           </item>
++           <item>
++            <widget class="QCheckBox" name="chkCopyVideo">
++             <property name="text">
++              <string>Copy Video (Do not re-encode)</string>
++             </property>
++            </widget>
++           </item>
++          </layout>
+          </item>
+          <item>
+           <widget class="QGroupBox" name="groupVideoOptions">
+@@ -497,6 +519,20 @@
+             <string>FFmpeg</string>
+            </property>
+            <layout class="QVBoxLayout" name="verticalLayout_5">
++            <item>
++             <layout class="QVBoxLayout" name="verticalLayout_10">
++              <item>
++               <widget class="QLabel" name="lblFFmpegGlobals">
++                <property name="text">
++                 <string>Additional FFmpeg Global Options</string>
++                </property>
++               </widget>
++              </item>
++              <item>
++               <widget class="QPlainTextEdit" name="txtFFmpegGlobals"/>
++              </item>
++             </layout>
++            </item>
+             <item>
+              <layout class="QVBoxLayout" name="verticalLayout_4">
+               <item>
+@@ -533,7 +569,6 @@
+   </layout>
+  </widget>
+  <tabstops>
+-  <tabstop>chkDisableAudio</tabstop>
+   <tabstop>cbAudioSampleRate</tabstop>
+   <tabstop>spinAudioBitrate</tabstop>
+   <tabstop>spinChannels</tabstop>
+@@ -547,7 +582,6 @@
+   <tabstop>spinCropBottom</tabstop>
+   <tabstop>txtFFmpegOptions</tabstop>
+   <tabstop>buttonBox</tabstop>
+-  <tabstop>chkDisableVideo</tabstop>
+  </tabstops>
+  <resources>
+   <include location="../images.qrc"/>
+@@ -585,37 +619,5 @@
+     </hint>
+    </hints>
+   </connection>
+-  <connection>
+-   <sender>chkDisableAudio</sender>
+-   <signal>toggled(bool)</signal>
+-   <receiver>groupAudioOptions</receiver>
+-   <slot>setDisabled(bool)</slot>
+-   <hints>
+-    <hint type="sourcelabel">
+-     <x>113</x>
+-     <y>56</y>
+-    </hint>
+-    <hint type="destinationlabel">
+-     <x>229</x>
+-     <y>266</y>
+-    </hint>
+-   </hints>
+-  </connection>
+-  <connection>
+-   <sender>chkDisableVideo</sender>
+-   <signal>toggled(bool)</signal>
+-   <receiver>groupVideoOptions</receiver>
+-   <slot>setDisabled(bool)</slot>
+-   <hints>
+-    <hint type="sourcelabel">
+-     <x>236</x>
+-     <y>56</y>
+-    </hint>
+-    <hint type="destinationlabel">
+-     <x>227</x>
+-     <y>270</y>
+-    </hint>
+-   </hints>
+-  </connection>
+  </connections>
+ </ui>
+-- 
+2.16.2
+

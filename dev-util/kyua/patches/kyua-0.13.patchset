@@ -1,0 +1,671 @@
+From 235280aa551819a75c09da858a6451e9260488f7 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Mon, 1 Jan 2018 22:35:07 +0700
+Subject: utils/process/child_test: fix type mismatch
+
+Align pipe_fail with syscall_pipe definition
+
+diff --git a/utils/process/child_test.cpp b/utils/process/child_test.cpp
+index 8996c31..2641716 100644
+--- a/utils/process/child_test.cpp
++++ b/utils/process/child_test.cpp
+@@ -256,7 +256,7 @@ open_fail(const char* path, const int flags, ...) throw()
+ ///
+ /// \return Always -1.
+ template< int Errno >
+-static pid_t
++static int
+ pipe_fail(int* UTILS_UNUSED_PARAM(fildes)) throw()
+ {
+     errno = Errno;
+-- 
+2.16.2
+
+
+From ea5b2176fc2fb7b89a14d39469fc33814506e84f Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Wed, 3 Jan 2018 20:56:21 +0700
+Subject: kyua: use Haiku user directory
+
+This broke a lot of tests that assume kyua will save it's data in
+$HOME/.kyua
+
+diff --git a/cli/common.cpp b/cli/common.cpp
+index 9204082..b937bdd 100644
+--- a/cli/common.cpp
++++ b/cli/common.cpp
+@@ -121,9 +121,9 @@ namespace {
+ static optional< fs::path >
+ get_historical_db(void)
+ {
+-    optional< fs::path > home = utils::get_home();
+-    if (home) {
+-        const fs::path old_db = home.get() / ".kyua/store.db";
++    optional< fs::path > data_dir = utils::get_home_data();
++    if (data_dir) {
++        const fs::path old_db = data_dir.get() / "store.db";
+         if (fs::exists(old_db)) {
+             if (old_db.is_absolute())
+                 return utils::make_optional(old_db);
+diff --git a/cli/config.cpp b/cli/config.cpp
+index 0049103..d35a533 100644
+--- a/cli/config.cpp
++++ b/cli/config.cpp
+@@ -101,9 +101,9 @@ load_config_file(const cmdline::parsed_cmdline& cmdline)
+     } else if (filename.str() != cli::config_option.default_value())
+         return engine::load_config(filename);
+ 
+-    const optional< fs::path > home = utils::get_home();
+-    if (home) {
+-        const fs::path path = home.get() / ".kyua" / config_basename;
++    const optional< fs::path > conf_home = utils::get_home_config();
++    if (conf_home) {
++        const fs::path path = conf_home.get() / config_basename;
+         try {
+             if (fs::exists(path))
+                 return engine::load_config(path);
+diff --git a/cli/main.cpp b/cli/main.cpp
+index 531c252..67820cd 100644
+--- a/cli/main.cpp
++++ b/cli/main.cpp
+@@ -239,10 +239,10 @@ fs::path
+ cli::detail::default_log_name(void)
+ {
+     // Update doc/troubleshooting.texi if you change this algorithm.
+-    const optional< std::string > home(utils::getenv("HOME"));
+-    if (home) {
+-        return logging::generate_log_name(fs::path(home.get()) / ".kyua" /
+-                                          "logs", cmdline::progname());
++    const optional< fs::path > data_home = utils::get_home_data();
++    if (data_home) {
++        return logging::generate_log_name(data_home.get() / "logs",
++                                          cmdline::progname());
+     } else {
+         const optional< std::string > tmpdir(utils::getenv("TMPDIR"));
+         if (tmpdir) {
+diff --git a/store/layout.cpp b/store/layout.cpp
+index 6bc67a8..b5f39d2 100644
+--- a/store/layout.cpp
++++ b/store/layout.cpp
+@@ -228,13 +228,13 @@ layout::new_db_for_migration(const fs::path& root,
+ fs::path
+ layout::query_store_dir(void)
+ {
+-    const optional< fs::path > home = utils::get_home();
+-    if (home) {
+-        const fs::path& home_path = home.get();
+-        if (home_path.is_absolute())
+-            return home_path / ".kyua/store";
++    const optional< fs::path > home_data = utils::get_home_data();
++    if (home_data) {
++        const fs::path& data_path = home_data.get();
++        if (data_path.is_absolute())
++            return data_path / "store";
+         else
+-            return home_path.to_absolute() / ".kyua/store";
++            return data_path.to_absolute() / "store";
+     } else {
+         LW("HOME not defined; creating store database in current "
+            "directory");
+diff --git a/utils/env.cpp b/utils/env.cpp
+index b0d995c..2a495bc 100644
+--- a/utils/env.cpp
++++ b/utils/env.cpp
+@@ -31,6 +31,10 @@
+ #if defined(HAVE_CONFIG_H)
+ #  include "config.h"
+ #endif
++#if defined(__HAIKU__)
++#  include <Path.h>
++#  include <FindDirectory.h>
++#endif
+ 
+ #include <cerrno>
+ #include <cstdlib>
+@@ -139,6 +143,54 @@ utils::get_home(void)
+ }
+ 
+ 
++/// Get the kyua user configuration directory.
++///
++/// \return The directory where kyua user configuration files should be found
++optional< fs::path >
++utils::get_home_config(void)
++{
++#if defined(__HAIKU__)
++    BPath conf_path;
++    if (find_directory(B_USER_SETTINGS_DIRECTORY, &conf_path) == B_OK) {
++        return utils::make_optional(fs::path(conf_path.Path()) / "kyua");
++    } else {
++        return none;
++    }
++#else
++    const optional< fs::path > home = utils::get_home();
++    if (home) {
++        return utils::make_optional(home.get() / ".kyua");
++    } else {
++        return none;
++    }
++#endif
++}
++
++
++/// Get the kyua user data directory.
++///
++/// \return The directory where kyua user data should be saved.
++optional< fs::path >
++utils::get_home_data(void)
++{
++#if defined(__HAIKU__)
++    BPath data_path;
++    if (find_directory(B_USER_VAR_DIRECTORY, &data_path) == B_OK) {
++        return utils::make_optional(fs::path(data_path.Path()) / "kyua");
++    } else {
++        return none;
++    }
++#else
++    const optional< fs::path > home = utils::get_home();
++    if (home) {
++        return utils::make_optional(home.get() / ".kyua");
++    } else {
++        return none;
++    }
++#endif
++}
++
++
+ /// Sets the value of an environment variable.
+ ///
+ /// \param name The name of the environment variable to set.
+diff --git a/utils/env.hpp b/utils/env.hpp
+index 2370ee4..a60ca5e 100644
+--- a/utils/env.hpp
++++ b/utils/env.hpp
+@@ -49,6 +49,8 @@ std::map< std::string, std::string > getallenv(void);
+ optional< std::string > getenv(const std::string&);
+ std::string getenv_with_default(const std::string&, const std::string&);
+ optional< utils::fs::path > get_home(void);
++optional< utils::fs::path > get_home_config(void);
++optional< utils::fs::path > get_home_data(void);
+ void setenv(const std::string&, const std::string&);
+ void unsetenv(const std::string&);
+ 
+-- 
+2.16.2
+
+
+From ea4b248c9731d9c782f2e0dc37e58942bbce00b1 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Wed, 3 Jan 2018 21:05:37 +0700
+Subject: utils/process/operations_test: fixes
+
+This commit allow operations_test to compile on OSes that doesn't
+have WCOREDUMP as this macro is non-standard
+
+diff --git a/utils/process/operations_test.cpp b/utils/process/operations_test.cpp
+index e9c1ebb..708a740 100644
+--- a/utils/process/operations_test.cpp
++++ b/utils/process/operations_test.cpp
+@@ -353,7 +353,9 @@ ATF_TEST_CASE_BODY(terminate_self_with__termsig)
+     ATF_REQUIRE(::wait(&status) != -1);
+     ATF_REQUIRE(WIFSIGNALED(status));
+     ATF_REQUIRE(WTERMSIG(status) == SIGKILL);
++#if defined(WCOREDUMP)
+     ATF_REQUIRE(!WCOREDUMP(status));
++#endif
+ }
+ 
+ 
+@@ -374,7 +376,11 @@ ATF_TEST_CASE_BODY(terminate_self_with__termsig_and_core)
+     ATF_REQUIRE(::wait(&status) != -1);
+     ATF_REQUIRE(WIFSIGNALED(status));
+     ATF_REQUIRE(WTERMSIG(status) == SIGABRT);
++#if defined(WCOREDUMP)
+     ATF_REQUIRE(WCOREDUMP(status));
++#else
++    expect_fail("Platform does not checking for coredump");
++#endif
+ }
+ 
+ 
+-- 
+2.16.2
+
+
+From 9bdf4754429fd3ee72e8309eb02879b1ea94a925 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Thu, 4 Jan 2018 11:54:25 +0700
+Subject: utils/fs/directory: use dirent correctly
+
+
+diff --git a/utils/fs/directory.cpp b/utils/fs/directory.cpp
+index ff7ad5e..c6794e5 100644
+--- a/utils/fs/directory.cpp
++++ b/utils/fs/directory.cpp
+@@ -32,6 +32,7 @@ extern "C" {
+ #include <sys/types.h>
+ 
+ #include <dirent.h>
++#include <unistd.h>
+ }
+ 
+ #include <cerrno>
+@@ -131,7 +132,7 @@ struct utils::fs::detail::directory_iterator::impl : utils::noncopyable {
+     ///
+     /// We need to keep this at the class level so that we can use the
+     /// readdir_r(3) function.
+-    ::dirent _dirent;
++    ::dirent* _dirent;
+ 
+     /// Custom representation of the directory entry.
+     ///
+@@ -141,7 +142,7 @@ struct utils::fs::detail::directory_iterator::impl : utils::noncopyable {
+     std::auto_ptr< directory_entry > _entry;
+ 
+     /// Constructs an iterator pointing to the "end" of the directory.
+-    impl(void) : _path("invalid-directory-entry"), _dirp(NULL)
++    impl(void) : _path("invalid-directory-entry"), _dirp(NULL), _dirent(NULL)
+     {
+     }
+ 
+@@ -160,6 +161,16 @@ struct utils::fs::detail::directory_iterator::impl : utils::noncopyable {
+         }
+         _dirp = dirp;
+ 
++        long name_max = pathconf(_path.c_str(), _PC_NAME_MAX);
++        if (name_max == -1)
++#if defined(NAME_MAX)
++            name_max = NAME_MAX;
++#else
++            name_max = 256; /* Wild guess */
++#endif
++        const size_t length = offsetof(::dirent, d_name) + name_max + 1;
++        _dirent = static_cast< ::dirent* >(operator new(length));
++
+         // Initialize our first directory entry.  Note that this may actually
+         // close the directory we just opened if the directory happens to be
+         // empty -- but directories are never empty because they at least have
+@@ -174,6 +185,8 @@ struct utils::fs::detail::directory_iterator::impl : utils::noncopyable {
+     {
+         if (_dirp != NULL)
+             close();
++        delete _dirent;
++        _dirent = NULL;
+     }
+ 
+     /// Closes the directory and invalidates the iterator.
+@@ -198,7 +211,7 @@ struct utils::fs::detail::directory_iterator::impl : utils::noncopyable {
+     {
+         ::dirent* result;
+ 
+-        if (::readdir_r(_dirp, &_dirent, &result) == -1) {
++        if (::readdir_r(_dirp, _dirent, &result) == -1) {
+             const int original_errno = errno;
+             throw fs::system_error(F("readdir_r(%s) failed") % _path,
+                                    original_errno);
+@@ -207,7 +220,7 @@ struct utils::fs::detail::directory_iterator::impl : utils::noncopyable {
+             _entry.reset(NULL);
+             close();
+         } else {
+-            _entry.reset(new directory_entry(_dirent.d_name));
++            _entry.reset(new directory_entry(_dirent->d_name));
+         }
+     }
+ };
+-- 
+2.16.2
+
+
+From 399fd5c96c4b725019082c6d4dbee8b44ea7e9f2 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Fri, 5 Jan 2018 20:36:11 +0700
+Subject: utils/process/status: use WIFCORED on Haiku
+
+
+diff --git a/utils/process/operations_test.cpp b/utils/process/operations_test.cpp
+index 708a740..7a50bfc 100644
+--- a/utils/process/operations_test.cpp
++++ b/utils/process/operations_test.cpp
+@@ -53,6 +53,9 @@ extern "C" {
+ namespace fs = utils::fs;
+ namespace process = utils::process;
+ 
++#if defined(__HAIKU__)
++#   define WCOREDUMP(x) WIFCORED(x)
++#endif
+ 
+ namespace {
+ 
+diff --git a/utils/process/status.cpp b/utils/process/status.cpp
+index a3cea8e..98605c7 100644
+--- a/utils/process/status.cpp
++++ b/utils/process/status.cpp
+@@ -41,7 +41,9 @@ namespace process = utils::process;
+ using utils::none;
+ using utils::optional;
+ 
+-#if !defined(WCOREDUMP)
++#if defined(__HAIKU__)
++#   define WCOREDUMP(x) WIFCORED(x)
++#elif !defined(WCOREDUMP)
+ #   define WCOREDUMP(x) false
+ #endif
+ 
+-- 
+2.16.2
+
+
+From d2cc0a80c05fe537e4b3c0907eba03010a7e9d99 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Fri, 5 Jan 2018 21:28:14 +0700
+Subject: utils/process/tests: Fix SIGKILL check on Haiku
+
+Haiku would emit SIGKILLTHR for our pids instead (they're thread ids)
+
+diff --git a/utils/process/deadline_killer_test.cpp b/utils/process/deadline_killer_test.cpp
+index 06c8966..f3a620f 100644
+--- a/utils/process/deadline_killer_test.cpp
++++ b/utils/process/deadline_killer_test.cpp
+@@ -78,7 +78,11 @@ ATF_TEST_CASE_BODY(activation)
+     ATF_REQUIRE(killer.fired());
+     ATF_REQUIRE(end - start <= datetime::delta(10, 0));
+     ATF_REQUIRE(status.signaled());
++#if defined(__HAIKU__)
++    ATF_REQUIRE_EQ(SIGKILLTHR, status.termsig());
++#else
+     ATF_REQUIRE_EQ(SIGKILL, status.termsig());
++#endif
+ }
+ 
+ 
+diff --git a/utils/process/operations_test.cpp b/utils/process/operations_test.cpp
+index 7a50bfc..05c7251 100644
+--- a/utils/process/operations_test.cpp
++++ b/utils/process/operations_test.cpp
+@@ -299,7 +299,11 @@ ATF_TEST_CASE_BODY(terminate_group__setpgrp_executed)
+     int status;
+     ATF_REQUIRE(::wait(&status) != -1);
+     ATF_REQUIRE(WIFSIGNALED(status));
++#if defined(__HAIKU__)
++    ATF_REQUIRE(WTERMSIG(status) == SIGKILLTHR);
++#else
+     ATF_REQUIRE(WTERMSIG(status) == SIGKILL);
++#endif
+ }
+ 
+ 
+@@ -320,7 +324,11 @@ ATF_TEST_CASE_BODY(terminate_group__setpgrp_not_executed)
+     int status;
+     ATF_REQUIRE(::wait(&status) != -1);
+     ATF_REQUIRE(WIFSIGNALED(status));
++#if defined(__HAIKU__)
++    ATF_REQUIRE(WTERMSIG(status) == SIGKILLTHR);
++#else
+     ATF_REQUIRE(WTERMSIG(status) == SIGKILL);
++#endif
+ }
+ 
+ 
+@@ -355,7 +363,11 @@ ATF_TEST_CASE_BODY(terminate_self_with__termsig)
+     int status;
+     ATF_REQUIRE(::wait(&status) != -1);
+     ATF_REQUIRE(WIFSIGNALED(status));
++#if defined(__HAIKU__)
++    ATF_REQUIRE(WTERMSIG(status) == SIGKILLTHR);
++#else
+     ATF_REQUIRE(WTERMSIG(status) == SIGKILL);
++#endif
+ #if defined(WCOREDUMP)
+     ATF_REQUIRE(!WCOREDUMP(status));
+ #endif
+diff --git a/utils/process/status_test.cpp b/utils/process/status_test.cpp
+index 5a3e19e..afee938 100644
+--- a/utils/process/status_test.cpp
++++ b/utils/process/status_test.cpp
+@@ -173,7 +173,11 @@ ATF_TEST_CASE_BODY(integration__signaled)
+     const status sigkill = fork_and_wait(child_signal< SIGKILL >);
+     ATF_REQUIRE(!sigkill.exited());
+     ATF_REQUIRE(sigkill.signaled());
++#if defined(__HAIKU__)
++    ATF_REQUIRE_EQ(SIGKILLTHR, sigkill.termsig());
++#else
+     ATF_REQUIRE_EQ(SIGKILL, sigkill.termsig());
++#endif
+     ATF_REQUIRE(!sigkill.coredump());
+ }
+ 
+diff --git a/utils/signals/interrupts_test.cpp b/utils/signals/interrupts_test.cpp
+index ef8758d..a7e9840 100644
+--- a/utils/signals/interrupts_test.cpp
++++ b/utils/signals/interrupts_test.cpp
+@@ -217,10 +217,18 @@ ATF_TEST_CASE_BODY(interrupts_handler__kill_children)
+ 
+     const process::status status1 = child1->wait();
+     ATF_REQUIRE(status1.signaled());
++#if defined(__HAIKU__)
++    ATF_REQUIRE_EQ(SIGKILLTHR, status1.termsig());
++#else
+     ATF_REQUIRE_EQ(SIGKILL, status1.termsig());
++#endif
+     const process::status status2 = child2->wait();
+     ATF_REQUIRE(status2.signaled());
++#if defined(__HAIKU__)
++    ATF_REQUIRE_EQ(SIGKILLTHR, status2.termsig());
++#else
+     ATF_REQUIRE_EQ(SIGKILL, status2.termsig());
++#endif
+ }
+ 
+ 
+-- 
+2.16.2
+
+
+From 6f25c5caa9849d3b7a2e3f958f929395cc147bca Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Fri, 5 Jan 2018 21:33:32 +0700
+Subject: utils/memory: add get_system_info support
+
+
+diff --git a/m4/memory.m4 b/m4/memory.m4
+index 3d9a83a..c829d8f 100644
+--- a/m4/memory.m4
++++ b/m4/memory.m4
+@@ -52,6 +52,11 @@ AC_DEFUN([KYUA_MEMORY], [
+         fi
+     fi
+ 
++    _KYUA_GET_SYSTEM_INFO([have_get_system_info=yes], [have_get_system_info=no])
++    if test "${have_get_system_info}" = yes; then
++        memory_query=get_system_info
++    fi
++
+     if test "${memory_query}" = unknown; then
+         AC_MSG_WARN([Don't know how to query the amount of physical memory])
+         AC_MSG_WARN([The test case's require.memory property will not work])
+@@ -120,3 +125,14 @@ AC_DEFUN([_KYUA_SYSCTL_MIB], [
+         m4_default([$4], [:])
+     fi
+ ])
++
++
++dnl Detects the availability of the get_system_info() function.
++dnl
++dnl \param action_if_found Code to run if the function is found.
++dnl \param action_if_not_found Code to run if the function is not found.
++AC_DEFUN([_KYUA_GET_SYSTEM_INFO], [
++    AC_CHECK_HEADERS([OS.h])
++
++    AC_CHECK_FUNCS([get_system_info], [$1], [$2])
++])
+diff --git a/utils/memory.cpp b/utils/memory.cpp
+index fb5da79..dfa6786 100644
+--- a/utils/memory.cpp
++++ b/utils/memory.cpp
+@@ -44,6 +44,10 @@ extern "C" {
+ #endif
+ }
+ 
++#if defined(HAVE_OS_H)
++#   include <OS.h>
++#endif
++
+ #include <cerrno>
+ #include <cstddef>
+ #include <cstring>
+@@ -73,6 +77,10 @@ static const char* query_type_unknown = "unknown";
+ static const char* query_type_sysctlbyname = "sysctlbyname";
+ 
+ 
++/// Value of query_type when we have to use get_system_info().
++static const char* query_type_get_system_info = "get_system_info";
++
++
+ /// Name of the sysctl MIB with the physical memory as detected by configure.
+ ///
+ /// This should only be used if memory_query_type is 'sysctl'.
+@@ -107,6 +115,37 @@ sysctlbyname(const char* UTILS_UNUSED_PARAM(name),
+ #endif
+ 
+ 
++#if !defined(HAVE_GET_SYSTEM_INFO)
++#if !defined(status_t)
++typedef status_t int;
++#endif
++#if !defined(system_info)
++typedef struct {
++  int64_t max_pages;
++} system_info;
++#endif
++#if !defined(B_PAGE_SIZE)
++#define B_PAGE_SIZE 1
++#endif
++/// Stub for get_system_info() for systems that don't have it.
++///
++/// The whole purpose of this fake function is to allow the caller code to be
++/// compiled on any machine regardless of the presence of get_system_info(). This
++/// will prevent the code from breaking when it is compiled on a machine without
++/// this function.  It also prevents "unused variable" warnings in the caller
++/// code.
++///
++/// \param unused_info Unused.
++///
++/// \return Nothing; this always crashes.
++static status_t
++get_system_info(system_info* UTILS_UNUSED_PARAM(unused_info))
++{
++    UNREACHABLE;
++}
++#endif
++
++
+ }  // anonymous namespace
+ 
+ 
+@@ -154,6 +193,12 @@ utils::physical_memory(void)
+             amount = 0;
+         } else if (std::strcmp(query_type, query_type_sysctlbyname) == 0) {
+             amount = query_sysctl(query_sysctl_mib);
++        } else if (std::strcmp(query_type, query_type_get_system_info) == 0) {
++            system_info info;
++            if (get_system_info(&info) == B_OK)
++                amount = static_cast<int64_t>(info.max_pages * B_PAGE_SIZE);
++            else
++                throw std::runtime_error(F("Failed to get page count with get_system_info()"));
+         } else
+             UNREACHABLE_MSG("Unimplemented memory query type");
+         LI(F("Physical memory as returned by query type '%s': %s") %
+diff --git a/utils/memory_test.cpp b/utils/memory_test.cpp
+index 66750fb..7b76a5c 100644
+--- a/utils/memory_test.cpp
++++ b/utils/memory_test.cpp
+@@ -48,7 +48,8 @@ ATF_TEST_CASE_BODY(physical_memory)
+ 
+     if (std::strcmp(MEMORY_QUERY_TYPE, "unknown") == 0) {
+         ATF_REQUIRE(memory == 0);
+-    } else if (std::strcmp(MEMORY_QUERY_TYPE, "sysctlbyname") == 0) {
++    } else if (std::strcmp(MEMORY_QUERY_TYPE, "sysctlbyname") == 0 ||
++               std::strcmp(MEMORY_QUERY_TYPE, "get_system_info") == 0) {
+         ATF_REQUIRE(memory > 0);
+         ATF_REQUIRE(memory < 100 * units::TB);  // Large enough for now...
+     } else {
+-- 
+2.16.2
+
+
+From 24a103d26f668154b434e4a7c1690927a1447aa5 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Sat, 6 Jan 2018 07:07:31 +0700
+Subject: Kyuafiles: disable tests that depends on HOME
+
+On Haiku we use find_directory for user directories, not $HOME. This
+commit disable tests that depends on $HOME being user directory.
+
+diff --git a/Kyuafile b/Kyuafile
+index e986218..f9d5861 100644
+--- a/Kyuafile
++++ b/Kyuafile
+@@ -12,7 +12,6 @@ end
+ include("drivers/Kyuafile")
+ include("engine/Kyuafile")
+ include("examples/Kyuafile")
+-include("integration/Kyuafile")
+ include("model/Kyuafile")
+ include("store/Kyuafile")
+ include("utils/Kyuafile")
+diff --git a/cli/Kyuafile b/cli/Kyuafile
+index f5b797d..727b653 100644
+--- a/cli/Kyuafile
++++ b/cli/Kyuafile
+@@ -9,6 +9,3 @@ atf_test_program{name="cmd_debug_test"}
+ atf_test_program{name="cmd_help_test"}
+ atf_test_program{name="cmd_list_test"}
+ atf_test_program{name="cmd_test_test"}
+-atf_test_program{name="common_test"}
+-atf_test_program{name="config_test"}
+-atf_test_program{name="main_test"}
+diff --git a/store/Kyuafile b/store/Kyuafile
+index ada2f7c..0f8ad43 100644
+--- a/store/Kyuafile
++++ b/store/Kyuafile
+@@ -4,12 +4,10 @@ test_suite("kyua")
+ 
+ atf_test_program{name="dbtypes_test"}
+ atf_test_program{name="exceptions_test"}
+-atf_test_program{name="layout_test"}
+ atf_test_program{name="metadata_test"}
+ atf_test_program{name="migrate_test"}
+ atf_test_program{name="read_backend_test"}
+ atf_test_program{name="read_transaction_test"}
+-atf_test_program{name="schema_inttest"}
+ atf_test_program{name="transaction_test"}
+ atf_test_program{name="write_backend_test"}
+ atf_test_program{name="write_transaction_test"}
+-- 
+2.16.2
+
+
+From b50332f25345fdd2c0e3c24a5452159b7bbbdf4a Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Sat, 6 Jan 2018 08:49:26 +0700
+Subject: utils/fs/operations_test: disable ENOENT test
+
+This test depends on BSD-specific getcwd(3) extension
+
+diff --git a/utils/fs/operations_test.cpp b/utils/fs/operations_test.cpp
+index f134935..c77ec6b 100644
+--- a/utils/fs/operations_test.cpp
++++ b/utils/fs/operations_test.cpp
+@@ -160,6 +160,9 @@ ATF_TEST_CASE_BODY(current_path__ok)
+ ATF_TEST_CASE_WITHOUT_HEAD(current_path__enoent);
+ ATF_TEST_CASE_BODY(current_path__enoent)
+ {
++#if defined(__HAIKU__)
++    expect_fail("This test depends on BSD-specific behaviour");
++#endif
+     const fs::path previous = fs::current_path();
+     fs::mkdir(fs::path("root"), 0755);
+     ATF_REQUIRE(::chdir("root") != -1);
+-- 
+2.16.2
+

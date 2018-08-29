@@ -1,0 +1,171 @@
+From 7d19038ccca2379140022037e6861a8f8d5fe8fa Mon Sep 17 00:00:00 2001
+From: Ingo Weinhold <ingo_weinhold@gmx.de>
+Date: Tue, 13 Aug 2013 08:07:25 +0200
+Subject: git-web--browse.sh: use "open" on Haiku
+
+
+diff --git a/git-web--browse.sh b/git-web--browse.sh
+index ae15253..b074d1a 100755
+--- a/git-web--browse.sh
++++ b/git-web--browse.sh
+@@ -133,6 +133,11 @@ if test -z "$browser" ; then
+ 		browser_candidates="cygstart $browser_candidates"
+ 	fi
+ 
++	# /boot/system/haiku_loader indicates Haiku
++	if test -f /boot/system/haiku_loader; then
++		browser_candidates="open $browser_candidates"
++	fi
++
+ 	for i in $browser_candidates; do
+ 		init_browser_path $i
+ 		if type "$browser_path" > /dev/null 2>&1; then
+-- 
+2.14.2
+
+
+From c28ebdeca7e0ad7a4d14a1026a5471ee2d8937db Mon Sep 17 00:00:00 2001
+From: Ingo Weinhold <ingo_weinhold@gmx.de>
+Date: Mon, 19 Jan 2015 15:37:16 -0500
+Subject: On Haiku use the user settings directory instead of HOME
+
+
+diff --git a/path.c b/path.c
+index 7f109f6..a4eb8bb 100644
+--- a/path.c
++++ b/path.c
+@@ -12,6 +12,11 @@
+ #include "packfile.h"
+ #include "object-store.h"
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#include <StorageDefs.h>
++#endif
++
+ static int get_st_mode_bits(const char *path, int *mode)
+ {
+ 	struct stat st;
+@@ -1416,10 +1421,19 @@ char *xdg_config_home(const char *filename)
+ {
+ 	const char *home, *config_home;
+ 
++#ifdef __HAIKU__
++	char settingsPath[B_PATH_NAME_LENGTH];
++	assert(filename);
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, true, settingsPath,
++		sizeof(settingsPath)) == B_OK)
++		return mkpathdup("%s/git/%s", settingsPath, filename);
++#else
+ 	assert(filename);
+ 	config_home = getenv("XDG_CONFIG_HOME");
++
+ 	if (config_home && *config_home)
+ 		return mkpathdup("%s/git/%s", config_home, filename);
++#endif
+ 
+ 	home = getenv("HOME");
+ 	if (home)
+-- 
+2.14.2
+
+
+From bb13568f941bb3e59a8e33f91676364313544614 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Mon, 19 Jan 2015 15:50:09 -0500
+Subject: Ensure config-directory exists before using it.
+
+
+diff --git a/config.c b/config.c
+index fbbf0f8..7de79b6 100644
+--- a/config.c
++++ b/config.c
+@@ -2657,6 +2657,7 @@ int git_config_set_multivar_in_file_gently(const char *config_filename,
+ 	int ret;
+ 	struct lock_file lock = LOCK_INIT;
+ 	char *filename_buf = NULL;
++	char *config_dir = NULL;
+ 	char *contents = NULL;
+ 	size_t contents_sz;
+ 	struct config_store_data store;
+@@ -2673,6 +2674,12 @@ int git_config_set_multivar_in_file_gently(const char *config_filename,
+ 	if (!config_filename)
+ 		config_filename = filename_buf = git_pathdup("config");
+ 
++	config_dir = xstrdup(config_filename);
++	* find_last_dir_sep(config_dir) = '\0';
++	if (access(config_dir, F_OK) != 0)
++		mkdir(config_dir, 0755);
++	free(config_dir);
++
+ 	/*
+ 	 * The lock serves a purpose in addition to locking: the new
+ 	 * contents of .git/config will be written into it.
+-- 
+2.16.3
+
+
+From 66ce1d4e8611573bde7ae110d015c45cc5529adf Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sun, 14 Feb 2016 10:32:12 +0100
+Subject: Move credential cache to the config directory.
+
+Do not clutter the home dir.
+
+diff --git a/credential-cache.c b/credential-cache.c
+index 1cccc3a..076f6fa 100644
+--- a/credential-cache.c
++++ b/credential-cache.c
+@@ -87,7 +87,7 @@ static char *get_socket_path(void)
+ {
+ 	struct stat sb;
+ 	char *old_dir, *socket;
+-	old_dir = expand_user_path("~/.git-credential-cache", 0);
++	old_dir = xdg_config_home("credential-cache");
+ 	if (old_dir && !stat(old_dir, &sb) && S_ISDIR(sb.st_mode))
+ 		socket = xstrfmt("%s/socket", old_dir);
+ 	else
+-- 
+2.14.2
+
+
+From 6cc7223d58b1fbb829d462e682ba32b7ebf91404 Mon Sep 17 00:00:00 2001
+From: sfanxiang <sfanxiang@gmail.com>
+Date: Mon, 1 Jan 2018 13:26:28 +0000
+Subject: builtin: config: use xdg_config even if it does not exist
+
+
+diff --git a/builtin/config.c b/builtin/config.c
+index b29d26d..7e1828f 100644
+--- a/builtin/config.c
++++ b/builtin/config.c
+@@ -615,22 +615,11 @@ int cmd_config(int argc, const char **argv, const char *prefix)
+ 		char *user_config = expand_user_path("~/.gitconfig", 0);
+ 		char *xdg_config = xdg_config_home("config");
+ 
+-		if (!user_config)
+-			/*
+-			 * It is unknown if HOME/.gitconfig exists, so
+-			 * we do not know if we should write to XDG
+-			 * location; error out even if XDG_CONFIG_HOME
+-			 * is set and points at a sane location.
+-			 */
+-			die("$HOME not set");
+-
+-		if (access_or_warn(user_config, R_OK, 0) &&
+-		    xdg_config && !access_or_warn(xdg_config, R_OK, 0)) {
+-			given_config_source.file = xdg_config;
+-			free(user_config);
+-		} else {
++		if (!xdg_config) {
+ 			given_config_source.file = user_config;
+-			free(xdg_config);
++		} else {
++			given_config_source.file = xdg_config;
++			if (user_config) free(user_config);
+ 		}
+ 	}
+ 	else if (use_system_config)
+-- 
+2.16.3
+

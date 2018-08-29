@@ -1,0 +1,120 @@
+From 85194fab93ce2c243147cbc18516950562bc4099 Mon Sep 17 00:00:00 2001
+From: sfanxiang <sfanxiang@gmail.com>
+Date: Mon, 15 Jan 2018 00:29:12 +0000
+Subject: port to Haiku
+
+
+diff --git a/src/gsasl.c b/src/gsasl.c
+index 11d45b5..a9ee590 100644
+--- a/src/gsasl.c
++++ b/src/gsasl.c
+@@ -31,6 +31,8 @@ gnutls_session session;
+ bool using_tls = false;
+ #endif
+ 
++#include <sys/select.h>
++
+ char *b64cbtlsunique = NULL;
+ 
+ struct gengetopt_args_info args_info;
+@@ -713,20 +715,12 @@ main (int argc, char *argv[])
+       /* Transfer application payload */
+       if (args_info.application_data_flag)
+ 	{
+-	  struct pollfd pfd[2];
++	  fd_set rfds, efds;
++	  int nfds;
+ 	  char *sockbuf = NULL;
+ 	  /* we read chunks of 1000 bytes at a time */
+ 	  size_t sockpos = 0, sockalloc = 0, sockalloc1 = 1000;
+ 
+-	  /* Setup pollfd structs... */
+-	  pfd[0].fd = STDIN_FILENO;
+-	  pfd[0].events = POLLIN;
+-	  if (sockfd)
+-	    {
+-	      pfd[1].fd = sockfd;
+-	      pfd[1].events = POLLIN;
+-	    }
+-
+ 	  if (!args_info.quiet_given)
+ 	    {
+ 	      fprintf (stderr,
+@@ -738,19 +732,32 @@ main (int argc, char *argv[])
+ 	    {
+ 	      int rc;
+ 
+-	      pfd[0].revents = 0;
+-	      pfd[1].revents = 0;
++	      /* Setup fd_set structs... */
++	      FD_ZERO (&rfds);
++	      FD_ZERO (&efds);
++
++	      FD_SET (STDIN_FILENO, &rfds);
++	      FD_SET (STDIN_FILENO, &efds);
++	      nfds = STDIN_FILENO + 1;
+ 
+-	      rc = poll (pfd, sockfd ? 2 : 1, -1);
++	      if (sockfd)
++	        {
++	          FD_SET (sockfd, &rfds);
++	          FD_SET (sockfd, &efds);
++	          if (sockfd + 1 > nfds) nfds = sockfd + 1;
++	        }
++
++	      rc = select (nfds, &rfds, NULL, &efds, NULL);
+ 	      if (rc < 0 && errno == EINTR)
+ 		continue;
+ 
+ 	      /* Always check for errors */
+ 	      if (rc < 0)
+-		error (EXIT_FAILURE, errno, "poll");
++		error (EXIT_FAILURE, errno, "select");
+ 
+ 	      /* We got data to read from stdin.. */
+-	      if ((pfd[0].revents & (POLLIN | POLLERR)) == POLLIN)
++	      if (FD_ISSET (STDIN_FILENO, &rfds)
++	          && !FD_ISSET (STDIN_FILENO, &efds))
+ 		{
+ 		  char *line = NULL;
+ 		  size_t n;
+@@ -812,14 +819,15 @@ main (int argc, char *argv[])
+ 		  free (out);
+ 		}
+ 	      /* If there was an error, quit.  */
+-	      else if (pfd[0].revents & (POLLERR | POLLHUP))
++	      else if (FD_ISSET (STDIN_FILENO, &efds))
+ 		{
+-		  error (0, 0, "poll stdin");
++		  error (0, 0, "select stdin");
+ 		  break;
+ 		}
+ 
+ 	      /* We got data to read from the socket.. */
+-	      if (sockfd && (pfd[1].revents & (POLLIN | POLLERR)) == POLLIN)
++	      if (sockfd && FD_ISSET (sockfd, &rfds)
++	          && !FD_ISSET (sockfd, &efds))
+ 		{
+ 		  ssize_t len;
+ 
+@@ -862,10 +870,15 @@ main (int argc, char *argv[])
+ 		  printf ("%.*s", (int) output_len, out);
+ 		  free (out);
+ 		}
++	      else if (!sockfd)
++		{
++		  error (0, 0, "select error");
++		  break;
++		}
+ 	      /* If there was an error, quit.  */
+-	      else if (pfd[1].revents & (POLLERR | POLLHUP))
++	      else if (FD_ISSET (sockfd, &efds))
+ 		{
+-		  error (0, 0, "poll socket");
++		  error (0, 0, "select socket");
+ 		  break;
+ 		}
+ 	    }
+-- 
+2.15.0
+

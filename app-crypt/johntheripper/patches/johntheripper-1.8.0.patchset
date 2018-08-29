@@ -1,0 +1,198 @@
+From e70ffaaaa9542949d6a371b9755914d1a093b28b Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Sun, 24 Dec 2017 19:41:43 +0700
+Subject: path: add expansion for "~config" and "~data"
+
+This commit enable the ability to dynamically expand user configuration
+folder and user data folder for Haiku.
+
+This could also be further extended to support XDG Base Directory
+Specification.
+
+diff --git a/src/path.c b/src/path.c
+index 14f6310..444ecb8 100644
+--- a/src/path.c
++++ b/src/path.c
+@@ -31,9 +31,16 @@ static int john_home_lengthex;
+ #include <pwd.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#endif
+ 
+ static char *user_home_path = NULL;
+ static int user_home_length;
++static char *user_config_path = NULL;
++static int user_config_length;
++static char *user_data_path = NULL;
++static int user_data_length;
+ #endif
+ 
+ #include "memdbg.h"
+@@ -66,6 +73,26 @@ void path_init(char **argv)
+ 	memcpy(user_home_path, pw->pw_dir, user_home_length - 1);
+ 	user_home_path[user_home_length - 1] = '/';
+ 
++	if (user_config_path) return;
++#ifdef __HAIKU__
++	user_config_path = mem_alloc(PATH_BUFFER_SIZE);
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, (dev_t)-1, false,
++			user_config_path, PATH_BUFFER_SIZE) != B_OK)
++		return;
++	user_config_length = strlen(user_config_path) + 1;
++	user_config_path[user_config_length - 1] = '/';
++#endif
++
++	if (user_data_path) return;
++#ifdef __HAIKU__
++	user_data_path = mem_alloc(PATH_BUFFER_SIZE);
++	if (find_directory(B_USER_VAR_DIRECTORY, (dev_t)-1, false,
++			user_data_path, PATH_BUFFER_SIZE) != B_OK)
++		return;
++	user_data_length = strlen(user_data_path) + 1;
++	user_data_path[user_data_length - 1] = '/';
++#endif
++
+ #ifdef JOHN_PRIVATE_HOME
+ 	private = path_expand(JOHN_PRIVATE_HOME);
+ 	if (mkdir(private, S_IRUSR | S_IWUSR | S_IXUSR)) {
+@@ -166,6 +193,24 @@ char *path_expand(char *name)
+ 		}
+ 		return name + 2;
+ 	}
++	if (!strncmp(name, "~config/", 8)) {
++		if (user_config_path &&
++		    user_config_length + strlen(name) - 8 < PATH_BUFFER_SIZE) {
++			strnzcpy(&user_config_path[user_config_length], &name[8],
++				PATH_BUFFER_SIZE - user_config_length);
++			return user_config_path;
++		}
++		return name + 8;
++	}
++	if (!strncmp(name, "~data/", 6)) {
++		if (user_data_path &&
++		    user_data_length + strlen(name) - 6 < PATH_BUFFER_SIZE) {
++			strnzcpy(&user_data_path[user_data_length], &name[6],
++				PATH_BUFFER_SIZE - user_data_length);
++			return user_data_path;
++		}
++		return name + 6;
++	}
+ #endif
+ 
+ 	return name;
+@@ -200,6 +245,8 @@ void path_done(void)
+ 	MEM_FREE(john_home_path);
+ #if JOHN_SYSTEMWIDE
+ 	MEM_FREE(user_home_path);
++	MEM_FREE(user_config_path);
++	MEM_FREE(user_data_path);
+ #endif
+ 	if (john_home_pathex)
+ 		MEM_FREE(john_home_pathex);
+diff --git a/src/path.h b/src/path.h
+index eeb4b04..9b64e80 100644
+--- a/src/path.h
++++ b/src/path.h
+@@ -21,7 +21,7 @@
+ extern void path_init(char **argv);
+ 
+ /*
+- * Expands "$JOHN/" and "~/" in a path name.
++ * Expands "$JOHN/", "~/", "~config/" and "~data/" in a path name.
+  * The returned buffer might be overwritten with subsequent calls.
+  */
+ extern char *path_expand(char *name);
+-- 
+2.15.0
+
+
+From a531b588f256bb4a4f559ffc23e861ca31b9e556 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Sun, 24 Dec 2017 20:17:07 +0700
+Subject: params: allow changing various paths
+
+
+diff --git a/src/params.h b/src/params.h
+index 29e6509..bd1ee50 100644
+--- a/src/params.h
++++ b/src/params.h
+@@ -90,8 +90,10 @@
+ #ifndef JOHN_SYSTEMWIDE_HOME
+ #define JOHN_SYSTEMWIDE_HOME		"/usr/share/john"
+ #endif
++#ifndef JOHN_PRIVATE_HOME
+ #define JOHN_PRIVATE_HOME		"~/.john"
+ #endif
++#endif
+ 
+ #ifndef OMP_FALLBACK
+ #define OMP_FALLBACK			0
+@@ -140,11 +142,19 @@
+ /*
+  * File names.
+  */
++#ifndef CFG_FULL_NAME
+ #define CFG_FULL_NAME			"$JOHN/john.conf"
++#endif
++#ifndef CFG_ALT_NAME
+ #define CFG_ALT_NAME			"$JOHN/john.ini"
++#endif
+ #if JOHN_SYSTEMWIDE
++#ifndef CFG_PRIVATE_FULL_NAME
+ #define CFG_PRIVATE_FULL_NAME		JOHN_PRIVATE_HOME "/john.conf"
++#endif
++#ifndef CFG_PRIVATE_ALT_NAME
+ #define CFG_PRIVATE_ALT_NAME		JOHN_PRIVATE_HOME "/john.ini"
++#endif
+ #define POT_NAME			JOHN_PRIVATE_HOME "/john.pot"
+ #define SEC_POT_NAME			JOHN_PRIVATE_HOME "/secure.pot"
+ #define LOG_NAME			JOHN_PRIVATE_HOME "/john.log"
+-- 
+2.15.0
+
+
+From 58dc5c82ea65bc7ca176b52c2729560bb6be90b6 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Wed, 27 Dec 2017 12:00:07 +0700
+Subject: x86-64: disable SIMD code path for NT fmt on Haiku
+
+
+diff --git a/src/x86-64.S b/src/x86-64.S
+index 80cce05..9905794 100644
+--- a/src/x86-64.S
++++ b/src/x86-64.S
+@@ -1672,6 +1672,7 @@ CPU_detect_fail:
+ 	ret
+ #endif
+ 
++#ifdef NT_X86_64
+ /* The following was written by Alain Espinosa <alainesp at gmail.com> in 2007.
+  * No copyright is claimed, and the software is hereby placed in the public domain.
+  * In case this attempt to disclaim copyright and place the software in the
+@@ -2029,6 +2030,7 @@ nt_crypt_all_8859_1_x86_64:
+ 	xchgq %r8,%rax
+ 	EPILOGUE
+ 	ret
++#endif
+ 
+ #if defined(__ELF__) && defined(__linux__)
+ .section .note.GNU-stack,"",@progbits
+diff --git a/src/x86-64.h b/src/x86-64.h
+index 12dc07a..6696ac0 100644
+--- a/src/x86-64.h
++++ b/src/x86-64.h
+@@ -314,7 +314,9 @@
+ #define MMX_TYPE			" SSE2"
+ #define MMX_COEF			4
+ 
++#ifndef __HAIKU__
+ #define NT_X86_64
++#endif
+ 
+ #define MMX_COEF_SHA256 4
+ #define MMX_COEF_SHA512 2
+-- 
+2.15.0
+
