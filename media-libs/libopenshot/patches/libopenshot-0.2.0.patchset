@@ -1,0 +1,1010 @@
+From 8914e50d286da14f88798929e0fd697f1febba24 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Thu, 30 Aug 2018 23:06:23 +0700
+Subject: cmake: use GNUInstallDirs
+
+This allows customizing installation folders.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index eaf7d65..56517db 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -33,6 +33,7 @@ MESSAGE("questions or issues, please visit <http://www.openshot.org/>.")
+ 
+ ################ ADD CMAKE MODULES ##################
+ set(CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/Modules")
++include(GNUInstallDirs)
+ 
+ ################ GET VERSION INFORMATION FROM VERSION.H ##################
+ MESSAGE("--------------------------------------------------------------")
+@@ -87,4 +88,4 @@ add_subdirectory(tests)
+ include(cmake/Modules/UseDoxygen.cmake)
+ 
+ file(GLOB_RECURSE doc_files ${CMAKE_CURRENT_BINARY_DIR}/doc/html/*.*)
+-INSTALL(FILES ${doc_files} DESTINATION share/doc/libopenshot)
++INSTALL(FILES ${doc_files} DESTINATION ${CMAKE_INSTALL_DOCDIR}/libopenshot)
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 0c4ff99..54db490 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -263,7 +263,7 @@ set_target_properties(openshot
+ 			PROPERTIES
+ 			VERSION ${PROJECT_VERSION}
+ 			SOVERSION ${SO_VERSION} 
+-			INSTALL_NAME_DIR "${CMAKE_INSTALL_PREFIX}/lib"
++			INSTALL_NAME_DIR ${CMAKE_INSTALL_LIBDIR}
+             )
+ 
+ ###############  LINK LIBRARY  #################
+@@ -326,16 +326,14 @@ add_subdirectory(bindings)
+ 
+ 
+ ############### INSTALL HEADERS & LIBRARY ################
+-set(LIB_INSTALL_DIR lib${LIB_SUFFIX}) # determine correct lib folder
+-
+ # Install primary library
+ INSTALL(  TARGETS openshot
+-  ARCHIVE DESTINATION ${LIB_INSTALL_DIR}
+-  LIBRARY DESTINATION ${LIB_INSTALL_DIR}
++  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
++  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+   COMPONENT library )
+ 	
+ INSTALL(FILES ${headers} 
+-	DESTINATION ${CMAKE_INSTALL_PREFIX}/include/libopenshot )
++	DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/libopenshot )
+ 
+ 
+ ############### CPACK PACKAGING ##############
+-- 
+2.16.4
+
+
+From 5ec13a4eec5d30f45098be504735065d4cd4d9e4 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Fri, 31 Aug 2018 00:09:35 +0700
+Subject: cmake/Modules: simplify search logic
+
+This also allows greater freedom in supporting different
+filesystem hierarchies.
+
+diff --git a/cmake/Modules/FindOpenShotAudio.cmake b/cmake/Modules/FindOpenShotAudio.cmake
+index 1de4529..112f3bb 100644
+--- a/cmake/Modules/FindOpenShotAudio.cmake
++++ b/cmake/Modules/FindOpenShotAudio.cmake
+@@ -9,9 +9,9 @@ message("$ENV{LIBOPENSHOT_AUDIO_DIR}")
+ 
+ # Find the base directory of juce includes
+ find_path(LIBOPENSHOT_AUDIO_BASE_DIR JuceHeader.h
+-			PATHS $ENV{LIBOPENSHOT_AUDIO_DIR}/include/libopenshot-audio/
+-			/usr/include/libopenshot-audio/
+-			/usr/local/include/libopenshot-audio/ )
++			HINTS ENV LIBOPENSHOT_AUDIO_DIR
++			PATH_SUFFIXES include/libopenshot-audio
++			libopenshot-audio )
+ 
+ # Get a list of all header file paths
+ FILE(GLOB_RECURSE JUCE_HEADER_FILES
+@@ -32,21 +32,14 @@ ENDFOREACH(HEADER_PATH)
+ # Remove duplicates from the header directories list
+ LIST(REMOVE_DUPLICATES HEADER_DIRECTORIES)
+ 
+-# Find the libopenshot-audio.so (check env var first)
+-find_library(LIBOPENSHOT_AUDIO_LIBRARY
+-		NAMES libopenshot-audio openshot-audio
+-		PATHS $ENV{LIBOPENSHOT_AUDIO_DIR}/lib/ NO_DEFAULT_PATH)
+-
+-# Find the libopenshot-audio.so / libopenshot-audio.dll library (fallback)
+ find_library(LIBOPENSHOT_AUDIO_LIBRARY
+ 			NAMES libopenshot-audio openshot-audio
+-			HINTS $ENV{LIBOPENSHOT_AUDIO_DIR}/lib/
+-			/usr/lib/
+-			/usr/lib/libopenshot-audio/
+-			/usr/local/lib/ )
++			HINTS ENV LIBOPENSHOT_AUDIO_DIR
++			PATH_SUFFIXES
++			lib/libopenshot-audio
++			lib )
+ 
+ set(LIBOPENSHOT_AUDIO_LIBRARIES ${LIBOPENSHOT_AUDIO_LIBRARY})
+-set(LIBOPENSHOT_AUDIO_LIBRARY ${LIBOPENSHOT_AUDIO_LIBRARIES})
+ 
+ # Seems to work fine with just the base dir (rather than all the actual include folders)
+ set(LIBOPENSHOT_AUDIO_INCLUDE_DIR ${LIBOPENSHOT_AUDIO_BASE_DIR} )
+@@ -55,5 +48,5 @@ set(LIBOPENSHOT_AUDIO_INCLUDE_DIRS ${LIBOPENSHOT_AUDIO_BASE_DIR} )
+ include(FindPackageHandleStandardArgs)
+ # handle the QUIETLY and REQUIRED arguments and set LIBOPENSHOT_AUDIO_FOUND to TRUE
+ # if all listed variables are TRUE
+-find_package_handle_standard_args(LIBOPENSHOT_AUDIO  DEFAULT_MSG
+-                                  LIBOPENSHOT_AUDIO_LIBRARY LIBOPENSHOT_AUDIO_INCLUDE_DIR)
++find_package_handle_standard_args(LIBOPENSHOT_AUDIO DEFAULT_MSG
++                                  LIBOPENSHOT_AUDIO_LIBRARY LIBOPENSHOT_AUDIO_INCLUDE_DIRS)
+diff --git a/cmake/Modules/FindUnitTest++.cmake b/cmake/Modules/FindUnitTest++.cmake
+index 545f62a..978b075 100644
+--- a/cmake/Modules/FindUnitTest++.cmake
++++ b/cmake/Modules/FindUnitTest++.cmake
+@@ -1,49 +1,39 @@
+ # Locate UNITTEST
+ # This module defines
+ # UNITTEST++_LIBRARY
+-# UNITTEST++_FOUND, if false, do not try to link to gdal 
++# UNITTEST++_FOUND, if false, do not try to link to gdal
+ # UNITTEST++_INCLUDE_DIR, where to find the headers
+ 
+ FIND_PATH(UNITTEST++_INCLUDE_DIR UnitTest++.h
+-    ${UNITTEST_DIR}/include/unittest++
+-    $ENV{UNITTEST_DIR}/include/unittest++
+-	$ENV{UNITTEST_DIR}/src
+-    $ENV{UNITTEST_DIR}
+-    ~/Library/Frameworks
+-    /Library/Frameworks
+-    /usr/local/include
+-    /usr/include
+-    /usr/include/unittest++
+-    /usr/include/UnitTest++ # Fedora
+-    /usr/include/unittest-cpp # openSUSE
+-    /usr/local/include/UnitTest++/ # Arch
+-    /sw/include # Fink
+-    /opt/local/include # DarwinPorts
+-    /opt/local/include/UnitTest++
+-    /opt/csw/include # Blastwave
+-    /opt/include
+-    [HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session\ Manager\\Environment]/include
+-    /usr/freeware/include
++    HINTS
++        ENV UNITTEST_DIR
++    PATHS
++        [HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session\ Manager\\Environment]
++        ~/Library/Frameworks
++        /Library/Frameworks
++        $ENV{UNITTEST_DIR}/src
++    PATH_SUFFIXES
++        include/unittest++
++        include/UnitTest++
++        include/unittest-cpp
++        include
++        unittest++
++        UnitTest++
++        unittest-cpp
+ )
+ 
+-FIND_LIBRARY(UNITTEST++_LIBRARY 
++FIND_LIBRARY(UNITTEST++_LIBRARY
+     NAMES unittest++ UnitTest++
++    HINTS
++        ENV UNITTEST_DIR
+     PATHS
+-    ${UNITTEST_DIR}/lib
+-    $ENV{UNITTEST_DIR}/lib
+-	$ENV{UNITTEST_DIR}/build
+-    $ENV{UNITTEST_DIR}
+-    ~/Library/Frameworks
+-    /Library/Frameworks
+-    /usr/local/lib
+-    /usr/lib
+-    /usr/lib64/ # Fedora
+-    /sw/lib
+-    /opt/local/lib
+-    /opt/csw/lib
+-    /opt/lib
+-    [HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session\ Manager\\Environment]/lib
+-    /usr/freeware/lib64
++        [HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session\ Manager\\Environment]
++        $ENV{UNITTEST_DIR}/build
++        ~/Library/Frameworks
++        /Library/Frameworks
++    PATH_SUFFIXES
++        lib
++        lib64
+ )
+ 
+ SET(UNITTEST++_FOUND "NO")
+-- 
+2.16.4
+
+
+From 1404976e3a58d8b22c90f461e620487bc90a01eb Mon Sep 17 00:00:00 2001
+From: Jonathan Thomas <jonathan@openshot.org>
+Date: Sat, 11 Aug 2018 18:22:18 -0500
+Subject: FFmpeg4 support. Compile warnings fixes. Credit goes to many people,
+ including ferdnyc, peterM, and other awesome folks!
+
+
+diff --git a/cmake/Modules/FindFFmpeg.cmake b/cmake/Modules/FindFFmpeg.cmake
+index 4af6cc9..45a27a9 100644
+--- a/cmake/Modules/FindFFmpeg.cmake
++++ b/cmake/Modules/FindFFmpeg.cmake
+@@ -91,6 +91,20 @@ FIND_LIBRARY( AVRESAMPLE_LIBRARY avresample avresample-2 avresample-3
+ 		   	 $ENV{FFMPEGDIR}/lib/ffmpeg/
+ 		   	 $ENV{FFMPEGDIR}/bin/ )
+ 
++#FindSwresample
++FIND_PATH( SWRESAMPLE_INCLUDE_DIR libswresample/swresample.h
++		   PATHS /usr/include/
++		   	 /usr/include/ffmpeg/
++		   	 $ENV{FFMPEGDIR}/include/
++		   	 $ENV{FFMPEGDIR}/include/ffmpeg/ )
++
++FIND_LIBRARY( SWRESAMPLE_LIBRARY swresample
++		   PATHS /usr/lib/
++		   	 /usr/lib/ffmpeg/
++		   	 $ENV{FFMPEGDIR}/lib/
++		   	 $ENV{FFMPEGDIR}/lib/ffmpeg/
++		   	 $ENV{FFMPEGDIR}/bin/ )
++
+ SET( FFMPEG_FOUND FALSE )
+ 
+ IF ( AVFORMAT_INCLUDE_DIR AND AVFORMAT_LIBRARY )
+@@ -117,27 +131,51 @@ IF ( AVRESAMPLE_INCLUDE_DIR AND AVRESAMPLE_LIBRARY )
+     SET ( AVRESAMPLE_FOUND TRUE )
+ ENDIF ( AVRESAMPLE_INCLUDE_DIR AND AVRESAMPLE_LIBRARY )
+ 
+-IF ( AVFORMAT_INCLUDE_DIR OR AVCODEC_INCLUDE_DIR OR AVUTIL_INCLUDE_DIR OR AVDEVICE_FOUND OR SWSCALE_FOUND OR AVRESAMPLE_FOUND )
++IF ( SWRESAMPLE_INCLUDE_DIR AND SWRESAMPLE_LIBRARY )
++    SET ( SWRESAMPLE_FOUND TRUE )
++ENDIF ( SWRESAMPLE_INCLUDE_DIR AND SWRESAMPLE_LIBRARY )
++
++IF ( AVFORMAT_INCLUDE_DIR OR AVCODEC_INCLUDE_DIR OR AVUTIL_INCLUDE_DIR OR AVDEVICE_FOUND OR SWSCALE_FOUND OR AVRESAMPLE_FOUND OR SWRESAMPLE_FOUND )
+ 
+ 	SET ( FFMPEG_FOUND TRUE )
+ 
+-	SET ( FFMPEG_INCLUDE_DIR
+-		  ${AVFORMAT_INCLUDE_DIR}
+-		  ${AVCODEC_INCLUDE_DIR}
+-		  ${AVUTIL_INCLUDE_DIR}
+-		  ${AVDEVICE_INCLUDE_DIR}
+-		  ${SWSCALE_INCLUDE_DIR}
+-		  ${AVRESAMPLE_INCLUDE_DIR} )
++	IF ( SWRESAMPLE_FOUND )
++		SET ( FFMPEG_INCLUDE_DIR
++			  ${AVFORMAT_INCLUDE_DIR}
++			  ${AVCODEC_INCLUDE_DIR}
++			  ${AVUTIL_INCLUDE_DIR}
++			  ${AVDEVICE_INCLUDE_DIR}
++			  ${SWSCALE_INCLUDE_DIR}
++			  ${AVRESAMPLE_INCLUDE_DIR}
++			  ${SWRESAMPLE_INCLUDE_DIR} )
++	
++		SET ( FFMPEG_LIBRARIES 
++			  ${AVFORMAT_LIBRARY}
++			  ${AVCODEC_LIBRARY}
++			  ${AVUTIL_LIBRARY}
++			  ${AVDEVICE_LIBRARY}
++			  ${SWSCALE_LIBRARY}
++			  ${AVRESAMPLE_LIBRARY}
++			  ${SWRESAMPLE_LIBRARY} )
++	ELSE ()
++		SET ( FFMPEG_INCLUDE_DIR
++			  ${AVFORMAT_INCLUDE_DIR}
++			  ${AVCODEC_INCLUDE_DIR}
++			  ${AVUTIL_INCLUDE_DIR}
++			  ${AVDEVICE_INCLUDE_DIR}
++			  ${SWSCALE_INCLUDE_DIR}
++			  ${AVRESAMPLE_INCLUDE_DIR} )
+ 	
+-	SET ( FFMPEG_LIBRARIES 
+-		  ${AVFORMAT_LIBRARY}
+-		  ${AVCODEC_LIBRARY}
+-		  ${AVUTIL_LIBRARY}
+-		  ${AVDEVICE_LIBRARY}
+-		  ${SWSCALE_LIBRARY}
+-		  ${AVRESAMPLE_LIBRARY} )
+-
+-ENDIF ( AVFORMAT_INCLUDE_DIR OR AVCODEC_INCLUDE_DIR OR AVUTIL_INCLUDE_DIR OR AVDEVICE_FOUND OR SWSCALE_FOUND OR AVRESAMPLE_FOUND )
++		SET ( FFMPEG_LIBRARIES 
++			  ${AVFORMAT_LIBRARY}
++			  ${AVCODEC_LIBRARY}
++			  ${AVUTIL_LIBRARY}
++			  ${AVDEVICE_LIBRARY}
++			  ${SWSCALE_LIBRARY}
++			  ${AVRESAMPLE_LIBRARY} )
++	ENDIF ()
++
++ENDIF ( AVFORMAT_INCLUDE_DIR OR AVCODEC_INCLUDE_DIR OR AVUTIL_INCLUDE_DIR OR AVDEVICE_FOUND OR SWSCALE_FOUND OR AVRESAMPLE_FOUND OR SWRESAMPLE_FOUND )
+ 
+ MARK_AS_ADVANCED(
+   FFMPEG_LIBRARY_DIR
+diff --git a/include/CrashHandler.h b/include/CrashHandler.h
+index e3a4bbe..12c79a8 100644
+--- a/include/CrashHandler.h
++++ b/include/CrashHandler.h
+@@ -53,13 +53,15 @@ namespace openshot {
+ 	class CrashHandler {
+ 	private:
+ 		/// Default constructor
+-		CrashHandler(){}; 						 // Don't allow user to create an instance of this singleton
++		CrashHandler(){return;}; 						 // Don't allow user to create an instance of this singleton
+ 
+ 		/// Default copy method
+-		CrashHandler(CrashHandler const&){};             // Don't allow the user to copy this instance
++		//CrashHandler(CrashHandler const&){};             // Don't allow the user to copy this instance
++		CrashHandler(CrashHandler const&) = delete;             // Don't allow the user to copy this instance
+ 
+ 		/// Default assignment operator
+-		CrashHandler & operator=(CrashHandler const&){};  // Don't allow the user to assign this instance
++		//CrashHandler & operator=(CrashHandler const&){};  // Don't allow the user to assign this instance
++		CrashHandler & operator=(CrashHandler const&) = delete;  // Don't allow the user to assign this instance
+ 
+ 		/// Private variable to keep track of singleton instance
+ 		static CrashHandler *m_pInstance;
+diff --git a/include/FFmpegUtilities.h b/include/FFmpegUtilities.h
+index 578c658..346da54 100644
+--- a/include/FFmpegUtilities.h
++++ b/include/FFmpegUtilities.h
+@@ -43,7 +43,15 @@
+ 		#include <libavcodec/avcodec.h>
+ 		#include <libavformat/avformat.h>
+ 		#include <libswscale/swscale.h>
++		// Change this to the first version swrescale works
++	#if (LIBAVFORMAT_VERSION_MAJOR >= 57)
++			#define USE_SW
++	#endif
++	#ifdef USE_SW
++		#include <libswresample/swresample.h>
++	#else
+ 		#include <libavresample/avresample.h>
++	#endif
+ 		#include <libavutil/mathematics.h>
+ 		#include <libavutil/pixfmt.h>
+ 		#include <libavutil/pixdesc.h>
+@@ -106,7 +114,65 @@
+ 		#define PIX_FMT_YUV420P AV_PIX_FMT_YUV420P
+ 	#endif
+ 
+-	#if IS_FFMPEG_3_2
++	#ifdef USE_SW
++		#define SWR_CONVERT(ctx, out, linesize, out_count, in, linesize2, in_count) \
++			swr_convert(ctx, out, out_count, (const uint8_t **)in, in_count)
++		#define SWR_ALLOC() swr_alloc()
++		#define SWR_CLOSE(ctx) {}
++		#define SWR_FREE(ctx) swr_free(ctx)
++		#define SWR_INIT(ctx)  swr_init(ctx)
++		#define SWRCONTEXT SwrContext
++	#else
++		#define SWR_CONVERT(ctx, out, linesize, out_count, in, linesize2, in_count) \
++			avresample_convert(ctx, out, linesize, out_count, (uint8_t **)in, linesize2, in_count)
++		#define SWR_ALLOC() avresample_alloc_context()
++		#define SWR_CLOSE(ctx) avresample_close(ctx)
++		#define SWR_FREE(ctx) avresample_free(ctx)
++		#define SWR_INIT(ctx)  avresample_open(ctx)
++		#define SWRCONTEXT AVAudioResampleContext
++	#endif
++
++
++	#if (LIBAVFORMAT_VERSION_MAJOR >= 58)
++		#define AV_REGISTER_ALL
++		#define AVCODEC_REGISTER_ALL
++		#define AV_FILENAME url
++		#define MY_INPUT_BUFFER_PADDING_SIZE AV_INPUT_BUFFER_PADDING_SIZE
++		#define AV_ALLOCATE_FRAME() av_frame_alloc()
++		#define AV_ALLOCATE_IMAGE(av_frame, pix_fmt, width, height) av_image_alloc(av_frame->data, av_frame->linesize, width, height, pix_fmt, 1)
++		#define AV_RESET_FRAME(av_frame) av_frame_unref(av_frame)
++    	#define AV_FREE_FRAME(av_frame) av_frame_free(av_frame)
++		#define AV_FREE_PACKET(av_packet) av_packet_unref(av_packet)
++		#define AV_FREE_CONTEXT(av_context) avcodec_free_context(&av_context)
++		#define AV_GET_CODEC_TYPE(av_stream) av_stream->codecpar->codec_type
++		#define AV_FIND_DECODER_CODEC_ID(av_stream) av_stream->codecpar->codec_id
++		auto AV_GET_CODEC_CONTEXT = [](AVStream* av_stream, AVCodec* av_codec) { \
++			AVCodecContext *context = avcodec_alloc_context3(av_codec); \
++			avcodec_parameters_to_context(context, av_stream->codecpar); \
++			return context; \
++		};
++		#define AV_GET_CODEC_PAR_CONTEXT(av_stream, av_codec) av_codec;
++		#define AV_GET_CODEC_FROM_STREAM(av_stream,codec_in)
++		#define AV_GET_CODEC_ATTRIBUTES(av_stream, av_context) av_stream->codecpar
++		#define AV_GET_CODEC_PIXEL_FORMAT(av_stream, av_context) (AVPixelFormat) av_stream->codecpar->format
++		#define AV_GET_SAMPLE_FORMAT(av_stream, av_context) av_stream->codecpar->format
++		#define AV_GET_IMAGE_SIZE(pix_fmt, width, height) av_image_get_buffer_size(pix_fmt, width, height, 1)
++		#define AV_COPY_PICTURE_DATA(av_frame, buffer, pix_fmt, width, height) av_image_fill_arrays(av_frame->data, av_frame->linesize, buffer, pix_fmt, width, height, 1)
++		#define AV_OUTPUT_CONTEXT(output_context, path) avformat_alloc_output_context2( output_context, NULL, NULL, path)
++		#define AV_OPTION_FIND(priv_data, name) av_opt_find(priv_data, name, NULL, 0, 0)
++		#define AV_OPTION_SET( av_stream, priv_data, name, value, avcodec) 	av_opt_set(priv_data, name, value, 0); avcodec_parameters_from_context(av_stream->codecpar, avcodec);
++		#define AV_FORMAT_NEW_STREAM(oc, st_codec, av_codec, av_st) 	av_st = avformat_new_stream(oc, NULL);\
++			if (!av_st) \
++				throw OutOfMemory("Could not allocate memory for the video stream.", path); \
++			c = avcodec_alloc_context3(av_codec); \
++			st_codec = c; \
++			av_st->codecpar->codec_id = av_codec->id;
++		#define AV_COPY_PARAMS_FROM_CONTEXT(av_stream, av_codec) avcodec_parameters_from_context(av_stream->codecpar, av_codec);
++	#elif IS_FFMPEG_3_2
++		#define AV_REGISTER_ALL av_register_all();
++		#define AVCODEC_REGISTER_ALL	avcodec_register_all();
++		#define AV_FILENAME filename
++		#define MY_INPUT_BUFFER_PADDING_SIZE FF_INPUT_BUFFER_PADDING_SIZE
+ 		#define AV_ALLOCATE_FRAME() av_frame_alloc()
+ 		#define AV_ALLOCATE_IMAGE(av_frame, pix_fmt, width, height) av_image_alloc(av_frame->data, av_frame->linesize, width, height, pix_fmt, 1)
+ 		#define AV_RESET_FRAME(av_frame) av_frame_unref(av_frame)
+@@ -138,6 +204,10 @@
+ 			av_st->codecpar->codec_id = av_codec->id;
+ 		#define AV_COPY_PARAMS_FROM_CONTEXT(av_stream, av_codec) avcodec_parameters_from_context(av_stream->codecpar, av_codec);
+ 	#elif LIBAVFORMAT_VERSION_MAJOR >= 55
++		#define AV_REGISTER_ALL av_register_all();
++		#define AVCODEC_REGISTER_ALL	avcodec_register_all();
++		#define AV_FILENAME filename
++		#define MY_INPUT_BUFFER_PADDING_SIZE FF_INPUT_BUFFER_PADDING_SIZE
+ 		#define AV_ALLOCATE_FRAME() av_frame_alloc()
+ 		#define AV_ALLOCATE_IMAGE(av_frame, pix_fmt, width, height) avpicture_alloc((AVPicture *) av_frame, pix_fmt, width, height)
+ 		#define AV_RESET_FRAME(av_frame) av_frame_unref(av_frame)
+@@ -164,6 +234,10 @@
+ 			c = av_st->codec;
+ 		#define AV_COPY_PARAMS_FROM_CONTEXT(av_stream, av_codec)
+ 	#else
++		#define AV_REGISTER_ALL av_register_all();
++		#define AVCODEC_REGISTER_ALL	avcodec_register_all();
++		#define AV_FILENAME filename
++		#define MY_INPUT_BUFFER_PADDING_SIZE FF_INPUT_BUFFER_PADDING_SIZE
+ 		#define AV_ALLOCATE_FRAME() avcodec_alloc_frame()
+ 		#define AV_ALLOCATE_IMAGE(av_frame, pix_fmt, width, height) avpicture_alloc((AVPicture *) av_frame, pix_fmt, width, height)
+ 		#define AV_RESET_FRAME(av_frame) avcodec_get_frame_defaults(av_frame)
+diff --git a/include/FFmpegWriter.h b/include/FFmpegWriter.h
+index 8343002..7eefacb 100644
+--- a/include/FFmpegWriter.h
++++ b/include/FFmpegWriter.h
+@@ -174,8 +174,8 @@ namespace openshot
+ 	    int initial_audio_input_frame_size;
+ 	    int audio_input_position;
+ 	    int audio_encoder_buffer_size;
+-	    AVAudioResampleContext *avr;
+-	    AVAudioResampleContext *avr_planar;
++	    SWRCONTEXT *avr;
++	    SWRCONTEXT *avr_planar;
+ 
+ 	    /* Resample options */
+ 	    int original_sample_rate;
+diff --git a/include/Frame.h b/include/Frame.h
+index a7ad509..eba7f8b 100644
+--- a/include/Frame.h
++++ b/include/Frame.h
+@@ -62,7 +62,7 @@
+ #include "AudioResampler.h"
+ #include "Fraction.h"
+ 
+-
++#pragma SWIG nowarn=362
+ using namespace std;
+ 
+ namespace openshot
+diff --git a/include/FrameMapper.h b/include/FrameMapper.h
+index e70fdbc..043b5e4 100644
+--- a/include/FrameMapper.h
++++ b/include/FrameMapper.h
+@@ -146,7 +146,7 @@ namespace openshot
+ 		ReaderBase *reader;		// The source video reader
+ 		CacheMemory final_cache; 		// Cache of actual Frame objects
+ 		bool is_dirty; 			// When this is true, the next call to GetFrame will re-init the mapping
+-		AVAudioResampleContext *avr;	// Audio resampling context object
++		SWRCONTEXT *avr;	// Audio resampling context object
+ 
+ 		// Internal methods used by init
+ 		void AddField(int64_t frame);
+diff --git a/include/ZmqLogger.h b/include/ZmqLogger.h
+index c134f2c..e825ed0 100644
+--- a/include/ZmqLogger.h
++++ b/include/ZmqLogger.h
+@@ -72,11 +72,19 @@ namespace openshot {
+ 		/// Default constructor
+ 		ZmqLogger(){}; 						 // Don't allow user to create an instance of this singleton
+ 
++#if __GNUC__ >=7
+ 		/// Default copy method
+-		ZmqLogger(ZmqLogger const&){};             // Don't allow the user to copy this instance
++		ZmqLogger(ZmqLogger const&) = delete; // Don't allow the user to assign this instance
+ 
+ 		/// Default assignment operator
+-		ZmqLogger & operator=(ZmqLogger const&){};  // Don't allow the user to assign this instance
++		ZmqLogger & operator=(ZmqLogger const&) = delete;  // Don't allow the user to assign this instance
++#else
++		/// Default copy method
++		ZmqLogger(ZmqLogger const&) {}; // Don't allow the user to assign this instance
++
++		/// Default assignment operator
++		ZmqLogger & operator=(ZmqLogger const&);  // Don't allow the user to assign this instance
++#endif
+ 
+ 		/// Private variable to keep track of singleton instance
+ 		static ZmqLogger * m_pInstance;
+diff --git a/src/Clip.cpp b/src/Clip.cpp
+index 913fd71..63e7741 100644
+--- a/src/Clip.cpp
++++ b/src/Clip.cpp
+@@ -925,13 +925,14 @@ void Clip::SetJsonValue(Json::Value root) {
+ 
+ 			if (!existing_effect["type"].isNull()) {
+ 				// Create instance of effect
+-				e = EffectInfo().CreateEffect(existing_effect["type"].asString());
++				if (e = EffectInfo().CreateEffect(existing_effect["type"].asString())) {
+ 
+-				// Load Json into Effect
+-				e->SetJsonValue(existing_effect);
++					// Load Json into Effect
++					e->SetJsonValue(existing_effect);
+ 
+-				// Add Effect to Timeline
+-				AddEffect(e);
++					// Add Effect to Timeline
++					AddEffect(e);
++				}
+ 			}
+ 		}
+ 	}
+diff --git a/src/EffectInfo.cpp b/src/EffectInfo.cpp
+index 23bc9d0..f9e4c40 100644
+--- a/src/EffectInfo.cpp
++++ b/src/EffectInfo.cpp
+@@ -82,6 +82,7 @@ EffectBase* EffectInfo::CreateEffect(string effect_type) {
+ 
+ 	else if (effect_type == "Wave")
+ 		return new Wave();
++	return NULL;
+ }
+ 
+ // Generate Json::JsonValue for this object
+diff --git a/src/FFmpegReader.cpp b/src/FFmpegReader.cpp
+index 5a4c936..1f43d26 100644
+--- a/src/FFmpegReader.cpp
++++ b/src/FFmpegReader.cpp
+@@ -40,8 +40,8 @@ FFmpegReader::FFmpegReader(string path)
+ 	  current_video_frame(0), has_missing_frames(false), num_packets_since_video_frame(0), num_checks_since_final(0), packet(NULL) {
+ 
+ 	// Initialize FFMpeg, and register all formats and codecs
+-	av_register_all();
+-	avcodec_register_all();
++	AV_REGISTER_ALL
++	AVCODEC_REGISTER_ALL
+ 
+ 	// Init cache
+ 	working_cache.SetMaxBytesFromInfo(OPEN_MP_NUM_PROCESSORS * info.fps.ToDouble() * 2, info.width, info.height, info.sample_rate, info.channels);
+@@ -61,8 +61,8 @@ FFmpegReader::FFmpegReader(string path, bool inspect_reader)
+ 		  current_video_frame(0), has_missing_frames(false), num_packets_since_video_frame(0), num_checks_since_final(0), packet(NULL) {
+ 
+ 	// Initialize FFMpeg, and register all formats and codecs
+-	av_register_all();
+-	avcodec_register_all();
++	AV_REGISTER_ALL
++	AVCODEC_REGISTER_ALL
+ 
+ 	// Init cache
+ 	working_cache.SetMaxBytesFromInfo(OPEN_MP_NUM_PROCESSORS * info.fps.ToDouble() * 2, info.width, info.height, info.sample_rate, info.channels);
+@@ -978,7 +978,7 @@ void FFmpegReader::ProcessAudioPacket(int64_t requested_frame, int64_t target_fr
+ 	int data_size = 0;
+ 
+ 	// re-initialize buffer size (it gets changed in the avcodec_decode_audio2 method call)
+-	int buf_size = AVCODEC_MAX_AUDIO_FRAME_SIZE + FF_INPUT_BUFFER_PADDING_SIZE;
++	int buf_size = AVCODEC_MAX_AUDIO_FRAME_SIZE + MY_INPUT_BUFFER_PADDING_SIZE;
+ 	#pragma omp critical (ProcessAudioPacket)
+ 	{
+ 	#if IS_FFMPEG_3_2
+@@ -1083,7 +1083,7 @@ void FFmpegReader::ProcessAudioPacket(int64_t requested_frame, int64_t target_fr
+ 
+ 
+ 	// Allocate audio buffer
+-	int16_t *audio_buf = new int16_t[AVCODEC_MAX_AUDIO_FRAME_SIZE + FF_INPUT_BUFFER_PADDING_SIZE];
++	int16_t *audio_buf = new int16_t[AVCODEC_MAX_AUDIO_FRAME_SIZE + MY_INPUT_BUFFER_PADDING_SIZE];
+ 
+ 	ZmqLogger::Instance()->AppendDebugMethod("FFmpegReader::ProcessAudioPacket (ReSample)", "packet_samples", packet_samples, "info.channels", info.channels, "info.sample_rate", info.sample_rate, "aCodecCtx->sample_fmt", AV_GET_SAMPLE_FORMAT(aStream, aCodecCtx), "AV_SAMPLE_FMT_S16", AV_SAMPLE_FMT_S16, "", -1);
+ 
+@@ -1093,11 +1093,11 @@ void FFmpegReader::ProcessAudioPacket(int64_t requested_frame, int64_t target_fr
+ 	audio_converted->nb_samples = audio_frame->nb_samples;
+ 	av_samples_alloc(audio_converted->data, audio_converted->linesize, info.channels, audio_frame->nb_samples, AV_SAMPLE_FMT_S16, 0);
+ 
+-	AVAudioResampleContext *avr = NULL;
++	SWRCONTEXT *avr = NULL;
+ 	int nb_samples = 0;
+ 
+ 	// setup resample context
+-	avr = avresample_alloc_context();
++	avr = SWR_ALLOC();
+ 	av_opt_set_int(avr,  "in_channel_layout", AV_GET_CODEC_ATTRIBUTES(aStream, aCodecCtx)->channel_layout, 0);
+ 	av_opt_set_int(avr, "out_channel_layout", AV_GET_CODEC_ATTRIBUTES(aStream, aCodecCtx)->channel_layout, 0);
+ 	av_opt_set_int(avr,  "in_sample_fmt",     AV_GET_SAMPLE_FORMAT(aStream, aCodecCtx), 0);
+@@ -1106,10 +1106,10 @@ void FFmpegReader::ProcessAudioPacket(int64_t requested_frame, int64_t target_fr
+ 	av_opt_set_int(avr, "out_sample_rate",    info.sample_rate,    0);
+ 	av_opt_set_int(avr,  "in_channels",       info.channels,    0);
+ 	av_opt_set_int(avr, "out_channels",       info.channels,    0);
+-	int r = avresample_open(avr);
++	int r = SWR_INIT(avr);
+ 
+ 	// Convert audio samples
+-	nb_samples = avresample_convert(avr, 	// audio resample context
++	nb_samples = SWR_CONVERT(avr, 	// audio resample context
+ 			audio_converted->data, 			// output data pointers
+ 			audio_converted->linesize[0], 	// output plane size, in bytes. (0 if unknown)
+ 			audio_converted->nb_samples,	// maximum number of samples that the output buffer can hold
+@@ -1121,8 +1121,8 @@ void FFmpegReader::ProcessAudioPacket(int64_t requested_frame, int64_t target_fr
+ 	memcpy(audio_buf, audio_converted->data[0], audio_converted->nb_samples * av_get_bytes_per_sample(AV_SAMPLE_FMT_S16) * info.channels);
+ 
+ 	// Deallocate resample buffer
+-	avresample_close(avr);
+-	avresample_free(&avr);
++	SWR_CLOSE(avr);
++	SWR_FREE(&avr);
+ 	avr = NULL;
+ 
+ 	// Free AVFrames
+@@ -1348,7 +1348,7 @@ void FFmpegReader::Seek(int64_t requested_frame)
+ 		{
+ 			seek_target = ConvertFrameToVideoPTS(requested_frame - buffer_amount);
+ 			if (av_seek_frame(pFormatCtx, info.video_stream_index, seek_target, AVSEEK_FLAG_BACKWARD) < 0) {
+-				fprintf(stderr, "%s: error while seeking video stream\n", pFormatCtx->filename);
++				fprintf(stderr, "%s: error while seeking video stream\n", pFormatCtx->AV_FILENAME);
+ 			} else
+ 			{
+ 				// VIDEO SEEK
+@@ -1362,7 +1362,7 @@ void FFmpegReader::Seek(int64_t requested_frame)
+ 		{
+ 			seek_target = ConvertFrameToAudioPTS(requested_frame - buffer_amount);
+ 			if (av_seek_frame(pFormatCtx, info.audio_stream_index, seek_target, AVSEEK_FLAG_BACKWARD) < 0) {
+-				fprintf(stderr, "%s: error while seeking audio stream\n", pFormatCtx->filename);
++				fprintf(stderr, "%s: error while seeking audio stream\n", pFormatCtx->AV_FILENAME);
+ 			} else
+ 			{
+ 				// AUDIO SEEK
+diff --git a/src/FFmpegWriter.cpp b/src/FFmpegWriter.cpp
+index 4416040..d106901 100644
+--- a/src/FFmpegWriter.cpp
++++ b/src/FFmpegWriter.cpp
+@@ -46,7 +46,7 @@ FFmpegWriter::FFmpegWriter(string path) :
+ 	info.has_video = false;
+ 
+ 	// Initialize FFMpeg, and register all formats and codecs
+-	av_register_all();
++	AV_REGISTER_ALL
+ 
+ 	// auto detect format
+ 	auto_detect_format();
+@@ -299,7 +299,7 @@ void FFmpegWriter::SetOption(StreamType stream, string name, string value)
+ /// Determine if codec name is valid
+ bool FFmpegWriter::IsValidCodec(string codec_name) {
+ 	// Initialize FFMpeg, and register all formats and codecs
+-	av_register_all();
++	AV_REGISTER_ALL
+ 
+ 	// Find the codec (if any)
+ 	if (avcodec_find_encoder_by_name(codec_name.c_str()) == NULL)
+@@ -342,7 +342,7 @@ void FFmpegWriter::WriteHeader()
+ 	}
+ 
+     // Force the output filename (which doesn't always happen for some reason)
+-    snprintf(oc->filename, sizeof(oc->filename), "%s", path.c_str());
++		snprintf(oc->AV_FILENAME, sizeof(oc->AV_FILENAME), "%s", path.c_str());
+ 
+ 	// Write the stream header, if any
+ 	// TODO: add avoptions / parameters instead of NULL
+@@ -559,8 +559,10 @@ void FFmpegWriter::flush_encoders()
+ {
+ 	if (info.has_audio && audio_codec && AV_GET_CODEC_TYPE(audio_st) == AVMEDIA_TYPE_AUDIO && AV_GET_CODEC_ATTRIBUTES(audio_st, audio_codec)->frame_size <= 1)
+ 		return;
++#if (LIBAVFORMAT_VERSION_MAJOR < 58)
+ 	if (info.has_video && video_codec && AV_GET_CODEC_TYPE(video_st) == AVMEDIA_TYPE_VIDEO && (oc->oformat->flags & AVFMT_RAWPICTURE) && AV_FIND_DECODER_CODEC_ID(video_st) == AV_CODEC_ID_RAWVIDEO)
+ 		return;
++#endif
+ 
+     int error_code = 0;
+     int stop_encoding = 1;
+@@ -734,14 +736,14 @@ void FFmpegWriter::close_audio(AVFormatContext *oc, AVStream *st)
+ 
+ 	// Deallocate resample buffer
+ 	if (avr) {
+-		avresample_close(avr);
+-		avresample_free(&avr);
++		SWR_CLOSE(avr);
++		SWR_FREE(&avr);
+ 		avr = NULL;
+ 	}
+ 
+ 	if (avr_planar) {
+-		avresample_close(avr_planar);
+-		avresample_free(&avr_planar);
++		SWR_CLOSE(avr_planar);
++		SWR_FREE(&avr_planar);
+ 		avr_planar = NULL;
+ 	}
+ }
+@@ -881,7 +883,11 @@ AVStream* FFmpegWriter::add_audio_stream()
+ 
+ 	// some formats want stream headers to be separate
+ 	if (oc->oformat->flags & AVFMT_GLOBALHEADER)
++#if (LIBAVCODEC_VERSION_MAJOR >= 57)
++		c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
++#else
+ 		c->flags |= CODEC_FLAG_GLOBAL_HEADER;
++#endif
+ 
+ 	AV_COPY_PARAMS_FROM_CONTEXT(st, c);
+ 	ZmqLogger::Instance()->AppendDebugMethod("FFmpegWriter::add_audio_stream", "c->codec_id", c->codec_id, "c->bit_rate", c->bit_rate, "c->channels", c->channels, "c->sample_fmt", c->sample_fmt, "c->channel_layout", c->channel_layout, "c->sample_rate", c->sample_rate);
+@@ -953,7 +959,11 @@ AVStream* FFmpegWriter::add_video_stream()
+ 		c->mb_decision = 2;
+ 	// some formats want stream headers to be separate
+ 	if (oc->oformat->flags & AVFMT_GLOBALHEADER)
++#if (LIBAVCODEC_VERSION_MAJOR >= 57)
++		c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
++#else
+ 		c->flags |= CODEC_FLAG_GLOBAL_HEADER;
++#endif
+ 
+ 	// Find all supported pixel formats for this codec
+     const PixelFormat* supported_pixel_formats = codec->pix_fmts;
+@@ -970,10 +980,12 @@ AVStream* FFmpegWriter::add_video_stream()
+             // Raw video should use RGB24
+         	c->pix_fmt = PIX_FMT_RGB24;
+ 
++#if (LIBAVFORMAT_VERSION_MAJOR < 58)
+         if (strcmp(fmt->name, "gif") != 0)
+ 			// If not GIF format, skip the encoding process
+ 			// Set raw picture flag (so we don't encode this video)
+ 			oc->oformat->flags |= AVFMT_RAWPICTURE;
++#endif
+         } else {
+         	// Set the default codec
+         	c->pix_fmt = PIX_FMT_YUV420P;
+@@ -981,7 +993,11 @@ AVStream* FFmpegWriter::add_video_stream()
+     }
+ 
+ 	AV_COPY_PARAMS_FROM_CONTEXT(st, c);
++#if (LIBAVFORMAT_VERSION_MAJOR < 58)
+ 	ZmqLogger::Instance()->AppendDebugMethod("FFmpegWriter::add_video_stream (" + (string)fmt->name + " : " + (string)av_get_pix_fmt_name(c->pix_fmt) + ")", "c->codec_id", c->codec_id, "c->bit_rate", c->bit_rate, "c->pix_fmt", c->pix_fmt, "oc->oformat->flags", oc->oformat->flags, "AVFMT_RAWPICTURE", AVFMT_RAWPICTURE, "", -1);
++#else
++	ZmqLogger::Instance()->AppendDebugMethod("FFmpegWriter::add_video_stream (" + (string)fmt->name + " : " + (string)av_get_pix_fmt_name(c->pix_fmt) + ")", "c->codec_id", c->codec_id, "c->bit_rate", c->bit_rate, "c->pix_fmt", c->pix_fmt, "oc->oformat->flags", oc->oformat->flags, "", -1, "", -1);
++#endif
+ 
+ 	return st;
+ }
+@@ -1056,7 +1072,7 @@ void FFmpegWriter::open_audio(AVFormatContext *oc, AVStream *st)
+ 		av_dict_set(&st->metadata, iter->first.c_str(), iter->second.c_str(), 0);
+ 	}
+ 
+-	ZmqLogger::Instance()->AppendDebugMethod("FFmpegWriter::open_audio", "audio_codec->thread_count", audio_codec->thread_count, "audio_input_frame_size", audio_input_frame_size, "buffer_size", AVCODEC_MAX_AUDIO_FRAME_SIZE + FF_INPUT_BUFFER_PADDING_SIZE, "", -1, "", -1, "", -1);
++	ZmqLogger::Instance()->AppendDebugMethod("FFmpegWriter::open_audio", "audio_codec->thread_count", audio_codec->thread_count, "audio_input_frame_size", audio_input_frame_size, "buffer_size", AVCODEC_MAX_AUDIO_FRAME_SIZE + MY_INPUT_BUFFER_PADDING_SIZE, "", -1, "", -1, "", -1);
+ 
+ }
+ 
+@@ -1222,7 +1238,7 @@ void FFmpegWriter::write_audio_packets(bool final)
+ 
+ 			// setup resample context
+ 			if (!avr) {
+-				avr = avresample_alloc_context();
++				avr = SWR_ALLOC();
+ 				av_opt_set_int(avr,  "in_channel_layout", channel_layout_in_frame, 0);
+ 				av_opt_set_int(avr, "out_channel_layout", info.channel_layout, 0);
+ 				av_opt_set_int(avr,  "in_sample_fmt",     AV_SAMPLE_FMT_S16,     0);
+@@ -1231,12 +1247,12 @@ void FFmpegWriter::write_audio_packets(bool final)
+ 				av_opt_set_int(avr, "out_sample_rate",    info.sample_rate,    0);
+ 				av_opt_set_int(avr,  "in_channels",       channels_in_frame,    0);
+ 				av_opt_set_int(avr, "out_channels",       info.channels,    0);
+-				avresample_open(avr);
++				SWR_INIT(avr);
+ 			}
+ 			int nb_samples = 0;
+ 
+ 			// Convert audio samples
+-			nb_samples = avresample_convert(avr, 	// audio resample context
++			nb_samples = SWR_CONVERT(avr, 	// audio resample context
+ 					audio_converted->data, 			// output data pointers
+ 					audio_converted->linesize[0], 	// output plane size, in bytes. (0 if unknown)
+ 					audio_converted->nb_samples,	// maximum number of samples that the output buffer can hold
+@@ -1297,7 +1313,7 @@ void FFmpegWriter::write_audio_packets(bool final)
+ 
+ 				// setup resample context
+ 				if (!avr_planar) {
+-					avr_planar = avresample_alloc_context();
++					avr_planar = SWR_ALLOC();
+ 					av_opt_set_int(avr_planar,  "in_channel_layout", info.channel_layout, 0);
+ 					av_opt_set_int(avr_planar, "out_channel_layout", info.channel_layout, 0);
+ 					av_opt_set_int(avr_planar,  "in_sample_fmt",     output_sample_fmt,     0);
+@@ -1306,7 +1322,7 @@ void FFmpegWriter::write_audio_packets(bool final)
+ 					av_opt_set_int(avr_planar, "out_sample_rate",    info.sample_rate,    0);
+ 					av_opt_set_int(avr_planar,  "in_channels",       info.channels,    0);
+ 					av_opt_set_int(avr_planar, "out_channels",       info.channels,    0);
+-					avresample_open(avr_planar);
++					SWR_INIT(avr_planar);
+ 				}
+ 
+ 				// Create input frame (and allocate arrays)
+@@ -1329,7 +1345,7 @@ void FFmpegWriter::write_audio_packets(bool final)
+ 				av_samples_alloc(frame_final->data, frame_final->linesize, info.channels, frame_final->nb_samples, audio_codec->sample_fmt, 0);
+ 
+ 				// Convert audio samples
+-				int nb_samples = avresample_convert(avr_planar, 	// audio resample context
++				int nb_samples = SWR_CONVERT(avr_planar, 	// audio resample context
+ 						frame_final->data, 			// output data pointers
+ 						frame_final->linesize[0], 	// output plane size, in bytes. (0 if unknown)
+ 						frame_final->nb_samples,	// maximum number of samples that the output buffer can hold
+@@ -1560,6 +1576,9 @@ void FFmpegWriter::process_video_packet(std::shared_ptr<Frame> frame)
+ // write video frame
+ bool FFmpegWriter::write_video_packet(std::shared_ptr<Frame> frame, AVFrame* frame_final)
+ {
++#if (LIBAVFORMAT_VERSION_MAJOR >= 58)
++	ZmqLogger::Instance()->AppendDebugMethod("FFmpegWriter::write_video_packet", "frame->number", frame->number, "oc->oformat->flags", oc->oformat->flags, "", -1, "", -1, "", -1, "", -1);
++#else
+ 	ZmqLogger::Instance()->AppendDebugMethod("FFmpegWriter::write_video_packet", "frame->number", frame->number, "oc->oformat->flags & AVFMT_RAWPICTURE", oc->oformat->flags & AVFMT_RAWPICTURE, "", -1, "", -1, "", -1, "", -1);
+ 
+ 	if (oc->oformat->flags & AVFMT_RAWPICTURE) {
+@@ -1587,7 +1606,9 @@ bool FFmpegWriter::write_video_packet(std::shared_ptr<Frame> frame, AVFrame* fra
+ 		// Deallocate packet
+ 		AV_FREE_PACKET(&pkt);
+ 
+-	} else {
++	} else
++#endif
++        {
+ 
+ 		AVPacket pkt;
+ 		av_init_packet(&pkt);
+diff --git a/src/FrameMapper.cpp b/src/FrameMapper.cpp
+index f49cbc4..c4c68f5 100644
+--- a/src/FrameMapper.cpp
++++ b/src/FrameMapper.cpp
+@@ -650,8 +650,8 @@ void FrameMapper::Close()
+ 
+ 		// Deallocate resample buffer
+ 		if (avr) {
+-			avresample_close(avr);
+-			avresample_free(&avr);
++			SWR_CLOSE(avr);
++			SWR_FREE(&avr);
+ 			avr = NULL;
+ 		}
+ 	}
+@@ -741,8 +741,8 @@ void FrameMapper::ChangeMapping(Fraction target_fps, PulldownType target_pulldow
+ 
+ 	// Deallocate resample buffer
+ 	if (avr) {
+-		avresample_close(avr);
+-		avresample_free(&avr);
++		SWR_CLOSE(avr);
++		SWR_FREE(&avr);
+ 		avr = NULL;
+ 	}
+ 
+@@ -817,7 +817,7 @@ void FrameMapper::ResampleMappedAudio(std::shared_ptr<Frame> frame, int64_t orig
+ 
+     // setup resample context
+     if (!avr) {
+-        avr = avresample_alloc_context();
++        avr = SWR_ALLOC();
+         av_opt_set_int(avr,  "in_channel_layout", channel_layout_in_frame, 0);
+         av_opt_set_int(avr, "out_channel_layout", info.channel_layout, 0);
+         av_opt_set_int(avr,  "in_sample_fmt",     AV_SAMPLE_FMT_S16,     0);
+@@ -826,11 +826,11 @@ void FrameMapper::ResampleMappedAudio(std::shared_ptr<Frame> frame, int64_t orig
+         av_opt_set_int(avr, "out_sample_rate",    info.sample_rate,    0);
+         av_opt_set_int(avr,  "in_channels",       channels_in_frame,    0);
+         av_opt_set_int(avr, "out_channels",       info.channels,    0);
+-        avresample_open(avr);
++        SWR_INIT(avr);
+     }
+ 
+     // Convert audio samples
+-    nb_samples = avresample_convert(avr, 	// audio resample context
++    nb_samples = SWR_CONVERT(avr, 	// audio resample context
+             audio_converted->data, 			// output data pointers
+             audio_converted->linesize[0], 	// output plane size, in bytes. (0 if unknown)
+             audio_converted->nb_samples,	// maximum number of samples that the output buffer can hold
+diff --git a/src/Timeline.cpp b/src/Timeline.cpp
+index 1b4f475..ed3c3df 100644
+--- a/src/Timeline.cpp
++++ b/src/Timeline.cpp
+@@ -1000,13 +1000,14 @@ void Timeline::SetJsonValue(Json::Value root) {
+ 
+ 			if (!existing_effect["type"].isNull()) {
+ 				// Create instance of effect
+-				e = EffectInfo().CreateEffect(existing_effect["type"].asString());
++				if (e = EffectInfo().CreateEffect(existing_effect["type"].asString())) {
+ 
+-				// Load Json into Effect
+-				e->SetJsonValue(existing_effect);
++					// Load Json into Effect
++					e->SetJsonValue(existing_effect);
+ 
+-				// Add Effect to Timeline
+-				AddEffect(e);
++					// Add Effect to Timeline
++					AddEffect(e);
++				}
+ 			}
+ 		}
+ 	}
+@@ -1270,13 +1271,14 @@ void Timeline::apply_json_to_effects(Json::Value change, EffectBase* existing_ef
+ 		EffectBase *e = NULL;
+ 
+ 		// Init the matching effect object
+-		e = EffectInfo().CreateEffect(effect_type);
++		if (e = EffectInfo().CreateEffect(effect_type)) {
+ 
+-		// Load Json into Effect
+-		e->SetJsonValue(change["value"]);
++			// Load Json into Effect
++			e->SetJsonValue(change["value"]);
+ 
+-		// Add Effect to Timeline
+-		AddEffect(e);
++			// Add Effect to Timeline
++			AddEffect(e);
++		}
+ 
+ 	} else if (change_type == "update") {
+ 
+diff --git a/tests/ReaderBase_Tests.cpp b/tests/ReaderBase_Tests.cpp
+index 9d43530..70ca90d 100644
+--- a/tests/ReaderBase_Tests.cpp
++++ b/tests/ReaderBase_Tests.cpp
+@@ -44,9 +44,9 @@ TEST(ReaderBase_Derived_Class)
+ 		std::shared_ptr<Frame> GetFrame(int64_t number) { std::shared_ptr<Frame> f(new Frame()); return f; }
+ 		void Close() { };
+ 		void Open() { };
+-		string Json() { };
++		string Json() { return NULL; };
+ 		void SetJson(string value) { };
+-		Json::Value JsonValue() { };
++		Json::Value JsonValue() { return (int) NULL; };
+ 		void SetJsonValue(Json::Value root) { };
+ 		bool IsOpen() { return true; };
+ 		string Name() { return "TestReader"; };
+-- 
+2.16.4
+
+
+From 054513e01a62148135c14b0710471b3f02d244d6 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Fri, 31 Aug 2018 09:26:01 +0700
+Subject: disable stacktrace printing, as it depends on libunwind.
+
+
+diff --git a/src/CrashHandler.cpp b/src/CrashHandler.cpp
+index e7827d0..8b4e4ed 100644
+--- a/src/CrashHandler.cpp
++++ b/src/CrashHandler.cpp
+@@ -197,7 +197,7 @@ void CrashHandler::printStackTrace(FILE *out, unsigned int max_frames)
+ 	}
+ 	SymCleanup(process);
+ 
+-#else
++#elif !defined(__HAIKU__)
+     // Linux and Mac stack unwinding
+ 	// Storage array for stack trace address data
+ 	void* addrlist[max_frames+1];
+@@ -317,4 +317,4 @@ void CrashHandler::printStackTrace(FILE *out, unsigned int max_frames)
+ 
+ 	fprintf(out, "---- End of Stack Trace ----\n");
+ 	ZmqLogger::Instance()->LogToFile("---- End of Stack Trace ----\n");
+-}
+\ No newline at end of file
++}
+-- 
+2.16.4
+
+
+From 40cf43eb4ef02753c772f4bbacdd9f68322ba4a1 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Fri, 31 Aug 2018 09:51:13 +0700
+Subject: bindings/python: allows overriding install path
+
+
+diff --git a/src/bindings/python/CMakeLists.txt b/src/bindings/python/CMakeLists.txt
+index ceb4876..cb7c97c 100644
+--- a/src/bindings/python/CMakeLists.txt
++++ b/src/bindings/python/CMakeLists.txt
+@@ -49,13 +49,14 @@ IF (PYTHONLIBS_FOUND)
+ 		SWIG_LINK_LIBRARIES(openshot ${PYTHON_LIBRARIES} openshot)
+ 
+ 		### FIND THE PYTHON INTERPRETER (AND THE SITE PACKAGES FOLDER)
+-		EXECUTE_PROCESS ( COMMAND ${PYTHON_EXECUTABLE} -c "import site; print(site.getsitepackages()[0])"
+-		                     OUTPUT_VARIABLE _ABS_PYTHON_MODULE_PATH
+-		                     OUTPUT_STRIP_TRAILING_WHITESPACE )
+-		GET_FILENAME_COMPONENT(_ABS_PYTHON_MODULE_PATH "${_ABS_PYTHON_MODULE_PATH}" ABSOLUTE)
+-		FILE(RELATIVE_PATH _REL_PYTHON_MODULE_PATH ${CMAKE_INSTALL_PREFIX} ${_ABS_PYTHON_MODULE_PATH})
+-		SET(PYTHON_MODULE_PATH ${_REL_PYTHON_MODULE_PATH})
+-		
++		IF(NOT PYTHON_MODULE_PATH)
++			EXECUTE_PROCESS ( COMMAND ${PYTHON_EXECUTABLE} -c "import site; print(site.getsitepackages()[0])"
++			                     OUTPUT_VARIABLE _ABS_PYTHON_MODULE_PATH
++			                     OUTPUT_STRIP_TRAILING_WHITESPACE )
++			GET_FILENAME_COMPONENT(_ABS_PYTHON_MODULE_PATH "${_ABS_PYTHON_MODULE_PATH}" ABSOLUTE)
++			FILE(RELATIVE_PATH _REL_PYTHON_MODULE_PATH ${CMAKE_INSTALL_PREFIX} ${_ABS_PYTHON_MODULE_PATH})
++			SET(PYTHON_MODULE_PATH ${_REL_PYTHON_MODULE_PATH})
++		ENDIF(NOT PYTHON_MODULE_PATH)
+ 		
+ 		############### INSTALL HEADERS & LIBRARY ################
+ 		### Install Python bindings
+-- 
+2.16.4
+
