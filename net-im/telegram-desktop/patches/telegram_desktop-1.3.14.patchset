@@ -2469,3 +2469,429 @@ index 1928257..4ce6ac6 100644
 -- 
 2.16.4
 
+
+From 95c36a14498a6ede405420d45bbeeb46df5d8d7e Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Tue, 4 Sep 2018 22:57:02 +1000
+Subject: Add native notifations
+
+
+diff --git a/Telegram/SourceFiles/platform/haiku/notifications_haiku_gate.cpp b/Telegram/SourceFiles/platform/haiku/notifications_haiku_gate.cpp
+new file mode 100644
+index 0000000..bf9c7be
+--- /dev/null
++++ b/Telegram/SourceFiles/platform/haiku/notifications_haiku_gate.cpp
+@@ -0,0 +1,40 @@
++#include <Application.h>
++
++#include <stdlib.h>
++#include <stdio.h>
++
++#define APPSIGNATURE "application/x-vnd.tg-notify-gate"
++
++class SimpleLauncherApp : public BApplication {
++	public:
++		SimpleLauncherApp(int argc, char **argv);
++		void	ArgvReceived(int32 argc, char **argv);
++		virtual void ReadyToRun();
++};
++
++SimpleLauncherApp::SimpleLauncherApp(int argc, char **argv) : BApplication(APPSIGNATURE)
++{
++}
++
++void
++SimpleLauncherApp::ArgvReceived(int32 argc, char **argv)
++{
++	if (argc==2) {
++		FILE *out=fopen("/tmp/tg_notify","wt");
++		fprintf(out,"%s\n", argv[1]);
++		fclose(out);
++	}
++}
++
++void
++SimpleLauncherApp::ReadyToRun()
++{
++    Quit();
++}
++
++int main(int argc, char **argv)
++{
++	SimpleLauncherApp application(argc, argv);
++	application.Run();
++	return 0;
++}
+diff --git a/Telegram/SourceFiles/platform/haiku/notifications_haiku_gate.rdef b/Telegram/SourceFiles/platform/haiku/notifications_haiku_gate.rdef
+new file mode 100644
+index 0000000..b6f3490
+--- /dev/null
++++ b/Telegram/SourceFiles/platform/haiku/notifications_haiku_gate.rdef
+@@ -0,0 +1,13 @@
++resource app_flags B_MULTIPLE_LAUNCH | B_BACKGROUND_APP;
++
++resource app_version {
++	major  = 0,
++	middle = 0,
++	minor  = 1,
++	variety = B_APPV_FINAL,
++	internal = 0,
++	short_info = "tg-notify-gate",
++	long_info = "Telegram native notifications gate"
++};
++
++resource app_signature "application/x-vnd.tg-notify-gate";
+diff --git a/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.cpp b/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.cpp
+index b3d186a..8a75ed7 100644
+--- a/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.cpp
++++ b/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.cpp
+@@ -18,65 +18,197 @@ to link the code of portions of this program with the OpenSSL library.
+ Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
+ Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+ */
++
++#include <stdio.h>
++#include <unistd.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++
+ #include "platform/haiku/notifications_manager_haiku.h"
+ 
+ #include "window/notifications_utilities.h"
+ #include "lang/lang_keys.h"
+ #include "history/history.h"
+ 
++#include <QProcess>
++#include <QThread>
++#include <QObject>
++#include <QString>
++#include <QStringList>
++
+ namespace Platform {
+ namespace Notifications {
+ namespace {
+ 
+-bool LibNotifyLoaded() {
+-	return false;
+-}
+-
+-QString escapeHtml(const QString &text) {
+-	auto result = QString();
+-	auto copyFrom = 0, textSize = text.size();
+-	auto data = text.constData();
+-	for (auto i = 0; i != textSize; ++i) {
+-		auto ch = data[i];
+-		if (ch == '<' || ch == '>' || ch == '&') {
+-			if (!copyFrom) {
+-				result.reserve(textSize * 5);
+-			}
+-			if (i > copyFrom) {
+-				result.append(data + copyFrom, i - copyFrom);
+-			}
+-			switch (ch.unicode()) {
+-			case '<': result.append(qstr("&lt;")); break;
+-			case '>': result.append(qstr("&gt;")); break;
+-			case '&': result.append(qstr("&amp;")); break;
+-			}
+-			copyFrom = i + 1;
++} // namespace
++
++bool Supported() {
++	return true;
++}
++
++std::unique_ptr<Window::Notifications::Manager> Create(Window::Notifications::System *system) {
++	if (Global::NativeNotifications() && Supported()) {
++		auto result = std::make_unique<Manager>(system);
++		if (result->init()) {
++			return std::move(result);
+ 		}
+ 	}
+-	if (copyFrom > 0) {
+-		result.append(data + copyFrom, textSize - copyFrom);
+-		return result;
++	return nullptr;
++}
++
++void Finish() {
++}
++
++NotifyReader::NotifyReader()
++{
++	unlink(NOTIFY_FIFO_NAME);
++	mkfifo(NOTIFY_FIFO_NAME, 0666);
++}
++
++NotifyReader::~NotifyReader()
++{
++	unlink(NOTIFY_FIFO_NAME);
++}
++
++void NotifyReader::run()
++{
++	char line[256];
++	size_t n;
++    
++    for(;;) {
++    	FILE *in=fopen(NOTIFY_FIFO_NAME, "rt");
++    	fgets(line, sizeof line, in);
++    	if (line[strlen(line)-1] == '\n') {
++    		uint64 peerid = 0;
++    		int32 msgid = 0;
++    		QString paramsString = QString(line);
++    		QStringList paramsList = paramsString.split(' ');
++    		if (paramsList.count() == 2) {
++    			bool peerStatus, msgStatus;
++				peerid = paramsList[0].toULongLong(&peerStatus, 16);
++				msgid = paramsList[1].toInt(&msgStatus, 16);
++				if (peerStatus & msgStatus)
++        			notificationActivated(peerid, msgid);
++    		}
++    	}
++    	fclose(in);
++    }
++}
++
++Manager::Private::Private(Manager *instance, Type type)
++: _guarded(std::make_shared<Manager*>(instance))
++, _cachedUserpics(type) {
++	_weak = _guarded;
++}
++
++bool Manager::Private::init() {
++	pipeReaderThread = new QThread;
++	pipeReader = new NotifyReader();
++	pipeReader->moveToThread(pipeReaderThread);
++	connect(pipeReaderThread, SIGNAL(started()), pipeReader, SLOT(run()));
++	qRegisterMetaType<PeerId>("PeerId");
++	qRegisterMetaType<MsgId>("MsgId");
++	connect(pipeReader, SIGNAL(notificationActivated(PeerId, MsgId)), \
++		this, SLOT(notificationActivatedSlot(PeerId, MsgId)));
++	pipeReaderThread->start();
++	return true;
++}
++
++Manager::Private::~Private() {	
++	clearAll();
++}
++
++void Manager::Private::clearAll() {
++}
++
++void Manager::Private::clearFromHistory(History *history) {
++}
++
++void Manager::Private::beforeNotificationActivated(PeerId peerId, MsgId msgId) {
++}
++
++void Manager::Private::afterNotificationActivated(PeerId peerId, MsgId msgId) {
++}
++
++void Manager::Private::clearNotification(PeerId peerId, MsgId msgId) {
++}
++
++bool Manager::Private::showNotification(PeerData *peer, MsgId msgId, const QString &title, \
++	const QString &subtitle, const QString &msg, bool hideNameAndPhoto, bool hideReplyButton) {
++	auto titleText = title;
++	auto subtitleText = subtitle;
++	auto msgText = msg;
++
++	StorageKey key;
++	if (hideNameAndPhoto) {
++		key = StorageKey(0, 0);
++	} else {
++		key = peer->userpicUniqueKey();
+ 	}
+-	return text;
++
++	auto userpicPath = _cachedUserpics.get(key, peer);
++	
++	QString program = "/bin/notify";
++	QStringList arguments;
++	arguments << "--icon" << userpicPath;
++	arguments << "--group" << "Telegram";
++	arguments << "--title" << titleText;
++	arguments << "--onClickFile" << NOTIFY_GATE_NAME;
++	arguments << "--onClickArgv" << QString("0x%1 0x%2").arg(peer->id, 0, 16).arg(msgId, 0, 16);
++	arguments << msgText;
++
++	QProcess *notifyProcess = new QProcess();
++    notifyProcess->start(program, arguments);
++
++	return true;
++}
++
++void Manager::Private::notificationActivatedSlot(PeerId _peerId, MsgId _msgId)
++{
++	qDebug() << _peerId << _msgId;
++	performOnMainQueue([peerId = _peerId, msgId = _msgId](Manager *manager) {
++		manager->notificationActivated(peerId, msgId);
++	});
+ }
+ 
++Manager::Manager(Window::Notifications::System *system) : NativeManager(system)
++, _private(std::make_unique<Private>(this, Private::Type::Rounded)) {
++}
+ 
++bool Manager::init() {
++	return _private->init();
++}
+ 
+-} // namespace
++void Manager::clearNotification(PeerId peerId, MsgId msgId) {
++	_private->clearNotification(peerId, msgId);
++}
+ 
+-bool Supported() {
+-	return false;
++Manager::~Manager() = default;
++
++void Manager::doShowNativeNotification(PeerData *peer, MsgId msgId, const QString &title, \
++	const QString &subtitle, const QString &msg, bool hideNameAndPhoto, bool hideReplyButton) {
++	_private->showNotification(peer, msgId, title, subtitle, msg, hideNameAndPhoto, hideReplyButton);
+ }
+ 
+-std::unique_ptr<Window::Notifications::Manager> Create(Window::Notifications::System *system) {
+-	return nullptr;
++void Manager::doClearAllFast() {
++	_private->clearAll();
+ }
+ 
+-void Finish() {
++void Manager::doClearFromHistory(History *history) {
++	_private->clearFromHistory(history);
++}
+ 
++void Manager::onBeforeNotificationActivated(PeerId peerId, MsgId msgId) {
++	_private->beforeNotificationActivated(peerId, msgId);
+ }
+ 
++void Manager::onAfterNotificationActivated(PeerId peerId, MsgId msgId) {
++	_private->afterNotificationActivated(peerId, msgId);
++}
+ 
++bool Manager::hasActionsSupport() const {
++	return _private->hasActionsSupport();
++}
+ 
+ } // namespace Notifications
+ } // namespace Platform
+diff --git a/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.h b/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.h
+index d70bcff..53491b6 100644
+--- a/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.h
++++ b/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.h
+@@ -21,6 +21,14 @@ Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+ #pragma once
+ 
+ #include "platform/platform_notifications_manager.h"
++#include "window/notifications_utilities.h"
++
++#include <QProcess>
++#include <QThread>
++#include <QObject>
++
++#define NOTIFY_FIFO_NAME "/tmp/tg_notify"
++#define NOTIFY_GATE_NAME "/bin/tg-notify-gate"
+ 
+ namespace Platform {
+ namespace Notifications {
+@@ -38,25 +46,80 @@ inline void FlashBounce() {
+ 
+ void Finish();
+ 
++class NotifyReader:public QObject {
++	Q_OBJECT
++public:
++	NotifyReader();
++	~NotifyReader();
++public slots:
++	void run();
++signals:
++	void notificationActivated(PeerId peerId, MsgId msgId);
++private:	
++	int pipeFD;
++};
++
++
+ class Manager : public Window::Notifications::NativeManager {
+ public:
+ 	Manager(Window::Notifications::System *system);
+ 
++	bool init();
++
+ 	void clearNotification(PeerId peerId, MsgId msgId);
+-	bool hasPoorSupport() const;
+-	bool hasActionsSupport() const;
+ 
+ 	~Manager();
+ 
+ protected:
+-	void doShowNativeNotification(PeerData *peer, MsgId msgId, const QString &title, const QString &subtitle, const QString &msg, bool hideNameAndPhoto, bool hideReplyButton) override;
++	void doShowNativeNotification(PeerData *peer, MsgId msgId, const QString &title, \
++		const QString &subtitle, const QString &msg, bool hideNameAndPhoto, bool hideReplyButton) override;
+ 	void doClearAllFast() override;
+ 	void doClearFromHistory(History *history) override;
++	void onBeforeNotificationActivated(PeerId peerId, MsgId msgId) override;
++	void onAfterNotificationActivated(PeerId peerId, MsgId msgId) override;
++
++	bool hasActionsSupport() const;
+ 
+ private:
+ 	class Private;
+ 	const std::unique_ptr<Private> _private;
++};
+ 
++class Manager::Private : public QObject {
++	Q_OBJECT
++public:
++	using Type = Window::Notifications::CachedUserpics::Type;
++	explicit Private(Manager *instance, Type type);
++	bool init();
++
++	bool showNotification(PeerData *peer, MsgId msgId, const QString &title, const QString &subtitle, \
++		const QString &msg, bool hideNameAndPhoto, bool hideReplyButton);
++	void clearAll();
++	void clearFromHistory(History *history);
++	void beforeNotificationActivated(PeerId peerId, MsgId msgId);
++	void afterNotificationActivated(PeerId peerId, MsgId msgId);
++	void clearNotification(PeerId peerId, MsgId msgId);
++
++	bool hasActionsSupport() const {
++		return true;
++	}
++	
++	void performOnMainQueue(FnMut<void(Manager *manager)> task) {
++		const auto weak = _weak;
++		crl::on_main(weak, [=, task = std::move(task)]() mutable {
++			task(*weak.lock());
++		});
++	}
++
++	~Private();
++public slots:
++	void notificationActivatedSlot(PeerId peerId, MsgId msgId);
++private:
++	Window::Notifications::CachedUserpics _cachedUserpics;
++	std::shared_ptr<Manager*> _guarded;
++	std::weak_ptr<Manager*> _weak;
++	QThread *pipeReaderThread;
++	NotifyReader *pipeReader;
+ };
+ 
+ } // namespace Notifications
+diff --git a/Telegram/SourceFiles/settings/settings_notifications_widget.cpp b/Telegram/SourceFiles/settings/settings_notifications_widget.cpp
+index 62bbe64..f0c06f9 100644
+--- a/Telegram/SourceFiles/settings/settings_notifications_widget.cpp
++++ b/Telegram/SourceFiles/settings/settings_notifications_widget.cpp
+@@ -69,7 +69,7 @@ void NotificationsWidget::createNotificationsControls() {
+ 	if (Platform::Notifications::Supported()) {
+ #ifdef Q_OS_WIN
+ 		nativeNotificationsLabel = lang(lng_settings_use_windows);
+-#elif defined Q_OS_LINUX64 || defined Q_OS_LINUX32 // Q_OS_WIN
++#elif defined Q_OS_LINUX64 || defined Q_OS_LINUX32 || defined Q_OS_HAIKU // Q_OS_WIN
+ 		nativeNotificationsLabel = lang(lng_settings_use_native_notifications);
+ #endif // Q_OS_WIN || Q_OS_LINUX64 || Q_OS_LINUX32
+ 	}
+-- 
+2.16.4
+

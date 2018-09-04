@@ -1,0 +1,946 @@
+From 957b6bc19b971d44f878a458c441301bd3215185 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Thu, 30 Aug 2018 20:14:24 +1000
+Subject: Add Haiku platform
+
+
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioInputHaiku.cpp b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioInputHaiku.cpp
+new file mode 100644
+index 0000000..1bfbfad
+--- /dev/null
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioInputHaiku.cpp
+@@ -0,0 +1,272 @@
++//
++// libtgvoip is free and unencumbered public domain software.
++// For more information, see http://unlicense.org or the UNLICENSE file
++// you should have received with this source code distribution.
++//
++
++#include <stdlib.h>
++#include <stdio.h>
++#include <assert.h>
++#include <dlfcn.h>
++#include "AudioInputHaiku.h"
++#include "../../logging.h"
++#include "../../audio/Resampler.h"
++#include "../../VoIPController.h"
++
++#include "RingBuffer.h"
++
++using namespace tgvoip::audio;
++
++void RecordData(void* cookie, bigtime_t timestamp, void* data, size_t size, const media_format &format)
++{
++	AudioInputHaiku *audioInput = (AudioInputHaiku*)cookie;
++	if (!audioInput->IsRecording())
++		return;
++
++	if (format.u.raw_audio.format == media_raw_audio_format::B_AUDIO_SHORT &&
++		format.u.raw_audio.channel_count == 1) {
++		audioInput->fRingBuffer->Write((unsigned char*)data, size);
++		return;
++	}
++
++	uint32 bytesPerSample = 2;
++	switch (format.u.raw_audio.format) {
++	    case media_raw_audio_format::B_AUDIO_CHAR:
++			bytesPerSample = 1;
++			break;
++	    case media_raw_audio_format::B_AUDIO_SHORT:
++			bytesPerSample = 2;
++			break;
++	    case media_raw_audio_format::B_AUDIO_INT:
++			bytesPerSample = 4;
++	        break;
++	    case media_raw_audio_format::B_AUDIO_FLOAT:
++			bytesPerSample = 4;
++	        break;
++	    default:
++	        break;
++    }
++
++	int frames = size / (format.u.raw_audio.channel_count * bytesPerSample);
++	int16_t *dst = audioInput->workBuffer;
++
++	if (format.u.raw_audio.format == media_raw_audio_format::B_AUDIO_CHAR) {
++		unsigned char* src=reinterpret_cast<unsigned char*>(data);
++		for (int n=0; n < frames; n++) {
++			int32_t value = 0;
++			for (int j=0; j < format.u.raw_audio.channel_count; j++, src++) {
++				value += ((int32_t)(*src) - INT8_MAX) * UINT8_MAX;
++			}
++			value /= format.u.raw_audio.channel_count;
++			dst[n] = (int16_t)value;
++		}
++	} else if (format.u.raw_audio.format == media_raw_audio_format::B_AUDIO_SHORT) {
++		int16_t* src=reinterpret_cast<int16_t*>(data);
++		for (int n=0; n < frames; n++) {
++			int32_t value = 0;
++			for (int j=0; j < format.u.raw_audio.channel_count; j++, src++) {
++				value += *src;
++			}
++			value /= format.u.raw_audio.channel_count;
++			dst[n] = (int16_t)value;
++		}
++	} else if (format.u.raw_audio.format == media_raw_audio_format::B_AUDIO_INT) {
++		int32_t* src=reinterpret_cast<int32_t*>(data);
++		for (int n=0; n < frames; n++) {
++			int64_t value = 0;
++			for (int j=0; j < format.u.raw_audio.channel_count; j++, src++) {
++				value += (int64_t)(*src);
++			}
++			value /= format.u.raw_audio.channel_count;
++			dst[n] = (int16_t)(value / (UINT16_MAX + 1));
++		}
++	} else if (format.u.raw_audio.format == media_raw_audio_format::B_AUDIO_FLOAT) {
++		float* src=reinterpret_cast<float*>(data);
++		for (int n=0; n < frames; n++) {
++			float value = 0;
++			for (int j=0; j < format.u.raw_audio.channel_count; j++, src++) {
++				value += *src;
++			}
++			value /= format.u.raw_audio.channel_count;
++			dst[n] = (int16_t)(value*INT16_MAX);
++		}
++	}
++
++	if(format.u.raw_audio.frame_rate != audioInput->tgFrameRate) {
++		size_t len = tgvoip::audio::Resampler::Convert(dst, audioInput->convertBuffer,
++			frames, frames, audioInput->tgFrameRate, format.u.raw_audio.frame_rate) * audioInput->tgBytesPerSample;
++		audioInput->fRingBuffer->Write((unsigned char*)audioInput->convertBuffer, len);
++	} else {
++		audioInput->fRingBuffer->Write((unsigned char*)dst, frames * audioInput->tgBytesPerSample);
++	}
++}
++
++void NotifyRecordData(void * cookie, BMediaRecorder::notification code, ...)
++{
++	AudioInputHaiku *audioInput = (AudioInputHaiku*)cookie;
++	if (code == BMediaRecorder::B_WILL_STOP) {
++		if (audioInput->IsRecording()) {
++			audioInput->Stop();
++		}
++	}
++}
++
++AudioInputHaiku::AudioInputHaiku()
++{
++	fRecorder = NULL;
++	fRingBuffer = NULL;
++	isRecording = false;
++
++	status_t error;
++
++	fRoster = BMediaRoster::Roster(&error);
++	if (!fRoster) {
++		failed=true;		
++		return;
++	}
++	error = fRoster->GetAudioInput(&fAudioInputNode);
++	if (error < B_OK) {
++		failed=true;
++		return;
++	}
++	error = fRoster->GetAudioMixer(&fAudioMixerNode);
++	if (error < B_OK) {
++		failed=true;
++		return;
++	}
++	fRecorder = new BMediaRecorder("Telegram", B_MEDIA_RAW_AUDIO);
++	if (fRecorder->InitCheck() < B_OK) {
++		failed=true;
++		return;
++	}	
++	media_format output_format;
++	output_format.type = B_MEDIA_RAW_AUDIO;
++	output_format.u.raw_audio = media_raw_audio_format::wildcard;
++    output_format.u.raw_audio.channel_count = 1;
++	fRecorder->SetAcceptedFormat(output_format);
++	
++	const int maxInputCount = 64;
++	dormant_node_info dni[maxInputCount];
++
++	int32 real_count = maxInputCount;
++
++	error = fRoster->GetDormantNodes(dni, &real_count, 0, &output_format, 0, B_BUFFER_PRODUCER | B_PHYSICAL_INPUT);
++	if (real_count > maxInputCount)
++			real_count = maxInputCount;
++	char selected_name[B_MEDIA_NAME_LENGTH] = "Default input";
++	
++	for (int i = 0; i < real_count; i++) {
++		media_node_id ni[12];
++		int32 ni_count = 12;
++		error = fRoster->GetInstancesFor(dni[i].addon, dni[i].flavor_id, ni, &ni_count);
++		if (error == B_OK) {
++			for (int j = 0; j < ni_count; j++) {
++				if (ni[j] == fAudioInputNode.node) {
++					strcpy(selected_name, dni[i].name);
++					break;
++				}
++			}
++		}
++	}
++
++	media_output audioOutput;
++	if (!fRecorder->IsConnected()) {
++		int32 count = 0;
++		error = fRoster->GetFreeOutputsFor(fAudioInputNode, &audioOutput, 1, &count, B_MEDIA_RAW_AUDIO);
++		if (error < B_OK) {
++			failed=true;
++			return;
++		}
++
++		if (count < 1) {
++			failed=true;
++			return;
++		}
++		fRecordFormat.u.raw_audio = audioOutput.format.u.raw_audio;
++	} else {
++		fRecordFormat.u.raw_audio = fRecorder->AcceptedFormat().u.raw_audio;
++	}
++	fRecordFormat.type = B_MEDIA_RAW_AUDIO;
++
++	error = fRecorder->SetHooks(RecordData, NotifyRecordData, this);
++	if (error < B_OK) {
++		failed=true;
++		return;
++	}
++	
++	if (!fRecorder->IsConnected()) {
++		error = fRecorder->Connect(fAudioInputNode, &audioOutput, &fRecordFormat);
++		if (error < B_OK) {
++			fRecorder->SetHooks(NULL, NULL, NULL);
++			failed=true;
++			return;
++		}
++	}
++	
++	fRingBuffer = new RingBuffer(BUFFER_SIZE * 2 * 3);
++	if (fRingBuffer->InitCheck() != B_OK) {
++		failed=true;
++		return;
++	}	
++}
++
++AudioInputHaiku::~AudioInputHaiku(){
++	if (fRecorder != NULL) {
++		if (fRecorder->InitCheck() == B_OK) {
++			if (fRecorder->IsConnected())
++				fRecorder->Disconnect();
++		}
++		delete fRecorder;
++	}
++	if (fRingBuffer != NULL)
++		delete fRingBuffer;
++}
++
++void AudioInputHaiku::Configure(uint32_t sampleRate, uint32_t bitsPerSample, uint32_t channels){
++	tgFrameRate = sampleRate;
++	tgChannelsCount = channels;
++	tgBytesPerSample = bitsPerSample / 8;
++}
++
++bool AudioInputHaiku::IsRecording(){
++	return isRecording;
++}
++
++void AudioInputHaiku::Start(){
++	if(failed || isRecording)
++		return;
++
++	isRecording=true;
++
++	thread = new Thread(new MethodPointer<AudioInputHaiku>(&AudioInputHaiku::RunThread, this), NULL);
++	thread->SetName("AudioInputHaiku");
++	thread->Start();
++
++	fRecorder->Start();
++}
++
++void AudioInputHaiku::Stop(){
++	if(!isRecording)
++		return;
++
++	isRecording=false;
++
++	fRecorder->Stop();
++
++	thread->Join();
++	delete thread;
++	thread=NULL;
++}
++
++void AudioInputHaiku::RunThread(void* arg){
++	unsigned char buffer[BUFFER_SIZE*2];
++	while (isRecording){
++		if (fRingBuffer->GetReadAvailable() >= sizeof(buffer)) {
++			int readed = fRingBuffer->Read(buffer, sizeof(buffer));
++			if (readed < sizeof(buffer))
++				memset(buffer + readed, 0, sizeof(buffer) - readed);		
++			InvokeCallback(buffer, sizeof(buffer));
++		} else
++			snooze(100);
++	}
++}
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioInputHaiku.h b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioInputHaiku.h
+new file mode 100644
+index 0000000..2425666
+--- /dev/null
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioInputHaiku.h
+@@ -0,0 +1,66 @@
++//
++// libtgvoip is free and unencumbered public domain software.
++// For more information, see http://unlicense.org or the UNLICENSE file
++// you should have received with this source code distribution.
++//
++
++#ifndef LIBTGVOIP_AUDIOINPUTHAIKU_H
++#define LIBTGVOIP_AUDIOINPUTHAIKU_H
++
++#include "../../audio/AudioInput.h"
++#include "../../threading.h"
++
++#include <OS.h>
++#include <MediaFile.h>
++#include <MediaNode.h>
++#include <MediaRecorder.h>
++#include <MediaTrack.h>
++#include <MediaRoster.h>
++#include <TimeSource.h>
++#include <NodeInfo.h>
++#include <MediaAddOn.h>
++
++#include "RingBuffer.h"
++
++#define BUFFER_SIZE 960
++
++namespace tgvoip{
++namespace audio{
++
++class AudioInputHaiku : public AudioInput{
++
++public:
++	AudioInputHaiku();
++	virtual ~AudioInputHaiku();
++	virtual void Configure(uint32_t sampleRate, uint32_t bitsPerSample, uint32_t channels);
++	virtual void Start();
++	virtual void Stop();
++	virtual bool IsRecording();
++
++	RingBuffer *fRingBuffer;
++	int16_t workBuffer[BUFFER_SIZE * 16];
++	int16_t convertBuffer[BUFFER_SIZE * 16];
++
++	uint32 tgFrameRate;
++	uint32 tgChannelsCount;
++	uint32 tgBytesPerSample;
++
++private:
++	void RunThread(void* arg);
++
++	bool isConfigured;
++	bool isRecording;
++	
++	BMediaRoster * fRoster;
++	BMediaRecorder * fRecorder;
++	media_format fRecordFormat;
++	media_node fAudioInputNode;
++	media_node fAudioMixerNode;
++
++	Thread* thread;
++};
++
++}
++}
++
++#endif //LIBTGVOIP_AUDIOINPUTHAIKU_H
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioOutputHaiku.cpp b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioOutputHaiku.cpp
+new file mode 100644
+index 0000000..533128d
+--- /dev/null
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioOutputHaiku.cpp
+@@ -0,0 +1,102 @@
++//
++// libtgvoip is free and unencumbered public domain software.
++// For more information, see http://unlicense.org or the UNLICENSE file
++// you should have received with this source code distribution.
++//
++
++
++#include <assert.h>
++#include <dlfcn.h>
++#include "AudioOutputHaiku.h"
++#include "../../logging.h"
++#include "../../VoIPController.h"
++
++#define BUFFER_SIZE 960
++
++using namespace tgvoip::audio;
++
++static void playerProc(void *cookie, void *buffer, size_t len, const media_raw_audio_format &format)
++{
++	AudioOutputHaiku *obj = (AudioOutputHaiku*)cookie;
++	obj->InvokeCallback((unsigned char*)buffer, len);
++}
++
++
++AudioOutputHaiku::AudioOutputHaiku(){
++	soundPlayer = NULL;
++	isPlaying = false;
++	isConfigured = false;
++	return;
++}
++
++AudioOutputHaiku::~AudioOutputHaiku(){
++	if (isConfigured) {
++		if (soundPlayer != NULL) {
++			soundPlayer->Stop();
++			delete soundPlayer;
++		}
++	}
++}
++
++void AudioOutputHaiku::Configure(uint32_t sampleRate, uint32_t bitsPerSample, uint32_t channels){
++	media_raw_audio_format mediaKitFormat = {
++		(float)sampleRate,
++		(uint32)channels,
++		media_raw_audio_format::B_AUDIO_SHORT,
++		B_MEDIA_LITTLE_ENDIAN,
++		(uint32)BUFFER_SIZE * (bitsPerSample / 8) * channels
++	};
++
++	switch (bitsPerSample) {
++	    case 8:
++	        mediaKitFormat.format = media_raw_audio_format::B_AUDIO_CHAR;
++	        break;
++	    case 16:
++	    	mediaKitFormat.format = media_raw_audio_format::B_AUDIO_SHORT;
++	        break;
++	    case 32:
++	        mediaKitFormat.format = media_raw_audio_format::B_AUDIO_INT;
++	        break;
++	    default:
++	    	mediaKitFormat.format = media_raw_audio_format::B_AUDIO_SHORT;
++	        break;
++    }
++
++	soundPlayer = new BSoundPlayer(&mediaKitFormat, "Telegram", playerProc, NULL, (void*)this);
++
++	if(soundPlayer->InitCheck() != B_OK) {
++		delete soundPlayer;
++		soundPlayer = NULL;
++		isPlaying = false;
++		failed = true;
++		return;
++	}
++
++	isConfigured = true;
++}
++
++void AudioOutputHaiku::Start(){
++	if(soundPlayer == NULL || isPlaying)
++		return;
++
++	soundPlayer->Start();
++	soundPlayer->SetHasData(true);
++
++	isPlaying=true;
++}
++
++void AudioOutputHaiku::Stop(){
++	if(!isPlaying)
++		return;
++	
++	soundPlayer->Stop();
++	isPlaying=false;
++}
++
++bool AudioOutputHaiku::IsPlaying(){
++	return isPlaying;
++}
++
++float AudioOutputHaiku::GetLevel(){
++	return 0;
++}
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioOutputHaiku.h b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioOutputHaiku.h
+new file mode 100644
+index 0000000..0ea8230
+--- /dev/null
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioOutputHaiku.h
+@@ -0,0 +1,36 @@
++//
++// libtgvoip is free and unencumbered public domain software.
++// For more information, see http://unlicense.org or the UNLICENSE file
++// you should have received with this source code distribution.
++//
++
++#ifndef LIBTGVOIP_AUDIOOUTPUTHAIKU_H
++#define LIBTGVOIP_AUDIOOUTPUTHAIKU_H
++
++#include "../../audio/AudioOutput.h"
++#include "../../threading.h"
++
++#include <SoundPlayer.h>
++
++namespace tgvoip{
++namespace audio{
++
++class AudioOutputHaiku : public AudioOutput{
++public:
++	AudioOutputHaiku();
++	virtual ~AudioOutputHaiku();
++	virtual void Configure(uint32_t sampleRate, uint32_t bitsPerSample, uint32_t channels);
++	virtual void Start();
++	virtual void Stop();
++	virtual bool IsPlaying() override;
++	virtual float GetLevel() override;
++private:
++	bool isPlaying;
++	bool isConfigured;
++	BSoundPlayer *soundPlayer;
++};
++
++}
++}
++
++#endif //LIBTGVOIP_AUDIOOUTPUTHAIKU_H
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/RingBuffer.cpp b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/RingBuffer.cpp
+new file mode 100644
+index 0000000..43236d3
+--- /dev/null
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/RingBuffer.cpp
+@@ -0,0 +1,130 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <OS.h>
++
++#include "RingBuffer.h"
++
++RingBuffer::RingBuffer( int size )
++{
++	 initialized = false;
++     Buffer = new unsigned char[size];
++     if(Buffer!=NULL) {
++     	memset( Buffer, 0, size );
++	    BufferSize = size;     	
++     } else {
++     	BufferSize = 0;
++     }
++     reader = 0;
++     writer = 0;
++     writeBytesAvailable = size;
++     if((locker=create_sem(1,"locker")) >= B_OK) {
++     	initialized = true;
++     } else {
++     	if(Buffer!=NULL) {
++     		delete[] Buffer;     		
++     	}
++     }
++}
++
++RingBuffer::~RingBuffer( )
++{
++	 if(initialized) {
++     	delete[] Buffer;
++     	delete_sem(locker);
++	 }
++}
++
++bool 
++RingBuffer::Empty( void )
++{
++     memset( Buffer, 0, BufferSize );
++     reader = 0;
++     writer = 0;
++     writeBytesAvailable = BufferSize;
++     return true;
++}
++
++int 
++RingBuffer::Read( unsigned char *data, int size )
++{	
++	 acquire_sem(locker);
++	 
++     if( data == 0 || size <= 0 || writeBytesAvailable == BufferSize ) {
++     	 release_sem(locker);
++         return 0;
++     }
++
++     int readBytesAvailable = BufferSize - writeBytesAvailable;
++
++     if( size > readBytesAvailable ) {
++         size = readBytesAvailable;
++     }
++
++     if(size > BufferSize - reader) {
++         int len = BufferSize - reader;
++         memcpy(data, Buffer + reader, len);
++         memcpy(data + len, Buffer, size-len);
++     } else {
++         memcpy(data, Buffer + reader, size);
++     }
++
++     reader = (reader + size) % BufferSize;
++     writeBytesAvailable += size;
++	 
++	 release_sem(locker);
++     return size;
++}
++
++int 
++RingBuffer::Write( unsigned char *data, int size )
++{
++	 acquire_sem(locker);
++	 
++     if( data == 0 || size <= 0 || writeBytesAvailable == 0 ) {
++     	 release_sem(locker);
++         return 0;
++     }
++
++     if( size > writeBytesAvailable ) {
++         size = writeBytesAvailable;
++     }
++
++     if(size > BufferSize - writer) {
++         int len = BufferSize - writer;
++         memcpy(Buffer + writer, data, len);
++         memcpy(Buffer, data+len, size-len);
++     } else {
++         memcpy(Buffer + writer, data, size);
++     }
++
++     writer = (writer + size) % BufferSize;
++     writeBytesAvailable -= size;
++
++	 release_sem(locker);	 
++     return size;
++}
++
++int 
++RingBuffer::GetSize( void )
++{
++     return BufferSize;
++}
++
++int 
++RingBuffer::GetWriteAvailable( void )
++{
++     return writeBytesAvailable;
++}
++
++int 
++RingBuffer::GetReadAvailable( void )
++{
++     return BufferSize - writeBytesAvailable;
++}
++
++status_t 
++RingBuffer::InitCheck( void )
++{
++	return initialized?B_OK:B_ERROR;
++}
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/RingBuffer.h b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/RingBuffer.h
+new file mode 100644
+index 0000000..4715632
+--- /dev/null
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/RingBuffer.h
+@@ -0,0 +1,31 @@
++#ifndef __RING_BUFFER_H__
++#define __RING_BUFFER_H__
++
++#include <OS.h>
++
++class RingBuffer {
++
++public:
++     RingBuffer(int size);
++     ~RingBuffer();
++     int Read( unsigned char* dataPtr, int numBytes );
++     int Write( unsigned char *dataPtr, int numBytes );
++     
++     bool Empty( void );
++     int GetSize( );
++     int GetWriteAvailable( );
++     int GetReadAvailable( );
++     status_t InitCheck( );
++private:
++     unsigned char *Buffer;
++     int BufferSize;
++     int reader;
++     int writer;
++     int writeBytesAvailable;
++     
++     sem_id locker;
++     
++     bool 	initialized;
++};
++
++#endif
+-- 
+2.16.4
+
+
+From 753b20ad62db41d0041b352dac9c9a45ecd3009b Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Thu, 30 Aug 2018 20:15:02 +1000
+Subject: Fix Haiku build
+
+
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/VoIPController.cpp b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/VoIPController.cpp
+index b82899e..700b0cd 100644
+--- a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/VoIPController.cpp
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/VoIPController.cpp
+@@ -8,6 +8,9 @@
+ #include <unistd.h>
+ #include <sys/time.h>
+ #endif
++#ifdef __HAIKU__
++#include <OS.h>
++#endif
+ #include <errno.h>
+ #include <string.h>
+ #include <wchar.h>
+@@ -2052,6 +2055,10 @@ double VoIPController::GetCurrentTime(){
+ 	struct timespec ts;
+ 	clock_gettime(CLOCK_MONOTONIC, &ts);
+ 	return ts.tv_sec+(double)ts.tv_nsec/1000000000.0;
++#elif defined(__HAIKU__)
++	struct timeval tm;
++	gettimeofday(&tm, NULL);
++	return tm.tv_sec+(double)tm.tv_usec/1000000.0;
+ #elif defined(__APPLE__)
+ 	static pthread_once_t token = PTHREAD_ONCE_INIT;
+ 	pthread_once(&token, &initMachTimestart);
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/audio/AudioIO.cpp b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/audio/AudioIO.cpp
+index 06beea7..bae4d64 100644
+--- a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/audio/AudioIO.cpp
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/audio/AudioIO.cpp
+@@ -37,6 +37,9 @@
+ #ifndef WITHOUT_PULSE
+ #include "../os/linux/AudioPulse.h"
+ #endif
++#elif defined(__HAIKU__)
++#include "../os/haiku/AudioInputHaiku.h"
++#include "../os/haiku/AudioOutputHaiku.h"
+ #else
+ #error "Unsupported operating system"
+ #endif
+@@ -62,6 +65,8 @@ shared_ptr<AudioIO> AudioIO::Create(){
+ 		return std::make_shared<ContextlessAudioIO<AudioInputWave, AudioOutputWave>>(inputDevice, outputDevice);
+ #endif
+ 	return std::make_shared<ContextlessAudioIO<AudioInputWASAPI, AudioOutputWASAPI>>(inputDevice, outputDevice);
++#elif defined(__HAIKU__)
++	return std::make_shared<ContextlessAudioIO<AudioInputHaiku, AudioOutputHaiku>>();
+ #elif defined(__linux__)
+ #ifndef WITHOUT_ALSA
+ #ifndef WITHOUT_PULSE
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/audio/AudioInput.cpp b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/audio/AudioInput.cpp
+index 3e3ccb9..a3e4c06 100644
+--- a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/audio/AudioInput.cpp
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/audio/AudioInput.cpp
+@@ -31,6 +31,8 @@
+ #ifndef WITHOUT_PULSE
+ #include "../os/linux/AudioPulse.h"
+ #endif
++#elif defined(__HAIKU__)
++#include "../os/haiku/AudioInputHaiku.h"
+ #else
+ #error "Unsupported operating system"
+ #endif
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/audio/AudioOutput.cpp b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/audio/AudioOutput.cpp
+index 938c1aa..36900a8 100644
+--- a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/audio/AudioOutput.cpp
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/audio/AudioOutput.cpp
+@@ -35,6 +35,8 @@
+ #include "../os/linux/AudioOutputPulse.h"
+ #include "../os/linux/AudioPulse.h"
+ #endif
++#elif defined(__HAIKU__)
++#include "../os/haiku/AudioOutputHaiku.h"
+ #else
+ #error "Unsupported operating system"
+ #endif
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/libtgvoip.gyp b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/libtgvoip.gyp
+index 0cf04ea..4f21d1e 100644
+--- a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/libtgvoip.gyp
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/libtgvoip.gyp
+@@ -104,6 +104,14 @@
+           '<(tgvoip_src_loc)/os/linux/AudioPulse.cpp',
+           '<(tgvoip_src_loc)/os/linux/AudioPulse.h',
+ 
++          # Haiku
++          '<(tgvoip_src_loc)/os/haiku/AudioInputHaiku.cpp',
++          '<(tgvoip_src_loc)/os/haiku/AudioInputHaiku.h',
++          '<(tgvoip_src_loc)/os/haiku/AudioOutputHaiku.cpp',
++          '<(tgvoip_src_loc)/os/haiku/AudioOutputHaiku.h',
++          '<(tgvoip_src_loc)/os/haiku/RingBuffer.cpp',
++          '<(tgvoip_src_loc)/os/haiku/RingBuffer.h',
++
+           # POSIX
+           '<(tgvoip_src_loc)/os/posix/NetworkSocketPosix.cpp',
+           '<(tgvoip_src_loc)/os/posix/NetworkSocketPosix.h',
+@@ -257,6 +265,11 @@
+               'sources/': [['exclude', '<(tgvoip_src_loc)/os/posix/']],
+             },
+           ],
++          [
++            '"<(OS)" != "haiku"', {
++              'sources/': [['exclude', '<(tgvoip_src_loc)/os/haiku/']],
++            },
++          ],
+           [
+             '"<(OS)" != "mac"', {
+               'sources/': [['exclude', '<(tgvoip_src_loc)/os/darwin/']],
+@@ -382,6 +395,21 @@
+             },
+           ],
+           [
++            '"<(OS)" == "haiku"', {
++              'defines': [
++                'WEBRTC_POSIX',
++              ],
++              'cflags_cc': [
++                '-msse2',
++                '-std=gnu++14',
++              ],
++              'direct_dependent_settings': {
++                'libraries': [
++
++                ],
++              },
++            },
++          ],          [
+             '"<(OS)" == "linux"', {
+               'defines': [
+                 'WEBRTC_POSIX',
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/posix/NetworkSocketPosix.cpp b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/posix/NetworkSocketPosix.cpp
+index ef8d2cb..da39a17 100644
+--- a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/posix/NetworkSocketPosix.cpp
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/posix/NetworkSocketPosix.cpp
+@@ -202,12 +202,13 @@ void NetworkSocketPosix::Open(){
+ 	}
+ 	int flag=0;
+ 	int res=setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &flag, sizeof(flag));
++#ifndef __HAIKU__
+ 	if(res<0){
+ 		LOGE("error enabling dual stack socket: %d / %s", errno, strerror(errno));
+ 		failed=true;
+ 		return;
+ 	}
+-
++#endif
+ 	SetMaxPriority();
+ 
+ 	int tries=0;
+@@ -353,6 +354,8 @@ std::string NetworkSocketPosix::GetLocalInterfaceInfo(IPv4Address *v4addr, IPv6A
+ 	if(didAttach){
+ 		sharedJVM->DetachCurrentThread();
+ 	}
++#elif defined(__HAIKU__)
++	return name;
+ #else
+ 	struct ifaddrs* interfaces;
+ 	if(!getifaddrs(&interfaces)){
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/threading.h b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/threading.h
+index 0bcf7c3..af86ef2 100644
+--- a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/threading.h
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/threading.h
+@@ -33,7 +33,7 @@ namespace tgvoip{
+ 	};
+ }
+ 
+-#if defined(_POSIX_THREADS) || defined(_POSIX_VERSION) || defined(__unix__) || defined(__unix) || (defined(__APPLE__) && defined(__MACH__))
++#if defined(_POSIX_THREADS) || defined(_POSIX_VERSION) || defined(__unix__) || defined(__unix) || defined(__HAIKU__) || (defined(__APPLE__) && defined(__MACH__))
+ 
+ #include <pthread.h>
+ #include <semaphore.h>
+@@ -115,6 +115,7 @@ namespace tgvoip{
+ 		static void* ActualEntryPoint(void* arg){
+ 			Thread* self=reinterpret_cast<Thread*>(arg);
+ 			if(self->name){
++#ifndef __HAIKU__
+ #if !defined(__APPLE__) && !defined(__gnu_hurd__)
+ 				pthread_setname_np(self->thread, self->name);
+ #elif !defined(__gnu_hurd__)
+@@ -123,6 +124,7 @@ namespace tgvoip{
+ 					DarwinSpecific::SetCurrentThreadPriority(DarwinSpecific::THREAD_PRIO_USER_INTERACTIVE);
+ 				}
+ #endif
++#endif //__HAKIU__
+ 			}
+ 			self->entry->Invoke(self->arg);
+ 			return NULL;
+-- 
+2.16.4
+
+
+From 1bf1510ada4edb23b04da953284b5d1decca9bd0 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Thu, 30 Aug 2018 23:52:44 +1000
+Subject: Remove GetLevel function
+
+
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioOutputHaiku.cpp b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioOutputHaiku.cpp
+index 533128d..3dc052c 100644
+--- a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioOutputHaiku.cpp
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioOutputHaiku.cpp
+@@ -96,7 +96,3 @@ void AudioOutputHaiku::Stop(){
+ bool AudioOutputHaiku::IsPlaying(){
+ 	return isPlaying;
+ }
+-
+-float AudioOutputHaiku::GetLevel(){
+-	return 0;
+-}
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioOutputHaiku.h b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioOutputHaiku.h
+index 0ea8230..91f2521 100644
+--- a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioOutputHaiku.h
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/os/haiku/AudioOutputHaiku.h
+@@ -23,7 +23,6 @@ public:
+ 	virtual void Start();
+ 	virtual void Stop();
+ 	virtual bool IsPlaying() override;
+-	virtual float GetLevel() override;
+ private:
+ 	bool isPlaying;
+ 	bool isConfigured;
+-- 
+2.16.4
+
+
+From 50540bcbe0cd11cf96cf6b095d99e2ed5ab36d30 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Thu, 30 Aug 2018 23:53:16 +1000
+Subject: Fix opus includes
+
+
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/OpusDecoder.cpp b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/OpusDecoder.cpp
+index 87a48eb..545113a 100644
+--- a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/OpusDecoder.cpp
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/OpusDecoder.cpp
+@@ -10,7 +10,7 @@
+ #include <assert.h>
+ #include <math.h>
+ #include <algorithm>
+-#ifdef HAVE_CONFIG_H
++#if defined(HAVE_CONFIG_H) || defined(__HAIKU__)
+ #include <opus/opus.h>
+ #else
+ #include "opus.h"
+diff --git a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/OpusEncoder.cpp b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/OpusEncoder.cpp
+index e30f814..c31aee2 100644
+--- a/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/OpusEncoder.cpp
++++ b/libtgvoip-bfa1e6ab76a467c6c6bff7eabb7c213acc7a1b34/OpusEncoder.cpp
+@@ -8,7 +8,7 @@
+ #include <assert.h>
+ #include "logging.h"
+ #include "VoIPServerConfig.h"
+-#ifdef HAVE_CONFIG_H
++#if defined(HAVE_CONFIG_H) || defined(__HAIKU__)
+ #include <opus/opus.h>
+ #else
+ #include "opus.h"
+-- 
+2.16.4
+
