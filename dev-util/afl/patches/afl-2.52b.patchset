@@ -1,0 +1,272 @@
+From 99ea7792610943c34ee45a296bff41952f40991a Mon Sep 17 00:00:00 2001
+From: begasus <begasus@gmail.com>
+Date: Fri, 14 Sep 2018 18:43:51 +0200
+Subject: hack to get afl building on Haiku
+
+
+diff --git a/Makefile b/Makefile
+index 0b2c92b..b46f26a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -44,7 +44,7 @@ endif
+ 
+ COMM_HDR    = alloc-inl.h config.h debug.h types.h
+ 
+-all: test_x86 $(PROGS) afl-as test_build all_done
++all: test_x86 $(PROGS) afl-as
+ 
+ ifndef AFL_NO_X86
+ 
+@@ -84,30 +84,6 @@ afl-analyze: afl-analyze.c $(COMM_HDR) | test_x86
+ afl-gotcpu: afl-gotcpu.c $(COMM_HDR) | test_x86
+ 	$(CC) $(CFLAGS) $@.c -o $@ $(LDFLAGS)
+ 
+-ifndef AFL_NO_X86
+-
+-test_build: afl-gcc afl-as afl-showmap
+-	@echo "[*] Testing the CC wrapper and instrumentation output..."
+-	unset AFL_USE_ASAN AFL_USE_MSAN; AFL_QUIET=1 AFL_INST_RATIO=100 AFL_PATH=. ./$(TEST_CC) $(CFLAGS) test-instr.c -o test-instr $(LDFLAGS)
+-	echo 0 | ./afl-showmap -m none -q -o .test-instr0 ./test-instr
+-	echo 1 | ./afl-showmap -m none -q -o .test-instr1 ./test-instr
+-	@rm -f test-instr
+-	@cmp -s .test-instr0 .test-instr1; DR="$$?"; rm -f .test-instr0 .test-instr1; if [ "$$DR" = "0" ]; then echo; echo "Oops, the instrumentation does not seem to be behaving correctly!"; echo; echo "Please ping <lcamtuf@google.com> to troubleshoot the issue."; echo; exit 1; fi
+-	@echo "[+] All right, the instrumentation seems to be working!"
+-
+-else
+-
+-test_build: afl-gcc afl-as afl-showmap
+-	@echo "[!] Note: skipping build tests (you may need to use LLVM or QEMU mode)."
+-
+-endif
+-
+-all_done: test_build
+-	@if [ ! "`which clang 2>/dev/null`" = "" ]; then echo "[+] LLVM users: see llvm_mode/README.llvm for a faster alternative to afl-gcc."; fi
+-	@echo "[+] All done! Be sure to review README - it's pretty short and useful."
+-	@if [ "`uname`" = "Darwin" ]; then printf "\nWARNING: Fuzzing on MacOS X is slow because of the unusually high overhead of\nfork() on this OS. Consider using Linux or *BSD. You can also use VirtualBox\n(virtualbox.org) to put AFL inside a Linux or *BSD VM.\n\n"; fi
+-	@! tty <&1 >/dev/null || printf "\033[0;30mNOTE: If you can read this, your terminal probably uses white background.\nThis will make the UI hard to read. See docs/status_screen.txt for advice.\033[0m\n" 2>/dev/null
+-
+ .NOTPARALLEL: clean
+ 
+ clean:
+diff --git a/afl-analyze.c b/afl-analyze.c
+index 813e79b..b1109c7 100644
+--- a/afl-analyze.c
++++ b/afl-analyze.c
+@@ -40,7 +40,9 @@
+ 
+ #include <sys/wait.h>
+ #include <sys/time.h>
++#ifndef __HAIKU__
+ #include <sys/shm.h>
++#endif
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include <sys/resource.h>
+@@ -142,13 +144,14 @@ static inline u8 anything_set(void) {
+ 
+ 
+ /* Get rid of shared memory and temp files (atexit handler). */
+-
++#ifndef __HAIKU__
+ static void remove_shm(void) {
+ 
+   unlink(prog_in); /* Ignore errors */
+   shmctl(shm_id, IPC_RMID, NULL);
+ 
+ }
++#endif
+ 
+ 
+ /* Configure shared memory. */
+@@ -157,11 +160,11 @@ static void setup_shm(void) {
+ 
+   u8* shm_str;
+ 
+-  shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
++  //shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
+ 
+   if (shm_id < 0) PFATAL("shmget() failed");
+ 
+-  atexit(remove_shm);
++  //atexit(remove_shm);
+ 
+   shm_str = alloc_printf("%d", shm_id);
+ 
+@@ -169,7 +172,7 @@ static void setup_shm(void) {
+ 
+   ck_free(shm_str);
+ 
+-  trace_bits = shmat(shm_id, NULL, 0);
++  //trace_bits = shmat(shm_id, NULL, 0);
+   
+   if (!trace_bits) PFATAL("shmat() failed");
+ 
+diff --git a/afl-fuzz.c b/afl-fuzz.c
+index 01b4afe..2e7767b 100644
+--- a/afl-fuzz.c
++++ b/afl-fuzz.c
+@@ -48,7 +48,9 @@
+ 
+ #include <sys/wait.h>
+ #include <sys/time.h>
++#ifndef __HAIKU__
+ #include <sys/shm.h>
++#endif
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include <sys/resource.h>
+@@ -1197,12 +1199,13 @@ static inline void classify_counts(u32* mem) {
+ 
+ 
+ /* Get rid of shared memory (atexit handler). */
+-
++#ifndef __HAIKU__
+ static void remove_shm(void) {
+ 
+   shmctl(shm_id, IPC_RMID, NULL);
+ 
+ }
++#endif
+ 
+ 
+ /* Compact trace bytes into a smaller bitmap. We effectively just drop the
+@@ -1348,11 +1351,11 @@ EXP_ST void setup_shm(void) {
+   memset(virgin_tmout, 255, MAP_SIZE);
+   memset(virgin_crash, 255, MAP_SIZE);
+ 
+-  shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
++  //shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
+ 
+   if (shm_id < 0) PFATAL("shmget() failed");
+ 
+-  atexit(remove_shm);
++  //atexit(remove_shm);
+ 
+   shm_str = alloc_printf("%d", shm_id);
+ 
+@@ -1365,7 +1368,7 @@ EXP_ST void setup_shm(void) {
+ 
+   ck_free(shm_str);
+ 
+-  trace_bits = shmat(shm_id, NULL, 0);
++  //trace_bits = shmat(shm_id, NULL, 0);
+   
+   if (!trace_bits) PFATAL("shmat() failed");
+ 
+@@ -6902,7 +6905,7 @@ EXP_ST void check_binary(u8* fname) {
+ #endif /* ^!__APPLE__ */
+ 
+   if (!qemu_mode && !dumb_mode &&
+-      !memmem(f_data, f_len, SHM_ENV_VAR, strlen(SHM_ENV_VAR) + 1)) {
++      SHM_ENV_VAR, strlen(SHM_ENV_VAR) + 1) {
+ 
+     SAYF("\n" cLRD "[-] " cRST
+          "Looks like the target binary is not instrumented! The fuzzer depends on\n"
+diff --git a/afl-showmap.c b/afl-showmap.c
+index df3f7cd..5f5301a 100644
+--- a/afl-showmap.c
++++ b/afl-showmap.c
+@@ -41,7 +41,9 @@
+ 
+ #include <sys/wait.h>
+ #include <sys/time.h>
++#ifndef __HAIKU__
+ #include <sys/shm.h>
++#endif
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include <sys/resource.h>
+@@ -127,12 +129,13 @@ static void classify_counts(u8* mem, const u8* map) {
+ 
+ 
+ /* Get rid of shared memory (atexit handler). */
+-
++#ifndef __HAIKU__
+ static void remove_shm(void) {
+ 
+   shmctl(shm_id, IPC_RMID, NULL);
+ 
+ }
++#endif
+ 
+ 
+ /* Configure shared memory. */
+@@ -141,11 +144,11 @@ static void setup_shm(void) {
+ 
+   u8* shm_str;
+ 
+-  shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
++  //shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
+ 
+   if (shm_id < 0) PFATAL("shmget() failed");
+ 
+-  atexit(remove_shm);
++  //atexit(remove_shm);
+ 
+   shm_str = alloc_printf("%d", shm_id);
+ 
+@@ -153,7 +156,7 @@ static void setup_shm(void) {
+ 
+   ck_free(shm_str);
+ 
+-  trace_bits = shmat(shm_id, NULL, 0);
++  //trace_bits = shmat(shm_id, NULL, 0);
+   
+   if (!trace_bits) PFATAL("shmat() failed");
+ 
+diff --git a/afl-tmin.c b/afl-tmin.c
+index a58c520..e196c2f 100644
+--- a/afl-tmin.c
++++ b/afl-tmin.c
+@@ -39,7 +39,9 @@
+ 
+ #include <sys/wait.h>
+ #include <sys/time.h>
++#ifndef __HAIKU__
+ #include <sys/shm.h>
++#endif
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include <sys/resource.h>
+@@ -155,13 +157,14 @@ static inline u8 anything_set(void) {
+ 
+ 
+ /* Get rid of shared memory and temp files (atexit handler). */
+-
++#ifndef __HAIKU__
+ static void remove_shm(void) {
+ 
+   if (prog_in) unlink(prog_in); /* Ignore errors */
+   shmctl(shm_id, IPC_RMID, NULL);
+ 
+ }
++#endif
+ 
+ 
+ /* Configure shared memory. */
+@@ -170,11 +173,11 @@ static void setup_shm(void) {
+ 
+   u8* shm_str;
+ 
+-  shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
++  //shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
+ 
+   if (shm_id < 0) PFATAL("shmget() failed");
+ 
+-  atexit(remove_shm);
++  //atexit(remove_shm);
+ 
+   shm_str = alloc_printf("%d", shm_id);
+ 
+@@ -182,7 +185,7 @@ static void setup_shm(void) {
+ 
+   ck_free(shm_str);
+ 
+-  trace_bits = shmat(shm_id, NULL, 0);
++  //trace_bits = shmat(shm_id, NULL, 0);
+   
+   if (!trace_bits) PFATAL("shmat() failed");
+ 
+-- 
+2.19.0
+
