@@ -1,0 +1,145 @@
+From 14cffc4226e26fae9179841806780800592927d7 Mon Sep 17 00:00:00 2001
+From: Puck Meerburg <puck@puckipedia.nl>
+Date: Sat, 17 Jan 2015 19:54:22 +0100
+Subject: Fix Haiku build
+
+
+diff --git a/Makefile b/Makefile
+index e208c15..073dc3c 100644
+--- a/Makefile
++++ b/Makefile
+@@ -62,6 +62,9 @@ ifeq ($(findstring libretro,$(ui)),)
+   ifeq ($(platform),x)
+     flags += -march=native
+     link += -Wl,-export-dynamic -ldl -lX11 -lXext
++  else ifeq ($(platform),haiku)
++    flags += -march=native
++    link += -Wl,-export-dynamic
+   else ifeq ($(platform),win)
+     ifeq ($(arch),win32)
+       flags += -m32
+diff --git a/nall/Makefile b/nall/Makefile
+index 94b58fc..6d7174e 100644
+--- a/nall/Makefile
++++ b/nall/Makefile
+@@ -22,6 +22,8 @@ ifeq ($(platform),)
+     platform := windows
+   else ifneq ($(findstring Darwin,$(uname)),)
+     platform := osx
++  else ifneq ($(findstring Haiku,$(uname)),)
++    platform := haiku
+   else
+     platform := unix
+   endif
+diff --git a/nall/directory.hpp b/nall/directory.hpp
+index 691b31e..a930191 100644
+--- a/nall/directory.hpp
++++ b/nall/directory.hpp
+@@ -190,12 +190,18 @@ private:
+       while((ep = readdir(dp))) {
+         if(!strcmp(ep->d_name, ".")) continue;
+         if(!strcmp(ep->d_name, "..")) continue;
++#if defined(PLATFORM_HAIKU)
++        struct stat sp = {0};
++        stat(string{pathname, ep->d_name}, &sp);
++        bool is_directory = S_ISDIR(sp.st_mode);
++#else
+         bool is_directory = ep->d_type & DT_DIR;
+         if(ep->d_type & DT_UNKNOWN) {
+           struct stat sp = {0};
+           stat(string{pathname, ep->d_name}, &sp);
+           is_directory = S_ISDIR(sp.st_mode);
+         }
++#endif
+         if(is_directory) {
+           if(strmatch(ep->d_name, pattern)) list.append(ep->d_name);
+         }
+@@ -215,7 +221,13 @@ private:
+       while((ep = readdir(dp))) {
+         if(!strcmp(ep->d_name, ".")) continue;
+         if(!strcmp(ep->d_name, "..")) continue;
++#if defined(PLATFORM_HAIKU)
++        struct stat sp = {0};
++        stat(string{pathname, ep->d_name}, &sp);
++        if(S_ISDIR(sp.st_mode)) {
++#else
+         if((ep->d_type & DT_DIR) == 0) {
++#endif
+           if(strmatch(ep->d_name, pattern)) list.append(ep->d_name);
+         }
+       }
+diff --git a/nall/intrinsics.hpp b/nall/intrinsics.hpp
+index 7377ed1..7a4784a 100644
+--- a/nall/intrinsics.hpp
++++ b/nall/intrinsics.hpp
+@@ -3,7 +3,7 @@
+ 
+ struct Intrinsics {
+   enum class Compiler : unsigned { Clang, GCC, VisualCPP, Unknown };
+-  enum class Platform : unsigned { Windows, MacOSX, X, Unknown };  //X = Linux, BSD, etc
++  enum class Platform : unsigned { Windows, MacOSX, X, BeAPI, Unknown };  //X = Linux, BSD, etc
+   enum class Architecture : unsigned { x86, amd64, ARM, aarch64, Unknown };
+   enum class Endian : unsigned { LSB, MSB, Unknown };
+ 
+@@ -38,6 +38,9 @@ struct Intrinsics {
+ #elif defined(linux) || defined(__linux__) || defined(__sun__) || defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__GNU__)
+   #define PLATFORM_X
+   Intrinsics::Platform Intrinsics::platform() { return Intrinsics::Platform::X; }
++#elif defined(__HAIKU__)
++  #define PLATFORM_HAIKU
++  Intrinsics::Platform Intrinsics::platform() { return Intrinsics::Platform::BeAPI; }
+ #else
+   #warning "unable to detect platform"
+   #define PLATFORM_UNKNOWN
+diff --git a/target-libretro/Makefile b/target-libretro/Makefile
+index 997cd48..13dc9ba 100644
+--- a/target-libretro/Makefile
++++ b/target-libretro/Makefile
+@@ -9,6 +9,8 @@ core_installdir := $(prefix)/lib
+ 
+ ifeq ($(platform),linux)
+   flags += -fPIC
++else ifeq ($(platform),haiku)
++  flags += -fPIC
+ else ifeq ($(platform),osx)
+   flags += -fPIC
+ else ifneq (,$(findstring ios,$(platform)))
+@@ -47,6 +49,8 @@ obj/libretro-$(profile).o: $(ui)/libretro.cpp $(ui)/*
+ build: $(objects)
+ ifeq ($(platform),linux)
+ 	$(compiler) -o out/bsnes_$(profile)_libretro.so -shared $(objects) -ldl -Wl,--no-undefined -Wl,--version-script=$(ui)/link.T
++else ifeq ($(platform),haiku)
++	$(compiler) -o out/bsnes_$(profile)_libretro.so -shared $(objects) -lnetwork -Wl,--no-undefined -Wl,--version-script=$(ui)/link.T
+ else ifneq (,$(findstring ios,$(platform)))
+   ifeq ($(platform),ios-arm64)
+ 		$(compiler) -o out/bsnes_$(profile)_libretro_ios.dylib -dynamiclib $(objects) -isysroot $(IOSSDK) -arch arm64
+-- 
+2.16.2
+
+
+From 246e7cdeb44452454c4c4b8e3f148f1a09693a04 Mon Sep 17 00:00:00 2001
+From: Benjamin FRANCOIS <kwyxz@kwyxz.org>
+Date: Sat, 3 Mar 2018 02:06:40 +0000
+Subject: Fix endianness
+
+
+diff --git a/nall/platform.hpp b/nall/platform.hpp
+index e5e3f8e..36f0f6c 100644
+--- a/nall/platform.hpp
++++ b/nall/platform.hpp
+@@ -44,7 +44,11 @@ namespace Math {
+   #ifdef __linux__
+     #include <endian.h>
+   #else
+-    #include <machine/endian.h>
++    #if defined(__HAIKU__)
++      #include <posix/endian.h>
++    #else
++      #include <machine/endian.h>
++    #endif
+   #endif
+   #include <unistd.h>
+   #include <pwd.h>
+-- 
+2.16.2
+

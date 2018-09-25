@@ -1,0 +1,579 @@
+From 9f27041eee31229675fa88a6fdddf299e586914a Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 14:52:03 +0200
+Subject: Tell perl that BFS has a link count of 1
+
+
+diff --git a/cpan/File-Temp/lib/File/Temp.pm b/cpan/File-Temp/lib/File/Temp.pm
+index 817c6d9..c3298a6 100644
+--- a/cpan/File-Temp/lib/File/Temp.pm
++++ b/cpan/File-Temp/lib/File/Temp.pm
+@@ -1425,7 +1425,8 @@ sub unlink0 {
+     # On NFS the link count may still be 1 but we can't know that
+     # we are on NFS.  Since we can't be sure, we'll defer it
+ 
+-    return 1 if $fh[3] == 0 || $^O eq 'cygwin';
++    # On haiku, the link count seems to be always 1 (at least for BFS)
++    return 1 if $fh[3] == 0 || $^O eq 'cygwin' || $^O eq 'haiku';
+   }
+   # fall-through if we can't unlink now
+   _deferred_unlink($fh, $path, 0);
+-- 
+2.16.2
+
+
+From 33fc48f52ae22336a1432055dd07223debb1cee7 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 14:52:53 +0200
+Subject: Haiku defines, but does not implement O_EXLOCK
+
+
+diff --git a/cpan/File-Temp/t/lock.t b/cpan/File-Temp/t/lock.t
+index ff8c7f9..4364bf6 100644
+--- a/cpan/File-Temp/t/lock.t
++++ b/cpan/File-Temp/t/lock.t
+@@ -8,7 +8,8 @@ use Fcntl;
+ BEGIN {
+ # see if we have O_EXLOCK
+   eval { &Fcntl::O_EXLOCK; };
+-  if ($@) {
++  if ($@  || $^O eq 'haiku') {
++    # haiku doesn't implement O_EXLOCK yet (but it defines the value)
+     plan skip_all => 'Do not seem to have O_EXLOCK';
+   } else {
+     plan tests => 4;
+-- 
+2.16.2
+
+
+From 61640c72c6eead2d43671f3c9c9ca9ff1b181fb6 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 14:53:40 +0200
+Subject: haiku sets all its specifics via Configure
+
+
+diff --git a/hints/haiku.sh b/hints/haiku.sh
+index fa8ebe5..0f09f53 100644
+--- a/hints/haiku.sh
++++ b/hints/haiku.sh
+@@ -1,44 +1 @@
+-# Haiku hints file
+-# $Id$
+-
+-case "$prefix" in
+-'') prefix="/boot/common" ;;
+-*) ;; # pass the user supplied value through
+-esac
+-
+-libpth='/boot/home/config/lib /boot/common/lib /system/lib'
+-usrinc='/boot/develop/headers/posix'
+-locinc='/boot/home/config/include /boot/common/include /boot/develop/headers'
+-
+-libc='/system/lib/libroot.so'
+-libs='-lnetwork'
+-
+-# Use Haiku's malloc() by default.
+-case "$usemymalloc" in
+-'') usemymalloc='n' ;;
+-esac
+-
+-# Haiku generally supports hard links, but the default file system (BFS)
+-# doesn't. So better avoid using hard links.
+-d_link='undef'
+-dont_use_nlink='define'
+-
+-# The array syserrlst[] is useless for the most part.
+-# Large negative numbers really kind of suck in arrays.
+-d_syserrlst='undef'
+-
+-# Haiku uses gcc.
+-cc="gcc"
+-ld='gcc'
+-
+-# The runtime loader library path variable is LIBRARY_PATH.
+-case "$ldlibpthname" in
+-'') ldlibpthname=LIBRARY_PATH ;;
+-esac
+-
+-# as of alpha 4.1 (at the latest) some symbols are versioned,
+-# confusing the nm lookup
+-case "$usenm" in
+-'') usenm='undef' ;;
+-esac
+-
++# haiku sets all its specifics via Configure
+-- 
+2.16.2
+
+
+From 84af5190c5255be829ce88e5e31868a583832b47 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 14:54:15 +0200
+Subject: Tell perl that Haiku needs haikuish.h installed as well
+
+
+diff --git a/installperl b/installperl
+index af61203..ed94fe6 100755
+--- a/installperl
++++ b/installperl
+@@ -381,6 +381,11 @@ elsif ($Is_Cygwin) { # On Cygwin symlink it to CORE to make Makefile happy
+ 
+     # AIX needs perl.exp installed as well.
+     push(@corefiles,'perl.exp') if $^O eq 'aix';
++    if ($^O eq 'haiku') {
++	# Haiku needs haikuish.h installed as well.
++	mkpath("$installarchlib/CORE/haiku", $opts{verbose}, 0777);
++	push(@corefiles,'haiku/haikuish.h');
++    }
+ }
+ 
+ 
+-- 
+2.16.2
+
+
+From 914528ca35f7a394db694ef892651420977e0157 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 14:55:13 +0200
+Subject: Fix handling of exit codes on Haiku
+
+
+diff --git a/t/run/exit.t b/t/run/exit.t
+index ce3270e..cab9a79 100644
+--- a/t/run/exit.t
++++ b/t/run/exit.t
+@@ -55,18 +55,18 @@ is( ${^CHILD_ERROR_NATIVE}, $native_success,  'Normal exit ${^CHILD_ERROR_NATIVE
+ if (!$vms_exit_mode) {
+   my $posix_ok = eval { require POSIX; };
+   my $wait_macros_ok = defined &POSIX::WIFEXITED;
+-  eval { POSIX::WIFEXITED(${^CHILD_ERROR_NATIVE}) };
++  eval { POSIX::WIFEXITED($?) };
+   $wait_macros_ok = 0 if $@;
+   $exit = run('exit 42');
+   is( $exit >> 8, 42,             'Non-zero exit' );
+   is( $exit, $?,                  'Non-zero exit $?' );
+-  isnt( !${^CHILD_ERROR_NATIVE}, 0, 'Non-zero exit ${^CHILD_ERROR_NATIVE}' );
++  isnt( ${^CHILD_ERROR_NATIVE}, 0, 'Non-zero exit ${^CHILD_ERROR_NATIVE}' );
+   SKIP: {
+     skip("No POSIX", 3) unless $posix_ok;
+     skip("No POSIX wait macros", 3) unless $wait_macros_ok;
+-    ok(POSIX::WIFEXITED(${^CHILD_ERROR_NATIVE}), "WIFEXITED");
+-    ok(!POSIX::WIFSIGNALED(${^CHILD_ERROR_NATIVE}), "WIFSIGNALED");
+-    is(POSIX::WEXITSTATUS(${^CHILD_ERROR_NATIVE}), 42, "WEXITSTATUS");
++    ok(POSIX::WIFEXITED($?), "WIFEXITED");
++    ok(!POSIX::WIFSIGNALED($?), "WIFSIGNALED");
++    is(POSIX::WEXITSTATUS($?), 42, "WEXITSTATUS");
+   }
+ 
+   SKIP: {
+@@ -85,9 +85,9 @@ if (!$vms_exit_mode) {
+     SKIP: {
+       skip("No POSIX", 3) unless $posix_ok;
+       skip("No POSIX wait macros", 3) unless $wait_macros_ok;
+-      ok(!POSIX::WIFEXITED(${^CHILD_ERROR_NATIVE}), "WIFEXITED");
+-      ok(POSIX::WIFSIGNALED(${^CHILD_ERROR_NATIVE}), "WIFSIGNALED");
+-      is(POSIX::WTERMSIG(${^CHILD_ERROR_NATIVE}), 15, "WTERMSIG");
++      ok(!POSIX::WIFEXITED($?), "WIFEXITED");
++      ok(POSIX::WIFSIGNALED($?), "WIFSIGNALED");
++      is(POSIX::WTERMSIG($?), 15, "WTERMSIG");
+     }
+   }
+ 
+-- 
+2.16.2
+
+
+From 16d97441ee948b2813fde6b2aa869af70aabbe8e Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 15:00:44 +0200
+Subject: Fix include path of errno.h
+
+
+diff --git a/ext/Errno/Errno_pm.PL b/ext/Errno/Errno_pm.PL
+index d345e98..1fe9312 100644
+--- a/ext/Errno/Errno_pm.PL
++++ b/ext/Errno/Errno_pm.PL
+@@ -139,7 +139,7 @@ sub get_files {
+ 	$file{$linux_errno_h} = 1;
+     } elsif ($^O eq 'haiku') {
+ 	# hidden in a special place
+-	$file{'/boot/develop/headers/posix/errno.h'} = 1;
++	$file{'/boot/system/develop/headers/posix/errno.h'} = 1;
+ 
+     } elsif ($^O eq 'vos') {
+ 	# avoid problem where cpp returns non-POSIX pathnames
+-- 
+2.16.2
+
+
+From 7dcaa0868e6eccf7019f9e6c6bb81366aa0ee852 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sat, 28 Sep 2013 13:46:42 +0200
+Subject: Adjust ExtUtils::MakeMaker for PM-Haiku.
+
+* MakeMaker-projects trying to install into 'site-perl' while specifying
+  PREFIX would end up using a wrong 'site-perl' prefix.
+* Split MM_Haiku.pm off MM_BeOS.pm, implementing Haiku-specific overrides
+  for MakeMaker.
+
+diff --git a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM.pm b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM.pm
+index b327932..ff255e3 100644
+--- a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM.pm
++++ b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM.pm
+@@ -60,7 +60,8 @@ if( $^O eq 'MSWin32' ) {
+ $Is{UWIN}   = $^O =~ /^uwin(-nt)?$/;
+ $Is{Cygwin} = $^O eq 'cygwin';
+ $Is{NW5}    = $Config{osname} eq 'NetWare';  # intentional
+-$Is{BeOS}   = ($^O =~ /beos/i or $^O eq 'haiku');
++$Is{BeOS}   = $^O =~ /beos/i;
++$Is{Haiku}  = $^O eq 'haiku';
+ $Is{DOS}    = $^O eq 'dos';
+ if( $Is{NW5} ) {
+     $^O = 'NetWare';
+diff --git a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+new file mode 100644
+index 0000000..81e5f99
+--- /dev/null
++++ b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+@@ -0,0 +1,70 @@
++package ExtUtils::MM_Haiku;
++
++use strict;
++
++=head1 NAME
++
++ExtUtils::MM_Haiku - methods to override UN*X behaviour in ExtUtils::MakeMaker
++
++=head1 SYNOPSIS
++
++ use ExtUtils::MM_Haiku;	# Done internally by ExtUtils::MakeMaker if needed
++
++=head1 DESCRIPTION
++
++See ExtUtils::MM_Unix for a documentation of the methods provided
++there. This package overrides the implementation of these methods, not
++the semantics.
++
++=over 4
++
++=cut
++
++use ExtUtils::MakeMaker::Config;
++use File::Spec;
++require ExtUtils::MM_Any;
++require ExtUtils::MM_Unix;
++
++our @ISA = qw( ExtUtils::MM_Any ExtUtils::MM_Unix );
++our $VERSION = '6.66';
++
++
++=item os_flavor
++
++Haiku is Haiku.
++
++=cut
++
++sub os_flavor {
++    return('Haiku');
++}
++
++=head3 init_INSTALL_from_PREFIX
++
++  $mm->init_INSTALL_from_PREFIX;
++
++=cut
++
++sub init_INSTALL_from_PREFIX {
++    my $self = shift;
++
++	# If a prefix has been given from outside, the default implementation
++	# will set PERLPREFIX, SITEPREFIX and VENDORPREFIX to identical values,
++	# but due to the way how Haiku's package management works, PERLPREFIX
++	# and VENDORPREFIX are not writable at all (as they're being populated
++	# from installed packages via package-fs). SITEPREFIX, however needs to
++	# be set to a path which can be written to (since site packages are
++	# expected to be installed "manually") - so we make sure it points
++	# to a 'non-packaged'-folder:
++    my $prefixGiven = $self->{PREFIX};
++	$self->SUPER::init_INSTALL_from_PREFIX();
++	if ($prefixGiven) {
++        $self->{SITEPREFIX} = '$(PREFIX)/non-packaged';
++    } 
++}
++
++=back
++
++1;
++__END__
++
+-- 
+2.16.2
+
+
+From 2d0804e071dfc13841b9d8659baf987538e2c721 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Tue, 8 Oct 2013 22:16:37 +0200
+Subject: Avoid using -rpath for dynamic modules.
+
+
+diff --git a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+index 81e5f99..25ace13 100644
+--- a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
++++ b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+@@ -65,6 +65,33 @@ sub init_INSTALL_from_PREFIX {
+ 
+ =back
+ 
++=head3 init_others
++
++    $MM->init_others();
++
++Initializes the macro definitions having to do with compiling and
++linking used by tools_other() and places them in the $MM object.
++
++If there is no description, its the same as the parameter to
++WriteMakefile() documented in ExtUtils::MakeMaker.
++
++=cut
++
++sub init_others {
++    my $self = shift;
++
++	$self->SUPER::init_others();
++
++	# Don't use run-time paths for libraries required by dynamic
++	# modules on Haiku, as that wouldn't work should a library be moved
++	# (for instance because the package has been activated somewhere else).
++    $self->{LD_RUN_PATH} = "";
++
++    return;
++}
++
++=back
++
+ 1;
+ __END__
+ 
+-- 
+2.16.2
+
+
+From e464c8046abea32d331f9af2c0b8fe6d1aaad228 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Tue, 8 Oct 2013 22:17:26 +0200
+Subject: Add script sitecustomize.pl for setting up @INC as we need it.
+
+
+diff --git a/sitecustomize.pl b/sitecustomize.pl
+new file mode 100644
+index 0000000..a321e51
+--- /dev/null
++++ b/sitecustomize.pl
+@@ -0,0 +1,36 @@
++#! perl
++
++use Config;
++
++# Remove all compiled-in paths referring to Perl's installation dir
++# and replace them with a static set of paths that implement the intended
++# searching order:
++my @ourINC = (
++	"/boot/home/config/lib/perl5/$Config{version}/$Config{archname}",
++	"/boot/home/config/lib/perl5/$Config{version}",
++	"/boot/home/config/non-packaged/lib/perl5/site_perl/$Config{version}/$Config{archname}",
++	"/boot/home/config/non-packaged/lib/perl5/site_perl/$Config{version}",
++	"/boot/home/config/lib/perl5/vendor_perl/$Config{version}/$Config{archname}",
++	"/boot/home/config/lib/perl5/vendor_perl/$Config{version}",
++	"/boot/home/config/lib/perl5/vendor_perl",
++	"/boot/system/lib/perl5/$Config{version}/$Config{archname}",
++	"/boot/system/lib/perl5/$Config{version}",
++	"/boot/system/non-packaged/lib/perl5/site_perl/$Config{version}/$Config{archname}",
++	"/boot/system/non-packaged/lib/perl5/site_perl/$Config{version}",
++	"/boot/system/lib/perl5/vendor_perl/$Config{version}/$Config{archname}",
++	"/boot/system/lib/perl5/vendor_perl/$Config{version}",
++	"/boot/system/lib/perl5/vendor_perl",
++);
++my @newINC;
++my $removedPerlPaths;
++foreach my $inc (@INC) {
++	if ($inc =~ m[^/packages/perl-$Config{version}-\d+/.self/]o) {
++		if (! $removedPerlPaths) {
++			push @newINC, @ourINC;
++			$removedPerlPaths = 1;
++		}
++		next;
++	}
++	push @newINC, $inc;
++}
++@INC = @newINC;
+-- 
+2.16.2
+
+
+From 4484b47eacf707786e595c4dc90fc7c2faba45a6 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Wed, 9 Oct 2013 20:29:38 +0200
+Subject: Fix initialization check for CPAN.
+
+* On Haiku, only the site-lib directories will ever be writable,
+  as the others read-only. This avoids CPAN asking for a way to
+  circumvent unwritable lib dirs.
+
+diff --git a/cpan/CPAN/lib/CPAN/FirstTime.pm b/cpan/CPAN/lib/CPAN/FirstTime.pm
+index 531c115..b9d87d7 100644
+--- a/cpan/CPAN/lib/CPAN/FirstTime.pm
++++ b/cpan/CPAN/lib/CPAN/FirstTime.pm
+@@ -2068,6 +2068,12 @@ sub _print_urllist {
+ }
+ 
+ sub _can_write_to_libdirs {
++    if ($^O eq 'haiku') {
++    	# on Haiku, the other dirs are never writable, as they are
++    	# being populated by packagefs
++        return -w $Config{installsitelib}
++            && -w $Config{installsitearch}
++    }
+     return -w $Config{installprivlib}
+         && -w $Config{installarchlib}
+         && -w $Config{installsitelib}
+-- 
+2.16.2
+
+
+From 53011d2e543af3a605f791d87989da89cb449bb4 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 13 Oct 2013 17:32:50 +0200
+Subject: Add support for HAIKU_USE_VENDOR_DIRECTORIES.
+
+* Adjust MakeMaker to automatically switch to vendor directories if
+  requested via HAIKU_USE_VENDOR_DIRECTORIES.
+
+diff --git a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+index 25ace13..8a04ead 100644
+--- a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
++++ b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+@@ -29,21 +29,20 @@ our @ISA = qw( ExtUtils::MM_Any ExtUtils::MM_Unix );
+ our $VERSION = '6.66';
+ 
+ 
+-=item os_flavor
+-
+-Haiku is Haiku.
+-
+-=cut
+-
+ sub os_flavor {
+     return('Haiku');
+ }
+ 
+-=head3 init_INSTALL_from_PREFIX
++sub init_main {
++    my $self = shift;
+ 
+-  $mm->init_INSTALL_from_PREFIX;
++    # switch to vendor directories if requested.
++    if ($ENV{'HAIKU_USE_VENDOR_DIRECTORIES'}) {
++        $self->{INSTALLDIRS} ||= 'vendor';
++    }
+ 
+-=cut
++    $self->SUPER::init_main();
++}
+ 
+ sub init_INSTALL_from_PREFIX {
+     my $self = shift;
+@@ -63,20 +62,6 @@ sub init_INSTALL_from_PREFIX {
+     } 
+ }
+ 
+-=back
+-
+-=head3 init_others
+-
+-    $MM->init_others();
+-
+-Initializes the macro definitions having to do with compiling and
+-linking used by tools_other() and places them in the $MM object.
+-
+-If there is no description, its the same as the parameter to
+-WriteMakefile() documented in ExtUtils::MakeMaker.
+-
+-=cut
+-
+ sub init_others {
+     my $self = shift;
+ 
+@@ -90,8 +75,6 @@ sub init_others {
+     return;
+ }
+ 
+-=back
+-
+ 1;
+ __END__
+ 
+-- 
+2.16.2
+
+
+From 76f644d2913e2aaf2f0477da7ec35bc40a40230f Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Fri, 9 Jun 2017 21:30:33 +0200
+Subject: disable fstack-protector for Haiku
+
+
+diff --git a/Configure b/Configure
+index bdcfaf1..acdd3da 100755
+--- a/Configure
++++ b/Configure
+@@ -5507,6 +5507,7 @@ default|recommended)
+ 	# thing. (NWC)
+ 	case "$osname" in
+ 	amigaos) ;; # -fstack-protector builds but doesn't work
++	haiku) ;; # -fstack-protector builds but doesn't work
+ 	*)	case "$gccversion" in
+ 		?*)	set stack-protector-strong -fstack-protector-strong
+ 			eval $checkccflag
+-- 
+2.16.2
+
+
+From 0ad4290008db0015555413d6efecfbb98e5589e3 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Wed, 14 Mar 2018 21:33:54 +0100
+Subject: sitecustomize.pl: use the shortVersion for site and vendor.
+
+
+diff --git a/sitecustomize.pl b/sitecustomize.pl
+index a321e51..76c0e46 100644
+--- a/sitecustomize.pl
++++ b/sitecustomize.pl
+@@ -8,17 +8,17 @@ use Config;
+ my @ourINC = (
+ 	"/boot/home/config/lib/perl5/$Config{version}/$Config{archname}",
+ 	"/boot/home/config/lib/perl5/$Config{version}",
+-	"/boot/home/config/non-packaged/lib/perl5/site_perl/$Config{version}/$Config{archname}",
+-	"/boot/home/config/non-packaged/lib/perl5/site_perl/$Config{version}",
+-	"/boot/home/config/lib/perl5/vendor_perl/$Config{version}/$Config{archname}",
+-	"/boot/home/config/lib/perl5/vendor_perl/$Config{version}",
++	"/boot/home/config/non-packaged/lib/perl5/site_perl/$Config{revision}.$Config{patchlevel}/$Config{archname}",
++	"/boot/home/config/non-packaged/lib/perl5/site_perl/$Config{revision}.$Config{patchlevel}",
++	"/boot/home/config/lib/perl5/vendor_perl/$Config{revision}.$Config{patchlevel}/$Config{archname}",
++	"/boot/home/config/lib/perl5/vendor_perl/$Config{revision}.$Config{patchlevel}",
+ 	"/boot/home/config/lib/perl5/vendor_perl",
+ 	"/boot/system/lib/perl5/$Config{version}/$Config{archname}",
+ 	"/boot/system/lib/perl5/$Config{version}",
+-	"/boot/system/non-packaged/lib/perl5/site_perl/$Config{version}/$Config{archname}",
+-	"/boot/system/non-packaged/lib/perl5/site_perl/$Config{version}",
+-	"/boot/system/lib/perl5/vendor_perl/$Config{version}/$Config{archname}",
+-	"/boot/system/lib/perl5/vendor_perl/$Config{version}",
++	"/boot/system/non-packaged/lib/perl5/site_perl/$Config{revision}.$Config{patchlevel}/$Config{archname}",
++	"/boot/system/non-packaged/lib/perl5/site_perl/$Config{revision}.$Config{patchlevel}",
++	"/boot/system/lib/perl5/vendor_perl/$Config{revision}.$Config{patchlevel}/$Config{archname}",
++	"/boot/system/lib/perl5/vendor_perl/$Config{revision}.$Config{patchlevel}",
+ 	"/boot/system/lib/perl5/vendor_perl",
+ );
+ my @newINC;
+-- 
+2.16.2
+

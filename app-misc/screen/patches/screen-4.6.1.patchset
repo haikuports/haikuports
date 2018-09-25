@@ -1,0 +1,145 @@
+From 64e0be71b9b48222a13318fbc3f311e93fdb982b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Fri, 20 Jun 2014 17:16:37 +0200
+Subject: Haiku port: Check for some libraries
+
+* libnetwork for sockets,
+* libbsd for getpass.
+
+diff --git a/configure.ac b/configure.ac
+index 28237f5..825db6b 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1229,7 +1229,9 @@ AC_TRY_LINK([
+ #include <langinfo.h>
+ ],[nl_langinfo(CODESET);], AC_MSG_RESULT(yes);AC_DEFINE(HAVE_NL_LANGINFO), AC_MSG_RESULT(no))
+ 
+-AC_SEARCH_LIBS(gethostname, nsl)
++AC_SEARCH_LIBS(gethostname, nsl network)
++
++AC_CHECK_LIB(bsd, getpass)
+ 
+ AC_CHECK_FUNCS(rename fchmod fchown strerror lstat _exit utimes vsnprintf getcwd setlocale strftime)
+ 
+-- 
+2.12.2
+
+
+From 1ca0b0f04bfd12ef1a60e8bac2b3bcdf5d2ce3f8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Fri, 20 Jun 2014 17:18:32 +0200
+Subject: Haiku port: temporary workaround for missing utmp
+
+
+diff --git a/acconfig.h b/acconfig.h
+index 4e5cda0..5b98970 100644
+--- a/acconfig.h
++++ b/acconfig.h
+@@ -191,7 +191,9 @@
+  * If screen is installed with permissions to update /etc/utmp (such
+  * as if it is installed set-uid root), define UTMPOK.
+  */
+-#define UTMPOK
++#ifndef __HAIKU__
++# define UTMPOK
++#endif
+ 
+ /* Set LOGINDEFAULT to one (1)
+  * if you want entries added to /etc/utmp by default, else set it to
+-- 
+2.12.2
+
+
+From 20c6f795916afe6566706741850917eecd036da7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Thu, 24 Sep 2015 01:28:59 +0200
+Subject: configure.in: drop test on $posix which is not set anymore
+
+
+diff --git a/configure.ac b/configure.ac
+index 825db6b..be973ff 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1128,9 +1128,7 @@ AC_TRY_COMPILE([#include <sys/types.h>
+ if test -z "$butterfly"; then
+ AC_CHECKING(for termio or termios)
+ AC_TRY_CPP([#include <termio.h>], AC_DEFINE(TERMIO),
+-if test -n "$posix"; then
+ AC_TRY_CPP([#include <termios.h>], AC_DEFINE(TERMIO))
+-fi
+ )
+ fi
+ 
+-- 
+2.12.2
+
+
+From eb3d91aece59322233d6022e224d6744a0fc6be7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Thu, 24 Sep 2015 01:29:12 +0200
+Subject: configure.in: fix libnetwork test for Haiku
+
+gethostname is actually in libroot so won't bring libnetwork in.
+
+diff --git a/configure.ac b/configure.ac
+index be973ff..85e081d 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1227,7 +1227,8 @@ AC_TRY_LINK([
+ #include <langinfo.h>
+ ],[nl_langinfo(CODESET);], AC_MSG_RESULT(yes);AC_DEFINE(HAVE_NL_LANGINFO), AC_MSG_RESULT(no))
+ 
+-AC_SEARCH_LIBS(gethostname, nsl network)
++AC_SEARCH_LIBS(gethostname, nsl)
++AC_SEARCH_LIBS(socket, network)
+ 
+ AC_CHECK_LIB(bsd, getpass)
+ 
+-- 
+2.12.2
+
+
+From b4449b509f25aea0c02cc6181e00b1dc801a1b60 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Thu, 24 Sep 2015 01:34:32 +0200
+Subject: sched: actually calculate the nfds arg to select
+
+Some select() implementations don't like being called with
+higher nfds than actually set in the masks.
+
+diff --git a/sched.c b/sched.c
+index c2e00df..6ee47e3 100644
+--- a/sched.c
++++ b/sched.c
+@@ -123,6 +123,7 @@ sched()
+   struct event *timeoutev = 0;
+   struct timeval timeout;
+   int nsel;
++  int nfds;
+ 
+   for (;;)
+     {
+@@ -186,9 +187,17 @@ sched()
+       debug("\n");
+ #endif
+ 
+-      nsel = select(FD_SETSIZE, &r, &w, (fd_set *)0, timeoutev ? &timeout : (struct timeval *) 0);
+-      if (nsel < 0)
+-	{
++    nsel = select(FD_SETSIZE, &r, &w, (fd_set *)0, timeoutev ? &timeout : (struct timeval *) 0);
++	nfds = 1;
++	for (nsel = 0; nsel < FD_SETSIZE; nsel++)
++		if (FD_ISSET(nsel, &r))
++			nfds = MAX(nfds, nsel + 1);
++	for (nsel = 0; nsel < FD_SETSIZE; nsel++)
++		if (FD_ISSET(nsel, &w))
++			nfds = MAX(nfds, nsel + 1);
++
++	nsel = select(nfds, &r, &w, (fd_set *) 0, timeoutev ? &timeout : (struct timeval *)0);      if (nsel < 0)
++	if (nsel < 0) {
+ 	  if (errno != EINTR)
+ 	    {
+ #if defined(sgi) && defined(SVR4)
+-- 
+2.12.2
+

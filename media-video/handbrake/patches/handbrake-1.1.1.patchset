@@ -1,0 +1,3839 @@
+From 68995c830c51d62715d82b18e9b1a861e2e3f659 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 4 Oct 2014 17:43:55 +0000
+Subject: define HB_NORMAL_PRIORITY
+
+
+diff --git a/libhb/ports.h b/libhb/ports.h
+index b1b478d..cc84090 100644
+--- a/libhb/ports.h
++++ b/libhb/ports.h
+@@ -112,7 +112,7 @@ void hb_get_user_config_filename( char name[1024], char *fmt, ... );
+  ***********************************************************************/
+ typedef struct hb_thread_s hb_thread_t;
+ 
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+ #  define HB_LOW_PRIORITY    5
+ #  define HB_NORMAL_PRIORITY 10
+ #elif defined( SYS_DARWIN )
+-- 
+2.10.2
+
+
+From aec83dfd592f64d29613a45d8a4dbf4652431a79 Mon Sep 17 00:00:00 2001
+From: Alexander von Gluck IV <kallisti5@unixzen.com>
+Date: Sat, 8 Dec 2012 18:23:16 +0000
+Subject: Haiku: Reintroduce original BeOS code
+
+
+diff --git a/haiku/HBApp.cpp b/haiku/HBApp.cpp
+new file mode 100644
+index 0000000..702c74d
+--- /dev/null
++++ b/haiku/HBApp.cpp
+@@ -0,0 +1,85 @@
++#include "HBApp.h"
++#include "MainWindow.h"
++#include "ScanWindow.h"
++
++#include "hb.h"
++
++int main()
++{
++    HBApp * app = new HBApp();
++    app->Run();
++    delete app;
++    return 0;
++}
++
++HBApp::HBApp()
++    : BApplication( "application/x-vnd.titer-handbrake" )
++{
++    fHandle = hb_init( HB_DEBUG_ALL, 0 );
++    
++    fMainWin = new MainWindow( fHandle );
++    fScanWin = new ScanWindow( fHandle );
++    fScanWin->AddToSubset( fMainWin );
++
++    fMainWin->Show();
++    fScanWin->Show();
++
++    SetPulseRate( 200000 ); /* 0.2 second */
++}
++
++void HBApp::MessageReceived( BMessage * message )
++{
++    switch( message->what )
++    {
++        default:
++            BApplication::MessageReceived( message );
++            break;
++    }
++}
++
++void HBApp::RefsReceived( BMessage * message )
++{
++}
++
++void HBApp::Pulse()
++{
++    hb_state_t s;
++    hb_get_state( fHandle, &s );
++
++    switch( s.state )
++    {
++        case HB_STATE_IDLE:
++            break;
++
++        case HB_STATE_SCANNING:
++            fScanWin->Update( &s );
++            break;
++
++        case HB_STATE_SCANDONE:
++            if( hb_list_count( hb_get_titles( fHandle ) ) )
++            {
++                /* Success */
++                fScanWin->Hide();
++                fMainWin->Update( &s );
++            }
++            else
++            {
++                /* Invalid volume */
++                fScanWin->Update( &s );
++            }
++            break;
++
++        case HB_STATE_WORKING:
++        case HB_STATE_PAUSED:
++        case HB_STATE_WORKDONE:
++            fMainWin->Update( &s );
++            break;
++    }
++}
++
++bool HBApp::QuitRequested()
++{
++    hb_close( &fHandle );
++    return BApplication::QuitRequested();
++}
++
+diff --git a/haiku/HBApp.h b/haiku/HBApp.h
+new file mode 100644
+index 0000000..042a791
+--- /dev/null
++++ b/haiku/HBApp.h
+@@ -0,0 +1,28 @@
++#ifndef HB_APP_H
++#define HB_APP_H
++
++#include <Application.h>
++
++#include "hb.h"
++
++class MainWindow;
++class ScanWindow;
++
++class HBApp : public BApplication
++{
++    public:
++                     HBApp();
++        void         MessageReceived( BMessage * message );
++        void         RefsReceived( BMessage * message );
++        void         Pulse();
++        bool         QuitRequested();
++
++    private:
++        MainWindow * fMainWin;
++        ScanWindow * fScanWin;
++        
++        hb_handle_t * fHandle;
++};
++
++#endif
++
+diff --git a/haiku/MainWindow.cpp b/haiku/MainWindow.cpp
+new file mode 100644
+index 0000000..5b2741b
+--- /dev/null
++++ b/haiku/MainWindow.cpp
+@@ -0,0 +1,986 @@
++#include <app/Application.h>
++#include <interface/Box.h>
++#include <interface/Button.h>
++#include <interface/CheckBox.h>
++#include <interface/MenuField.h>
++#include <interface/MenuItem.h>
++#include <interface/PopUpMenu.h>
++#include <interface/RadioButton.h>
++#include <interface/Screen.h>
++#include <interface/Slider.h>
++#include <interface/StatusBar.h>
++#include <interface/StringView.h>
++#include <interface/TextControl.h>
++#include <storage/FilePanel.h>
++#include <storage/Path.h>
++#include <support/String.h>
++
++#include "MainWindow.h"
++#include "PicWindow.h"
++#include "QueueWindow.h"
++
++#define MSG_TITLEPOPUP   'titl'
++#define MSG_CHAPTERPOPUP 'chap'
++#define MSG_FORMATPOPUP  'form'
++#define MSG_CODECSPOPUP  'code'
++#define MSG_BROWSE       'brow'
++#define MSG_QUALITYRADIO 'radi'
++#define MSG_SLIDER       'slid'
++#define MSG_PICSETTINGS  'pise'
++#define MSG_QUEUE_ENABLE 'quen'
++#define MSG_QUEUE_ADD    'quad'
++#define MSG_QUEUE_SHOW   'qush'
++#define MSG_PAUSE        'paus'
++#define MSG_START        'star'
++
++static int FormatSettings[3][4] =
++  { { HB_MUX_MP4 | HB_VCODEC_FFMPEG | HB_ACODEC_FAAC,
++      HB_MUX_MP4 | HB_VCODEC_X264   | HB_ACODEC_FAAC,
++      0,
++      0 },
++    { HB_MUX_AVI | HB_VCODEC_FFMPEG | HB_ACODEC_LAME,
++      HB_MUX_AVI | HB_VCODEC_FFMPEG | HB_ACODEC_AC3,
++      HB_MUX_AVI | HB_VCODEC_X264   | HB_ACODEC_LAME,
++      HB_MUX_AVI | HB_VCODEC_X264   | HB_ACODEC_AC3 },
++    { HB_MUX_OGM | HB_VCODEC_FFMPEG | HB_ACODEC_VORBIS,
++      HB_MUX_OGM | HB_VCODEC_FFMPEG | HB_ACODEC_LAME,
++      0,
++      0 } };
++
++MainView::MainView( hb_handle_t * handle )
++    : BView( BRect( 0,0,700,475 ), NULL, B_FOLLOW_NONE, B_WILL_DRAW )
++{
++    fHandle = handle;
++
++    BRect r, b;
++    BBox * box;
++    
++    SetViewColor( ui_color( B_PANEL_BACKGROUND_COLOR ) );
++
++    /* Source box */
++    b = Bounds();
++    r = BRect( 10,10,b.right/2-5,135 );
++    box = new BBox( r );
++    box->SetLabel( "Source" );
++    AddChild( box );
++
++    b = box->Bounds();
++
++    r = BRect( 10,15,b.right/4,35 );
++    fSrcDVD1String = new BStringView( r, NULL, "DVD:" );
++    box->AddChild( fSrcDVD1String );
++
++    r = BRect( b.right/4+1,15,b.right-10,35 );
++    fSrcDVD2String = new BStringView( r, NULL, "" );
++    fSrcDVD2String->SetAlignment( B_ALIGN_RIGHT );
++    box->AddChild( fSrcDVD2String );
++
++    r = BRect( 10,40,b.right-10,60 );
++    fSrcTitlePopUp = new BPopUpMenu( "" );
++    fSrcTitleMenu  = new BMenuField( r, NULL, "Title:", fSrcTitlePopUp,
++                                     true );
++    fSrcTitleMenu->SetDivider( b.right-130 );
++    box->AddChild( fSrcTitleMenu );
++
++    r = BRect( 10,65,b.right-120,85 );
++    fSrcChapString = new BStringView( r, NULL, "Chapters:" );
++    box->AddChild( fSrcChapString );
++    
++    r = BRect( b.right-119,65,b.right-80,85 );
++    fSrcChapStartPopUp = new BPopUpMenu( "" );
++    fSrcChapStartMenu  = new BMenuField( r, NULL, "",
++                                         fSrcChapStartPopUp, true );
++    fSrcChapStartMenu->SetDivider( 0.0 );
++    box->AddChild( fSrcChapStartMenu );
++
++    r = BRect( b.right-79,65,b.right-50,85 );
++    fSrcChapToString = new BStringView( r, NULL, "to" );
++    fSrcChapToString->SetAlignment( B_ALIGN_CENTER );
++    box->AddChild( fSrcChapToString );
++    
++    r = BRect( b.right-49,65,b.right-10,85 );
++    fSrcChapEndPopUp = new BPopUpMenu( "" );
++    fSrcChapEndMenu  = new BMenuField( r, NULL, "", fSrcChapEndPopUp,
++                                       true );
++    fSrcChapEndMenu->SetDivider( 0.0 );
++    box->AddChild( fSrcChapEndMenu );
++
++    r = BRect( 10,90,b.right/2,110 );
++    fSrcDur1String = new BStringView( r, NULL, "Duration:" );
++    box->AddChild( fSrcDur1String );
++
++    r = BRect( b.right/2+1,90,b.right-10,110 );
++    fSrcDur2String = new BStringView( r, NULL, "00:00:00" );
++    fSrcDur2String->SetAlignment( B_ALIGN_RIGHT );
++    box->AddChild( fSrcDur2String );
++
++    /* Destination box */
++    b = Bounds();
++    r = BRect( b.right/2+5,10,b.right-10,135 );
++    box = new BBox( r );
++    box->SetLabel( "Destination" );
++    AddChild( box );
++
++    b = box->Bounds();
++
++    r = BRect( 10,15,b.right-10,35 );
++    fDstFormatPopUp = new BPopUpMenu( "" );
++#define ADDITEM(a) fDstFormatPopUp->AddItem( new BMenuItem( a, \
++    new BMessage( MSG_FORMATPOPUP ) ) )
++    ADDITEM( "MP4 file" );
++    ADDITEM( "AVI file" );
++    ADDITEM( "OGM file" );
++#undef ADDITEM
++    fDstFormatPopUp->ItemAt( 0 )->SetMarked( true );
++    fDstFormat = -1;
++    fDstFormatMenu = new BMenuField( r, NULL, "File format:",
++                                     fDstFormatPopUp, true );
++    fDstFormatMenu->SetDivider( b.right/3 );
++    box->AddChild( fDstFormatMenu );
++
++    r = BRect( 10,40,b.right-10,60 );
++    fDstCodecsPopUp = new BPopUpMenu( "" );
++    fDstCodecsMenu  = new BMenuField( r, NULL, "Codecs:",
++                                      fDstCodecsPopUp, true );
++    fDstCodecsMenu->SetDivider( b.right/3 );
++    box->AddChild( fDstCodecsMenu );
++
++    r = BRect( 10,65,b.right-10,85 );
++    fDstFileControl = new BTextControl( r, NULL, "File:",
++        "/boot/home/Desktop/Movie", new BMessage() );
++    fDstFileControl->SetDivider( b.right/3 );
++    box->AddChild( fDstFileControl );
++
++    r = BRect( b.right-90,90,b.right-10,115 );
++    fBrowseButton = new BButton( r, NULL, "Browse",
++                                 new BMessage( MSG_BROWSE ) );
++    box->AddChild( fBrowseButton );
++
++    /* Video box */
++    b = Bounds();
++    r = BRect( 10,145,b.right/2-5,395 );
++    box = new BBox( r );
++    box->SetLabel( "Video" );
++    AddChild( box );
++
++    b = box->Bounds();
++
++    r = BRect( 10,15,b.right-10,35 );
++    fVidRatePopUp = new BPopUpMenu( "" );
++    fVidRatePopUp->AddItem( new BMenuItem( "Same as source",
++        new BMessage() ) );
++    for( int i = 0; i < hb_video_rates_count; i++ )
++    {
++        fVidRatePopUp->AddItem( new BMenuItem( hb_video_rates[i].string,
++            new BMessage() ) );
++    }
++    fVidRatePopUp->ItemAt( 0 )->SetMarked( true );
++    fVidRateMenu = new BMenuField( r, NULL, "Framerate (fps):",
++                                   fVidRatePopUp, true );
++    box->AddChild( fVidRateMenu );
++
++    r = BRect( 10,40,b.right-10,60 );
++    fVidEncoderPopUp = new BPopUpMenu( "" );
++    fVidEncoderMenu  = new BMenuField( r, NULL, "Encoder:",
++                                       fVidEncoderPopUp, true );
++    box->AddChild( fVidEncoderMenu );
++
++    r = BRect( 10,65,b.right-10,85 );
++    fVidQualityString = new BStringView( r, NULL, "Quality:" );
++    box->AddChild( fVidQualityString );
++
++    r = BRect( 10,90,b.right*2/3,110);
++    fVidTargetRadio = new BRadioButton( r, NULL, "Target size (MB):",
++        new BMessage( MSG_QUALITYRADIO ) );
++    box->AddChild( fVidTargetRadio );
++
++    r = BRect( b.right*2/3+1,90,b.right-10,110); 
++    fVidTargetControl = new BTextControl( r, NULL, "", "700",
++        new BMessage() );
++    fVidTargetControl->SetDivider( 0 );
++    box->AddChild( fVidTargetControl );
++
++    r = BRect( 10,115,b.right/2,135);
++    fVidAverageRadio = new BRadioButton( r, NULL, "Average bitrate (kbps):",
++        new BMessage( MSG_QUALITYRADIO ) );
++    fVidAverageRadio->SetValue( 1 );
++    box->AddChild( fVidAverageRadio );
++
++    r = BRect( b.right*2/3+1,115,b.right-10,135); 
++    fVidAverageControl = new BTextControl( r, NULL, "", "1000",
++        new BMessage() );
++    fVidAverageControl->SetDivider( 0 );
++    box->AddChild( fVidAverageControl );
++
++    r = BRect( 10,140,b.right/2,160);
++    fVidConstantRadio = new BRadioButton( r, NULL, "Constant quality:",
++        new BMessage( MSG_QUALITYRADIO ) );
++    box->AddChild( fVidConstantRadio );
++
++    r = BRect( 20,165,b.right-10,195);
++    fVidConstantSlider = new BSlider( r, NULL, NULL,
++        new BMessage( MSG_SLIDER ), 0, 100 );
++    fVidConstantSlider->SetValue( 50 );
++    SliderChanged();
++    box->AddChild( fVidConstantSlider );
++
++    r = BRect( 10,200,b.right-10,220);
++    fVidGrayCheck = new BCheckBox( r, NULL, "Grayscale encoding", new BMessage() );
++    box->AddChild( fVidGrayCheck );
++    r = BRect( 10,220,b.right-10,240);
++    fVidTwoPassCheck = new BCheckBox( r, NULL, "2-pass encoding", new BMessage() );
++    box->AddChild( fVidTwoPassCheck );
++
++    /* Subtitles box */
++    b = Bounds();
++    r = BRect( b.right/2+5,145,b.right-10,190 );
++    box = new BBox( r );
++    box->SetLabel( "Subtitles" );
++    AddChild( box );
++
++    b = box->Bounds();
++
++    r = BRect( 10,15,b.right-10,35 );
++    fSubPopUp = new BPopUpMenu( "" );
++    fSubMenu  = new BMenuField( r, NULL, "Language:",
++                                fSubPopUp, true );
++    box->AddChild( fSubMenu );
++
++    /* Audio box */
++    b = Bounds();
++    r = BRect( b.right/2+5,200,b.right-10,320 );
++    box = new BBox( r );
++    box->SetLabel( "Audio" );
++    AddChild( box );
++
++    b = box->Bounds();
++
++    r = BRect( 10,15,b.right-10,35 );
++    fAudLang1PopUp = new BPopUpMenu( "" );
++    fAudLang1Menu  = new BMenuField( r, NULL, "Language 1:",
++                                     fAudLang1PopUp, true );
++    box->AddChild( fAudLang1Menu );
++    r = BRect( 10,40,b.right-10,60 );
++    fAudLang2PopUp = new BPopUpMenu( "" );
++    fAudLang2Menu = new BMenuField( r, NULL, "Language 2:",
++                                    fAudLang2PopUp, true );
++    box->AddChild( fAudLang2Menu );
++    r = BRect( 10,65,b.right-10,85 );
++    fAudRatePopUp = new BPopUpMenu( "" );
++    for( int i = 0; i < hb_audio_rates_count; i++ )
++    {
++        fAudRatePopUp->AddItem( new BMenuItem( hb_audio_rates[i].string,
++            new BMessage ) );
++    }
++    fAudRatePopUp->ItemAt( hb_audio_rates_default )->SetMarked( true );
++    fAudRateMenu = new BMenuField( r, NULL, "Sample rate (Hz):",
++                                   fAudRatePopUp, true );
++    box->AddChild( fAudRateMenu );
++    r = BRect( 10,90,b.right-10,110 );
++    fAudBitratePopUp = new BPopUpMenu( "" );
++    for( int i = 0; i < hb_audio_bitrates_count; i++ )
++    {
++        fAudBitratePopUp->AddItem( new BMenuItem(
++            hb_audio_bitrates[i].string, new BMessage ) );
++    }
++    fAudBitratePopUp->ItemAt(
++        hb_audio_bitrates_default )->SetMarked( true );
++    fAudBitrateMenu = new BMenuField( r, NULL, "Bitrate (kbps):",
++                                      fAudBitratePopUp, true );
++    box->AddChild( fAudBitrateMenu );
++
++    /* Picture settings */
++    b = Bounds();
++    r = BRect( b.right-110,370,b.right-10,395 );
++    fPictureButton = new BButton( r, NULL, "Picture settings...",
++                                  new BMessage( MSG_PICSETTINGS ) );
++    AddChild( fPictureButton );
++
++    /* Bottom */
++    r = BRect( 10,405,b.right-10,435 );
++    fProgressBar = new BStatusBar( r, NULL );
++    AddChild( fProgressBar );
++
++    r = BRect( 10,450,b.right-370,470);
++    fQueueCheck = new BCheckBox( r, NULL, "Enable Queue",
++                                 new BMessage( MSG_QUEUE_ENABLE ) );
++    AddChild( fQueueCheck );
++
++    r = BRect( b.right-360,445,b.right-280,470 );
++    fAddButton = new BButton( r, NULL, "Add to Queue",
++                              new BMessage( MSG_QUEUE_ADD ) );
++
++    r = BRect( b.right-270,445,b.right-190,470 );
++    fShowButton = new BButton( r, NULL, "Show queue",
++                               new BMessage( MSG_QUEUE_SHOW ) );
++
++    r = BRect( b.right-180,445,b.right-100,470 );
++    fPauseButton = new BButton( r, NULL, "Pause",
++                                new BMessage( MSG_PAUSE ) );
++    AddChild( fPauseButton );
++
++    r = BRect( b.right-90,445,b.right-10,470 );
++    fRipButton = new BButton( r, NULL, "Rip",
++                              new BMessage( MSG_START ) );
++    AddChild( fRipButton );
++
++    EnableUI( false );
++    fPauseButton->SetEnabled( false );
++    fRipButton->SetEnabled( false );
++
++    FormatPopUpChanged();
++
++    fFilePanel = NULL;
++}
++
++void MainView::HandleMessage( BMessage * msg )
++{
++    switch( msg->what )
++    {
++        case MSG_TITLEPOPUP:
++            TitlePopUpChanged();
++            break;
++
++        case MSG_CHAPTERPOPUP:
++            ChapterPopUpChanged();
++            break;
++
++        case MSG_FORMATPOPUP:
++            FormatPopUpChanged();
++            break;
++
++        case MSG_CODECSPOPUP:
++            CodecsPopUpChanged();
++            break;
++
++        case MSG_BROWSE:
++            if( !fFilePanel )
++            {
++                fFilePanel = new BFilePanel( B_SAVE_PANEL,
++                    new BMessenger( Window() ), NULL, 0, false );
++            }
++            fFilePanel->Show();
++            break;
++
++        case B_SAVE_REQUESTED:
++        {
++            entry_ref ref;
++            BString string;
++            if( msg->FindRef( "directory", 0, &ref ) == B_OK &&
++                msg->FindString( "name", &string ) == B_OK )
++            {
++                BPath * path = new BPath( &ref );
++                string.Prepend( "/" );
++                string.Prepend( path->Path() );
++                fDstFileControl->SetText( string.String() );
++                CheckExtension();
++            }
++            break;
++        }
++
++        case MSG_QUALITYRADIO:
++            QualityRadioChanged();
++            break;
++
++        case MSG_SLIDER:
++            SliderChanged();
++            break;
++
++        case MSG_PICSETTINGS:
++            fPicWin = new PicWindow( fHandle, fSrcTitlePopUp->IndexOf(
++                fSrcTitlePopUp->FindMarked() ) );
++            fPicWin->Show();
++            break;
++
++        case MSG_QUEUE_ENABLE:
++            if( fQueueCheck->Value() )
++            {
++                AddChild( fAddButton );
++                AddChild( fShowButton );
++            }
++            else
++            {
++                RemoveChild( fAddButton );
++                RemoveChild( fShowButton );
++            }
++            break;
++
++        case MSG_QUEUE_ADD:
++            AddJob();
++            break;
++
++        case MSG_QUEUE_SHOW:
++            fQueueWin = new QueueWindow( fHandle );
++            fQueueWin->Show();
++            break;
++
++        case MSG_PAUSE:
++            fPauseButton->SetEnabled( false );
++            fRipButton->SetEnabled( false );
++            if( !strcmp( fPauseButton->Label(), "Resume" ) )
++            {
++                hb_resume( fHandle );
++            }
++            else
++            {
++                hb_pause( fHandle );
++            }
++            break;
++
++        case MSG_START:
++        {
++            if( !strcmp( fRipButton->Label(), "Cancel" ) )
++            {
++                fPauseButton->SetEnabled( false );
++                fRipButton->SetEnabled( false );
++                hb_stop( fHandle );
++                break;
++            }
++
++            EnableUI( false );
++            fPauseButton->SetEnabled( false );
++            fRipButton->SetEnabled( false );
++
++            if( !fQueueCheck->Value() )
++            {
++                AddJob();
++            }
++
++            hb_start( fHandle );
++            break;
++        }
++    }
++}
++
++void MainView::Update( hb_state_t * s )
++{
++    if( !LockLooper() )
++    {
++        fprintf( stderr, "LockLooper failed\n" );
++        return;
++    }
++
++    switch( s->state )
++    {
++#define p s->param.scandone
++        case HB_STATE_SCANDONE:
++        {
++            hb_list_t  * list;
++            hb_title_t * title;
++            char         string[1024];
++
++            list = hb_get_titles( fHandle );
++            for( int i = 0; i < hb_list_count( list ); i++ )
++            {
++                title = (hb_title_t *) hb_list_item( list, i );
++                fSrcDVD2String->SetText( title->dvd );
++                snprintf( string, 1024, "%d - %02dh%02dm%02ds",
++                          title->index, title->hours, title->minutes,
++                          title->seconds );
++                fSrcTitlePopUp->AddItem( new BMenuItem( string,
++                    new BMessage( MSG_TITLEPOPUP ) ) );
++            }
++            fSrcTitlePopUp->ItemAt( 0 )->SetMarked( true );
++            fSrcTitle = -1;
++            TitlePopUpChanged();
++
++            EnableUI( true );
++            fRipButton->SetEnabled( true );
++            fPauseButton->SetEnabled( false );
++            break;
++        }
++#undef p
++
++#define p s->param.working
++        case HB_STATE_WORKING:
++        {
++            float progress_total;
++            char  text[1024];
++            progress_total = ( p.progress + p.job_cur - 1 ) / p.job_count;
++            snprintf( text, 1024, "Encoding: task %d of %d, %.2f %%",
++                      p.job_cur, p.job_count, 100.0 * p.progress );
++            if( p.seconds > -1 )
++            {
++                snprintf( text + strlen( text ), 1024 - strlen( text ),
++                          " (%.2f fps, avg %.2f fps, ETA %02dh%02dm%02ds)",
++                          p.rate_cur, p.rate_avg, p.hours, p.minutes,
++                          p.seconds );
++            }
++            fProgressBar->Update( fProgressBar->MaxValue() *
++                progress_total - fProgressBar->CurrentValue(), text );
++
++            fPauseButton->SetLabel( "Pause" );
++            fPauseButton->SetEnabled( true );
++            fRipButton->SetLabel( "Cancel" );
++            fRipButton->SetEnabled( true );
++            break;
++        }
++#undef p
++
++        case HB_STATE_PAUSED:
++            fProgressBar->Update( 0, "Paused" );
++            fPauseButton->SetLabel( "Resume" );
++            fPauseButton->SetEnabled( true );
++            fRipButton->SetLabel( "Cancel" );
++            fRipButton->SetEnabled( true );
++            break;          
++
++#define p s->param.workdone 
++        case HB_STATE_WORKDONE:
++            fProgressBar->Update( - fProgressBar->CurrentValue(),
++                                  "Done." );
++            EnableUI( true );
++            fPauseButton->SetLabel( "Pause" );
++            fPauseButton->SetEnabled( false );
++            fRipButton->SetLabel( "Rip" );
++            fRipButton->SetEnabled( true );
++
++            /* FIXME */
++            hb_job_t * job;
++            while( ( job = hb_job( fHandle, 0 ) ) )
++            {
++                hb_rem( fHandle, job );
++            }
++            break;
++#undef p
++    }
++
++    UnlockLooper();
++}
++
++void MainView::EnableUI( bool b )
++{
++
++    rgb_color mycolor;
++    mycolor.red = mycolor.green = mycolor.blue = b ? 0 : 128;
++    mycolor.alpha = 255;
++
++    BStringView * strings[] =
++      { fSrcDVD1String, fSrcDVD2String, fSrcChapString,
++        fSrcChapToString, fSrcDur1String, fSrcDur2String,
++        fVidQualityString };
++    for( unsigned i = 0; i < sizeof( strings ) / sizeof( void * ); i++ )
++    {
++        strings[i]->SetHighColor( mycolor );
++        strings[i]->Invalidate(); /* Force redraw */
++    }
++
++    BMenuField * fields[] =
++      { fSrcTitleMenu, fSrcChapStartMenu, fSrcChapEndMenu,
++        fDstFormatMenu, fDstCodecsMenu, fVidRateMenu, fVidEncoderMenu,
++        fSubMenu, fAudLang1Menu, fAudLang2Menu, fAudRateMenu,
++        fAudBitrateMenu };
++    for( unsigned i = 0; i < sizeof( fields ) / sizeof( void * ); i++ )
++    {
++        fields[i]->SetEnabled( b );
++    }
++
++    BControl * controls[] =
++      { fDstFileControl, fBrowseButton, fVidTargetRadio,
++        fVidTargetControl, fVidAverageRadio, fVidAverageControl,
++        fVidConstantRadio, fVidConstantSlider, fVidGrayCheck,
++        fVidTwoPassCheck, fPictureButton };
++    for( unsigned i = 0; i < sizeof( controls ) / sizeof( void * ); i++ )
++    {
++        controls[i]->SetEnabled( b );
++    }
++
++    if( b )
++    {
++        QualityRadioChanged();
++    }
++}
++
++void MainView::TitlePopUpChanged()
++{
++    int index = fSrcTitlePopUp->IndexOf( fSrcTitlePopUp->FindMarked() );
++    if( index == fSrcTitle )
++    {
++        /* No change actually */
++        return;
++    }
++    fSrcTitle = index;
++
++    /* Get a pointer to the title */
++    hb_list_t    * list;
++    hb_title_t   * title;
++    list  = hb_get_titles( fHandle );
++    title = (hb_title_t *) hb_list_item( list, index );
++
++    char text[1024];
++    BMenuItem * item;
++
++    /* Update chapters popups */
++    while( ( item = fSrcChapStartPopUp->RemoveItem( 0L ) ) )
++    {
++        delete item;
++    }
++    while( ( item = fSrcChapEndPopUp->RemoveItem( 0L ) ) )
++    {
++        delete item;
++    }
++    for( int i = 0; i < hb_list_count( title->list_chapter ); i++ )
++    {
++        snprintf( text, 1024, "%d", i + 1 );
++        fSrcChapStartPopUp->AddItem( new BMenuItem( text,
++            new BMessage( MSG_CHAPTERPOPUP ) ) );
++        fSrcChapEndPopUp->AddItem( new BMenuItem( text,
++            new BMessage( MSG_CHAPTERPOPUP ) ) );
++    }
++    fSrcChapStartPopUp->ItemAt( 0 )->SetMarked( true );
++    fSrcChapEndPopUp->ItemAt( hb_list_count( title->list_chapter )
++                                - 1 )->SetMarked( true );
++    ChapterPopUpChanged();
++
++    /* Update subtitles popup */
++    hb_subtitle_t * sub;
++    while( ( item = fSubPopUp->RemoveItem( 0L ) ) )
++    {
++        delete item;
++    }
++    fSubPopUp->AddItem( new BMenuItem( "None", new BMessage() ) );
++    for( int i = 0; i < hb_list_count( title->list_subtitle ); i++ )
++    {
++        sub = (hb_subtitle_t *) hb_list_item( title->list_subtitle, i );
++        fSubPopUp->AddItem( new BMenuItem( sub->lang, new BMessage() ) );
++    }
++    fSubPopUp->ItemAt( 0 )->SetMarked( true );
++
++    /* Update audio popups */
++    hb_audio_t * audio;
++    while( ( item = fAudLang1PopUp->RemoveItem( 0L ) ) )
++    {
++        delete item;
++    }
++    while( ( item = fAudLang2PopUp->RemoveItem( 0L ) ) )
++    {
++        delete item;
++    }
++    fAudLang1PopUp->AddItem( new BMenuItem( "None", new BMessage() ) );
++    fAudLang2PopUp->AddItem( new BMenuItem( "None", new BMessage() ) );
++    for( int i = 0; i < hb_list_count( title->list_audio ); i++ )
++    {
++        audio = (hb_audio_t *) hb_list_item( title->list_audio, i );
++        fAudLang1PopUp->AddItem( new BMenuItem( audio->lang, new BMessage() ) );
++        fAudLang2PopUp->AddItem( new BMenuItem( audio->lang, new BMessage() ) );
++    }
++    fAudLang1PopUp->ItemAt( 1 )->SetMarked( true );
++    fAudLang2PopUp->ItemAt( 0 )->SetMarked( true );
++}
++
++void MainView::ChapterPopUpChanged()
++{
++    /* Get a pointer to the title */
++    hb_list_t    * list;
++    hb_title_t   * title;
++    list  = hb_get_titles( fHandle );
++    title = (hb_title_t *) hb_list_item( list,
++        fSrcTitlePopUp->IndexOf( fSrcTitlePopUp->FindMarked() ) );
++
++    hb_chapter_t * chapter;
++    int64_t        duration = 0;
++    for( int i = fSrcChapStartPopUp->IndexOf(
++             fSrcChapStartPopUp->FindMarked() );
++         i <= fSrcChapEndPopUp->IndexOf(
++             fSrcChapEndPopUp->FindMarked() );
++         i++ )
++    {
++        chapter = (hb_chapter_t *) hb_list_item( title->list_chapter, i );
++        duration += chapter->duration;
++    }
++    duration /= 90000; /* pts -> seconds */
++
++    char text[1024];
++    snprintf( text, sizeof(text), "%02lld:%02lld:%02lld",
++              duration / 3600, ( duration / 60 ) % 60, duration % 60 );
++    fSrcDur2String->SetText( text );
++}
++
++void MainView::FormatPopUpChanged()
++{
++    int format;
++    BMenuItem * item;
++
++    format = fDstFormatPopUp->IndexOf( fDstFormatPopUp->FindMarked() );
++    if( format == fDstFormat )
++    {
++        /* No change actually */
++        CheckExtension();
++        return;
++    }
++    fDstFormat = format;
++
++    /* Empty codecs popup */
++    while( ( item = fDstCodecsPopUp->RemoveItem( 0L ) ) )
++    {
++        delete item;
++    }
++
++    /* Add acceptable video codec / audio codec combinations */
++#define ADDITEM(a) \
++    fDstCodecsPopUp->AddItem( new BMenuItem( a, new BMessage( MSG_CODECSPOPUP ) ) )
++    switch( format )
++    {
++        case 0:
++            ADDITEM( "MPEG-4 Video / AAC Audio" );
++            ADDITEM( "AVC/H.264 Video / AAC Audio" );
++            break;
++        case 1:
++            ADDITEM( "MPEG-4 Video / MP3 Audio" );
++            ADDITEM( "MPEG-4 Video / AC-3 Audio" );
++            ADDITEM( "AVC/H.264 Video / MP3 Audio" );
++            ADDITEM( "AVC/H.264 Video / AC-3 Audio" );
++            break;
++        case 2:
++            ADDITEM( "MPEG-4 Video / Vorbis Audio" );
++            ADDITEM( "MPEG-4 Video / MP3 Audio" );
++            break;
++    }
++#undef ADDITEM
++
++    fDstCodecsPopUp->ItemAt( 0 )->SetMarked( true );
++
++    CheckExtension();
++    CodecsPopUpChanged();
++}
++
++void MainView::CodecsPopUpChanged()
++{
++    int format = fDstFormatPopUp->IndexOf( fDstFormatPopUp->FindMarked() );
++    int codecs = fDstCodecsPopUp->IndexOf( fDstCodecsPopUp->FindMarked() );
++
++    BMenuItem * item;
++
++    /* Update the encoder popup if necessary */
++    if( ( FormatSettings[format][codecs] & HB_VCODEC_X264 ) &&
++        fVidEncoderPopUp->CountItems() > 1 )
++    {
++        /* MPEG-4 -> H.264 */
++        while( ( item = fVidEncoderPopUp->RemoveItem( 0L ) ) )
++            delete item;
++        fVidEncoderPopUp->AddItem( new BMenuItem( "x264", new BMessage() ) );
++        fVidEncoderPopUp->ItemAt( 0 )->SetMarked( true );
++    }
++    else if( ( FormatSettings[format][codecs] & HB_VCODEC_FFMPEG ) &&
++             fVidEncoderPopUp->CountItems() < 2 )
++    {
++        /* H.264 -> MPEG-4 */
++        while( ( item = fVidEncoderPopUp->RemoveItem( 0L ) ) )
++            delete item;
++        fVidEncoderPopUp->AddItem( new BMenuItem( "FFmpeg", new BMessage() ) );
++        fVidEncoderPopUp->AddItem( new BMenuItem( "XviD", new BMessage() ) );
++        fVidEncoderPopUp->ItemAt( 0 )->SetMarked( true );
++    }
++
++    if( FormatSettings[format][codecs] & HB_ACODEC_AC3 )
++    {
++        /* AC-3 pass-through: disable samplerate and bitrate */
++        fAudRatePopUp->SetEnabled( false );
++        fAudBitratePopUp->SetEnabled( false );
++    }
++    else if( fVidEncoderPopUp->IsEnabled() )
++    {
++        fAudRatePopUp->SetEnabled( true );
++        fAudBitratePopUp->SetEnabled( true );
++    }
++}
++
++void MainView::CheckExtension()
++{
++    char * ext = NULL;
++    switch( fDstFormat )
++    {
++        case 0:
++            ext = ".mp4";
++            break;
++        case 1:
++            ext = ".avi";
++            break;
++        case 2:
++            ext = ".ogm";
++            break;
++    }
++
++    char newname[1024];
++    const char * oldname = fDstFileControl->Text();
++    memcpy( newname, oldname, strlen( oldname ) );
++    if( strlen( oldname ) > 4 &&
++        oldname[strlen( oldname ) - 4] == '.' )
++    {
++        /* Replace extension */
++        memcpy( &newname[strlen( oldname ) - 4], ext, 5 );
++    }
++    else
++    {
++        /* Add extension */
++        memcpy( &newname[strlen( oldname )], ext, 5 );
++    }
++    fDstFileControl->SetText( newname );
++}
++
++void MainView::QualityRadioChanged()
++{
++    fVidTargetControl->SetEnabled( fVidTargetRadio->Value() );
++    fVidAverageControl->SetEnabled( fVidAverageRadio->Value() );
++    fVidConstantSlider->SetEnabled( fVidConstantRadio->Value() );
++    fVidTwoPassCheck->SetEnabled( !fVidConstantRadio->Value() );
++    if( fVidConstantRadio->Value() )
++        fVidTwoPassCheck->SetValue( 0 );
++}
++
++void MainView::SliderChanged()
++{
++    char text[1024];
++    snprintf( text, 1024, "Constant quality: %ld %%",
++              fVidConstantSlider->Value() );
++    fVidConstantRadio->SetLabel( text );
++}
++
++void MainView::AddJob()
++{
++    hb_list_t  * list;
++    hb_title_t * title;
++    hb_job_t   * job;
++    list  = hb_get_titles( fHandle );
++    title = (hb_title_t *) hb_list_item( list,
++        fSrcTitlePopUp->IndexOf( fSrcTitlePopUp->FindMarked() ) );
++    job = title->job;
++
++    job->chapter_start = fSrcChapStartPopUp->IndexOf(
++        fSrcChapStartPopUp->FindMarked() ) + 1;
++    job->chapter_end = fSrcChapEndPopUp->IndexOf(
++        fSrcChapEndPopUp->FindMarked() ) + 1;
++
++    int format = fDstFormatPopUp->IndexOf(
++        fDstFormatPopUp->FindMarked() );
++    int codecs = fDstCodecsPopUp->IndexOf(
++        fDstCodecsPopUp->FindMarked() );
++
++    job->mux    = FormatSettings[format][codecs] & HB_MUX_MASK;
++    job->vcodec = FormatSettings[format][codecs] & HB_VCODEC_MASK;
++    job->acodec = FormatSettings[format][codecs] & HB_ACODEC_MASK;
++
++    if( ( job->vcodec & HB_VCODEC_FFMPEG ) &&
++        fVidEncoderPopUp->IndexOf(
++            fVidEncoderPopUp->FindMarked() ) > 0 )
++    {
++        job->vcodec = HB_VCODEC_XVID;
++    }
++
++    int index;
++    index = fVidRatePopUp->IndexOf(
++        fVidRatePopUp->FindMarked() );
++    if( index > 0 )
++    {
++        job->vrate_base = hb_video_rates[index-1].rate;
++    }
++    else
++    {
++        job->vrate_base = title->rate_base;
++    }
++
++    job->grayscale = fVidGrayCheck->Value();
++
++    job->subtitle = fSubPopUp->IndexOf(
++        fSubPopUp->FindMarked() ) - 1;
++
++    job->audios[0] = fAudLang1PopUp->IndexOf(
++        fAudLang1PopUp->FindMarked() ) - 1;
++    job->audios[1] = fAudLang2PopUp->IndexOf(
++        fAudLang2PopUp->FindMarked() ) - 1;
++    job->audios[2] = -1;
++
++    job->arate = hb_audio_rates[fAudRatePopUp->IndexOf(
++        fAudRatePopUp->FindMarked() )].rate;
++    job->abitrate = hb_audio_bitrates[fAudBitratePopUp->IndexOf(
++        fAudBitratePopUp->FindMarked() )].rate;
++
++    if( fVidConstantRadio->Value() )
++    {
++        job->vquality = 0.01 * fVidConstantSlider->Value();
++        job->vbitrate = 0;
++    }
++    else if( fVidTargetRadio->Value() )
++    {
++        job->vquality = -1.0;
++        job->vbitrate = hb_calc_bitrate( job,
++            atoi( fVidTargetControl->Text() ) );
++    }
++    else
++    {
++        job->vquality = -1.0;
++        job->vbitrate = atoi( fVidAverageControl->Text() );
++    }
++
++    job->file = strdup( fDstFileControl->Text() );
++
++    if( fVidTwoPassCheck->Value() )
++    {
++        job->pass = 1;
++        hb_add( fHandle, job );
++        job->pass = 2;
++        hb_add( fHandle, job );
++    }
++    else
++    {
++        job->pass = 0;
++        hb_add( fHandle, job );
++    }
++}
++
++MainWindow::MainWindow( hb_handle_t * handle )
++    : BWindow( BRect( 0,0,10,10 ), "HandBrake " HB_VERSION,
++               B_TITLED_WINDOW, B_NOT_RESIZABLE | B_NOT_ZOOMABLE )
++{
++    fHandle = handle;
++
++    /* Add the main view */
++    fView = new MainView( fHandle );
++    AddChild( fView );
++
++    /* Resize to fit */
++    ResizeTo( fView->Bounds().Width(), fView->Bounds().Height() );
++
++    /* Center */
++    BScreen screen;
++    MoveTo( ( screen.Frame().Width() - fView->Bounds().Width() ) / 2,
++            ( screen.Frame().Height() - fView->Bounds().Height() ) / 2 );
++}
++
++void MainWindow::MessageReceived( BMessage * msg )
++{
++    switch( msg->what )
++    {
++        case MSG_TITLEPOPUP:
++        case MSG_CHAPTERPOPUP:
++        case MSG_FORMATPOPUP:
++        case MSG_CODECSPOPUP:
++        case MSG_BROWSE:
++        case MSG_QUALITYRADIO:
++        case MSG_SLIDER:
++        case MSG_PICSETTINGS:
++        case MSG_QUEUE_ENABLE:
++        case MSG_QUEUE_ADD:
++        case MSG_QUEUE_SHOW:
++        case MSG_PAUSE:
++        case MSG_START:
++        case B_SAVE_REQUESTED:
++            fView->HandleMessage( msg );
++            break;
++
++        default:
++            BWindow::MessageReceived( msg );
++            break;
++    }
++}
++
++bool MainWindow::QuitRequested()
++{
++    be_app_messenger.SendMessage( B_QUIT_REQUESTED );
++    return true;
++}
++
++void MainWindow::Update( hb_state_t * s )
++{
++    fView->Update( s );
++}
+diff --git a/haiku/MainWindow.h b/haiku/MainWindow.h
+new file mode 100644
+index 0000000..1558556
+--- /dev/null
++++ b/haiku/MainWindow.h
+@@ -0,0 +1,121 @@
++#ifndef MAINWINDOW_H
++#define MAINWINDOW_H
++
++#include <interface/Window.h>
++#include <interface/View.h>
++
++#include "hb.h"
++
++class BButton;
++class BCheckBox;
++class BMenuField;
++class BPopUpMenu;
++class BRadioButton;
++class BSlider;
++class BStatusBar;
++class BStringView;
++class BTextControl;
++class BFilePanel;
++
++class PicWindow;
++class QueueWindow;
++
++class MainView : public BView
++{
++    public:
++        MainView( hb_handle_t * handle );
++
++        void HandleMessage( BMessage * msg );
++        void Update( hb_state_t * s );
++
++    private:
++        void EnableUI( bool );
++        void TitlePopUpChanged();
++        void ChapterPopUpChanged();
++        void FormatPopUpChanged();
++        void CodecsPopUpChanged();
++        void CheckExtension();
++        void QualityRadioChanged();
++        void SliderChanged();
++        void AddJob();
++
++        hb_handle_t  * fHandle;
++
++        BStringView  * fSrcDVD1String;
++        BStringView  * fSrcDVD2String;
++        BPopUpMenu   * fSrcTitlePopUp;
++        BMenuField   * fSrcTitleMenu;
++        int            fSrcTitle;
++        BStringView  * fSrcChapString;
++        BPopUpMenu   * fSrcChapStartPopUp;
++        BMenuField   * fSrcChapStartMenu;
++        BStringView  * fSrcChapToString;
++        BPopUpMenu   * fSrcChapEndPopUp;
++        BMenuField   * fSrcChapEndMenu;
++        BStringView  * fSrcDur1String;
++        BStringView  * fSrcDur2String;
++
++        BPopUpMenu   * fDstFormatPopUp;
++        BMenuField   * fDstFormatMenu;
++        int            fDstFormat;
++        BPopUpMenu   * fDstCodecsPopUp;
++        BMenuField   * fDstCodecsMenu;
++        BTextControl * fDstFileControl;
++        BButton      * fBrowseButton;
++
++        BPopUpMenu   * fVidRatePopUp;
++        BMenuField   * fVidRateMenu;
++        BPopUpMenu   * fVidEncoderPopUp;
++        BMenuField   * fVidEncoderMenu;
++        BStringView  * fVidQualityString;
++        BRadioButton * fVidTargetRadio;
++        BTextControl * fVidTargetControl;
++        BRadioButton * fVidAverageRadio;
++        BTextControl * fVidAverageControl;
++        BRadioButton * fVidConstantRadio;
++        BSlider      * fVidConstantSlider;
++        BCheckBox    * fVidGrayCheck;
++        BCheckBox    * fVidTwoPassCheck;
++
++        BPopUpMenu   * fSubPopUp;
++        BMenuField   * fSubMenu;
++
++        BPopUpMenu   * fAudLang1PopUp;
++        BMenuField   * fAudLang1Menu;
++        BPopUpMenu   * fAudLang2PopUp;
++        BMenuField   * fAudLang2Menu;
++        BPopUpMenu   * fAudRatePopUp;
++        BMenuField   * fAudRateMenu;
++        BPopUpMenu   * fAudBitratePopUp;
++        BMenuField   * fAudBitrateMenu;
++
++        BButton      * fPictureButton;
++
++        BStatusBar   * fProgressBar;
++        BCheckBox    * fQueueCheck;
++        BButton      * fAddButton;
++        BButton      * fShowButton;
++        BButton      * fPauseButton;
++        BButton      * fRipButton;
++
++        BFilePanel   * fFilePanel;
++        PicWindow    * fPicWin;
++        QueueWindow  * fQueueWin;
++};
++
++class MainWindow : public BWindow
++{
++    public:
++        MainWindow( hb_handle_t * handle );
++        void MessageReceived( BMessage * msg );
++        bool QuitRequested();
++
++        void Update( hb_state_t * s );
++
++    private:
++        MainView * fView;
++
++        hb_handle_t * fHandle;
++};
++
++#endif
+diff --git a/haiku/PicWindow.cpp b/haiku/PicWindow.cpp
+new file mode 100644
+index 0000000..6b30f27
+--- /dev/null
++++ b/haiku/PicWindow.cpp
+@@ -0,0 +1,369 @@
++#include <app/Application.h>
++#include <interface/Bitmap.h>
++#include <interface/Box.h>
++#include <interface/Button.h>
++#include <interface/CheckBox.h>
++#include <interface/RadioButton.h>
++#include <interface/Screen.h>
++#include <interface/StringView.h>
++
++#include "PicWindow.h"
++#include "Stepper.h"
++
++#define MSG_PREV   'prev'
++#define MSG_NEXT   'next'
++#define MSG_CLOSE  'clos'
++#define MSG_WIDTH  'widt'
++#define MSG_HEIGHT 'heig'
++#define MSG_RADIO  'radi'
++
++PicView::PicView( hb_handle_t * handle, int index )
++    : BView( BRect( 0,0,10,10 ), NULL, B_FOLLOW_NONE, B_WILL_DRAW )
++{
++    fHandle = handle;
++
++    /* Get the title and the job */
++    hb_list_t * list;
++    list   = hb_get_titles( fHandle );
++    fTitle = (hb_title_t *) hb_list_item( list, index );
++    fJob   = fTitle->job;
++
++    /* We'll start with the first picture */
++    fIndex = 0;
++
++    /* Allocate a buffer large enough to call hb_get_preview() later */
++    fRawPic = (uint8_t *) malloc( ( fTitle->width + 2 ) *
++                ( fTitle->height + 2 ) * 4 );
++
++    /* Create the RGB BBitmap we'll use to display */
++    fBitmap = new BBitmap( BRect( 0, 0, fTitle->width + 1,
++                                  fTitle->height + 1 ), 0, B_RGB32 );
++
++    /* Now build the interface */
++    BRect r, b;
++    BBox * box;
++    BButton * button;
++    BStringView * stringView;
++
++    /* Resize ourselves so the picture fits just fine */
++    b = fBitmap->Bounds();
++    ResizeTo( b.Width()+170, b.Height()+65 );
++
++    /* Now build the UI around the BBitmap */
++    SetViewColor( ui_color( B_PANEL_BACKGROUND_COLOR ) );
++
++    /* "Size" box */
++    b = Bounds();
++    r = BRect( b.right-150,10,b.right-10,105 );
++    box = new BBox( r );
++    box->SetLabel( "Size" );
++    AddChild( box );
++
++    b = box->Bounds();
++
++    /* Width */
++    r = BRect( 10,15,b.right/2,35 );
++    stringView = new BStringView( r, NULL, "Width:" );
++    box->AddChild( stringView );
++    r = BRect( b.right/2+1,15,b.right-10,35 );
++    fWidthStepper = new HBStepper( r, 16, 16, fTitle->width,
++        fJob->width, new BMessage( MSG_WIDTH ) );
++    box->AddChild( fWidthStepper );
++
++    /* Height */
++    r = BRect( 10,40,b.right/2,60 );
++    stringView = new BStringView( r, NULL, "Height:" );
++    box->AddChild( stringView );
++    r = BRect( b.right/2+1,40,b.right-10,60 );
++    fHeightStepper = new HBStepper( r, 16, 16, fTitle->height,
++        fJob->height, new BMessage( MSG_HEIGHT ) );
++    box->AddChild( fHeightStepper );
++
++    /* Aspect ratio */
++    r = BRect( 10,65,b.right-10,85 );
++    fRatioCheck = new BCheckBox( r, NULL, "Keep aspect ratio",
++                                 new BMessage( MSG_WIDTH ) );
++    fRatioCheck->SetValue( fJob->keep_ratio );
++    box->AddChild( fRatioCheck );
++
++    /* "Crop" box */
++    b = Bounds();
++    r = BRect( b.right-150,115,b.right-10,260 );
++    box = new BBox( r );
++    box->SetLabel( "Crop" );
++    AddChild( box );
++
++    b = box->Bounds();
++
++    /* Automatic */
++    r = BRect( 10,15,b.right-10,35 );
++    fAutoRadio = new BRadioButton( r, NULL, "Automatic",
++                                   new BMessage( MSG_RADIO ) );
++    box->AddChild( fAutoRadio );
++
++    /* Custom */
++    r = BRect( 10,40,b.right-10,60 );
++    fCustomRadio = new BRadioButton( r, NULL, "Custom:",
++                                     new BMessage( MSG_RADIO ) );
++    box->AddChild( fCustomRadio );
++    float width = ( b.Width() - 30 ) / 2;
++    r = BRect( (b.right-width)/2,65,(b.right+width)/2,85 );
++    fCropSteppers[0] = new HBStepper( r, 2, 0, fTitle->height/2-2,
++        fJob->crop[0], new BMessage( MSG_WIDTH ) );
++    box->AddChild( fCropSteppers[0] );
++    r = BRect( (b.right-width)/2,115,(b.right+width)/2,135 );
++    fCropSteppers[1] = new HBStepper( r, 2, 0, fTitle->height/2-2,
++        fJob->crop[1], new BMessage( MSG_WIDTH ) );
++    box->AddChild( fCropSteppers[1] );
++    r = BRect( 10,90,10+width,110 );
++    fCropSteppers[2] = new HBStepper( r, 2, 0, fTitle->width/2-2,
++        fJob->crop[2], new BMessage( MSG_HEIGHT ) );
++    box->AddChild( fCropSteppers[2] );
++    r = BRect( width+20,90,b.right-10,110 );
++    fCropSteppers[3] = new HBStepper( r, 2, 0, fTitle->width/2-2,
++        fJob->crop[3], new BMessage( MSG_HEIGHT ) );
++    box->AddChild( fCropSteppers[3] );
++
++    if( memcmp( fTitle->crop, fJob->crop, 4 * sizeof( int ) ) )
++    {
++        fCustomRadio->SetValue( 1 );
++    }
++    else
++    {
++        fAutoRadio->SetValue( 1 );
++    }
++
++    /* "Misc" box */
++    b = Bounds();
++    r = BRect( b.right-150,270,b.right-10,315 );
++    box = new BBox( r );
++    box->SetLabel( "Misc" );
++    AddChild( box );
++
++    b = box->Bounds();
++
++    /* Deinterlace */
++    r = BRect( 10,15,b.right-10,35 );
++    fDeintCheck = new BCheckBox( r, NULL, "Deinterlace picture",
++                                 new BMessage( MSG_WIDTH ) );
++    fDeintCheck->SetValue( fJob->deinterlace );
++    box->AddChild( fDeintCheck );
++
++    b = Bounds();
++
++    /* Next/Prev buttons */
++    r = BRect( b.right-90,325,b.right-10,350 );
++    fPrevButton = new BButton( r, NULL, "Previous",
++                               new BMessage( MSG_PREV ) );
++    AddChild( fPrevButton );
++    r = BRect( b.right-90,355,b.right-10,380 );
++    fNextButton = new BButton( r, NULL, "Next",
++                               new BMessage( MSG_NEXT ) );
++    AddChild( fNextButton );
++
++    /* Info string and OK button */
++    r = BRect( 10,b.bottom-30,b.right-100,b.bottom-10 );
++    fInfoString = new BStringView( r, NULL, "" );
++    AddChild( fInfoString );
++    r = BRect( b.right-90,b.bottom-35,b.right-10,b.bottom-10 );
++    button = new BButton( r, NULL, "OK", new BMessage( MSG_CLOSE ) );
++    AddChild( button );
++
++    /* Process and draw a first picture */
++    RadioChanged();
++    UpdateBitmap();
++}
++
++PicView::~PicView()
++{
++    free( fRawPic );
++    delete fBitmap;
++}
++
++/************************************************************************
++ * PicView::Draw
++ ************************************************************************
++ * Calls the inherited BView::Draw, plus draws the BBitmap preview
++ * and the horizontal line above the info string and OK button
++ ***********************************************************************/
++void PicView::Draw( BRect rect )
++{
++    BRect b;
++
++    BView::Draw( rect );
++
++    if( LockLooper() )
++    {
++        b = fBitmap->Bounds();
++        DrawBitmap( fBitmap, BRect( 10,10,b.Width()+10,b.Height()+10 ) );
++        UnlockLooper();
++    }
++
++    b = Bounds();
++    SetHighColor( 128,128,128 );
++    StrokeLine( BPoint( 10,b.bottom-45 ), BPoint( b.right-10,b.bottom-45 ) );
++    SetHighColor( 255,255,255 );
++    StrokeLine( BPoint( 10,b.bottom-44 ), BPoint( b.right-10,b.bottom-44 ) );
++}
++
++void PicView::HandleMessage( BMessage * msg )
++{
++    switch( msg->what )
++    {
++        case MSG_PREV:
++            fIndex--;
++            UpdateBitmap();
++            break;
++
++        case MSG_NEXT:
++            fIndex++;
++            UpdateBitmap();
++            break;
++
++        case MSG_WIDTH:
++        case MSG_HEIGHT:
++            UpdateSettings( msg->what );
++            UpdateBitmap();
++            break;
++
++        case MSG_RADIO:
++            RadioChanged();
++            break;
++
++    }
++}
++
++void PicView::RadioChanged()
++{
++    int cus = fCustomRadio->Value();
++    for( int i = 0; i < 4; i++ )
++    {
++        fCropSteppers[i]->SetEnabled( cus );
++    }
++    if( !cus )
++    {
++        memcpy( fJob->crop, fTitle->crop, 4 * sizeof( int ) );
++        for( int i = 0; i < 4; i++ )
++        {
++            fCropSteppers[i]->SetValue( fJob->crop[i] );
++        }
++        UpdateSettings( MSG_WIDTH );
++        UpdateBitmap();
++    }
++}
++
++void PicView::UpdateSettings( uint32 what )
++{
++    fJob->width       = fWidthStepper->Value();
++    fJob->height      = fHeightStepper->Value();
++    fJob->keep_ratio  = fRatioCheck->Value();
++    fJob->deinterlace = fDeintCheck->Value();
++    for( int i = 0; i < 4; i++ )
++    {
++        fJob->crop[i] = fCropSteppers[i]->Value();
++    }
++
++    if( fJob->keep_ratio )
++    {
++        if( what == MSG_WIDTH )
++        {
++            hb_fix_aspect( fJob, HB_KEEP_WIDTH );
++            if( fJob->height > fTitle->height )
++            {
++                fJob->height = fTitle->height;
++                hb_fix_aspect( fJob, HB_KEEP_HEIGHT );
++            }
++        }
++        else
++        {
++            hb_fix_aspect( fJob, HB_KEEP_HEIGHT );
++            if( fJob->width > fTitle->width )
++            {
++                fJob->width = fTitle->width;
++                hb_fix_aspect( fJob, HB_KEEP_WIDTH );
++            }
++        }
++    }
++
++    fWidthStepper->SetValue( fJob->width );
++    fHeightStepper->SetValue( fJob->height );
++}
++
++void PicView::UpdateBitmap()
++{
++    /* Sanity checks */
++    if( fIndex < 0 )
++    {
++        fIndex = 0;
++        return;
++    }
++    if( fIndex > 9 )
++    {
++        fIndex = 9;
++        return;
++    }
++
++    /* Enable/disable buttons */
++    fPrevButton->SetEnabled( fIndex > 0 );
++    fNextButton->SetEnabled( fIndex < 9 );
++
++    /* Get new preview and copy it in our BBitmap */
++    hb_get_preview( fHandle, fTitle, fIndex, fRawPic );
++    for( int i = 0; i < fTitle->height + 2; i++ )
++    {
++        memcpy( ( (uint8_t *) fBitmap->Bits() ) +
++                    i * fBitmap->BytesPerRow(),
++                fRawPic + 4 * ( fTitle->width + 2 ) * i,
++                4 * ( fTitle->width + 2 ) );
++    }
++
++    /* Update size info */
++    char text[1024];
++    snprintf( text, 1024, "Source: %dx%d, output: %dx%d",
++              fTitle->width, fTitle->height,
++              fJob->width, fJob->height );
++    fInfoString->SetText( text );
++
++    /* Force redraw */
++    Draw( Bounds() );
++}
++
++PicWindow::PicWindow( hb_handle_t * handle, int index )
++    : BWindow( BRect( 0,0,10,10 ), "Picture settings",
++               B_FLOATING_WINDOW_LOOK, B_MODAL_APP_WINDOW_FEEL,
++               B_NOT_CLOSABLE | B_NOT_RESIZABLE | B_NOT_ZOOMABLE )
++{
++    /* Add the PicView */
++    fView = new PicView( handle, index );
++    AddChild( fView );
++    
++    /* Resize to fit */
++    ResizeTo( fView->Bounds().Width(), fView->Bounds().Height() );
++    
++    /* Center */
++    BScreen screen;
++    MoveTo( ( screen.Frame().Width() - fView->Bounds().Width() ) / 2,
++            ( screen.Frame().Height() - fView->Bounds().Height() ) / 2 );
++}
++
++void PicWindow::MessageReceived( BMessage * msg )
++{
++    switch( msg->what )
++    {
++        case MSG_PREV:
++        case MSG_NEXT:
++        case MSG_WIDTH:
++        case MSG_HEIGHT:
++        case MSG_RADIO:
++            fView->HandleMessage( msg );
++            break;
++
++        case MSG_CLOSE:
++            Lock();
++            Quit();
++            break;
++
++        default:
++            BWindow::MessageReceived( msg );
++    }
++}
+diff --git a/haiku/PicWindow.h b/haiku/PicWindow.h
+new file mode 100644
+index 0000000..9fe5d31
+--- /dev/null
++++ b/haiku/PicWindow.h
+@@ -0,0 +1,54 @@
++#ifndef PICWINDOW_H
++#define PICWINDOW_H
++
++#include <interface/Window.h>
++#include <interface/View.h>
++
++#include "hb.h"
++
++class HBStepper;
++
++class PicView : public BView
++{
++    public:
++        PicView( hb_handle_t * handle, int index );
++        ~PicView();
++        void Draw( BRect rect );
++
++        void HandleMessage( BMessage * msg );
++
++    private:
++        void UpdateBitmap();
++        void RadioChanged();
++        void UpdateSettings( uint32 what );
++
++        hb_handle_t  * fHandle;
++        hb_title_t   * fTitle;
++        hb_job_t     * fJob;
++        int            fIndex;
++        uint8_t      * fRawPic;
++        BBitmap      * fBitmap;
++
++        HBStepper    * fWidthStepper;
++        HBStepper    * fHeightStepper;
++        BCheckBox    * fRatioCheck;
++        BRadioButton * fAutoRadio;
++        BRadioButton * fCustomRadio;
++        HBStepper    * fCropSteppers[4];
++        BCheckBox    * fDeintCheck;
++        BButton      * fPrevButton;
++        BButton      * fNextButton;
++        BStringView  * fInfoString;
++};
++
++class PicWindow : public BWindow
++{
++    public:
++        PicWindow( hb_handle_t * handle, int index );
++        void MessageReceived( BMessage * msg );
++
++    private:
++        PicView * fView;
++};
++
++#endif
+diff --git a/haiku/QueueWindow.cpp b/haiku/QueueWindow.cpp
+new file mode 100644
+index 0000000..2b0319e
+--- /dev/null
++++ b/haiku/QueueWindow.cpp
+@@ -0,0 +1,132 @@
++#include <app/Message.h>
++#include <interface/Button.h>
++#include <interface/Screen.h>
++#include <interface/ScrollView.h>
++#include <interface/StringView.h>
++
++#include "QueueWindow.h"
++
++#define MSG_REMOVE 'remo'
++#define MSG_CLOSE  'clos'
++
++QueueView::QueueView( hb_handle_t * handle )
++    : BView( BRect( 0,0,500,300 ), NULL, B_FOLLOW_NONE, B_WILL_DRAW )
++{
++    fHandle = handle;
++
++    BRect b = Bounds(), r;
++
++    r = BRect( b.right-90,b.bottom-35,b.right-10,b.bottom-10 );
++    BButton * button = new BButton( r, NULL, "Close", new BMessage( MSG_CLOSE ) );
++    AddChild( button );
++
++    fScrollView = NULL;
++    UpdateQueue();
++}
++
++QueueView::~QueueView()
++{
++}
++
++void QueueView::HandleMessage( BMessage * msg )
++{
++    switch( msg->what )
++    {
++        case MSG_REMOVE:
++            break;
++    }
++}
++
++void QueueView::AddStringView( char * string, BRect * r )
++{
++    BStringView * stringView;
++
++    stringView = new BStringView( *r, NULL, string );
++    fQueueView->AddChild( stringView );
++    free( string );
++
++    r->top    += 20;
++    r->bottom += 20;
++}
++
++void QueueView::UpdateQueue()
++{
++    BRect b = Bounds(), r;
++
++    if( fScrollView )
++    {
++        RemoveChild( fScrollView );
++        delete fScrollView;
++    }
++
++    r = BRect( b.left+10,b.top+10,b.right-B_V_SCROLL_BAR_WIDTH-10,b.bottom-45 );
++    fQueueView  = new BView( r, NULL, B_FOLLOW_NONE, B_WILL_DRAW );
++    fScrollView = new BScrollView( NULL, fQueueView, B_FOLLOW_NONE, 0,
++                                   false, true, B_FANCY_BORDER );
++    AddChild( fScrollView );
++
++    hb_job_t * j;
++    hb_title_t * t;
++    int i;
++    char * s;
++
++    b = fQueueView->Bounds();
++    r = BRect( b.left+10,b.top+10,b.right-10,b.top+25 );
++
++    for( i = 0; i < hb_count( fHandle ); i++ )
++    {
++        j = hb_job( fHandle, i );
++        t = j->title;
++
++        asprintf( &s, "DVD: %s", t->dvd );
++        AddStringView( s, &r );
++
++        asprintf( &s, "Title: %d", t->index );
++        AddStringView( s, &r );
++
++        asprintf( &s, "Chapters: %d to %d", j->chapter_start, j->chapter_end );
++        AddStringView( s, &r );
++
++        asprintf( &s, "Pass: %d of %d", MAX( 1, j->pass ), MIN( 2, j->pass + 1 ) );
++        AddStringView( s, &r );
++
++        asprintf( &s, "Destination: %s", j->file );
++        AddStringView( s, &r );
++    }
++}
++
++QueueWindow::QueueWindow( hb_handle_t * handle )
++    : BWindow( BRect( 0,0,10,10 ), "Queue",
++               B_FLOATING_WINDOW_LOOK, B_MODAL_APP_WINDOW_FEEL,
++               B_NOT_CLOSABLE | B_NOT_RESIZABLE | B_NOT_ZOOMABLE )
++{
++    /* Add the QueueView */
++    fView = new QueueView( handle );
++    AddChild( fView );
++    
++    /* Resize to fit */
++    ResizeTo( fView->Bounds().Width(), fView->Bounds().Height() );
++    
++    /* Center */
++    BScreen screen;
++    MoveTo( ( screen.Frame().Width() - fView->Bounds().Width() ) / 2,
++            ( screen.Frame().Height() - fView->Bounds().Height() ) / 2 );
++}
++
++void QueueWindow::MessageReceived( BMessage * msg )
++{
++    switch( msg->what )
++    {
++        case MSG_REMOVE:
++            fView->HandleMessage( msg );
++            break;
++
++        case MSG_CLOSE:
++            Lock();
++            Quit();
++            break;
++
++        default:
++            BWindow::MessageReceived( msg );
++    }
++}
+diff --git a/haiku/QueueWindow.h b/haiku/QueueWindow.h
+new file mode 100644
+index 0000000..e9b86e3
+--- /dev/null
++++ b/haiku/QueueWindow.h
+@@ -0,0 +1,38 @@
++#ifndef QUEUE_WINDOW_H
++#define QUEUE_WINDOW_H
++
++#include <interface/Window.h>
++#include <interface/View.h>
++
++#include "hb.h"
++
++class QueueView : public BView
++{
++    public:
++        QueueView( hb_handle_t * handle );
++        ~QueueView();
++
++        void HandleMessage( BMessage * msg );
++
++    private:
++        void AddStringView( char * string, BRect * r );
++        void UpdateQueue();
++
++        hb_handle_t  * fHandle;
++
++        BScrollView  * fScrollView;
++        BView        * fQueueView;
++        BButton      * fCloseButton;
++};
++
++class QueueWindow : public BWindow
++{
++    public:
++        QueueWindow( hb_handle_t * handle );
++        void MessageReceived( BMessage * msg );
++
++    private:
++        QueueView * fView;
++};
++
++#endif
+diff --git a/haiku/ScanWindow.cpp b/haiku/ScanWindow.cpp
+new file mode 100644
+index 0000000..615731f
+--- /dev/null
++++ b/haiku/ScanWindow.cpp
+@@ -0,0 +1,320 @@
++#include <drivers/Drivers.h>
++#include <interface/Box.h>
++#include <interface/Button.h>
++#include <interface/MenuField.h>
++#include <interface/MenuItem.h>
++#include <interface/PopUpMenu.h>
++#include <interface/RadioButton.h>
++#include <interface/Screen.h>
++#include <interface/StatusBar.h>
++#include <interface/StringView.h>
++#include <interface/TextControl.h>
++#include <kernel/fs_info.h>
++#include <storage/FilePanel.h>
++#include <storage/Path.h>
++#include <storage/Query.h>
++#include <storage/VolumeRoster.h>
++#include <sys/ioctl.h>
++
++#include "ScanWindow.h"
++
++#define MSG_RADIO  'radi'
++#define MSG_BROWSE 'brow'
++#define MSG_CANCEL 'canc'
++#define MSG_OPEN   'open'
++
++ScanView::ScanView( hb_handle_t * handle )
++    : BView( BRect( 0,0,400,215 ), NULL, B_FOLLOW_NONE, B_WILL_DRAW )
++{
++    fHandle = handle;
++
++    BRect r, b;
++    BBox * box;
++    BStringView * stringView;
++    
++    SetViewColor( ui_color( B_PANEL_BACKGROUND_COLOR ) );
++
++    b = Bounds();
++
++    r = BRect( 10,10,b.right-10,130 );
++    box = new BBox( r );
++    AddChild( box );
++
++    b = box->Bounds();
++
++    r = BRect( 10,10,b.right-10,30 );
++    stringView = new BStringView( r, NULL, "Select a DVD:" );
++    box->AddChild( stringView );
++
++    r = BRect( 10,35,b.right/2,55 );
++    fDetectedRadio = new BRadioButton( r, NULL, "Detected volume",
++                                       new BMessage( MSG_RADIO ) );
++    box->AddChild( fDetectedRadio );
++
++    r = BRect( b.right/2+1,35,b.right-10,55 );
++    fPopUp = new BPopUpMenu( "No volume detected" );
++    fMenu = new BMenuField( r, NULL, "", fPopUp, true );
++    fMenu->SetDivider( 0 );
++    box->AddChild( fMenu );
++
++    r = BRect( 10,60,b.right/2,80 );
++    fFolderRadio = new BRadioButton( r, NULL, "DVD Folder / Image",
++                                     new BMessage( MSG_RADIO ) );
++    box->AddChild( fFolderRadio );
++
++    r = BRect( b.right/2+1,60,b.right-10,80 );
++    fControl = new BTextControl( r, NULL, "", "", new BMessage() );
++    fControl->SetDivider( 0 );
++    box->AddChild( fControl );
++
++    r = BRect( b.right-90,85,b.right-10,110 );
++    fBrowseButton = new BButton( r, NULL, "Browse",
++        new BMessage( MSG_BROWSE ) );
++    box->AddChild( fBrowseButton );
++
++    b = Bounds();
++
++    r = BRect( 10,b.bottom-75,b.right-10,b.bottom-45 );
++    fBar = new BStatusBar( r, NULL, NULL, NULL );
++    AddChild( fBar );
++
++    r = BRect( b.right-180,b.bottom-35,b.right-100,b.bottom-10 );
++    fCancelButton = new BButton( r, NULL, "Cancel",
++        new BMessage( MSG_CANCEL ) );
++    AddChild( fCancelButton );
++
++    r = BRect( b.right-90,b.bottom-35,b.right-10,b.bottom-10 );
++    fOpenButton = new BButton( r, NULL, "Open", new BMessage( MSG_OPEN ) );
++    AddChild( fOpenButton );
++
++    DetectVolumes();
++
++    if( fPopUp->CountItems() > 0 )
++    {
++        fDetectedRadio->SetValue( true );
++    }
++    else
++    {
++        fFolderRadio->SetValue( true );
++    }
++    RadioChanged();
++
++    fFilePanel = NULL;
++}
++
++void ScanView::HandleMessage( BMessage * msg )
++{
++    switch( msg->what )
++    {
++        case MSG_RADIO:
++            RadioChanged();
++            break;
++
++        case MSG_BROWSE:
++            if( !fFilePanel )
++            {
++                fFilePanel = new BFilePanel( B_OPEN_PANEL,
++                    new BMessenger( Window() ), NULL, 
++                    B_FILE_NODE | B_DIRECTORY_NODE, false, NULL, NULL,
++                    true );
++            }
++            fFilePanel->Show();
++            break;
++
++        case B_REFS_RECEIVED:
++        {
++            entry_ref ref;
++            if( msg->FindRef( "refs", 0, &ref ) == B_OK )
++            {
++                BPath * path = new BPath( &ref );
++                fControl->SetText( path->Path());
++            }
++            break;
++        }
++
++        case MSG_CANCEL:
++            Window()->Hide();
++            break;
++
++        case MSG_OPEN:
++            SetEnabled( false );
++            fBar->Update( - fBar->CurrentValue(), "Opening..." );
++            if( fDetectedRadio->Value() && fPopUp->CountItems() > 0 )
++            {
++                hb_scan( fHandle, fPopUp->FindMarked()->Label(), 0 );
++            }
++            else if( fFolderRadio->Value() )
++            {
++                hb_scan( fHandle, fControl->Text(), 0 );
++            }
++            break;
++    }
++}
++
++void ScanView::Update( hb_state_t * s )
++{
++    if( !LockLooper() )
++    {
++        return;
++    }
++
++    switch( s->state )
++    {
++#define p s->param.scanning
++        case HB_STATE_SCANNING:
++        {
++            char text[1024];
++            snprintf( text, 1024, "Scanning title %d of %d...", p.title_cur,
++                  p.title_count );
++            fBar->Update( fBar->MaxValue() * ( - 0.5 + p.title_cur ) /
++                  p.title_count - fBar->CurrentValue(), text );
++            break;
++        }
++#undef p
++
++        case HB_STATE_SCANDONE:
++            /* If we are still here, then no title was found */
++            fBar->Update( - fBar->CurrentValue(),
++                          "No valid title found." );
++            SetEnabled( true );
++            break;
++    }
++
++    UnlockLooper();
++}
++
++void ScanView::RadioChanged()
++{
++    bool b = fDetectedRadio->Value();
++    fMenu->SetEnabled( b );
++    fControl->SetEnabled( !b );
++    fBrowseButton->SetEnabled( !b );
++    fOpenButton->SetEnabled( !b || ( fPopUp->CountItems() > 0 ) );
++}
++
++void ScanView::SetEnabled( bool b )
++{
++    fDetectedRadio->SetEnabled( b );
++    fMenu->SetEnabled( b );
++    fFolderRadio->SetEnabled( b );
++    fControl->SetEnabled( b );
++    fBrowseButton->SetEnabled( b );
++    fOpenButton->SetEnabled( b );
++
++    if( b )
++    {
++        RadioChanged();
++    }
++}
++
++void ScanView::DetectVolumes()
++{
++    BVolumeRoster   * roster  = new BVolumeRoster();
++    BVolume         * volume = new BVolume();
++    fs_info           info;
++    int               device;
++    device_geometry   geometry;
++
++    while( roster->GetNextVolume( volume ) == B_NO_ERROR )
++    {
++        /* open() and ioctl() for more informations */
++        fs_stat_dev( volume->Device(), &info );
++        if( ( device = open( info.device_name, O_RDONLY ) ) < 0 )
++        {
++            continue;
++        }
++
++        if( ioctl( device, B_GET_GEOMETRY, &geometry,
++                   sizeof( geometry ) ) < 0 )
++        {
++            continue;
++        }
++
++        /* Get the volume name */
++        char volumeName[B_FILE_NAME_LENGTH];
++        volume->GetName( volumeName );
++
++        if( volume->IsReadOnly() && geometry.device_type == B_CD )
++        {
++            /* May be a DVD */
++            fPopUp->AddItem( new BMenuItem( info.device_name, NULL ) );
++        }
++        else if( geometry.device_type == B_DISK )
++        {
++            /* May be a hard drive. Look for VIDEO_TS folders on it */
++            BQuery * query = new BQuery();
++
++            if( query->SetVolume( volume ) != B_OK )
++            {
++                delete query;
++                continue;
++            }
++
++            if( query->SetPredicate( "name = VIDEO_TS.IFO" ) != B_OK )
++            {
++                delete query;
++                continue;
++            }
++
++            query->Fetch();
++
++            BEntry entry, parentEntry;
++            BPath  path;
++            while( query->GetNextEntry( &entry ) == B_OK )
++            {
++                entry.GetParent( &parentEntry );
++                parentEntry.GetPath( &path );
++
++                fPopUp->AddItem( new BMenuItem( path.Path(), NULL ) );
++            }
++
++            delete query;
++        }
++    }
++
++    if( fPopUp->CountItems() > 0 )
++    {
++        fPopUp->ItemAt( 0 )->SetMarked( true );
++    }
++}
++
++ScanWindow::ScanWindow( hb_handle_t * handle )
++    : BWindow( BRect( 0,0,10,10 ), "Scan", B_FLOATING_WINDOW_LOOK,
++               B_MODAL_SUBSET_WINDOW_FEEL, B_NOT_CLOSABLE |
++               B_NOT_RESIZABLE | B_NOT_ZOOMABLE )
++{
++    /* Add the scan view */
++    fView = new ScanView( handle );
++    AddChild( fView );
++    
++    /* Resize to fit */
++    ResizeTo( fView->Bounds().Width(), fView->Bounds().Height() );
++    
++    /* Center */
++    BScreen screen;
++    MoveTo( ( screen.Frame().Width() - fView->Bounds().Width() ) / 2,
++            ( screen.Frame().Height() - fView->Bounds().Height() ) / 2 );
++}
++
++void ScanWindow::MessageReceived( BMessage * msg )
++{
++    switch( msg->what )
++    {
++        case MSG_RADIO:
++        case MSG_BROWSE:
++        case MSG_CANCEL:
++        case MSG_OPEN:
++        case B_REFS_RECEIVED:
++            fView->HandleMessage( msg );
++            break;
++
++        default:
++            BWindow::MessageReceived( msg );
++    }
++}
++
++void ScanWindow::Update( hb_state_t * s )
++{
++    fView->Update( s );
++}
++
+diff --git a/haiku/ScanWindow.h b/haiku/ScanWindow.h
+new file mode 100644
+index 0000000..f46c1c1
+--- /dev/null
++++ b/haiku/ScanWindow.h
+@@ -0,0 +1,56 @@
++#ifndef SCANWINDOW_H
++#define SCANWINDOW_H
++
++#include <interface/Window.h>
++#include <interface/View.h>
++
++#include "hb.h"
++
++class BButton;
++class BMenuField;
++class BPopUpMenu;
++class BRadioButton;
++class BStatusBar;
++class BTextControl;
++
++class ScanView : public BView
++{
++    public:
++        ScanView( hb_handle_t * handle );
++
++        void HandleMessage( BMessage * msg );
++        void Update( hb_state_t * s );
++        void RadioChanged();
++        void SetEnabled( bool );
++
++    private:
++        void DetectVolumes();
++
++        hb_handle_t  * fHandle;
++
++        BRadioButton * fDetectedRadio;
++        BPopUpMenu   * fPopUp;
++        BMenuField   * fMenu;
++        BRadioButton * fFolderRadio;
++        BTextControl * fControl;
++        BButton      * fBrowseButton;
++        BStatusBar   * fBar;
++        BButton      * fCancelButton;
++        BButton      * fOpenButton;
++
++        BFilePanel  * fFilePanel;
++};
++
++class ScanWindow : public BWindow
++{
++    public:
++        ScanWindow( hb_handle_t * handle );
++        void MessageReceived( BMessage * msg );
++
++        void Update( hb_state_t * s );
++
++    private:
++        ScanView    * fView;
++};
++
++#endif
+diff --git a/haiku/Stepper.cpp b/haiku/Stepper.cpp
+new file mode 100644
+index 0000000..8f2733a
+--- /dev/null
++++ b/haiku/Stepper.cpp
+@@ -0,0 +1,130 @@
++#include <interface/Region.h>
++#include <interface/TextControl.h>
++#include <interface/Window.h>
++
++#include "Stepper.h"
++
++#include <stdio.h>
++
++HBStepper::HBStepper( BRect rect, int step, int min, int max, int val,
++                      BMessage * message )
++    : BView( rect, NULL, B_FOLLOW_NONE, B_WILL_DRAW )
++{
++    fStep    = step;
++    fMin     = min;
++    fMax     = max;
++    fMessage = message;
++
++    BRect b = Bounds();
++
++    fEnabled = true;
++
++    fControl = new BTextControl( BRect( 0,1,b.Width()-14,b.Height()-1 ),
++        NULL, NULL, "", new BMessage() );
++    fControl->SetDivider( 0.0 );
++    fControl->TextView()->MakeEditable( false );
++    AddChild( fControl );
++
++    SetValue( val );
++}
++
++void HBStepper::Draw( BRect rect )
++{
++    /* Why do we have to do this here!? */
++    fControl->TextView()->MakeEditable( false );
++    fControl->TextView()->MakeSelectable( false );
++
++    BRect b = Bounds();
++    BRegion region;
++
++    SetHighColor( 128,128,128 ); /* Dark gray */
++    region.MakeEmpty();
++    region.Include( BRect(  3, 0,10, 0 ) );
++    region.Include( BRect(  2, 1, 3, 1 ) );
++    region.Include( BRect( 10, 1,11, 1 ) );
++    region.Include( BRect(  1, 2, 2, 2 ) );
++    region.Include( BRect( 11, 2,12, 2 ) );
++    region.Include( BRect(  1, 2, 1,18 ) );
++    region.Include( BRect(  1,10,12,10 ) );
++    region.Include( BRect( 12, 2,12,18 ) );
++    region.Include( BRect(  1,18, 2,18 ) );
++    region.Include( BRect( 11,18,12,18 ) );
++    region.Include( BRect(  2,19, 3,19 ) );
++    region.Include( BRect( 10,19,11,19 ) );
++    region.Include( BRect(  3,20,10,20 ) );
++    region.OffsetBy( b.Width()-12,0 );
++    FillRegion( &region );
++
++    SetHighColor( 0,0,0 ); /* Black */
++    region.MakeEmpty();
++    region.Include( BRect(  6, 4, 7, 4 ) );
++    region.Include( BRect(  5, 5, 8, 6 ) );
++    region.Include( BRect(  5,14, 8,15 ) );
++    region.Include( BRect(  6,16, 7,16 ) );
++    region.OffsetBy( b.Width()-12,0 );
++    FillRegion( &region );
++
++    BView::Draw( rect );
++}
++
++void HBStepper::AttachedToWindow()
++{
++    if( Parent() )
++    {
++        SetViewColor( Parent()->ViewColor() );
++    }
++}
++
++void HBStepper::MouseDown( BPoint point )
++{
++    BRect r, b = Bounds();
++
++    if( !fEnabled )
++    {
++        return;
++    }
++
++    BMessenger messenger( Window() );
++
++    r = BRect( 2,1,11,9 );
++    r.OffsetBy( b.Width()-12,0 );
++    if( r.Contains( point ) )
++    {
++        SetValue( fValue + fStep );
++        messenger.SendMessage( fMessage );
++    }
++    r.OffsetBy( 0,10 );
++    if( r.Contains( point ) )
++    {
++        SetValue( fValue - fStep );
++        messenger.SendMessage( fMessage );
++    }
++}
++
++void HBStepper::SetValue( int val )
++{
++    fValue = val;
++    if( fValue < fMin )
++    {
++        fValue = fMin;
++    }
++    if( fValue > fMax )
++    {
++        fValue = fMax;
++    }
++
++    char text[16];
++    snprintf( text, 16, "%d", fValue );
++    fControl->SetText( text );
++}
++
++int HBStepper::Value()
++{
++    return fValue;
++}
++
++void HBStepper::SetEnabled( bool e )
++{
++    fEnabled = e;
++    fControl->SetEnabled( fEnabled );
++}
+diff --git a/haiku/Stepper.h b/haiku/Stepper.h
+new file mode 100644
+index 0000000..2b0493f
+--- /dev/null
++++ b/haiku/Stepper.h
+@@ -0,0 +1,31 @@
++#ifndef STEPPER_H
++#define STEPPER_H
++
++#include <interface/View.h>
++
++class BTextControl;
++
++class HBStepper : public BView
++{
++    public:
++        HBStepper( BRect rect, int step, int min, int max, int val,
++                   BMessage * message );
++        void Draw( BRect rect );
++        void AttachedToWindow();
++        void MouseDown( BPoint point );
++        void SetValue( int val );
++        int  Value();
++        void SetEnabled( bool e );
++
++    private:
++        int            fStep;
++        int            fMin;
++        int            fMax;
++        int            fValue;
++        BMessage     * fMessage;
++
++        bool           fEnabled;
++        BTextControl * fControl;
++};
++
++#endif
+-- 
+2.10.2
+
+
+From 89a7684997fa175817a3868487bfa0869b2c55db Mon Sep 17 00:00:00 2001
+From: Alexander von Gluck IV <kallisti5@unixzen.com>
+Date: Sat, 8 Dec 2012 18:44:38 +0000
+Subject: Haiku: Add Haiku build def
+
+
+diff --git a/make/variant/haiku.defs b/make/variant/haiku.defs
+new file mode 100644
+index 0000000..c703272
+--- /dev/null
++++ b/make/variant/haiku.defs
+@@ -0,0 +1,11 @@
++TARGET.dylib.ext = .so
++
++GCC.start      = 1
++GCC.end        = 1
++GCC.args.dylib = -shared
++GCC.args.pic   = 1
++
++GCC.args.g.none = -g0
++GCC.args.g.min  = -g1
++GCC.args.g.std  = -g2
++GCC.args.g.max  = -g3
+-- 
+2.10.2
+
+
+From: Alexander von Gluck IV <kallisti5@unixzen.com>
+Date: Sat, 8 Dec 2012 22:55:18 +0000
+Subject: Haiku: Define SYS_HAIKU and add proper checks
+
+--- a/libhb/ports.c
++++ b/libhb/ports.c
+@@ -19,7 +19,7 @@
+ #include <pthread.h>
+ #endif
+ 
+-#ifdef SYS_BEOS
++#if defined(SYS_BEOS) || defined(SYS_HAIKU)
+ #include <kernel/OS.h>
+ #endif
+ 
+@@ -211,7 +211,7 @@ void hb_snooze( int delay )
+     {
+         return;
+     }
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+     snooze( 1000 * delay );
+ #elif defined( SYS_DARWIN ) || defined( SYS_LINUX ) || defined( SYS_FREEBSD) || defined( SYS_SunOS )
+     usleep( 1000 * delay );
+@@ -431,7 +431,7 @@ static int init_cpu_count()
+     for( cpu_count = 0, bit = 0; bit < sizeof(p_aff); bit++ )
+          cpu_count += (((uint8_t *)&p_aff)[bit / 8] >> (bit % 8)) & 1;
+ 
+-#elif defined(SYS_BEOS)
++#elif defined(SYS_BEOS) || defined(SYS_HAIKU)
+     system_info info;
+     get_system_info( &info );
+     cpu_count = info.cpu_count;
+@@ -796,7 +796,7 @@ struct hb_thread_s
+     hb_lock_t     * lock;
+     int             exited;
+ 
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+     thread_id       thread;
+ #elif USE_PTHREAD
+     pthread_t       thread;
+@@ -852,7 +852,7 @@ static void attribute_align_thread hb_thread_func( void * _t )
+     pthread_setschedparam( pthread_self(), SCHED_OTHER, &param );
+ #endif
+ 
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+     signal( SIGINT, SIG_IGN );
+ #endif
+ 
+@@ -887,7 +887,7 @@ hb_thread_t * hb_thread_init( const char * name, void (* function)(void *),
+     t->lock     = hb_lock_init();
+ 
+     /* Create and start the thread */
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+     t->thread = spawn_thread( (thread_func) hb_thread_func,
+                               name, priority, t );
+     resume_thread( t->thread );
+@@ -919,7 +919,7 @@ void hb_thread_close( hb_thread_t ** _t )
+     hb_thread_t * t = *_t;
+ 
+     /* Join the thread */
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+     long exit_value;
+     wait_for_thread( t->thread, &exit_value );
+ 
+@@ -959,7 +959,7 @@ int hb_thread_has_exited( hb_thread_t * t )
+  ***********************************************************************/
+ struct hb_lock_s
+ {
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+     sem_id          sem;
+ #elif USE_PTHREAD
+     pthread_mutex_t mutex;
+@@ -980,7 +980,7 @@ hb_lock_t * hb_lock_init()
+ {
+     hb_lock_t * l = calloc( sizeof( hb_lock_t ), 1 );
+ 
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+     l->sem = create_sem( 1, "sem" );
+ #elif USE_PTHREAD
+     pthread_mutexattr_t mta;
+@@ -1007,7 +1007,7 @@ void hb_lock_close( hb_lock_t ** _l )
+     {
+         return;
+     }
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+     delete_sem( l->sem );
+ #elif USE_PTHREAD
+     pthread_mutex_destroy( &l->mutex );
+@@ -1021,7 +1021,7 @@ void hb_lock_close( hb_lock_t ** _l )
+ 
+ void hb_lock( hb_lock_t * l )
+ {
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+     acquire_sem( l->sem );
+ #elif USE_PTHREAD
+     pthread_mutex_lock( &l->mutex );
+@@ -1032,7 +1032,7 @@ void hb_lock( hb_lock_t * l )
+ 
+ void hb_unlock( hb_lock_t * l )
+ {
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+     release_sem( l->sem );
+ #elif USE_PTHREAD
+     pthread_mutex_unlock( &l->mutex );
+@@ -1046,7 +1046,7 @@ void hb_unlock( hb_lock_t * l )
+  ***********************************************************************/
+ struct hb_cond_s
+ {
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+     int                 thread;
+ #elif USE_PTHREAD
+     pthread_cond_t      cond;
+@@ -1071,7 +1071,7 @@ hb_cond_t * hb_cond_init()
+     if( c == NULL )
+         return NULL;
+ 
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+     c->thread = -1;
+ #elif USE_PTHREAD
+     pthread_cond_init( &c->cond, NULL );
+@@ -1090,7 +1090,7 @@ void hb_cond_close( hb_cond_t ** _c )
+     {
+         return;
+     }
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+ #elif USE_PTHREAD
+     pthread_cond_destroy( &c->cond );
+ //#elif defined( SYS_CYGWIN )
+@@ -1103,7 +1103,7 @@ void hb_cond_close( hb_cond_t ** _c )
+ 
+ void hb_cond_wait( hb_cond_t * c, hb_lock_t * lock )
+ {
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+     c->thread = find_thread( NULL );
+     release_sem( lock->sem );
+     suspend_thread( c->thread );
+@@ -1133,7 +1133,7 @@ void hb_yield(void)
+ 
+ void hb_cond_timedwait( hb_cond_t * c, hb_lock_t * lock, int msec )
+ {
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+     c->thread = find_thread( NULL );
+     release_sem( lock->sem );
+     suspend_thread( c->thread );
+@@ -1151,7 +1151,7 @@ void hb_cond_timedwait( hb_cond_t * c, hb_lock_t * lock, int msec )
+ 
+ void hb_cond_signal( hb_cond_t * c )
+ {
+-#if defined( SYS_BEOS )
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
+     while( c->thread != -1 )
+     {
+         thread_info info;
+-- 
+2.10.2
+
+
+From 7d2560d11378d3fb01afb9ed06700da1c62ce3e1 Mon Sep 17 00:00:00 2001
+From: Alexander von Gluck IV <kallisti5@unixzen.com>
+Date: Sat, 8 Dec 2012 22:47:30 +0000
+Subject: Haiku: Stub out thread broadcast call
+
+
+diff --git a/libhb/ports.c b/libhb/ports.c
+index 80d1565..00678a1 100644
+--- a/libhb/ports.c
++++ b/libhb/ports.c
+@@ -1175,7 +1175,9 @@ void hb_cond_signal( hb_cond_t * c )
+ 
+ void hb_cond_broadcast( hb_cond_t * c )
+ {
+-#if USE_PTHREAD
++#if defined( SYS_BEOS ) || defined( SYS_HAIKU )
++	// TODO: Handle this if needed
++#elif USE_PTHREAD
+     pthread_cond_broadcast( &c->cond );
+ #endif
+ }
+-- 
+2.10.2
+
+
+From 9290a49384f9efd20e16b0eddf78290185c831ef Mon Sep 17 00:00:00 2001
+From: Alexander von Gluck IV <kallisti5@unixzen.com>
+Date: Sat, 8 Dec 2012 22:55:18 +0000
+Subject: Haiku: Add needed libraries
+
+
+diff --git a/make/variant/haiku.defs b/make/variant/haiku.defs
+index c703272..d61dd38 100644
+--- a/make/variant/haiku.defs
++++ b/make/variant/haiku.defs
+@@ -3,6 +3,7 @@ TARGET.dylib.ext = .so
+ GCC.start      = 1
+ GCC.end        = 1
+ GCC.args.dylib = -shared
++GCC.args.extra = -lnetwork -liconv
+ GCC.args.pic   = 1
+ 
+ GCC.args.g.none = -g0
+-- 
+2.10.2
+
+
+From 433a01f8fac12517845bf77c389c7e1b5142f3d8 Mon Sep 17 00:00:00 2001
+From: Alexander von Gluck IV <kallisti5@unixzen.com>
+Date: Sun, 9 Dec 2012 05:27:37 +0000
+Subject: Haiku: Fix Haiku GUI. Add TODO items
+
+
+diff --git a/haiku/HBApp.cpp b/haiku/HBApp.cpp
+index 702c74d..f878308 100644
+--- a/haiku/HBApp.cpp
++++ b/haiku/HBApp.cpp
+@@ -2,8 +2,6 @@
+ #include "MainWindow.h"
+ #include "ScanWindow.h"
+ 
+-#include "hb.h"
+-
+ int main()
+ {
+     HBApp * app = new HBApp();
+diff --git a/haiku/HBApp.h b/haiku/HBApp.h
+index 042a791..ef3011d 100644
+--- a/haiku/HBApp.h
++++ b/haiku/HBApp.h
+@@ -3,7 +3,7 @@
+ 
+ #include <Application.h>
+ 
+-#include "hb.h"
++#include "hb_wrapper.h"
+ 
+ class MainWindow;
+ class ScanWindow;
+diff --git a/haiku/MainWindow.cpp b/haiku/MainWindow.cpp
+index 5b2741b..7d1049a 100644
+--- a/haiku/MainWindow.cpp
++++ b/haiku/MainWindow.cpp
+@@ -38,12 +38,12 @@ static int FormatSettings[3][4] =
+       HB_MUX_MP4 | HB_VCODEC_X264   | HB_ACODEC_FAAC,
+       0,
+       0 },
+-    { HB_MUX_AVI | HB_VCODEC_FFMPEG | HB_ACODEC_LAME,
+-      HB_MUX_AVI | HB_VCODEC_FFMPEG | HB_ACODEC_AC3,
+-      HB_MUX_AVI | HB_VCODEC_X264   | HB_ACODEC_LAME,
+-      HB_MUX_AVI | HB_VCODEC_X264   | HB_ACODEC_AC3 },
+-    { HB_MUX_OGM | HB_VCODEC_FFMPEG | HB_ACODEC_VORBIS,
+-      HB_MUX_OGM | HB_VCODEC_FFMPEG | HB_ACODEC_LAME,
++    { HB_VCODEC_FFMPEG | HB_ACODEC_LAME,
++      HB_VCODEC_FFMPEG | HB_ACODEC_AC3,
++      HB_VCODEC_X264   | HB_ACODEC_LAME,
++      HB_VCODEC_X264   | HB_ACODEC_AC3 },
++    { HB_MUX_MKV | HB_VCODEC_FFMPEG | HB_ACODEC_VORBIS,
++      HB_MUX_MKV | HB_VCODEC_FFMPEG | HB_ACODEC_LAME,
+       0,
+       0 } };
+ 
+@@ -272,7 +272,10 @@ MainView::MainView( hb_handle_t * handle )
+         fAudRatePopUp->AddItem( new BMenuItem( hb_audio_rates[i].string,
+             new BMessage ) );
+     }
++	#if 0
++	// TODO: hb_audio_rates_default
+     fAudRatePopUp->ItemAt( hb_audio_rates_default )->SetMarked( true );
++	#endif
+     fAudRateMenu = new BMenuField( r, NULL, "Sample rate (Hz):",
+                                    fAudRatePopUp, true );
+     box->AddChild( fAudRateMenu );
+@@ -283,8 +286,11 @@ MainView::MainView( hb_handle_t * handle )
+         fAudBitratePopUp->AddItem( new BMenuItem(
+             hb_audio_bitrates[i].string, new BMessage ) );
+     }
++    #if 0
++    // TODO: hb_audio_bitrates_default
+     fAudBitratePopUp->ItemAt(
+         hb_audio_bitrates_default )->SetMarked( true );
++    #endif
+     fAudBitrateMenu = new BMenuField( r, NULL, "Bitrate (kbps):",
+                                       fAudBitratePopUp, true );
+     box->AddChild( fAudBitrateMenu );
+@@ -473,7 +479,10 @@ void MainView::Update( hb_state_t * s )
+             for( int i = 0; i < hb_list_count( list ); i++ )
+             {
+                 title = (hb_title_t *) hb_list_item( list, i );
++                #if 0
++                // TODO: dvd missing
+                 fSrcDVD2String->SetText( title->dvd );
++                #endif
+                 snprintf( string, 1024, "%d - %02dh%02dm%02ds",
+                           title->index, title->hours, title->minutes,
+                           title->seconds );
+@@ -660,9 +669,12 @@ void MainView::TitlePopUpChanged()
+     fAudLang2PopUp->AddItem( new BMenuItem( "None", new BMessage() ) );
+     for( int i = 0; i < hb_list_count( title->list_audio ); i++ )
+     {
++		// TODO: fix
++        #if 0
+         audio = (hb_audio_t *) hb_list_item( title->list_audio, i );
+         fAudLang1PopUp->AddItem( new BMenuItem( audio->lang, new BMessage() ) );
+         fAudLang2PopUp->AddItem( new BMenuItem( audio->lang, new BMessage() ) );
++        #endif
+     }
+     fAudLang1PopUp->ItemAt( 1 )->SetMarked( true );
+     fAudLang2PopUp->ItemAt( 0 )->SetMarked( true );
+@@ -858,13 +870,15 @@ void MainView::AddJob()
+ 
+     job->mux    = FormatSettings[format][codecs] & HB_MUX_MASK;
+     job->vcodec = FormatSettings[format][codecs] & HB_VCODEC_MASK;
+-    job->acodec = FormatSettings[format][codecs] & HB_ACODEC_MASK;
++	// TODO: audio codec?
++    //job->acodec = FormatSettings[format][codecs] & HB_ACODEC_MASK;
+ 
+     if( ( job->vcodec & HB_VCODEC_FFMPEG ) &&
+         fVidEncoderPopUp->IndexOf(
+             fVidEncoderPopUp->FindMarked() ) > 0 )
+     {
+-        job->vcodec = HB_VCODEC_XVID;
++        // TODO: No more XVID?
++        //job->vcodec = HB_VCODEC_XVID;
+     }
+ 
+     int index;
+@@ -881,6 +895,8 @@ void MainView::AddJob()
+ 
+     job->grayscale = fVidGrayCheck->Value();
+ 
++    #if 0
++    // TODO: Find these missing structs 
+     job->subtitle = fSubPopUp->IndexOf(
+         fSubPopUp->FindMarked() ) - 1;
+ 
+@@ -894,6 +910,7 @@ void MainView::AddJob()
+         fAudRatePopUp->FindMarked() )].rate;
+     job->abitrate = hb_audio_bitrates[fAudBitratePopUp->IndexOf(
+         fAudBitratePopUp->FindMarked() )].rate;
++    #endif
+ 
+     if( fVidConstantRadio->Value() )
+     {
+@@ -903,8 +920,11 @@ void MainView::AddJob()
+     else if( fVidTargetRadio->Value() )
+     {
+         job->vquality = -1.0;
++        #if 0
++        // TODO: find hb_calc_bitrate
+         job->vbitrate = hb_calc_bitrate( job,
+             atoi( fVidTargetControl->Text() ) );
++        #endif
+     }
+     else
+     {
+@@ -929,7 +949,7 @@ void MainView::AddJob()
+ }
+ 
+ MainWindow::MainWindow( hb_handle_t * handle )
+-    : BWindow( BRect( 0,0,10,10 ), "HandBrake " HB_VERSION,
++    : BWindow( BRect( 0,0,10,10 ), "HandBrake",
+                B_TITLED_WINDOW, B_NOT_RESIZABLE | B_NOT_ZOOMABLE )
+ {
+     fHandle = handle;
+diff --git a/haiku/MainWindow.h b/haiku/MainWindow.h
+index 1558556..b432285 100644
+--- a/haiku/MainWindow.h
++++ b/haiku/MainWindow.h
+@@ -4,7 +4,7 @@
+ #include <interface/Window.h>
+ #include <interface/View.h>
+ 
+-#include "hb.h"
++#include "hb_wrapper.h"
+ 
+ class BButton;
+ class BCheckBox;
+diff --git a/haiku/PicWindow.cpp b/haiku/PicWindow.cpp
+index 6b30f27..b93c393 100644
+--- a/haiku/PicWindow.cpp
++++ b/haiku/PicWindow.cpp
+@@ -308,7 +308,10 @@ void PicView::UpdateBitmap()
+     fNextButton->SetEnabled( fIndex < 9 );
+ 
+     /* Get new preview and copy it in our BBitmap */
++    #if 0
++    // TODO: Fix this
+     hb_get_preview( fHandle, fTitle, fIndex, fRawPic );
++    #endif
+     for( int i = 0; i < fTitle->height + 2; i++ )
+     {
+         memcpy( ( (uint8_t *) fBitmap->Bits() ) +
+diff --git a/haiku/PicWindow.h b/haiku/PicWindow.h
+index 9fe5d31..82c4cf1 100644
+--- a/haiku/PicWindow.h
++++ b/haiku/PicWindow.h
+@@ -4,7 +4,7 @@
+ #include <interface/Window.h>
+ #include <interface/View.h>
+ 
+-#include "hb.h"
++#include "hb_wrapper.h"
+ 
+ class HBStepper;
+ 
+diff --git a/haiku/QueueWindow.cpp b/haiku/QueueWindow.cpp
+index 2b0319e..2d43352 100644
+--- a/haiku/QueueWindow.cpp
++++ b/haiku/QueueWindow.cpp
+@@ -78,8 +78,9 @@ void QueueView::UpdateQueue()
+         j = hb_job( fHandle, i );
+         t = j->title;
+ 
+-        asprintf( &s, "DVD: %s", t->dvd );
+-        AddStringView( s, &r );
++		// TODO: find dvd
++        //asprintf( &s, "DVD: %s", t->dvd );
++        //AddStringView( s, &r );
+ 
+         asprintf( &s, "Title: %d", t->index );
+         AddStringView( s, &r );
+diff --git a/haiku/QueueWindow.h b/haiku/QueueWindow.h
+index e9b86e3..b7cc949 100644
+--- a/haiku/QueueWindow.h
++++ b/haiku/QueueWindow.h
+@@ -4,7 +4,7 @@
+ #include <interface/Window.h>
+ #include <interface/View.h>
+ 
+-#include "hb.h"
++#include "hb_wrapper.h"
+ 
+ class QueueView : public BView
+ {
+diff --git a/haiku/ScanWindow.cpp b/haiku/ScanWindow.cpp
+index 615731f..44e39a1 100644
+--- a/haiku/ScanWindow.cpp
++++ b/haiku/ScanWindow.cpp
+@@ -139,6 +139,8 @@ void ScanView::HandleMessage( BMessage * msg )
+         case MSG_OPEN:
+             SetEnabled( false );
+             fBar->Update( - fBar->CurrentValue(), "Opening..." );
++            #if 0
++            // TODO: fix call to hb_scan
+             if( fDetectedRadio->Value() && fPopUp->CountItems() > 0 )
+             {
+                 hb_scan( fHandle, fPopUp->FindMarked()->Label(), 0 );
+@@ -147,6 +149,7 @@ void ScanView::HandleMessage( BMessage * msg )
+             {
+                 hb_scan( fHandle, fControl->Text(), 0 );
+             }
++            #endif
+             break;
+     }
+ }
+diff --git a/haiku/ScanWindow.h b/haiku/ScanWindow.h
+index f46c1c1..49f3a0e 100644
+--- a/haiku/ScanWindow.h
++++ b/haiku/ScanWindow.h
+@@ -4,7 +4,7 @@
+ #include <interface/Window.h>
+ #include <interface/View.h>
+ 
+-#include "hb.h"
++#include "hb_wrapper.h"
+ 
+ class BButton;
+ class BMenuField;
+diff --git a/haiku/hb_wrapper.h b/haiku/hb_wrapper.h
+new file mode 100644
+index 0000000..ba99c55
+--- /dev/null
++++ b/haiku/hb_wrapper.h
+@@ -0,0 +1,6 @@
++#ifndef INT64_C
++#define INT64_C(c) (c ## LL)
++#define UINT64_C(c) (c ## ULL)
++#endif
++
++#include "hb.h"
+diff --git a/haiku/makefile b/haiku/makefile
+new file mode 100644
+index 0000000..871eb02
+--- /dev/null
++++ b/haiku/makefile
+@@ -0,0 +1,164 @@
++## BeOS Generic Makefile v2.5 ##
++
++## Fill in this file to specify the project being created, and the referenced
++## makefile-engine will do all of the hard work for you.  This handles both
++## Intel and PowerPC builds of the BeOS and Haiku.
++
++## Application Specific Settings ---------------------------------------------
++
++# specify the name of the binary
++NAME=HandBrake
++
++# specify the type of binary
++#	APP:	Application
++#	SHARED:	Shared library or add-on
++#	STATIC:	Static library archive
++#	DRIVER: Kernel Driver
++TYPE=APP
++
++# 	if you plan to use localization features 
++# 	specify the application MIME siganture
++APP_MIME_SIG= 
++
++#	add support for new Pe and Eddie features
++#	to fill in generic makefile
++
++#%{
++# @src->@ 
++
++#	specify the source files to use
++#	full paths or paths relative to the makefile can be included
++# 	all files, regardless of directory, will have their object
++#	files created in the common object directory.
++#	Note that this means this makefile will not work correctly
++#	if two source files with the same name (source.c or source.cpp)
++#	are included from different directories.  Also note that spaces
++#	in folder names do not work well with this makefile.
++SRCS=HBApp.cpp MainWindow.cpp PicWindow.cpp QueueWindow.cpp ScanWindow.cpp Stepper.cpp
++
++#	specify the resource definition files to use
++#	full path or a relative path to the resource file can be used.
++RDEFS= 
++	
++#	specify the resource files to use. 
++#	full path or a relative path to the resource file can be used.
++#	both RDEFS and RSRCS can be defined in the same makefile.
++RSRCS= 
++
++# @<-src@ 
++#%}
++
++#	end support for Pe and Eddie
++
++#	specify additional libraries to link against
++#	there are two acceptable forms of library specifications
++#	-	if your library follows the naming pattern of:
++#		libXXX.so or libXXX.a you can simply specify XXX
++#		library: libbe.so entry: be
++#
++#	-	for version-independent linking of standard C++ libraries please add
++#		$(STDCPPLIBS) instead of raw "stdc++[.r4] [supc++]" library names
++#
++#	-	for localization support add following libs:
++#		locale localestub
++#		
++#	- 	if your library does not follow the standard library
++#		naming scheme you need to specify the path to the library
++#		and it's name
++#		library: my_lib.a entry: my_lib.a or path/my_lib.a
++LIBS=be network tracker stdc++ bz2 \
++	ass fribidi ogg theora vorbis vorbisenc iconv samplerate fontconfig freetype z \
++	../build/libhb/libhb.a \
++	../build/contrib/lib/liba52.a \
++	../build/contrib/lib/libavdevice.a \
++	../build/contrib/lib/libavformat.a \
++	../build/contrib/lib/libavcodec.a \
++	../build/contrib/lib/libavresample.a \
++	../build/contrib/lib/libavutil.a \
++	../build/contrib/lib/libbluray.a \
++	../build/contrib/lib/libdvdnav.a \
++	../build/contrib/lib/libdvdnavmini.a \
++	../build/contrib/lib/libdvdread.a \
++	../build/contrib/lib/libfaac.a \
++	../build/contrib/lib/libmkv.a \
++	../build/contrib/lib/libmp3lame.a \
++	../build/contrib/lib/libmp4v2.a \
++	../build/contrib/lib/libmpeg2.a \
++	../build/contrib/lib/libmpeg2convert.a \
++	../build/contrib/lib/libswscale.a \
++	../build/contrib/lib/libx264.a
++
++
++#	specify additional paths to directories following the standard
++#	libXXX.so or libXXX.a naming scheme.  You can specify full paths
++#	or paths relative to the makefile.  The paths included may not
++#	be recursive, so include all of the paths where libraries can
++#	be found.  Directories where source files are found are
++#	automatically included.
++LIBPATHS= 
++
++#	additional paths to look for system headers
++#	thes use the form: #include <header>
++#	source file directories are NOT auto-included here
++SYSTEM_INCLUDE_PATHS = 
++
++#	additional paths to look for local headers
++#	thes use the form: #include "header"
++#	source file directories are automatically included
++LOCAL_INCLUDE_PATHS = ../build/libhb/ ../build/contrib/include/
++
++#	specify the level of optimization that you desire
++#	NONE, SOME, FULL
++OPTIMIZE= 
++
++# 	specify here the codes for languages you are going
++# 	to support in this application. The default "en"
++# 	one must be provided too. "make catkeys" will recreate only
++# 	locales/en.catkeys file. Use it as template for creating other
++# 	languages catkeys. All localization files must be placed
++# 	in "locales" sub-directory.
++LOCALES=
++
++#	specify any preprocessor symbols to be defined.  The symbols will not
++#	have their values set automatically; you must supply the value (if any)
++#	to use.  For example, setting DEFINES to "DEBUG=1" will cause the
++#	compiler option "-DDEBUG=1" to be used.  Setting DEFINES to "DEBUG"
++#	would pass "-DDEBUG" on the compiler's command line.
++DEFINES=
++
++#	specify special warning levels
++#	if unspecified default warnings will be used
++#	NONE = supress all warnings
++#	ALL = enable all warnings
++WARNINGS = 
++
++#	specify whether image symbols will be created
++#	so that stack crawls in the debugger are meaningful
++#	if TRUE symbols will be created
++SYMBOLS = 
++
++#	specify debug settings
++#	if TRUE will allow application to be run from a source-level
++#	debugger.  Note that this will disable all optimzation.
++DEBUGGER = 
++
++#	specify additional compiler flags for all files
++COMPILER_FLAGS =
++
++#	specify additional linker flags
++LINKER_FLAGS =
++
++#	specify the version of this particular item
++#	(for example, -app 3 4 0 d 0 -short 340 -long "340 "`echo -n -e '\302\251'`"1999 GNU GPL") 
++#	This may also be specified in a resource.
++APP_VERSION = 
++
++#	(for TYPE == DRIVER only) Specify desired location of driver in the /dev
++#	hierarchy. Used by the driverinstall rule. E.g., DRIVER_PATH = video/usb will
++#	instruct the driverinstall rule to place a symlink to your driver's binary in
++#	~/add-ons/kernel/drivers/dev/video/usb, so that your driver will appear at
++#	/dev/video/usb when loaded. Default is "misc".
++DRIVER_PATH = 
++
++## include the makefile-engine
++include $(BUILDHOME)/etc/makefile-engine
+-- 
+2.10.2
+
+
+From 8e612d401bbdbd961d309abb7acb5d26943a8098 Mon Sep 17 00:00:00 2001
+From: Alexander von Gluck IV <kallisti5@unixzen.com>
+Date: Sat, 15 Dec 2012 02:45:49 +0000
+Subject: Haiku: Fix call to hb_scan
+
+
+diff --git a/haiku/ScanWindow.cpp b/haiku/ScanWindow.cpp
+index 44e39a1..8833e29 100644
+--- a/haiku/ScanWindow.cpp
++++ b/haiku/ScanWindow.cpp
+@@ -139,17 +139,14 @@ void ScanView::HandleMessage( BMessage * msg )
+         case MSG_OPEN:
+             SetEnabled( false );
+             fBar->Update( - fBar->CurrentValue(), "Opening..." );
+-            #if 0
+-            // TODO: fix call to hb_scan
+             if( fDetectedRadio->Value() && fPopUp->CountItems() > 0 )
+             {
+-                hb_scan( fHandle, fPopUp->FindMarked()->Label(), 0 );
++                hb_scan( fHandle, fPopUp->FindMarked()->Label(), 0, 10, 0, 0 );
+             }
+             else if( fFolderRadio->Value() )
+             {
+-                hb_scan( fHandle, fControl->Text(), 0 );
++                hb_scan( fHandle, fControl->Text(), 0, 10, 0, 0 );
+             }
+-            #endif
+             break;
+     }
+ }
+-- 
+2.10.2
+
+
+From 365e19b71227daa90dda3d02a2ce1ade0898ed94 Mon Sep 17 00:00:00 2001
+From: Sergei Reznikov <diver@gelios.net>
+Date: Tue, 12 Jan 2016 22:23:19 +0300
+Subject: Haiku: link libs dynamically
+
+
+diff --git a/haiku/makefile b/haiku/makefile
+index 871eb02..44da58a 100644
+--- a/haiku/makefile
++++ b/haiku/makefile
+@@ -67,26 +67,10 @@ RSRCS=
+ #		and it's name
+ #		library: my_lib.a entry: my_lib.a or path/my_lib.a
+ LIBS=be network tracker stdc++ bz2 \
+-	ass fribidi ogg theora vorbis vorbisenc iconv samplerate fontconfig freetype z \
+-	../build/libhb/libhb.a \
+-	../build/contrib/lib/liba52.a \
+-	../build/contrib/lib/libavdevice.a \
+-	../build/contrib/lib/libavformat.a \
+-	../build/contrib/lib/libavcodec.a \
+-	../build/contrib/lib/libavresample.a \
+-	../build/contrib/lib/libavutil.a \
+-	../build/contrib/lib/libbluray.a \
+-	../build/contrib/lib/libdvdnav.a \
+-	../build/contrib/lib/libdvdnavmini.a \
+-	../build/contrib/lib/libdvdread.a \
+-	../build/contrib/lib/libfaac.a \
+-	../build/contrib/lib/libmkv.a \
+-	../build/contrib/lib/libmp3lame.a \
+-	../build/contrib/lib/libmp4v2.a \
+-	../build/contrib/lib/libmpeg2.a \
+-	../build/contrib/lib/libmpeg2convert.a \
+-	../build/contrib/lib/libswscale.a \
+-	../build/contrib/lib/libx264.a
++	ass fribidi ogg theora vorbis vorbisenc iconv samplerate fontconfig \
++	freetype z a52 avdevice avformat avcodec avresample avutil bluray dvdnav \
++	dvdread faac mkv mp3lame mp4v2 mpeg2 mpeg2convert swscale x264 \
++	libhandbrake.a
+ 
+ 
+ #	specify additional paths to directories following the standard
+-- 
+2.10.2
+
+
+From b7b683818a10bb4e9155ee38d75e7bbcfe21a757 Mon Sep 17 00:00:00 2001
+From: Sergei Reznikov <diver@gelios.net>
+Date: Tue, 12 Jan 2016 22:24:48 +0300
+Subject: Haiku: fix defines (untested)
+
+
+diff --git a/haiku/MainWindow.cpp b/haiku/MainWindow.cpp
+index 7d1049a..d536a18 100644
+--- a/haiku/MainWindow.cpp
++++ b/haiku/MainWindow.cpp
+@@ -34,16 +34,16 @@
+ #define MSG_START        'star'
+ 
+ static int FormatSettings[3][4] =
+-  { { HB_MUX_MP4 | HB_VCODEC_FFMPEG | HB_ACODEC_FAAC,
+-      HB_MUX_MP4 | HB_VCODEC_X264   | HB_ACODEC_FAAC,
++  { { HB_MUX_MP4 | HB_VCODEC_FFMPEG_MASK | HB_ACODEC_FFAAC,
++      HB_MUX_MP4 | HB_VCODEC_X264   | HB_ACODEC_FFAAC,
+       0,
+       0 },
+-    { HB_VCODEC_FFMPEG | HB_ACODEC_LAME,
+-      HB_VCODEC_FFMPEG | HB_ACODEC_AC3,
++    { HB_VCODEC_FFMPEG_MASK | HB_ACODEC_LAME,
++      HB_VCODEC_FFMPEG_MASK | HB_ACODEC_AC3,
+       HB_VCODEC_X264   | HB_ACODEC_LAME,
+       HB_VCODEC_X264   | HB_ACODEC_AC3 },
+-    { HB_MUX_MKV | HB_VCODEC_FFMPEG | HB_ACODEC_VORBIS,
+-      HB_MUX_MKV | HB_VCODEC_FFMPEG | HB_ACODEC_LAME,
++    { HB_MUX_MKV | HB_VCODEC_FFMPEG_MASK | HB_ACODEC_VORBIS,
++      HB_MUX_MKV | HB_VCODEC_FFMPEG_MASK | HB_ACODEC_LAME,
+       0,
+       0 } };
+ 
+@@ -773,7 +773,7 @@ void MainView::CodecsPopUpChanged()
+         fVidEncoderPopUp->AddItem( new BMenuItem( "x264", new BMessage() ) );
+         fVidEncoderPopUp->ItemAt( 0 )->SetMarked( true );
+     }
+-    else if( ( FormatSettings[format][codecs] & HB_VCODEC_FFMPEG ) &&
++    else if( ( FormatSettings[format][codecs] & HB_VCODEC_FFMPEG_MASK ) &&
+              fVidEncoderPopUp->CountItems() < 2 )
+     {
+         /* H.264 -> MPEG-4 */
+@@ -873,7 +873,7 @@ void MainView::AddJob()
+ 	// TODO: audio codec?
+     //job->acodec = FormatSettings[format][codecs] & HB_ACODEC_MASK;
+ 
+-    if( ( job->vcodec & HB_VCODEC_FFMPEG ) &&
++    if( ( job->vcodec & HB_VCODEC_FFMPEG_MASK ) &&
+         fVidEncoderPopUp->IndexOf(
+             fVidEncoderPopUp->FindMarked() ) > 0 )
+     {
+-- 
+2.10.2
+
+
+From 11b6f076e7bf482f47efd00dfd69b413d8047d1a Mon Sep 17 00:00:00 2001
+From: Markus Himmel <markus@himmel-villmar.de>
+Date: Thu, 21 Jan 2016 16:17:17 +0100
+Subject: Fix build of the BeOS GUI
+
+This does not actually make it work properly (though it fixes a small number
+of issues). See https://github.com/haikuports/haikuports/issues/411.
+
+diff --git a/haiku/HBApp.cpp b/haiku/HBApp.cpp
+index f878308..cfd7345 100644
+--- a/haiku/HBApp.cpp
++++ b/haiku/HBApp.cpp
+@@ -4,6 +4,7 @@
+ 
+ int main()
+ {
++    hb_global_init();
+     HBApp * app = new HBApp();
+     app->Run();
+     delete app;
+diff --git a/haiku/MainWindow.cpp b/haiku/MainWindow.cpp
+index d536a18..8d5dda8 100644
+--- a/haiku/MainWindow.cpp
++++ b/haiku/MainWindow.cpp
+@@ -169,10 +169,13 @@ MainView::MainView( hb_handle_t * handle )
+     fVidRatePopUp = new BPopUpMenu( "" );
+     fVidRatePopUp->AddItem( new BMenuItem( "Same as source",
+         new BMessage() ) );
+-    for( int i = 0; i < hb_video_rates_count; i++ )
++
++    const hb_rate_t * current_video_rate = hb_video_framerate_get_next( NULL );
++    while( current_video_rate != NULL )
+     {
+-        fVidRatePopUp->AddItem( new BMenuItem( hb_video_rates[i].string,
++        fVidRatePopUp->AddItem( new BMenuItem( current_video_rate->name,
+             new BMessage() ) );
++        current_video_rate = hb_video_framerate_get_next( current_video_rate );
+     }
+     fVidRatePopUp->ItemAt( 0 )->SetMarked( true );
+     fVidRateMenu = new BMenuField( r, NULL, "Framerate (fps):",
+@@ -267,11 +270,15 @@ MainView::MainView( hb_handle_t * handle )
+     box->AddChild( fAudLang2Menu );
+     r = BRect( 10,65,b.right-10,85 );
+     fAudRatePopUp = new BPopUpMenu( "" );
+-    for( int i = 0; i < hb_audio_rates_count; i++ )
++    const hb_rate_t * current_audio_samples = hb_audio_samplerate_get_next( NULL );
++    while( current_audio_samples != NULL )
+     {
+-        fAudRatePopUp->AddItem( new BMenuItem( hb_audio_rates[i].string,
+-            new BMessage ) );
++        fAudRatePopUp->AddItem( new BMenuItem( current_audio_samples->name,
++            new BMessage() ) );
++        current_audio_samples =
++            hb_audio_samplerate_get_next( current_audio_samples );
+     }
++
+ 	#if 0
+ 	// TODO: hb_audio_rates_default
+     fAudRatePopUp->ItemAt( hb_audio_rates_default )->SetMarked( true );
+@@ -281,10 +288,12 @@ MainView::MainView( hb_handle_t * handle )
+     box->AddChild( fAudRateMenu );
+     r = BRect( 10,90,b.right-10,110 );
+     fAudBitratePopUp = new BPopUpMenu( "" );
+-    for( int i = 0; i < hb_audio_bitrates_count; i++ )
++    const hb_rate_t * current_audio_bits = hb_audio_bitrate_get_next( NULL );
++    while( current_audio_bits != NULL)
+     {
+-        fAudBitratePopUp->AddItem( new BMenuItem(
+-            hb_audio_bitrates[i].string, new BMessage ) );
++        fAudBitratePopUp->AddItem( new BMenuItem( current_audio_bits->name,
++            new BMessage() ) );
++        current_audio_bits = hb_audio_bitrate_get_next( current_audio_bits );
+     }
+     #if 0
+     // TODO: hb_audio_bitrates_default
+@@ -676,7 +685,7 @@ void MainView::TitlePopUpChanged()
+         fAudLang2PopUp->AddItem( new BMenuItem( audio->lang, new BMessage() ) );
+         #endif
+     }
+-    fAudLang1PopUp->ItemAt( 1 )->SetMarked( true );
++    fAudLang1PopUp->ItemAt( 0 )->SetMarked( true );
+     fAudLang2PopUp->ItemAt( 0 )->SetMarked( true );
+ }
+ 
+@@ -799,7 +808,7 @@ void MainView::CodecsPopUpChanged()
+ 
+ void MainView::CheckExtension()
+ {
+-    char * ext = NULL;
++    const char * ext = NULL;
+     switch( fDstFormat )
+     {
+         case 0:
+@@ -882,11 +891,10 @@ void MainView::AddJob()
+     }
+ 
+     int index;
+-    index = fVidRatePopUp->IndexOf(
+-        fVidRatePopUp->FindMarked() );
+-    if( index > 0 )
++    BMenuItem* marked = fVidRatePopUp->FindMarked();
++    if( marked != NULL )
+     {
+-        job->vrate_base = hb_video_rates[index-1].rate;
++        job->vrate_base = hb_video_framerate_get_from_name( marked->Label() );
+     }
+     else
+     {
+diff --git a/haiku/Makefile b/haiku/Makefile
+new file mode 100644
+index 0000000..e0ac283
+--- /dev/null
++++ b/haiku/Makefile
+@@ -0,0 +1,133 @@
++## Haiku Generic Makefile v2.6 ## 
++
++## Fill in this file to specify the project being created, and the referenced
++## Makefile-Engine will do all of the hard work for you. This handles any
++## architecture of Haiku.
++
++# The name of the binary.
++NAME = HandBrake
++
++# The type of binary, must be one of:
++#	APP:	Application
++#	SHARED:	Shared library or add-on
++#	STATIC:	Static library archive
++#	DRIVER: Kernel driver
++TYPE = APP
++
++# 	If you plan to use localization, specify the application's MIME signature.
++APP_MIME_SIG = 
++
++#	The following lines tell Pe and Eddie where the SRCS, RDEFS, and RSRCS are
++#	so that Pe and Eddie can fill them in for you.
++#%{
++# @src->@ 
++
++#	Specify the source files to use. Full paths or paths relative to the 
++#	Makefile can be included. All files, regardless of directory, will have
++#	their object files created in the common object directory. Note that this
++#	means this Makefile will not work correctly if two source files with the
++#	same name (source.c or source.cpp) are included from different directories.
++#	Also note that spaces in folder names do not work well with this Makefile.
++SRCS = HBApp.cpp MainWindow.cpp PicWindow.cpp QueueWindow.cpp ScanWindow.cpp Stepper.cpp
++
++#	Specify the resource definition files to use. Full or relative paths can be
++#	used.
++RDEFS = 
++
++#	Specify the resource files to use. Full or relative paths can be used.
++#	Both RDEFS and RSRCS can be utilized in the same Makefile.
++RSRCS = 
++
++# End Pe/Eddie support.
++# @<-src@ 
++#%}
++
++#	Specify libraries to link against.
++#	There are two acceptable forms of library specifications:
++#	-	if your library follows the naming pattern of libXXX.so or libXXX.a,
++#		you can simply specify XXX for the library. (e.g. the entry for
++#		"libtracker.so" would be "tracker")
++#
++#	-	for GCC-independent linking of standard C++ libraries, you can use
++#		$(STDCPPLIBS) instead of the raw "stdc++[.r4] [supc++]" library names.
++#
++#	- 	if your library does not follow the standard library naming scheme,
++#		you need to specify the path to the library and it's name.
++#		(e.g. for mylib.a, specify "mylib.a" or "path/mylib.a")
++LIBS = be network tracker $(STDCPPLIBS) bz2 \
++	ass fribidi ogg theora vorbis vorbisenc iconv samplerate fontconfig \
++	freetype z a52 avdevice avformat avcodec avresample avutil bluray dvdnav \
++	dvdread faac mkv mp3lame mp4v2 mpeg2 mpeg2convert swscale x264 \
++	handbrake
++
++
++#	Specify additional paths to directories following the standard libXXX.so
++#	or libXXX.a naming scheme. You can specify full paths or paths relative
++#	to the Makefile. The paths included are not parsed recursively, so
++#	include all of the paths where libraries must be found. Directories where
++#	source files were specified are	automatically included.
++LIBPATHS = ../build/libhb
++
++#	Additional paths to look for system headers. These use the form
++#	"#include <header>". Directories that contain the files in SRCS are
++#	NOT auto-included here.
++SYSTEM_INCLUDE_PATHS = 
++
++#	Additional paths paths to look for local headers. These use the form
++#	#include "header". Directories that contain the files in SRCS are
++#	automatically included.
++LOCAL_INCLUDE_PATHS = ../build/libhb ../build/contrib/include/
++
++#	Specify the level of optimization that you want. Specify either NONE (O0),
++#	SOME (O1), FULL (O2), or leave blank (for the default optimization level).
++OPTIMIZE := 
++
++# 	Specify the codes for languages you are going to support in this
++# 	application. The default "en" one must be provided too. "make catkeys"
++# 	will recreate only the "locales/en.catkeys" file. Use it as a template
++# 	for creating catkeys for other languages. All localization files must be
++# 	placed in the "locales" subdirectory.
++LOCALES = 
++
++#	Specify all the preprocessor symbols to be defined. The symbols will not
++#	have their values set automatically; you must supply the value (if any) to
++#	use. For example, setting DEFINES to "DEBUG=1" will cause the compiler
++#	option "-DDEBUG=1" to be used. Setting DEFINES to "DEBUG" would pass
++#	"-DDEBUG" on the compiler's command line.
++DEFINES = 
++
++#	Specify the warning level. Either NONE (suppress all warnings),
++#	ALL (enable all warnings), or leave blank (enable default warnings).
++WARNINGS = 
++
++#	With image symbols, stack crawls in the debugger are meaningful.
++#	If set to "TRUE", symbols will be created.
++SYMBOLS := 
++
++#	Includes debug information, which allows the binary to be debugged easily.
++#	If set to "TRUE", debug info will be created.
++DEBUGGER := 
++
++#	Specify any additional compiler flags to be used.
++COMPILER_FLAGS = 
++
++#	Specify any additional linker flags to be used.
++LINKER_FLAGS = 
++
++#	Specify the version of this binary. Example:
++#		-app 3 4 0 d 0 -short 340 -long "340 "`echo -n -e '\302\251'`"1999 GNU GPL"
++#	This may also be specified in a resource.
++APP_VERSION := 
++
++#	(Only used when "TYPE" is "DRIVER"). Specify the desired driver install
++#	location in the /dev hierarchy. Example:
++#		DRIVER_PATH = video/usb
++#	will instruct the "driverinstall" rule to place a symlink to your driver's
++#	binary in ~/add-ons/kernel/drivers/dev/video/usb, so that your driver will
++#	appear at /dev/video/usb when loaded. The default is "misc".
++DRIVER_PATH = 
++
++## Include the Makefile-Engine
++DEVEL_DIRECTORY := \
++	$(shell findpaths -r "makefile_engine" B_FIND_PATH_DEVELOP_DIRECTORY)
++include $(DEVEL_DIRECTORY)/etc/makefile-engine
+diff --git a/haiku/PicWindow.cpp b/haiku/PicWindow.cpp
+index b93c393..3ff3045 100644
+--- a/haiku/PicWindow.cpp
++++ b/haiku/PicWindow.cpp
+@@ -26,7 +26,7 @@ PicView::PicView( hb_handle_t * handle, int index )
+     hb_list_t * list;
+     list   = hb_get_titles( fHandle );
+     fTitle = (hb_title_t *) hb_list_item( list, index );
+-    fJob   = fTitle->job;
++    fJob   = hb_job_init(fTitle);
+ 
+     /* We'll start with the first picture */
+     fIndex = 0;
+@@ -83,7 +83,7 @@ PicView::PicView( hb_handle_t * handle, int index )
+     r = BRect( 10,65,b.right-10,85 );
+     fRatioCheck = new BCheckBox( r, NULL, "Keep aspect ratio",
+                                  new BMessage( MSG_WIDTH ) );
+-    fRatioCheck->SetValue( fJob->keep_ratio );
++    fRatioCheck->SetValue( fJob->anamorphic.keep_display_aspect );
+     box->AddChild( fRatioCheck );
+ 
+     /* "Crop" box */
+@@ -254,35 +254,37 @@ void PicView::RadioChanged()
+ 
+ void PicView::UpdateSettings( uint32 what )
+ {
+-    fJob->width       = fWidthStepper->Value();
+-    fJob->height      = fHeightStepper->Value();
+-    fJob->keep_ratio  = fRatioCheck->Value();
+-    fJob->deinterlace = fDeintCheck->Value();
++    fJob->width                           = fWidthStepper->Value();
++    fJob->height                          = fHeightStepper->Value();
++    fJob->anamorphic.keep_display_aspect  = fRatioCheck->Value();
++    fJob->deinterlace                     = fDeintCheck->Value();
+     for( int i = 0; i < 4; i++ )
+     {
+         fJob->crop[i] = fCropSteppers[i]->Value();
+     }
+ 
+-    if( fJob->keep_ratio )
++    if( fJob->anamorphic.keep_display_aspect )
+     {
+         if( what == MSG_WIDTH )
+         {
+-            hb_fix_aspect( fJob, HB_KEEP_WIDTH );
+             if( fJob->height > fTitle->height )
+             {
+                 fJob->height = fTitle->height;
+-                hb_fix_aspect( fJob, HB_KEEP_HEIGHT );
+             }
+         }
+         else
+         {
+-            hb_fix_aspect( fJob, HB_KEEP_HEIGHT );
+             if( fJob->width > fTitle->width )
+             {
+                 fJob->width = fTitle->width;
+-                hb_fix_aspect( fJob, HB_KEEP_WIDTH );
+             }
+         }
++        int width, height, par_width, par_height;
++        hb_set_anamorphic_size(fJob, &width, &height, &par_width, &par_height);
++        fJob->width = width;
++        fJob->height = height;
++        fJob->anamorphic.par_width = par_width;
++        fJob->anamorphic.par_height = par_height;
+     }
+ 
+     fWidthStepper->SetValue( fJob->width );
+diff --git a/haiku/makefile b/haiku/makefile
+deleted file mode 100644
+index 44da58a..0000000
+--- a/haiku/makefile
++++ /dev/null
+@@ -1,148 +0,0 @@
+-## BeOS Generic Makefile v2.5 ##
+-
+-## Fill in this file to specify the project being created, and the referenced
+-## makefile-engine will do all of the hard work for you.  This handles both
+-## Intel and PowerPC builds of the BeOS and Haiku.
+-
+-## Application Specific Settings ---------------------------------------------
+-
+-# specify the name of the binary
+-NAME=HandBrake
+-
+-# specify the type of binary
+-#	APP:	Application
+-#	SHARED:	Shared library or add-on
+-#	STATIC:	Static library archive
+-#	DRIVER: Kernel Driver
+-TYPE=APP
+-
+-# 	if you plan to use localization features 
+-# 	specify the application MIME siganture
+-APP_MIME_SIG= 
+-
+-#	add support for new Pe and Eddie features
+-#	to fill in generic makefile
+-
+-#%{
+-# @src->@ 
+-
+-#	specify the source files to use
+-#	full paths or paths relative to the makefile can be included
+-# 	all files, regardless of directory, will have their object
+-#	files created in the common object directory.
+-#	Note that this means this makefile will not work correctly
+-#	if two source files with the same name (source.c or source.cpp)
+-#	are included from different directories.  Also note that spaces
+-#	in folder names do not work well with this makefile.
+-SRCS=HBApp.cpp MainWindow.cpp PicWindow.cpp QueueWindow.cpp ScanWindow.cpp Stepper.cpp
+-
+-#	specify the resource definition files to use
+-#	full path or a relative path to the resource file can be used.
+-RDEFS= 
+-	
+-#	specify the resource files to use. 
+-#	full path or a relative path to the resource file can be used.
+-#	both RDEFS and RSRCS can be defined in the same makefile.
+-RSRCS= 
+-
+-# @<-src@ 
+-#%}
+-
+-#	end support for Pe and Eddie
+-
+-#	specify additional libraries to link against
+-#	there are two acceptable forms of library specifications
+-#	-	if your library follows the naming pattern of:
+-#		libXXX.so or libXXX.a you can simply specify XXX
+-#		library: libbe.so entry: be
+-#
+-#	-	for version-independent linking of standard C++ libraries please add
+-#		$(STDCPPLIBS) instead of raw "stdc++[.r4] [supc++]" library names
+-#
+-#	-	for localization support add following libs:
+-#		locale localestub
+-#		
+-#	- 	if your library does not follow the standard library
+-#		naming scheme you need to specify the path to the library
+-#		and it's name
+-#		library: my_lib.a entry: my_lib.a or path/my_lib.a
+-LIBS=be network tracker stdc++ bz2 \
+-	ass fribidi ogg theora vorbis vorbisenc iconv samplerate fontconfig \
+-	freetype z a52 avdevice avformat avcodec avresample avutil bluray dvdnav \
+-	dvdread faac mkv mp3lame mp4v2 mpeg2 mpeg2convert swscale x264 \
+-	libhandbrake.a
+-
+-
+-#	specify additional paths to directories following the standard
+-#	libXXX.so or libXXX.a naming scheme.  You can specify full paths
+-#	or paths relative to the makefile.  The paths included may not
+-#	be recursive, so include all of the paths where libraries can
+-#	be found.  Directories where source files are found are
+-#	automatically included.
+-LIBPATHS= 
+-
+-#	additional paths to look for system headers
+-#	thes use the form: #include <header>
+-#	source file directories are NOT auto-included here
+-SYSTEM_INCLUDE_PATHS = 
+-
+-#	additional paths to look for local headers
+-#	thes use the form: #include "header"
+-#	source file directories are automatically included
+-LOCAL_INCLUDE_PATHS = ../build/libhb/ ../build/contrib/include/
+-
+-#	specify the level of optimization that you desire
+-#	NONE, SOME, FULL
+-OPTIMIZE= 
+-
+-# 	specify here the codes for languages you are going
+-# 	to support in this application. The default "en"
+-# 	one must be provided too. "make catkeys" will recreate only
+-# 	locales/en.catkeys file. Use it as template for creating other
+-# 	languages catkeys. All localization files must be placed
+-# 	in "locales" sub-directory.
+-LOCALES=
+-
+-#	specify any preprocessor symbols to be defined.  The symbols will not
+-#	have their values set automatically; you must supply the value (if any)
+-#	to use.  For example, setting DEFINES to "DEBUG=1" will cause the
+-#	compiler option "-DDEBUG=1" to be used.  Setting DEFINES to "DEBUG"
+-#	would pass "-DDEBUG" on the compiler's command line.
+-DEFINES=
+-
+-#	specify special warning levels
+-#	if unspecified default warnings will be used
+-#	NONE = supress all warnings
+-#	ALL = enable all warnings
+-WARNINGS = 
+-
+-#	specify whether image symbols will be created
+-#	so that stack crawls in the debugger are meaningful
+-#	if TRUE symbols will be created
+-SYMBOLS = 
+-
+-#	specify debug settings
+-#	if TRUE will allow application to be run from a source-level
+-#	debugger.  Note that this will disable all optimzation.
+-DEBUGGER = 
+-
+-#	specify additional compiler flags for all files
+-COMPILER_FLAGS =
+-
+-#	specify additional linker flags
+-LINKER_FLAGS =
+-
+-#	specify the version of this particular item
+-#	(for example, -app 3 4 0 d 0 -short 340 -long "340 "`echo -n -e '\302\251'`"1999 GNU GPL") 
+-#	This may also be specified in a resource.
+-APP_VERSION = 
+-
+-#	(for TYPE == DRIVER only) Specify desired location of driver in the /dev
+-#	hierarchy. Used by the driverinstall rule. E.g., DRIVER_PATH = video/usb will
+-#	instruct the driverinstall rule to place a symlink to your driver's binary in
+-#	~/add-ons/kernel/drivers/dev/video/usb, so that your driver will appear at
+-#	/dev/video/usb when loaded. Default is "misc".
+-DRIVER_PATH = 
+-
+-## include the makefile-engine
+-include $(BUILDHOME)/etc/makefile-engine
+-- 
+2.10.2
+
+From: Ken Mays <kmays2000@gmail.com>
+Date: Thu Aug 16 00:25:51 GMT 2018
+Subject: update libhb/module.defs
+
+--- a/libhb/module.defs	2018-08-15 23:19:17.998768640 +0000
++++ b/libhb/module.defs	2018-08-15 23:58:17.119799808 +0000
+@@ -52,6 +52,8 @@
+     LIBHB.GCC.I += /usr/local/include/libxml2
+ else ifneq (,$(filter $(BUILD.system),darwin cygwin mingw))
+     LIBHB.GCC.I += $(CONTRIB.build/)include/libxml2
++else ifeq ($(BUILD.system),haiku)
++    LIBHB.GCC.I += /system/develop/headers/libxml2
+ else
+     LIBHB.GCC.I += /usr/include/libxml2
+ endif
+--
+2.10.2
+
+From: Ken Mays <kmays2000@gmail.com>
+Date: Thu Aug 16 00:25:51 GMT 2018
+Subject: update config.guess
+
+--- a/make/config.guess	2018-06-18 14:07:09.065273856 +0000
++++ b/make/config.guess	2018-08-15 23:19:17.948699136 +0000
+@@ -154,6 +154,27 @@
+ 	;;
+ esac
+ 
++case "${UNAME_SYSTEM}" in
++Linux|GNU|GNU/*)
++	# If the system lacks a compiler, then just pick glibc.
++	# We could probably try harder.
++	LIBC=gnu
++
++	eval $set_cc_for_build
++	cat <<-EOF > $dummy.c
++	#include <features.h>
++	#if defined(__UCLIBC__)
++	LIBC=uclibc
++	#elif defined(__dietlibc__)
++	LIBC=dietlibc
++	#else
++	LIBC=gnu
++	#endif
++	EOF
++	eval `$CC_FOR_BUILD -E $dummy.c 2>/dev/null | grep '^LIBC'`
++	;;
++esac
++
+ # Note: order is significant - the case branches are not exclusive.
+ 
+ case "${UNAME_MACHINE}:${UNAME_SYSTEM}:${UNAME_RELEASE}:${UNAME_VERSION}" in
+@@ -237,6 +258,10 @@
+ 	UNAME_MACHINE_ARCH=`arch | sed 's/Bitrig.//'`
+ 	echo ${UNAME_MACHINE_ARCH}-unknown-bitrig${UNAME_RELEASE}
+ 	exit ;;
++    *:Bitrig:*:*)
++	UNAME_MACHINE_ARCH=`arch | sed 's/Bitrig.//'`
++	echo ${UNAME_MACHINE_ARCH}-unknown-bitrig${UNAME_RELEASE}
++	exit ;;
+     *:OpenBSD:*:*)
+ 	UNAME_MACHINE_ARCH=`arch | sed 's/OpenBSD.//'`
+ 	echo ${UNAME_MACHINE_ARCH}-unknown-openbsd${UNAME_RELEASE}
+@@ -847,6 +872,9 @@
+     *:MINGW64*:*)
+ 	echo ${UNAME_MACHINE}-pc-mingw64
+ 	exit ;;
++    *:MINGW64*:*)
++	echo ${UNAME_MACHINE}-pc-mingw64
++	exit ;;
+     *:MINGW*:*)
+ 	echo ${UNAME_MACHINE}-pc-mingw32
+ 	exit ;;
+@@ -1246,6 +1274,9 @@
+ 	exit ;;
+     x86_64:Haiku:*:*)
+ 	echo x86_64-unknown-haiku
++	exit ;;
++    x86_64:Haiku:*:*)
++	echo x86_64-unknown-haiku
+ 	exit ;;
+     SX-4:SUPER-UX:*:*)
+ 	echo sx4-nec-superux${UNAME_RELEASE}

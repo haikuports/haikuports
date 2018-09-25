@@ -1,0 +1,246 @@
+From df9928369194977feac67e6775ad380849d62aff Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Mon, 30 Sep 2013 21:16:54 +0200
+Subject: Convert existing patch to git patchset.
+
+
+diff --git a/Makefile.in b/Makefile.in
+index df70d08..dd96876 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -565,7 +565,7 @@ distccmon-gnome@EXEEXT@: $(mon_obj) $(gnome_obj)
+ 
+ # The include-server is a python app, so we use Python's build system.  We pass
+ # the distcc version, the source location, the CPP flags (for location of the
+-# includes), and the build location.
++# includes), LD flags and the build location.
+ include-server:
+ 	if test -z "$(INCLUDESERVER_PYTHON)"; then	\
+ 	  echo "Not building $@: No suitable python found"; \
+@@ -575,6 +575,7 @@ include-server:
+ 	  SRCDIR="$(srcdir)"                            \
+ 	  CFLAGS="$(CFLAGS) $(PYTHON_CFLAGS)"           \
+ 	  CPPFLAGS="$(CPPFLAGS)"                        \
++	  LDFLAGS="$(LDFLAGS)"                        \
+ 	  $(INCLUDESERVER_PYTHON) "$(srcdir)/include_server/setup.py" \
+ 	      build 					\
+ 	        --build-base="$(include_server_builddir)"  \
+diff --git a/configure.ac b/configure.ac
+index 3218801..0793a83 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -329,9 +329,12 @@ AC_CHECK_TYPES([in_port_t, in_addr_t], , ,
+ # only looks in /etc/hosts), so we only look for -lsocket if we need
+ # it.
+ AC_SEARCH_LIBS(gethostent, [nsl])
+-AC_SEARCH_LIBS(setsockopt, [socket])
++AC_SEARCH_LIBS(setsockopt, [socket network])
+ AC_SEARCH_LIBS(hstrerror, [resolv])
+ AC_SEARCH_LIBS(inet_aton, [resolv])
++AC_SEARCH_LIBS(strsep, [bsd])
++AC_SEARCH_LIBS(wait3, [bsd])
++AC_SEARCH_LIBS(wait4, [bsd])
+ 
+ if test x"$with_included_popt" != x"yes"  && test x"$with_included_popt" != xno
+ then
+@@ -379,6 +382,7 @@ AC_CHECK_FUNCS([snprintf vsnprintf vasprintf asprintf getcwd getwd mkdtemp])
+ AC_CHECK_FUNCS([getrusage strsignal gettimeofday])
+ AC_CHECK_FUNCS([getaddrinfo getnameinfo inet_ntop inet_ntoa])
+ AC_CHECK_FUNCS([strndup strsep mmap strlcpy])
++AC_CHECK_FUNCS([nice])
+ 
+ AC_CHECK_FUNCS([getloadavg])
+ AC_CHECK_FUNCS([getline])
+@@ -472,6 +476,8 @@ AC_CHECK_MEMBER([struct sockaddr_storage.ss_family],
+     AC_DEFINE(HAVE_SOCKADDR_STORAGE, 1, [define if you have struct sockaddr_storage]),,
+     [#include <sys/socket.h>])
+ 
++AC_CHECK_MEMBERS([struct rusage.ru_minflt, struct rusage.ru_majflt])
++
+ AC_ARG_WITH(avahi,
+         AC_HELP_STRING([--without-avahi], [build without avahi]))
+ 
+diff --git a/src/daemon.c b/src/daemon.c
+index a1056f8..54dd775 100644
+--- a/src/daemon.c
++++ b/src/daemon.c
+@@ -177,15 +177,19 @@ int main(int argc, char *argv[])
+     if ((ret = dcc_set_lifetime()) != 0)
+         dcc_exit(ret);
+ 
++#ifdef HAVE_NICE
+     /* do this before giving away root */
+     if (nice(opt_niceness) == -1) {
+         rs_log_warning("nice %d failed: %s", opt_niceness,
+                        strerror(errno));
+         /* continue anyhow */
+     }
++#endif
+ 
++#ifndef __HAIKU__
+     if ((ret = dcc_discard_root()) != 0)
+         dcc_exit(ret);
++#endif
+ 
+     /* Discard privileges before opening log so that if it's created, it has
+      * the right ownership. */
+diff --git a/src/exec.c b/src/exec.c
+index 43fcb21..87c2e90 100644
+--- a/src/exec.c
++++ b/src/exec.c
+@@ -489,13 +489,19 @@ int dcc_collect_child(const char *what, pid_t pid,
+              * critique_status(). */
+             rs_trace("%s child %ld terminated with status %#x",
+                      what, (long) ret_pid, *wait_status);
++#if defined HAVE_RUSAGE_RU_MINFLT && defined HAVE_RUSAGE_RU_MAJFLT
+             rs_log_info("%s times: user %ld.%06lds, system %ld.%06lds, "
+                         "%ld minflt, %ld majflt",
+                         what,
+                         ru.ru_utime.tv_sec, (long) ru.ru_utime.tv_usec,
+                         ru.ru_stime.tv_sec, (long) ru.ru_stime.tv_usec,
+                         ru.ru_minflt, ru.ru_majflt);
+-
++#else
++            rs_log_info("%s times: user %ld.%06lds, system %ld.%06lds",
++                        what,
++                        ru.ru_utime.tv_sec, (long) ru.ru_utime.tv_usec,
++                        ru.ru_stime.tv_sec, (long) ru.ru_stime.tv_usec);
++#endif
+             return 0;
+         }
+ 
+-- 
+2.14.2
+
+
+From f6051130b18d85e1e098f3ffda34d12cb8744fe6 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Tue, 1 Oct 2013 17:26:29 +0200
+Subject: C89 fixes for gcc2 compatibility
+
+
+diff --git a/src/compile.c b/src/compile.c
+index 08c4c95..0597999 100644
+--- a/src/compile.c
++++ b/src/compile.c
+@@ -109,6 +109,8 @@ int dcc_discrepancy_filename(char **filename)
+         return 0;
+     } else if (str_endswith(include_server_port_suffix,
+                             include_server_port)) {
++		int slash_pos;
++
+         /* We're going to make a longer string from include_server_port: one
+          * that replaces include_server_port_suffix with discrepancy_suffix. */
+         int delta = strlen(discrepancy_suffix) -
+@@ -120,7 +122,7 @@ int dcc_discrepancy_filename(char **filename)
+             return EXIT_OUT_OF_MEMORY;
+         }
+         strcpy(*filename, include_server_port);
+-        int slash_pos = strlen(include_server_port)
++        slash_pos = strlen(include_server_port)
+                         - strlen(include_server_port_suffix);
+         /* Because include_server_port_suffix is a suffix of include_server_port
+          * we expect to find a '/' at slash_pos in filename. */
+@@ -139,8 +141,9 @@ int dcc_discrepancy_filename(char **filename)
+  **/
+ static int dcc_read_number_discrepancies(const char *discrepancy_filename)
+ {
+-    if (!discrepancy_filename) return 0;
+     struct stat stat_record;
++
++    if (!discrepancy_filename) return 0;
+     if (stat(discrepancy_filename, &stat_record) == 0) {
+         size_t size = stat_record.st_size;
+         /* Does size fit in an 'int'? */
+diff --git a/src/emaillog.c b/src/emaillog.c
+index e106529..d5daa7b 100644
+--- a/src/emaillog.c
++++ b/src/emaillog.c
+@@ -121,12 +121,12 @@ int dcc_add_file_to_log_email(const char *description,
+ void dcc_maybe_send_email(void) {
+   int child_pid = 0;
+   const char *whom_to_blame;
++  char *cant_send_message_to;
++  int ret;
+   if ((whom_to_blame = getenv("DISTCC_EMAILLOG_WHOM_TO_BLAME"))
+       == NULL) {
+     whom_to_blame = dcc_emaillog_whom_to_blame;
+   }
+-  char *cant_send_message_to;
+-  int ret;
+ 
+   if (should_send_email == 0) return;
+   if (never_send_email) return;
+diff --git a/src/lsdistcc.c b/src/lsdistcc.c
+index 8bae7c8..13319e5 100644
+--- a/src/lsdistcc.c
++++ b/src/lsdistcc.c
+@@ -922,6 +922,8 @@ int detect_distcc_servers(const char **argv, int argc, int opti,
+     const char *default_format = DEFAULT_FORMAT;
+     const char **sformat = &default_format;
+     const char *domain_name;
++    struct rlimit rlim = {0, 0};
++
+     if (opt_domain) {
+         if (dcc_get_dns_domain(&domain_name)) {
+                 fprintf(stderr, "Can't get domain name\n");
+@@ -944,7 +946,6 @@ int detect_distcc_servers(const char **argv, int argc, int opti,
+      * We'll ideally use n + 2 fds in our poll loop, so ask for n + 10
+      * fds total.
+      */
+-    struct rlimit rlim = {0, 0};
+     getrlimit(RLIMIT_NOFILE, &rlim);
+     if (rlim.rlim_cur < (rlim_t)n + 10) {
+         rlim.rlim_cur = (rlim_t)n + 10;
+-- 
+2.14.2
+
+
+From dee05d0645432f9678fe1497718e97c4c5c1751b Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@gmail.com>
+Date: Thu, 18 Sep 2014 09:53:05 +0200
+Subject: strings.h fix.
+
+
+diff --git a/src/filename.c b/src/filename.c
+index 9b23b38..f19157c 100644
+--- a/src/filename.c
++++ b/src/filename.c
+@@ -28,6 +28,7 @@
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <string.h>
++#include <strings.h>
+ #include <errno.h>
+ 
+ #include "distcc.h"
+-- 
+2.14.2
+
+
+From c1c813b47e02bb92c25e33ad10cd586ac2ce7290 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sat, 20 Aug 2016 16:27:52 +0200
+Subject: distcc: fix gcc2build again
+
+elf.h is now available so we need this code to work.
+
+diff --git a/src/fix_debug_info.c b/src/fix_debug_info.c
+index ea76624..225dd85 100644
+--- a/src/fix_debug_info.c
++++ b/src/fix_debug_info.c
+@@ -435,8 +435,10 @@ int dcc_fix_debug_info(const char *path, const char *client_path,
+    */
+   size_t client_path_len = strlen(client_path);
+   size_t server_path_len = strlen(server_path);
++  char *client_path_plus_slashes;
++
+   assert(client_path_len <= server_path_len);
+-  char *client_path_plus_slashes = malloc(server_path_len + 1);
++  client_path_plus_slashes = malloc(server_path_len + 1);
+   if (!client_path_plus_slashes) {
+     rs_log_crit("failed to allocate memory");
+     return 1;
+-- 
+2.14.2
+

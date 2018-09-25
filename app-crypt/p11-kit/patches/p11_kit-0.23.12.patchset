@@ -1,0 +1,278 @@
+From 4ed9659faca9f08a3c7c127b3e8c0e92a25b39f9 Mon Sep 17 00:00:00 2001
+From: sfanxiang <sfanxiang@gmail.com>
+Date: Tue, 2 Jan 2018 12:51:02 +0000
+Subject: port to Haiku
+
+
+diff --git a/common/unix-peer.c b/common/unix-peer.c
+index 7fe2eea..f4c6789 100644
+--- a/common/unix-peer.c
++++ b/common/unix-peer.c
+@@ -41,7 +41,6 @@
+ #include <sys/socket.h>
+ #include <sys/un.h>
+ #include <sys/uio.h>
+-#include <sys/errno.h>
+ 
+ #ifdef HAVE_UCRED_H
+ #  include <ucred.h>
+diff --git a/p11-kit/server.c b/p11-kit/server.c
+index e64890c..c02aec0 100644
+--- a/p11-kit/server.c
++++ b/p11-kit/server.c
+@@ -56,6 +56,7 @@
+ #include <grp.h>
+ #include <pwd.h>
+ #include <signal.h>
++#include <sys/select.h>
+ #include <sys/socket.h>
+ #include <sys/types.h>
+ #include <sys/un.h>
+@@ -271,7 +272,7 @@ create_socket (const char *address,
+ 	}
+ 
+ 	umask (066);
+-	rc = bind (sd, (struct sockaddr *)&sa, SUN_LEN (&sa));
++	rc = bind (sd, (struct sockaddr *)&sa, sizeof(sa));
+ 	if (rc == -1) {
+ 		p11_message_err (errno, "could not create socket %s", socket_file);
+ 		return -1;
+-- 
+2.15.0
+
+
+From 2aec2e7ee7fb0f360ccff22578a2a05e04a04b21 Mon Sep 17 00:00:00 2001
+From: sfanxiang <sfanxiang@gmail.com>
+Date: Tue, 2 Jan 2018 14:38:35 +0000
+Subject: fix frob_setuid dependency
+
+
+diff --git a/Makefile.in b/Makefile.in
+index 1df290e..d425140 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -591,7 +591,7 @@ am_frob_setuid_OBJECTS = p11-kit/frob-setuid.$(OBJEXT)
+ frob_setuid_OBJECTS = $(am_frob_setuid_OBJECTS)
+ am__DEPENDENCIES_6 = libp11-kit-testable.la libp11-test.la \
+ 	libp11-common.la $(am__DEPENDENCIES_1)
+-frob_setuid_DEPENDENCIES = $(am__DEPENDENCIES_6)
++frob_setuid_DEPENDENCIES = $(am__DEPENDENCIES_6) libp11-library.la
+ am__frob_token_SOURCES_DIST = trust/frob-token.c
+ @WITH_TRUST_MODULE_TRUE@am_frob_token_OBJECTS =  \
+ @WITH_TRUST_MODULE_TRUE@	trust/frob_token-frob-token.$(OBJEXT)
+-- 
+2.15.0
+
+
+From 92abf95c6d47aa20b2441f6bbb02737d31671fbe Mon Sep 17 00:00:00 2001
+From: sfanxiang <sfanxiang@gmail.com>
+Date: Wed, 3 Jan 2018 13:57:49 +0000
+Subject: avoid segfault caused by ffi closures
+
+
+diff --git a/p11-kit/virtual.c b/p11-kit/virtual.c
+index 67b3eed..4ac86b8 100644
+--- a/p11-kit/virtual.c
++++ b/p11-kit/virtual.c
+@@ -65,6 +65,10 @@
+ #include "ffi.h"
+ #endif
+ 
++#ifdef FFI_CLOSURES
++#undef FFI_CLOSURES	/* ffi closures segfault in Haiku */
++#endif
++
+ /* There are 66 functions in PKCS#11, with a maximum of 8 args */
+ #define MAX_FUNCTIONS 66
+ #define MAX_ARGS 10
+-- 
+2.15.0
+
+
+From 9ccbe8f3a7939e94e75a5a14900abe142e2cbeea Mon Sep 17 00:00:00 2001
+From: sfanxiang <sfanxiang@gmail.com>
+Date: Thu, 4 Jan 2018 12:42:37 +0000
+Subject: use __thread instead of pthread_getspecific()
+
+Using pthread_getspecific() and pthread_setspecific() leads to segfault
+in this program, but doing the same with __thread doesn't.
+
+This is just a workaround.
+
+diff --git a/common/library.c b/common/library.c
+index 1f0ba41..bd70df1 100644
+--- a/common/library.c
++++ b/common/library.c
+@@ -58,8 +58,6 @@ typedef struct {
+ 	char message[P11_MESSAGE_MAX];
+ } p11_local;
+ 
+-static p11_local * _p11_library_get_thread_local (void);
+-
+ p11_mutex_t p11_library_mutex;
+ 
+ p11_mutex_t p11_virtual_mutex;
+@@ -77,9 +75,8 @@ extern locale_t p11_message_locale;
+ static char *
+ thread_local_message (void)
+ {
+-	p11_local *local;
+-	local = _p11_library_get_thread_local ();
+-	return local ? local->message : NULL;
++	static __thread p11_local local = {};
++	return local.message;
+ }
+ 
+ static char *
+@@ -96,24 +93,6 @@ uninit_common (void)
+ 
+ #ifdef OS_UNIX
+ 
+-static pthread_key_t thread_local = 0;
+-
+-static p11_local *
+-_p11_library_get_thread_local (void)
+-{
+-	p11_local *local;
+-
+-	p11_library_init_once ();
+-
+-	local = pthread_getspecific (thread_local);
+-	if (local == NULL) {
+-		local = calloc (1, sizeof (p11_local));
+-		pthread_setspecific (thread_local, local);
+-	}
+-
+-	return local;
+-}
+-
+ static void
+ count_forks (void)
+ {
+@@ -128,7 +107,6 @@ p11_library_init_impl (void)
+ 	p11_debug ("initializing library");
+ 	p11_mutex_init (&p11_library_mutex);
+ 	p11_mutex_init (&p11_virtual_mutex);
+-	pthread_key_create (&thread_local, free);
+ 	p11_message_storage = thread_local_message;
+ #ifdef HAVE_STRERROR_L
+ 	p11_message_locale = newlocale (LC_ALL_MASK, "POSIX", (locale_t) 0);
+@@ -148,15 +126,10 @@ p11_library_uninit (void)
+ {
+ 	uninit_common ();
+ 
+-	/* Some cleanup to pacify valgrind */
+-	free (pthread_getspecific (thread_local));
+-	pthread_setspecific (thread_local, NULL);
+-
+ #ifdef HAVE_STRERROR_L
+ 	freelocale (p11_message_locale);
+ #endif
+ 	p11_message_storage = dont_store_message;
+-	pthread_key_delete (thread_local);
+ 	p11_mutex_uninit (&p11_virtual_mutex);
+ 	p11_mutex_uninit (&p11_library_mutex);
+ }
+-- 
+2.15.0
+
+
+From dcfe67ade5775de359887eb6dca4e178fd133b6f Mon Sep 17 00:00:00 2001
+From: sfanxiang <sfanxiang@gmail.com>
+Date: Thu, 4 Jan 2018 13:40:33 +0000
+Subject: trust/save: don't use hard links on Haiku
+
+
+diff --git a/trust/save.c b/trust/save.c
+index abff864..7efc30a 100644
+--- a/trust/save.c
++++ b/trust/save.c
+@@ -166,7 +166,7 @@ filo_free (p11_save_file *file)
+ 	free (file);
+ }
+ 
+-#ifdef OS_UNIX
++#if defined(OS_UNIX) && !defined(__HAIKU__)
+ 
+ static int
+ on_unique_try_link (void *data,
+@@ -184,7 +184,7 @@ on_unique_try_link (void *data,
+ 	return 1; /* All done */
+ }
+ 
+-#else /* OS_WIN32 */
++#else /* defined(OS_UNIX) && !defined(__HAIKU__) */
+ 
+ static int
+ on_unique_try_rename (void *data,
+@@ -204,7 +204,7 @@ on_unique_try_rename (void *data,
+ 	return 1; /* All done */
+ }
+ 
+-#endif /* OS_WIN32 */
++#endif /* defined(OS_UNIX) && !defined(__HAIKU__) */
+ 
+ bool
+ p11_save_finish_file (p11_save_file *file,
+@@ -231,7 +231,7 @@ p11_save_finish_file (p11_save_file *file,
+ 		p11_message_err (errno, "couldn't write file: %s", file->temp);
+ 		ret = false;
+ 
+-#ifdef OS_UNIX
++#if defined(OS_UNIX) && !defined(__HAIKU__)
+ 	/* Set the mode of the file, readable by everyone, but not writable */
+ 	} else if (chmod (file->temp, S_IRUSR | S_IRGRP | S_IROTH) < 0) {
+ 		p11_message_err (errno, "couldn't set file permissions: %s", file->temp);
+@@ -263,7 +263,7 @@ p11_save_finish_file (p11_save_file *file,
+ 		}
+ 		unlink (file->temp);
+ 
+-#else /* OS_WIN32 */
++#else /* defined(OS_UNIX) && !defined(__HAIKU__) */
+ 
+ 	/* Windows does not do atomic renames, so delete original file first */
+ 	} else {
+@@ -290,7 +290,7 @@ p11_save_finish_file (p11_save_file *file,
+ 			unlink (file->temp);
+ 		}
+ 
+-#endif /* OS_WIN32 */
++#endif /* defined(OS_UNIX) && !defined(__HAIKU__) */
+ 	}
+ 
+ 	if (ret && path_out) {
+-- 
+2.15.0
+
+
+From 83b286e7300d0b609eec4d6dfdc6fce4381de0ae Mon Sep 17 00:00:00 2001
+From: fbrosson <fbrosson@localhost>
+Date: Tue, 29 May 2018 16:08:23 +0000
+Subject: fix incorrect printf format for pid_t.
+
+
+diff --git a/common/debug.c b/common/debug.c
+index bcf6e21..cf18090 100644
+--- a/common/debug.c
++++ b/common/debug.c
+@@ -140,7 +140,7 @@ p11_debug_message (int flag,
+ 	va_list args;
+ 
+ 	if (flag & p11_debug_current_flags) {
+-		fprintf (stderr, "(p11-kit:%d) ", getpid());
++		fprintf (stderr, "(p11-kit:%ld) ", getpid());
+ 		va_start (args, format);
+ 		vfprintf (stderr, format, args);
+ 		va_end (args);
+@@ -157,7 +157,7 @@ p11_debug_message_err (int flag,
+ 	char strerr[P11_DEBUG_MESSAGE_MAX];
+ 
+ 	if (flag & p11_debug_current_flags) {
+-		fprintf (stderr, "(p11-kit:%d) ", getpid());
++		fprintf (stderr, "(p11-kit:%ld) ", getpid());
+ 		va_start (args, format);
+ 		vfprintf (stderr, format, args);
+ 		va_end (args);
+-- 
+2.17.0
+

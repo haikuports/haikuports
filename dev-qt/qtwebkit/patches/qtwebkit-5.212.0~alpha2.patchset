@@ -1,0 +1,1303 @@
+From 3404f2fc0b1ec5aab7b310122f662623716efaa6 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 16 Jun 2017 21:38:08 +1000
+Subject: Fix build
+
+
+diff --git a/Source/JavaScriptCore/dfg/DFGByteCodeParser.cpp b/Source/JavaScriptCore/dfg/DFGByteCodeParser.cpp
+index 8e93a7e..0d4c02d 100644
+--- a/Source/JavaScriptCore/dfg/DFGByteCodeParser.cpp
++++ b/Source/JavaScriptCore/dfg/DFGByteCodeParser.cpp
+@@ -4397,7 +4397,7 @@ bool ByteCodeParser::parseBlock(unsigned limit)
+                     nodeType = GetGlobalVar;
+                 else
+                     nodeType = GetGlobalLexicalVariable;
+-                Node* value = addToGraph(nodeType, OpInfo(operand), OpInfo(prediction));
++                Node* value = addToGraph(nodeType, OpInfo((void*)operand), OpInfo(prediction));
+                 if (resolveType == GlobalLexicalVar || resolveType == GlobalLexicalVarWithVarInjectionChecks)
+                     addToGraph(CheckNotEmpty, value);
+                 set(VirtualRegister(dst), value);
+@@ -4427,7 +4427,7 @@ bool ByteCodeParser::parseBlock(unsigned limit)
+                 }
+                 SpeculatedType prediction = getPrediction();
+                 set(VirtualRegister(dst),
+-                    addToGraph(GetClosureVar, OpInfo(operand), OpInfo(prediction), scopeNode));
++                    addToGraph(GetClosureVar, OpInfo((void*)operand), OpInfo(prediction), scopeNode));
+                 break;
+             }
+             case UnresolvedProperty:
+@@ -4500,7 +4500,7 @@ bool ByteCodeParser::parseBlock(unsigned limit)
+             case GlobalVarWithVarInjectionChecks: {
+                 if (getPutInfo.initializationMode() != Initialization && (resolveType == GlobalLexicalVar || resolveType == GlobalLexicalVarWithVarInjectionChecks)) {
+                     SpeculatedType prediction = SpecEmpty;
+-                    Node* value = addToGraph(GetGlobalLexicalVariable, OpInfo(operand), OpInfo(prediction));
++                    Node* value = addToGraph(GetGlobalLexicalVariable, OpInfo((void*)operand), OpInfo(prediction));
+                     addToGraph(CheckNotEmpty, value);
+                 }
+ 
+@@ -4510,7 +4510,7 @@ bool ByteCodeParser::parseBlock(unsigned limit)
+                     ASSERT_UNUSED(entry, watchpoints == entry.watchpointSet());
+                 }
+                 Node* valueNode = get(VirtualRegister(value));
+-                addToGraph(PutGlobalVariable, OpInfo(operand), weakJSConstant(scopeObject), valueNode);
++                addToGraph(PutGlobalVariable, OpInfo((void*)operand), weakJSConstant(scopeObject), valueNode);
+                 if (watchpoints && watchpoints->state() != IsInvalidated) {
+                     // Must happen after the store. See comment for GetGlobalVar.
+                     addToGraph(NotifyWrite, OpInfo(watchpoints));
+@@ -4525,7 +4525,7 @@ bool ByteCodeParser::parseBlock(unsigned limit)
+                 Node* scopeNode = get(VirtualRegister(scope));
+                 Node* valueNode = get(VirtualRegister(value));
+ 
+-                addToGraph(PutClosureVar, OpInfo(operand), scopeNode, valueNode);
++                addToGraph(PutClosureVar, OpInfo((void*)operand), scopeNode, valueNode);
+ 
+                 if (watchpoints && watchpoints->state() != IsInvalidated) {
+                     // Must happen after the store. See comment for GetGlobalVar.
+diff --git a/Source/JavaScriptCore/heap/HeapStatistics.cpp b/Source/JavaScriptCore/heap/HeapStatistics.cpp
+index 12d12ce..15ed177 100644
+--- a/Source/JavaScriptCore/heap/HeapStatistics.cpp
++++ b/Source/JavaScriptCore/heap/HeapStatistics.cpp
+@@ -47,7 +47,7 @@ double HeapStatistics::s_endTime = 0.0;
+ Vector<double>* HeapStatistics::s_pauseTimeStarts = 0;
+ Vector<double>* HeapStatistics::s_pauseTimeEnds = 0;
+ 
+-#if OS(UNIX) 
++#if OS(UNIX) && !OS(HAIKU)
+ 
+ void HeapStatistics::initialize()
+ {
+diff --git a/Source/JavaScriptCore/heap/MachineStackMarker.cpp b/Source/JavaScriptCore/heap/MachineStackMarker.cpp
+index 883914f..3f96e5f 100644
+--- a/Source/JavaScriptCore/heap/MachineStackMarker.cpp
++++ b/Source/JavaScriptCore/heap/MachineStackMarker.cpp
+@@ -23,16 +23,14 @@
+ #include "MachineStackMarker.h"
+ 
+ #include "ConservativeRoots.h"
+-#include "GPRInfo.h"
+ #include "Heap.h"
+ #include "JSArray.h"
+ #include "JSCInlines.h"
+-#include "LLIntPCRanges.h"
+-#include "MacroAssembler.h"
+ #include "VM.h"
+ #include <setjmp.h>
+ #include <stdlib.h>
+ #include <wtf/StdLibExtras.h>
++#include <wtf/Platform.h>
+ 
+ #if OS(DARWIN)
+ 
+@@ -65,55 +63,27 @@
+ #if USE(PTHREADS) && !OS(WINDOWS) && !OS(DARWIN)
+ #include <signal.h>
+ 
+-// We use SIGUSR2 to suspend and resume machine threads in JavaScriptCore.
+ static const int SigThreadSuspendResume = SIGUSR2;
+-static StaticLock globalSignalLock;
+-thread_local static std::atomic<JSC::MachineThreads::Thread*> threadLocalCurrentThread;
+ 
+-static void pthreadSignalHandlerSuspendResume(int, siginfo_t*, void* ucontext)
++#if defined(SA_RESTART)
++static void pthreadSignalHandlerSuspendResume(int)
+ {
+-    // Touching thread local atomic types from signal handlers is allowed.
+-    JSC::MachineThreads::Thread* thread = threadLocalCurrentThread.load();
+-
+-    if (thread->suspended.load(std::memory_order_acquire)) {
+-        // This is signal handler invocation that is intended to be used to resume sigsuspend.
+-        // So this handler invocation itself should not process.
+-        //
+-        // When signal comes, first, the system calls signal handler. And later, sigsuspend will be resumed. Signal handler invocation always precedes.
+-        // So, the problem never happens that suspended.store(true, ...) will be executed before the handler is called.
+-        // http://pubs.opengroup.org/onlinepubs/009695399/functions/sigsuspend.html
+-        return;
+-    }
+-
+-    ucontext_t* userContext = static_cast<ucontext_t*>(ucontext);
+-#if CPU(PPC)
+-    thread->suspendedMachineContext = *userContext->uc_mcontext.uc_regs;
+-#else
+-    thread->suspendedMachineContext = userContext->uc_mcontext;
+-#endif
+-
+-    // Allow suspend caller to see that this thread is suspended.
+-    // sem_post is async-signal-safe function. It means that we can call this from a signal handler.
+-    // http://pubs.opengroup.org/onlinepubs/009695399/functions/xsh_chap02_04.html#tag_02_04_03
+-    //
+-    // And sem_post emits memory barrier that ensures that suspendedMachineContext is correctly saved.
+-    // http://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap04.html#tag_04_11
+-    sem_post(&thread->semaphoreForSuspendResume);
+-
+-    // Reaching here, SigThreadSuspendResume is blocked in this handler (this is configured by sigaction's sa_mask).
+-    // So before calling sigsuspend, SigThreadSuspendResume to this thread is deferred. This ensures that the handler is not executed recursively.
+-    sigset_t blockedSignalSet;
+-    sigfillset(&blockedSignalSet);
+-    sigdelset(&blockedSignalSet, SigThreadSuspendResume);
+-    sigsuspend(&blockedSignalSet);
+-
+-    // Allow resume caller to see that this thread is resumed.
+-    sem_post(&thread->semaphoreForSuspendResume);
++    sigset_t signalSet;
++    sigemptyset(&signalSet);
++    sigaddset(&signalSet, SigThreadSuspendResume);
++    sigsuspend(&signalSet);
+ }
++#endif // defined(SA_RESTART)
+ #endif // USE(PTHREADS) && !OS(WINDOWS) && !OS(DARWIN)
+ 
+ #endif
+ 
++// HAIKU hooks on POSIX, but adds some specifics. So it can't be part of the
++// #if-chain above.
++#if OS(HAIKU)
++#include <OS.h>
++#endif
++
+ using namespace WTF;
+ 
+ namespace JSC {
+@@ -184,6 +154,8 @@ static inline PlatformThread getCurrentPlatformThread()
+     return pthread_mach_thread_np(pthread_self());
+ #elif OS(WINDOWS)
+     return GetCurrentThreadId();
++#elif OS(HAIKU)
++    return find_thread(NULL);
+ #elif USE(PTHREADS)
+     return pthread_self();
+ #endif
+@@ -225,7 +197,7 @@ Thread* MachineThreads::Thread::createForCurrentThread()
+ 
+ bool MachineThreads::Thread::operator==(const PlatformThread& other) const
+ {
+-#if OS(DARWIN) || OS(WINDOWS)
++#if OS(DARWIN) || OS(WINDOWS) || OS(HAIKU)
+     return platformThread == other;
+ #elif USE(PTHREADS)
+     return !!pthread_equal(platformThread, other);
+@@ -333,35 +305,24 @@ MachineThreads::Thread::Thread(const PlatformThread& platThread, void* base, voi
+     , stackBase(base)
+     , stackEnd(end)
+ {
+-#if OS(WINDOWS)
+-    ASSERT(platformThread == GetCurrentThreadId());
+-    bool isSuccessful =
+-        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
+-            &platformThreadHandle, 0, FALSE, DUPLICATE_SAME_ACCESS);
+-    RELEASE_ASSERT(isSuccessful);
+-#elif USE(PTHREADS) && !OS(DARWIN)
+-    threadLocalCurrentThread.store(this);
+-
+-    // Signal handlers are process global configuration.
+-    static std::once_flag initializeSignalHandler;
+-    std::call_once(initializeSignalHandler, [] {
+-        // Intentionally block SigThreadSuspendResume in the handler.
+-        // SigThreadSuspendResume will be allowed in the handler by sigsuspend.
+-        struct sigaction action;
+-        sigemptyset(&action.sa_mask);
+-        sigaddset(&action.sa_mask, SigThreadSuspendResume);
+-
+-        action.sa_sigaction = pthreadSignalHandlerSuspendResume;
+-        action.sa_flags = SA_RESTART | SA_SIGINFO;
+-        sigaction(SigThreadSuspendResume, &action, 0);
+-    });
++#if USE(PTHREADS) && !OS(WINDOWS) && !OS(DARWIN) && defined(SA_RESTART)
++    // if we have SA_RESTART, enable SIGUSR2 debugging mechanism
++    struct sigaction action;
++    action.sa_handler = pthreadSignalHandlerSuspendResume;
++    sigemptyset(&action.sa_mask);
++    action.sa_flags = SA_RESTART;
++    sigaction(SigThreadSuspendResume, &action, 0);
+ 
+     sigset_t mask;
+     sigemptyset(&mask);
+     sigaddset(&mask, SigThreadSuspendResume);
+     pthread_sigmask(SIG_UNBLOCK, &mask, 0);
+-
+-    sem_init(&semaphoreForSuspendResume, /* Only available in this process. */ 0, /* Initial value for the semaphore. */ 0);
++#elif OS(WINDOWS)
++    ASSERT(platformThread == GetCurrentThreadId());
++    bool isSuccessful =
++        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
++            &platformThreadHandle, 0, FALSE, DUPLICATE_SAME_ACCESS);
++    RELEASE_ASSERT(isSuccessful);
+ #endif
+ }
+ 
+@@ -369,8 +330,6 @@ MachineThreads::Thread::~Thread()
+ {
+ #if OS(WINDOWS)
+     CloseHandle(platformThreadHandle);
+-#elif USE(PTHREADS) && !OS(DARWIN)
+-    sem_destroy(&semaphoreForSuspendResume);
+ #endif
+ }
+ 
+@@ -379,32 +338,15 @@ bool MachineThreads::Thread::suspend()
+ #if OS(DARWIN)
+     kern_return_t result = thread_suspend(platformThread);
+     return result == KERN_SUCCESS;
++#elif OS(HAIKU)
++    status_t result = suspend_thread(platformThread);
++    return result == B_OK;
+ #elif OS(WINDOWS)
+     bool threadIsSuspended = (SuspendThread(platformThreadHandle) != (DWORD)-1);
+     ASSERT(threadIsSuspended);
+     return threadIsSuspended;
+ #elif USE(PTHREADS)
+-    ASSERT_WITH_MESSAGE(getCurrentPlatformThread() != platformThread, "Currently we don't support suspend the current thread itself.");
+-    {
+-        // During suspend, suspend or resume should not be executed from the other threads.
+-        // We use global lock instead of per thread lock.
+-        // Consider the following case, there are threads A and B.
+-        // And A attempt to suspend B and B attempt to suspend A.
+-        // A and B send signals. And later, signals are delivered to A and B.
+-        // In that case, both will be suspended.
+-        LockHolder lock(globalSignalLock);
+-        if (!suspendCount) {
+-            // Ideally, we would like to use pthread_sigqueue. It allows us to pass the argument to the signal handler.
+-            // But it can be used in a few platforms, like Linux.
+-            // Instead, we use Thread* stored in the thread local storage to pass it to the signal handler.
+-            if (pthread_kill(platformThread, SigThreadSuspendResume) == ESRCH)
+-                return false;
+-            sem_wait(&semaphoreForSuspendResume);
+-            // Release barrier ensures that this operation is always executed after all the above processing is done.
+-            suspended.store(true, std::memory_order_release);
+-        }
+-        ++suspendCount;
+-    }
++    pthread_kill(platformThread, SigThreadSuspendResume);
+     return true;
+ #else
+ #error Need a way to suspend threads on this platform
+@@ -415,28 +357,12 @@ void MachineThreads::Thread::resume()
+ {
+ #if OS(DARWIN)
+     thread_resume(platformThread);
++#elif OS(HAIKU)
++    resume_thread(platformThread);
+ #elif OS(WINDOWS)
+     ResumeThread(platformThreadHandle);
+ #elif USE(PTHREADS)
+-    {
+-        // During resume, suspend or resume should not be executed from the other threads.
+-        LockHolder lock(globalSignalLock);
+-        if (suspendCount == 1) {
+-            // When allowing SigThreadSuspendResume interrupt in the signal handler by sigsuspend and SigThreadSuspendResume is actually issued,
+-            // the signal handler itself will be called once again.
+-            // There are several ways to distinguish the handler invocation for suspend and resume.
+-            // 1. Use different signal numbers. And check the signal number in the handler.
+-            // 2. Use some arguments to distinguish suspend and resume in the handler. If pthread_sigqueue can be used, we can take this.
+-            // 3. Use thread local storage with atomic variables in the signal handler.
+-            // In this implementaiton, we take (3). suspended flag is used to distinguish it.
+-            if (pthread_kill(platformThread, SigThreadSuspendResume) == ESRCH)
+-                return;
+-            sem_wait(&semaphoreForSuspendResume);
+-            // Release barrier ensures that this operation is always executed after all the above processing is done.
+-            suspended.store(false, std::memory_order_release);
+-        }
+-        --suspendCount;
+-    }
++    pthread_kill(platformThread, SigThreadSuspendResume);
+ #else
+ #error Need a way to resume threads on this platform
+ #endif
+@@ -481,18 +407,20 @@ size_t MachineThreads::Thread::getRegisters(Thread::Registers& registers)
+     regs.ContextFlags = CONTEXT_INTEGER | CONTEXT_CONTROL;
+     GetThreadContext(platformThreadHandle, &regs);
+     return sizeof(CONTEXT);
++#elif OS(HAIKU)
++	get_thread_info(platformThread, &regs);
++	return sizeof(thread_info);
+ #elif USE(PTHREADS)
+-    pthread_attr_init(&regs.attribute);
++    pthread_attr_init(&regs);
+ #if HAVE(PTHREAD_NP_H) || OS(NETBSD)
+ #if !OS(OPENBSD)
+     // e.g. on FreeBSD 5.4, neundorf@kde.org
+-    pthread_attr_get_np(platformThread, &regs.attribute);
++    pthread_attr_get_np(platformThread, &regs);
+ #endif
+ #else
+     // FIXME: this function is non-portable; other POSIX systems may have different np alternatives
+-    pthread_getattr_np(platformThread, &regs.attribute);
++    pthread_getattr_np(platformThread, &regs);
+ #endif
+-    regs.machineContext = suspendedMachineContext;
+     return 0;
+ #else
+ #error Need a way to get thread registers on this platform
+@@ -534,6 +462,9 @@ void* MachineThreads::Thread::Registers::stackPointer() const
+ #endif // __DARWIN_UNIX03
+ 
+ // end OS(DARWIN)
++#elif OS(HAIKU)
++    return reinterpret_cast<void*>(regs.stack_base);
++
+ #elif OS(WINDOWS)
+ 
+ #if CPU(ARM)
+@@ -549,40 +480,6 @@ void* MachineThreads::Thread::Registers::stackPointer() const
+ #endif
+ 
+ #elif USE(PTHREADS)
+-
+-#if OS(FREEBSD) && ENABLE(JIT)
+-
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_esp);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_rsp);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.__gregs[_REG_SP]);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_gpregs.gp_sp);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_regs[29]);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#elif defined(__GLIBC__) && ENABLE(JIT)
+-
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_ESP]);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_RSP]);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.arm_sp);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.sp);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[29]);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#else
+     void* stackBase = 0;
+     size_t stackSize = 0;
+ #if OS(OPENBSD)
+@@ -591,13 +488,11 @@ void* MachineThreads::Thread::Registers::stackPointer() const
+     stackBase = (void*)((size_t) ss.ss_sp - ss.ss_size);
+     stackSize = ss.ss_size;
+ #else
+-    int rc = pthread_attr_getstack(&regs.attribute, &stackBase, &stackSize);
++    int rc = pthread_attr_getstack(&regs, &stackBase, &stackSize);
+ #endif
+     (void)rc; // FIXME: Deal with error code somehow? Seems fatal.
+     ASSERT(stackBase);
+     return static_cast<char*>(stackBase) + stackSize;
+-#endif
+-
+ #else
+ #error Need a way to get the stack pointer for another thread on this platform
+ #endif
+@@ -649,39 +544,6 @@ void* MachineThreads::Thread::Registers::framePointer() const
+ #error Unknown Architecture
+ #endif
+ 
+-#elif OS(FREEBSD)
+-
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_ebp);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_rbp);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.__gregs[_REG_FP]);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_gpregs.gp_x[29]);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_regs[30]);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#elif defined(__GLIBC__)
+-
+-// The following sequence depends on glibc's sys/ucontext.h.
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_EBP]);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_RBP]);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.arm_fp);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.regs[29]);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[30]);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+ #else
+ #error Need a way to get the frame pointer for another thread on this platform
+ #endif
+@@ -731,141 +593,17 @@ void* MachineThreads::Thread::Registers::instructionPointer() const
+ #error Unknown Architecture
+ #endif
+ 
+-#elif OS(FREEBSD)
+-
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_eip);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_rip);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.__gregs[_REG_PC]);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_gpregs.gp_elr);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_pc);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#elif defined(__GLIBC__)
+-
+-// The following sequence depends on glibc's sys/ucontext.h.
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_EIP]);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_RIP]);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.arm_pc);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.pc);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.pc);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+ #else
+ #error Need a way to get the instruction pointer for another thread on this platform
+ #endif
+ }
+-void* MachineThreads::Thread::Registers::llintPC() const
+-{
+-    // LLInt uses regT4 as PC.
+-#if OS(DARWIN)
+-
+-#if __DARWIN_UNIX03
+-
+-#if CPU(X86)
+-    static_assert(LLInt::LLIntPC == X86Registers::esi, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>(regs.__esi);
+-#elif CPU(X86_64)
+-    static_assert(LLInt::LLIntPC == X86Registers::r8, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>(regs.__r8);
+-#elif CPU(ARM)
+-    static_assert(LLInt::LLIntPC == ARMRegisters::r8, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>(regs.__r[8]);
+-#elif CPU(ARM64)
+-    static_assert(LLInt::LLIntPC == ARM64Registers::x4, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>(regs.__x[4]);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#else // !__DARWIN_UNIX03
+-#if CPU(X86)
+-    static_assert(LLInt::LLIntPC == X86Registers::esi, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>(regs.esi);
+-#elif CPU(X86_64)
+-    static_assert(LLInt::LLIntPC == X86Registers::r8, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>(regs.r8);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#endif // __DARWIN_UNIX03
+-
+-// end OS(DARWIN)
+-#elif OS(WINDOWS)
+-
+-#if CPU(ARM)
+-    static_assert(LLInt::LLIntPC == ARMRegisters::r8, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>((uintptr_t) regs.R8);
+-#elif CPU(MIPS)
+-#error Dont know what to do with mips. Do we even need this?
+-#elif CPU(X86)
+-    static_assert(LLInt::LLIntPC == X86Registers::esi, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>((uintptr_t) regs.Esi);
+-#elif CPU(X86_64)
+-    static_assert(LLInt::LLIntPC == X86Registers::r10, "Wrong LLInt PC.");
+-    return reinterpret_cast<void*>((uintptr_t) regs.R10);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#elif OS(FREEBSD)
+-
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_esi);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_r8);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.__gregs[_REG_R8]);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_gpregs.gp_x[4]);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.mc_regs[12]);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#elif defined(__GLIBC__)
+-
+-// The following sequence depends on glibc's sys/ucontext.h.
+-#if CPU(X86)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_ESI]);
+-#elif CPU(X86_64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[REG_R8]);
+-#elif CPU(ARM)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.arm_r8);
+-#elif CPU(ARM64)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.regs[4]);
+-#elif CPU(MIPS)
+-    return reinterpret_cast<void*>((uintptr_t) regs.machineContext.gregs[12]);
+-#else
+-#error Unknown Architecture
+-#endif
+-
+-#else
+-#error Need a way to get the LLIntPC for another thread on this platform
+-#endif
+-}
+ #endif // ENABLE(SAMPLING_PROFILER)
+ 
+ void MachineThreads::Thread::freeRegisters(Thread::Registers& registers)
+ {
+     Thread::Registers::PlatformRegisters& regs = registers.regs;
+-#if USE(PTHREADS) && !OS(WINDOWS) && !OS(DARWIN)
+-    pthread_attr_destroy(&regs.attribute);
++#if USE(PTHREADS) && !OS(WINDOWS) && !OS(DARWIN) && !OS(HAIKU)
++    pthread_attr_destroy(&regs);
+ #else
+     UNUSED_PARAM(regs);
+ #endif
+diff --git a/Source/JavaScriptCore/heap/MachineStackMarker.h b/Source/JavaScriptCore/heap/MachineStackMarker.h
+index a16f0da..6b7473e 100644
+--- a/Source/JavaScriptCore/heap/MachineStackMarker.h
++++ b/Source/JavaScriptCore/heap/MachineStackMarker.h
+@@ -29,24 +29,16 @@
+ 
+ #if OS(DARWIN)
+ #include <mach/thread_act.h>
+-#endif
+-
+-#if USE(PTHREADS) && !OS(WINDOWS) && !OS(DARWIN)
+-#include <semaphore.h>
+-#include <signal.h>
+-// Using signal.h didn't make mcontext_t and ucontext_t available on FreeBSD.
+-// This bug has been fixed in FreeBSD 11.0-CURRENT, so this workaround can be
+-// removed after FreeBSD 10.x goes EOL.
+-// https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=207079
+-#if OS(FREEBSD)
+-#include <ucontext.h>
+-#endif
++#elif OS(HAIKU)
++#include <OS.h>
+ #endif
+ 
+ #if OS(DARWIN)
+ typedef mach_port_t PlatformThread;
+ #elif OS(WINDOWS)
+ typedef DWORD PlatformThread;
++#elif OS(HAIKU)
++typedef thread_id PlatformThread;
+ #elif USE(PTHREADS)
+ typedef pthread_t PlatformThread;
+ #endif // OS(DARWIN)
+@@ -84,7 +76,6 @@ public:
+ #if ENABLE(SAMPLING_PROFILER)
+             void* framePointer() const;
+             void* instructionPointer() const;
+-            void* llintPC() const;
+ #endif // ENABLE(SAMPLING_PROFILER)
+             
+ #if OS(DARWIN)
+@@ -106,11 +97,10 @@ public:
+             
+ #elif OS(WINDOWS)
+             typedef CONTEXT PlatformRegisters;
++#elif OS(HAIKU)
++            typedef thread_info PlatformRegisters;
+ #elif USE(PTHREADS)
+-            struct PlatformRegisters {
+-                pthread_attr_t attribute;
+-                mcontext_t machineContext;
+-            };
++            typedef pthread_attr_t PlatformRegisters;
+ #else
+ #error Need a thread register struct for this platform
+ #endif
+@@ -133,11 +123,6 @@ public:
+         void* stackEnd;
+ #if OS(WINDOWS)
+         HANDLE platformThreadHandle;
+-#elif USE(PTHREADS) && !OS(DARWIN)
+-        sem_t semaphoreForSuspendResume;
+-        mcontext_t suspendedMachineContext;
+-        int suspendCount { 0 };
+-        std::atomic<bool> suspended { false };
+ #endif
+     };
+ 
+diff --git a/Source/ThirdParty/ANGLE/src/common/platform.h b/Source/ThirdParty/ANGLE/src/common/platform.h
+index 56db297..c98bfdd 100644
+--- a/Source/ThirdParty/ANGLE/src/common/platform.h
++++ b/Source/ThirdParty/ANGLE/src/common/platform.h
+@@ -26,6 +26,7 @@
+       defined(__DragonFly__) || \
+       defined(__sun) || \
+       defined(__GLIBC__) || \
++      defined(__HAIKU__) || \
+       defined(__GNU__) || \
+       defined(__QNX__)
+ #   define ANGLE_PLATFORM_POSIX 1
+diff --git a/Source/ThirdParty/gtest/include/gtest/internal/gtest-port.h b/Source/ThirdParty/gtest/include/gtest/internal/gtest-port.h
+index e8c6ae0..d72dee9 100644
+--- a/Source/ThirdParty/gtest/include/gtest/internal/gtest-port.h
++++ b/Source/ThirdParty/gtest/include/gtest/internal/gtest-port.h
+@@ -223,7 +223,7 @@
+ #define GTEST_OS_LINUX 1
+ #elif defined __GNU__
+ #define GTEST_OS_HURD 1
+-#elif defined(__FreeBSD__) || defined(__DragonFly__) || defined(__FreeBSD_kernel__)
++#elif defined(__FreeBSD__) || defined(__DragonFly__) || defined(__FreeBSD_kernel__) || defined(__HAIKU__)
+ #define GTEST_OS_FREEBSD 1
+ #elif defined __MVS__
+ #define GTEST_OS_ZOS 1
+diff --git a/Source/WTF/wtf/DateMath.cpp b/Source/WTF/wtf/DateMath.cpp
+index ebcecac..fb2d11a 100644
+--- a/Source/WTF/wtf/DateMath.cpp
++++ b/Source/WTF/wtf/DateMath.cpp
+@@ -431,7 +431,7 @@ static int32_t calculateUTCOffset()
+     localt.tm_zone = 0;
+ #endif
+ 
+-#if HAVE(TIMEGM)
++#if HAVE(TIMEGM) && !OS(HAIKU)
+     time_t utcOffset = timegm(&localt) - mktime(&localt);
+ #else
+     // Using a canned date of 01/01/2009 on platforms with weaker date-handling foo.
+diff --git a/Source/WTF/wtf/InlineASM.h b/Source/WTF/wtf/InlineASM.h
+index 965e281..b2129b1 100644
+--- a/Source/WTF/wtf/InlineASM.h
++++ b/Source/WTF/wtf/InlineASM.h
+@@ -40,7 +40,7 @@
+ #define THUMB_FUNC_PARAM(name)
+ #endif
+ 
+-#if (OS(LINUX) || OS(FREEBSD)) && CPU(X86_64)
++#if (OS(LINUX) || OS(FREEBSD) || OS(HAIKU)) && CPU(X86_64)
+ #define GLOBAL_REFERENCE(name) #name "@plt"
+ #elif CPU(X86) && COMPILER(MINGW)
+ #define GLOBAL_REFERENCE(name) "@" #name "@4"
+@@ -82,6 +82,7 @@
+ #elif   OS(LINUX)               \
+     || OS(FREEBSD)             \
+     || OS(OPENBSD)             \
++    || OS(HAIKU)               \
+     || OS(HURD)                \
+     || OS(NETBSD)              \
+     || COMPILER(MINGW)
+diff --git a/Source/WTF/wtf/Platform.h b/Source/WTF/wtf/Platform.h
+index 3f2069e..363ae7e 100644
+--- a/Source/WTF/wtf/Platform.h
++++ b/Source/WTF/wtf/Platform.h
+@@ -399,6 +399,11 @@
+ #define WTF_OS_NETBSD 1
+ #endif
+ 
++/* OS(HAIKU) - Haiku  */
++#if defined(__HAIKU__)
++#define WTF_OS_HAIKU 1
++#endif
++
+ /* OS(OPENBSD) - OpenBSD */
+ #ifdef __OpenBSD__
+ #define WTF_OS_OPENBSD 1
+@@ -424,6 +429,7 @@
+     || OS(HURD)             \
+     || OS(LINUX)            \
+     || OS(NETBSD)           \
++    || OS(HAIKU)           \
+     || OS(OPENBSD)          \
+     || OS(SOLARIS)          \
+     || defined(unix)        \
+diff --git a/Source/WTF/wtf/ProcessID.h b/Source/WTF/wtf/ProcessID.h
+index f84716e..ca7c266 100644
+--- a/Source/WTF/wtf/ProcessID.h
++++ b/Source/WTF/wtf/ProcessID.h
+@@ -41,7 +41,7 @@ inline int getCurrentProcessID()
+ #if OS(WINDOWS)
+     return GetCurrentProcessId();
+ #else
+-    return getpid();
++    return ::getpid();
+ #endif
+ }
+ 
+diff --git a/Source/WTF/wtf/StackBounds.cpp b/Source/WTF/wtf/StackBounds.cpp
+index f308ac1..f33a676 100644
+--- a/Source/WTF/wtf/StackBounds.cpp
++++ b/Source/WTF/wtf/StackBounds.cpp
+@@ -31,6 +31,10 @@
+ 
+ #include <windows.h>
+ 
++#elif OS(HAIKU)
++
++#include <OS.h>
++
+ #elif OS(SOLARIS)
+ 
+ #include <thread.h>
+@@ -46,6 +50,16 @@
+ 
+ namespace WTF {
+ 
++#if OS(HAIKU)
++
++static const ptrdiff_t estimateStackSize = 128 * sizeof(void*) *1024;
++static void* estimateStackBound(void *origin)
++{
++    return static_cast<char*>(origin) - estimateStackSize;
++}
++
++#endif
++
+ #if OS(DARWIN)
+ 
+ void StackBounds::initialize()
+@@ -90,6 +104,16 @@ void StackBounds::initialize()
+ #endif
+ }
+ 
++#elif OS(HAIKU)
++
++void StackBounds::initialize()
++{
++    thread_info threadInfo;
++    get_thread_info(find_thread(NULL), &threadInfo);
++    m_origin = threadInfo.stack_end;
++    m_bound = estimateStackBound(m_origin);
++}
++
+ #elif OS(UNIX)
+ 
+ void StackBounds::initialize()
+diff --git a/Source/WebCore/bindings/js/JSMediaStreamTrackCustom.cpp b/Source/WebCore/bindings/js/JSMediaStreamTrackCustom.cpp
+index 55154b8..24481e6 100644
+--- a/Source/WebCore/bindings/js/JSMediaStreamTrackCustom.cpp
++++ b/Source/WebCore/bindings/js/JSMediaStreamTrackCustom.cpp
+@@ -127,7 +127,7 @@ JSC::JSValue JSMediaStreamTrack::getCapabilities(ExecState& state)
+             facingModes.reserveCapacity(modes.size());
+ 
+             for (auto& mode : modes)
+-                facingModes.append(RealtimeMediaSourceSettings::facingMode(mode));
++                facingModes.append(QString(RealtimeMediaSourceSettings::facingMode(mode)));
+         }
+ 
+         object->putDirect(state.vm(), Identifier::fromString(&state, "facingMode"), jsArray(&state, castedThis->globalObject(), facingModes), DontDelete | ReadOnly);
+diff --git a/Source/WebCore/html/HTMLAnchorElement.cpp b/Source/WebCore/html/HTMLAnchorElement.cpp
+index bc100a8..b840088 100644
+--- a/Source/WebCore/html/HTMLAnchorElement.cpp
++++ b/Source/WebCore/html/HTMLAnchorElement.cpp
+@@ -77,7 +77,7 @@ HTMLAnchorElement::~HTMLAnchorElement()
+ }
+ 
+ // This function does not allow leading spaces before the port number.
+-static unsigned parsePortFromStringPosition(const String& value, unsigned portStart, unsigned& portEnd)
++static unsigned parsePortFromStringPosition2(const String& value, unsigned portStart, unsigned& portEnd)
+ {
+     portEnd = portStart;
+     while (isASCIIDigit(value[portEnd]))
+@@ -375,7 +375,7 @@ void HTMLAnchorElement::setHost(const String& value)
+         url.setHostAndPort(value);
+     else {
+         unsigned portEnd;
+-        unsigned port = parsePortFromStringPosition(value, separator + 1, portEnd);
++        unsigned port = parsePortFromStringPosition2(value, separator + 1, portEnd);
+         if (!port) {
+             // http://dev.w3.org/html5/spec/infrastructure.html#url-decomposition-idl-attributes
+             // specifically goes against RFC 3986 (p3.2) and
+diff --git a/Source/WebCore/platform/FileSystem.cpp b/Source/WebCore/platform/FileSystem.cpp
+index 1db7e03..4d2b532 100644
+--- a/Source/WebCore/platform/FileSystem.cpp
++++ b/Source/WebCore/platform/FileSystem.cpp
+@@ -149,7 +149,7 @@ bool excludeFromBackup(const String&)
+ 
+ MappedFileData::~MappedFileData()
+ {
+-#if !OS(WINDOWS)
++#if !OS(WINDOWS) || OS(HAIKU)
+     if (!m_fileData)
+         return;
+     munmap(m_fileData, m_fileSize);
+@@ -158,7 +158,7 @@ MappedFileData::~MappedFileData()
+ 
+ MappedFileData::MappedFileData(const String& filePath, bool& success)
+ {
+-#if OS(WINDOWS)
++#if OS(WINDOWS) || OS(HAIKU)
+     // FIXME: Implement mapping
+     success = false;
+ #else
+diff --git a/Source/WebKit2/UIProcess/Launcher/qt/ProcessLauncherQt.cpp b/Source/WebKit2/UIProcess/Launcher/qt/ProcessLauncherQt.cpp
+index 6b6bcf5..042fccc 100644
+--- a/Source/WebKit2/UIProcess/Launcher/qt/ProcessLauncherQt.cpp
++++ b/Source/WebKit2/UIProcess/Launcher/qt/ProcessLauncherQt.cpp
+@@ -221,7 +221,7 @@ void ProcessLauncher::launchProcess()
+         delete webProcessOrSUIDHelper;
+         return;
+     }
+-#if OS(UNIX)
++#if OS(UNIX) && !OS(HAIKU)
+     setpriority(PRIO_PROCESS, webProcessOrSUIDHelper->pid(), 10);
+ #endif
+     RefPtr<ProcessLauncher> protector(this);
+diff --git a/Source/cmake/OptionsQt.cmake b/Source/cmake/OptionsQt.cmake
+index 1930027..9c827a3 100644
+--- a/Source/cmake/OptionsQt.cmake
++++ b/Source/cmake/OptionsQt.cmake
+@@ -122,7 +122,7 @@ if (APPLE)
+     set(MACOS_BUILD_FRAMEWORKS ON) # TODO: Make it an option
+ endif ()
+ 
+-if (WIN32 OR APPLE)
++if (WIN32 OR APPLE OR HAIKU)
+     set(USE_LIBHYPHEN_DEFAULT OFF)
+     set(USE_GSTREAMER_DEFAULT OFF)
+     set(USE_QT_MULTIMEDIA_DEFAULT ON)
+-- 
+2.16.4
+
+
+From 6b375beeea26a4a37954d66cce4ba818309ecc98 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sat, 17 Jun 2017 12:22:33 +1000
+Subject: Add libnetwork
+
+
+diff --git a/Source/WebKit2/CMakeLists.txt b/Source/WebKit2/CMakeLists.txt
+index e5d08ed..deb9f68 100644
+--- a/Source/WebKit2/CMakeLists.txt
++++ b/Source/WebKit2/CMakeLists.txt
+@@ -740,6 +740,12 @@ set(PluginProcess_LIBRARIES
+     WebKit2
+ )
+ 
++if (HAIKU)
++	list(APPEND WebKit2_LIBRARIES network)
++	list(APPEND WebProcess_LIBRARIES network)
++	list(APPEND NetworkProcess_LIBRARIES network)
++endif ()
++
+ # librt is needed for shm_open on Linux.
+ find_library(LIBRT_LIBRARIES NAMES rt)
+ mark_as_advanced(LIBRT_LIBRARIES)
+-- 
+2.16.4
+
+
+From 4718dffa9ef6f2a5ffe1b835d5514099c09f350e Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sat, 17 Jun 2017 12:23:20 +1000
+Subject: Add Haiku detection to useragent string
+
+
+diff --git a/Source/WebCore/platform/qt/UserAgentQt.cpp b/Source/WebCore/platform/qt/UserAgentQt.cpp
+index 4b88762..fa564f9 100644
+--- a/Source/WebCore/platform/qt/UserAgentQt.cpp
++++ b/Source/WebCore/platform/qt/UserAgentQt.cpp
+@@ -94,6 +94,8 @@ String UserAgentQt::standardUserAgent(const String &applicationNameForUserAgent,
+ 
+ #elif OS(FREEBSD)
+             "FreeBSD"
++#elif OS(HAIKU)
++            "Haiku"
+ #elif OS(HURD)
+             "GNU Hurd"
+ #elif OS(LINUX)
+-- 
+2.16.4
+
+
+From 4db4d772bb95451345d9687c251fd96ff521ec43 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Mon, 17 Jul 2017 19:43:24 +1000
+Subject: Use gstreamer instead qtmulimadia
+
+
+diff --git a/Source/cmake/OptionsQt.cmake b/Source/cmake/OptionsQt.cmake
+index 9c827a3..1930027 100644
+--- a/Source/cmake/OptionsQt.cmake
++++ b/Source/cmake/OptionsQt.cmake
+@@ -122,7 +122,7 @@ if (APPLE)
+     set(MACOS_BUILD_FRAMEWORKS ON) # TODO: Make it an option
+ endif ()
+ 
+-if (WIN32 OR APPLE OR HAIKU)
++if (WIN32 OR APPLE)
+     set(USE_LIBHYPHEN_DEFAULT OFF)
+     set(USE_GSTREAMER_DEFAULT OFF)
+     set(USE_QT_MULTIMEDIA_DEFAULT ON)
+-- 
+2.16.4
+
+
+From 4bca27643de38432bfbd8110598f79885da1ef95 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Mon, 17 Jul 2017 19:44:23 +1000
+Subject: UserAgent improvements
+
+
+diff --git a/Source/WebCore/platform/qt/UserAgentQt.cpp b/Source/WebCore/platform/qt/UserAgentQt.cpp
+index fa564f9..71920ff 100644
+--- a/Source/WebCore/platform/qt/UserAgentQt.cpp
++++ b/Source/WebCore/platform/qt/UserAgentQt.cpp
+@@ -62,7 +62,7 @@ String UserAgentQt::standardUserAgent(const String &applicationNameForUserAgent,
+ 
+         // Platform.
+         ua = ua.arg(
+-#if OS(MAC_OS_X)
++#if OS(MAC_OS_X) || OS(HAIKU)
+             QStringLiteral("Macintosh; ")
+ #elif OS(WINDOWS)
+             QStringLiteral("")
+@@ -95,7 +95,11 @@ String UserAgentQt::standardUserAgent(const String &applicationNameForUserAgent,
+ #elif OS(FREEBSD)
+             "FreeBSD"
+ #elif OS(HAIKU)
+-            "Haiku"
++#if CPU(X86) || CPU(X86_64)
++            "Intel Haiku R1 x86"
++#else
++            "Haiku R1"
++#endif
+ #elif OS(HURD)
+             "GNU Hurd"
+ #elif OS(LINUX)
+-- 
+2.16.4
+
+
+From 806f7fdf8d79f89c495204348a2691aea657b6b2 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 21 Jul 2017 21:58:31 +1000
+Subject: Add support for notification icon
+
+
+diff --git a/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.cpp b/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.cpp
+index ccd1afb..c096f14 100644
+--- a/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.cpp
++++ b/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.cpp
+@@ -51,6 +51,82 @@ namespace WebCore {
+ 
+ #if ENABLE(NOTIFICATIONS)
+ 
++#if defined(Q_OS_HAIKU)
++
++static void appendBlobResolved(QByteArray& data, const QUrl& url, QString* contentType = 0)
++{
++    RefPtr<BlobData> blobData = static_cast<BlobRegistryImpl&>(blobRegistry()).getBlobDataFromURL(url);
++    if (!blobData)
++        return;
++
++    if (contentType)
++        *contentType = blobData->contentType();
++
++    BlobDataItemList::const_iterator it = blobData->items().begin();
++    const BlobDataItemList::const_iterator itend = blobData->items().end();
++    for (; it != itend; ++it) {
++        const BlobDataItem& blobItem = *it;
++        if (blobItem.type() == BlobDataItem::Type::Data)
++            data.append(reinterpret_cast<const char*>(blobItem.data().data()->data()) + static_cast<int>(blobItem.offset()), static_cast<int>(blobItem.length()));
++        else if (blobItem.type() == BlobDataItem::Type::File) {
++            // File types are not allowed here, so just ignore it.
++            RELEASE_ASSERT_WITH_MESSAGE(false, "File types are not allowed here");
++        } else
++            ASSERT_NOT_REACHED();
++    }
++}
++
++static void resolveBlobUrl(const QUrl& url, QUrl& resolvedUrl)
++{
++    RefPtr<BlobData> blobData = static_cast<BlobRegistryImpl&>(blobRegistry()).getBlobDataFromURL(url);
++    if (!blobData)
++        return;
++
++    QByteArray data;
++    QString contentType;
++    appendBlobResolved(data, url, &contentType);
++
++    QString dataUri(QStringLiteral("data:"));
++    dataUri.append(contentType);
++    dataUri.append(QStringLiteral(";base64,"));
++    dataUri.append(QString::fromLatin1(data.toBase64()));
++    resolvedUrl = QUrl(dataUri);
++}
++
++static QImage httpGetImage(QNetworkAccessManager *netMgr, const QUrl& src)
++{
++	QNetworkRequest request;
++	QUrl url = src;
++    if (url.scheme() == QLatin1String("blob"))
++        resolveBlobUrl(src, url);
++	request.setUrl(url);
++	QNetworkReply* reply = netMgr->get(request);
++
++	QEventLoop eventloop;
++    QObject::connect(reply, SIGNAL(finished()), &eventloop, SLOT(quit()));
++    QTimer::singleShot(3000, &eventloop, SLOT(quit()));
++    eventloop.exec();
++
++	QVariant redirectedUrl = reply->attribute(QNetworkRequest::RedirectionTargetAttribute);
++	QUrl redirectedTo = redirectedUrl.toUrl();
++	if (redirectedTo.isValid()) {
++		if (redirectedTo != reply->request().url())
++			return httpGetImage(netMgr, redirectedTo);
++		else
++			return QImage();
++	} else {
++	    if (reply->error() == QNetworkReply::NoError) {
++			QByteArray data = reply->readAll();
++			QImage image = QImage::fromData(data);
++			reply->deleteLater();
++			return image;
++	    }
++	}
++
++    return QImage();
++}
++#endif
++
+ const double notificationTimeout = 10.0;
+ 
+ bool NotificationPresenterClientQt::dumpNotification = false;
+@@ -218,8 +294,19 @@ void NotificationPresenterClientQt::displayNotification(Notification* notificati
+ #ifndef QT_NO_SYSTEMTRAYICON
+     wrapper->connect(m_systemTrayIcon.data(), SIGNAL(messageClicked()), wrapper, SLOT(notificationClicked()));
+     QMetaObject::invokeMethod(m_systemTrayIcon.data(), "show");
++#if defined(Q_OS_HAIKU)
++	m_netMgr = new QNetworkAccessManager();
++	QImage image = httpGetImage(m_netMgr, notification->iconURL());
++	QIcon icon(QPixmap::fromImage(image).scaled(32, 32));
++	QMetaObject::invokeMethod(m_systemTrayIcon.data(), "showMessage",
++		Q_ARG(QString, notification->title()),
++		Q_ARG(QString, notification->body()),
++		Q_ARG(QIcon, icon));
++    delete m_netMgr;
++#else
+     QMetaObject::invokeMethod(m_systemTrayIcon.data(), "showMessage", Q_ARG(QString, notification->title()), Q_ARG(QString, notification->body()));
+ #endif
++#endif
+ }
+ 
+ void NotificationPresenterClientQt::cancel(Notification* notification)
+diff --git a/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.h b/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.h
+index f53fe51..9f69a31 100644
+--- a/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.h
++++ b/Source/WebKit/qt/WebCoreSupport/NotificationPresenterClientQt.h
+@@ -40,6 +40,18 @@
+ #include <QMultiHash>
+ #include <QScopedPointer>
+ 
++#if defined(Q_OS_HAIKU)
++#include <QUrl>
++#include <QNetworkAccessManager>
++#include <QNetworkReply>
++#include <QNetworkRequest>
++#include <QEventLoop>
++#include <QTimer>
++
++#include "BlobData.h"
++#include "BlobRegistryImpl.h"
++#endif
++
+ class QWebFrameAdapter;
+ class QWebPageAdapter;
+ 
+@@ -136,6 +148,9 @@ private:
+     QtPlatformPlugin m_platformPlugin;
+ #ifndef QT_NO_SYSTEMTRAYICON
+     QScopedPointer<QObject> m_systemTrayIcon;
++#if defined(Q_OS_HAIKU)
++	QNetworkAccessManager *m_netMgr;
++#endif
+ #endif
+ };
+ 
+-- 
+2.16.4
+
+
+From 3a6a7fff67f5e2fabf18c5710ad67210fa333207 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michael=20Br=C3=BCning?= <michael.bruning@digia.com>
+Date: Wed, 13 Nov 2013 18:13:36 +0100
+Subject: Trigger layout after resizing the FrameView.
+
+There are problems with QGLWidget based web plugins due to the fact
+that WebKit forces us to relayout during paint events, which in turn
+might resize widgets, causing the shared backing store's QImages to
+be corrupted and hence causing crashed.
+
+This patch triggers a layout upon resizing the FrameView, which reduces
+the likely hood of resizing plugins during a subsequent paintEvent.
+
+Task-number: QTBUG-34277
+Change-Id: Id35c72a3cc68ac6633a74fba0669c2d8fbfabc88
+Reviewed-by: Allan Sandfeld Jensen <allan.jensen@digia.com>
+
+diff --git a/Source/WebKit/qt/WebCoreSupport/QWebFrameAdapter.cpp b/Source/WebKit/qt/WebCoreSupport/QWebFrameAdapter.cpp
+index e6145b6..941d8df 100644
+--- a/Source/WebKit/qt/WebCoreSupport/QWebFrameAdapter.cpp
++++ b/Source/WebKit/qt/WebCoreSupport/QWebFrameAdapter.cpp
+@@ -962,6 +962,9 @@ void QWebFrameAdapter::setViewportSize(const QSize& size)
+     ASSERT(view);
+     view->resize(size);
+     view->adjustViewSize();
++
++    if (view->needsLayout())
++        view->layout();
+ }
+ 
+ 
+-- 
+2.16.4
+
+
+From 121f09f0652294a5280e5206b76723ac75c3887d Mon Sep 17 00:00:00 2001
+From: Konstantin Tokarev <annulen@yandex.ru>
+Date: Thu, 12 Oct 2017 20:15:15 +0300
+Subject: Fix for 451c5a10: run adjustViewSize() after relayout
+
+Additional note for 451c5a10 + this:
+
+Since r162515 resize of FrameView that does not have scrollbars (or use
+overlay scrollbars) does not lead to automatic re-layout. In Trojita
+contentsSize() is called immediately after QWebPage::setViewportSize(),
+returning wrong result.
+
+Change-Id: I543b22d7bbe1514333007e5f99b97a7c12c19c1a
+
+diff --git a/Source/WebKit/qt/WebCoreSupport/QWebFrameAdapter.cpp b/Source/WebKit/qt/WebCoreSupport/QWebFrameAdapter.cpp
+index 941d8df..df28e9f 100644
+--- a/Source/WebKit/qt/WebCoreSupport/QWebFrameAdapter.cpp
++++ b/Source/WebKit/qt/WebCoreSupport/QWebFrameAdapter.cpp
+@@ -961,10 +961,9 @@ void QWebFrameAdapter::setViewportSize(const QSize& size)
+     FrameView* view = frame->view();
+     ASSERT(view);
+     view->resize(size);
+-    view->adjustViewSize();
+-
+     if (view->needsLayout())
+         view->layout();
++    view->adjustViewSize();
+ }
+ 
+ 
+-- 
+2.16.4
+
+
+From 695a072cc768ff5ac50479fa2daaf979e5e7b65d Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sat, 21 Apr 2018 22:27:07 +1000
+Subject: Update Safari version for UserAgent string
+
+
+diff --git a/Source/WebCore/platform/qt/UserAgentQt.cpp b/Source/WebCore/platform/qt/UserAgentQt.cpp
+index 71920ff..89a5035 100644
+--- a/Source/WebCore/platform/qt/UserAgentQt.cpp
++++ b/Source/WebCore/platform/qt/UserAgentQt.cpp
+@@ -58,7 +58,7 @@ String UserAgentQt::standardUserAgent(const String &applicationNameForUserAgent,
+ 
+     if (ua.isNull()) {
+ 
+-        ua = QStringLiteral("Mozilla/5.0 (%1%2%3) AppleWebKit/%4 (KHTML, like Gecko) %99 Version/9.0 Safari/%5");
++        ua = QStringLiteral("Mozilla/5.0 (%1%2%3) AppleWebKit/%4 (KHTML, like Gecko) %99 Version/10.0 Safari/%5");
+ 
+         // Platform.
+         ua = ua.arg(
+-- 
+2.16.4
+
+
+From 4b1d87a0c8f53f045987612c45ffdafe36d93dcc Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Tue, 12 Jun 2018 21:21:51 +1000
+Subject: Fix build with gcc7
+
+
+diff --git a/Source/WebCore/dom/SlotAssignment.h b/Source/WebCore/dom/SlotAssignment.h
+index 0fcd4df..6672ce3 100644
+--- a/Source/WebCore/dom/SlotAssignment.h
++++ b/Source/WebCore/dom/SlotAssignment.h
+@@ -28,6 +28,8 @@
+ 
+ #if ENABLE(SHADOW_DOM) || ENABLE(DETAILS_ELEMENT)
+ 
++#include <functional>
++
+ #include <wtf/HashMap.h>
+ #include <wtf/HashSet.h>
+ #include <wtf/Vector.h>
+-- 
+2.16.4
+
+
+From a36365c33c489c8fe5b44f1bfa62a23cbd9e7fc5 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 13 Jun 2018 21:24:48 +1000
+Subject: WTF::StringImpl::copyChars segfaults when built with GCC 7
+
+
+diff --git a/Source/WTF/wtf/text/StringImpl.h b/Source/WTF/wtf/text/StringImpl.h
+index 5781c1c..a1be756 100644
+--- a/Source/WTF/wtf/text/StringImpl.h
++++ b/Source/WTF/wtf/text/StringImpl.h
+@@ -619,25 +619,7 @@ public:
+             *destination = *source;
+             return;
+         }
+-
+-        if (numCharacters <= s_copyCharsInlineCutOff) {
+-            unsigned i = 0;
+-#if (CPU(X86) || CPU(X86_64))
+-            const unsigned charsPerInt = sizeof(uint32_t) / sizeof(T);
+-
+-            if (numCharacters > charsPerInt) {
+-                unsigned stopCount = numCharacters & ~(charsPerInt - 1);
+-
+-                const uint32_t* srcCharacters = reinterpret_cast<const uint32_t*>(source);
+-                uint32_t* destCharacters = reinterpret_cast<uint32_t*>(destination);
+-                for (unsigned j = 0; i < stopCount; i += charsPerInt, ++j)
+-                    destCharacters[j] = srcCharacters[j];
+-            }
+-#endif
+-            for (; i < numCharacters; ++i)
+-                destination[i] = source[i];
+-        } else
+-            memcpy(destination, source, numCharacters * sizeof(T));
++        memcpy(destination, source, numCharacters * sizeof(T));
+     }
+ 
+     ALWAYS_INLINE static void copyChars(UChar* destination, const LChar* source, unsigned numCharacters)
+@@ -855,9 +837,6 @@ private:
+         return *tailPointer<StringImpl*>();
+     }
+ 
+-    // This number must be at least 2 to avoid sharing empty, null as well as 1 character strings from SmallStrings.
+-    static const unsigned s_copyCharsInlineCutOff = 20;
+-
+     enum class CaseConvertType { Upper, Lower };
+     template<CaseConvertType type, typename CharacterType> static Ref<StringImpl> convertASCIICase(StringImpl&, const CharacterType*, unsigned);
+ 
+-- 
+2.16.4
+

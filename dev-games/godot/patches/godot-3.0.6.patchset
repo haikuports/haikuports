@@ -1,0 +1,1014 @@
+From 2943f1f9af7f7e6a5cd2f1f62287bfc9b1c4c364 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Mon, 9 Jul 2018 15:36:13 +0200
+Subject: Fix various things for Godot 3
+
+Our upstream code is unmaintained and does not compile.
+Rework event management, renderer initialization, haiku support in GLAD.
+We now get all the way up to the splash screen without crashing, but the
+editor does not start.
+
+diff --git a/platform/haiku/audio_driver_media_kit.cpp b/platform/haiku/audio_driver_media_kit.cpp
+index 278a994..e513212 100644
+--- a/platform/haiku/audio_driver_media_kit.cpp
++++ b/platform/haiku/audio_driver_media_kit.cpp
+@@ -100,7 +100,7 @@ int AudioDriverMediaKit::get_mix_rate() const {
+ 	return mix_rate;
+ }
+ 
+-AudioDriverSW::SpeakerMode AudioDriverMediaKit::get_speaker_mode() const {
++AudioDriverMediaKit::SpeakerMode AudioDriverMediaKit::get_speaker_mode() const {
+ 	return speaker_mode;
+ }
+ 
+diff --git a/platform/haiku/audio_driver_media_kit.h b/platform/haiku/audio_driver_media_kit.h
+index a09403e..b743039 100644
+--- a/platform/haiku/audio_driver_media_kit.h
++++ b/platform/haiku/audio_driver_media_kit.h
+@@ -35,8 +35,8 @@
+ #include "core/os/mutex.h"
+ #include "core/os/thread.h"
+ 
+-#include <SoundPlayer.h>
+ #include <kernel/image.h> // needed for image_id
++#include <SoundPlayer.h>
+ 
+ class AudioDriverMediaKit : public AudioDriver {
+ 	Mutex *mutex;
+diff --git a/platform/haiku/detect.py b/platform/haiku/detect.py
+index 2959023..20bdf85 100644
+--- a/platform/haiku/detect.py
++++ b/platform/haiku/detect.py
+@@ -64,6 +64,79 @@ def configure(env):
+     env["CC"] = "gcc-x86"
+     env["CXX"] = "g++-x86"
+ 
++    ## Dependencies
++
++    if not env['builtin_openssl']:
++        env.ParseConfig('pkg-config openssl --cflags --libs')
++
++    if not env['builtin_libwebp']:
++        env.ParseConfig('pkg-config libwebp --cflags --libs')
++
++    # freetype depends on libpng and zlib, so bundling one of them while keeping others
++    # as shared libraries leads to weird issues
++    if env['builtin_freetype'] or env['builtin_libpng'] or env['builtin_zlib']:
++        env['builtin_freetype'] = True
++        env['builtin_libpng'] = True
++        env['builtin_zlib'] = True
++
++    if not env['builtin_freetype']:
++        env.ParseConfig('pkg-config freetype2 --cflags --libs')
++
++    if not env['builtin_libpng']:
++        env.ParseConfig('pkg-config libpng --cflags --libs')
++
++    if not env['builtin_bullet']:
++        # We need at least version 2.88
++        import subprocess
++        bullet_version = subprocess.check_output(['pkg-config', 'bullet', '--modversion']).strip()
++        if bullet_version < "2.88":
++            # Abort as system bullet was requested but too old
++            print("Bullet: System version {0} does not match minimal requirements ({1}). Aborting.".format(bullet_version, "2.88"))
++            sys.exit(255)
++        env.ParseConfig('pkg-config bullet --cflags --libs')
++
++    if not env['builtin_enet']:
++        env.ParseConfig('pkg-config libenet --cflags --libs')
++
++    if not env['builtin_squish'] and env['tools']:
++        env.ParseConfig('pkg-config libsquish --cflags --libs')
++
++    if not env['builtin_zstd']:
++        env.ParseConfig('pkg-config libzstd --cflags --libs')
++
++    # Sound and video libraries
++    # Keep the order as it triggers chained dependencies (ogg needed by others, etc.)
++
++    if not env['builtin_libtheora']:
++        env['builtin_libogg'] = False  # Needed to link against system libtheora
++        env['builtin_libvorbis'] = False  # Needed to link against system libtheora
++        env.ParseConfig('pkg-config theora theoradec --cflags --libs')
++
++    if not env['builtin_libvpx']:
++        env.ParseConfig('pkg-config vpx --cflags --libs')
++
++    if not env['builtin_libvorbis']:
++        env['builtin_libogg'] = False  # Needed to link against system libvorbis
++        env.ParseConfig('pkg-config vorbis vorbisfile --cflags --libs')
++
++    if not env['builtin_opus']:
++        env['builtin_libogg'] = False  # Needed to link against system opus
++        env.ParseConfig('pkg-config opus opusfile --cflags --libs')
++
++    if not env['builtin_libogg']:
++        env.ParseConfig('pkg-config ogg --cflags --libs')
++
++    if env['builtin_libtheora']:
++        list_of_x86 = ['x86_64', 'x86', 'i386', 'i586']
++        if any(platform.machine() in s for s in list_of_x86):
++            env["x86_libtheora_opt_gcc"] = True
++
++    # On Linux wchar_t should be 32-bits
++    # 16-bit library shouldn't be required due to compiler optimisations
++    if not env['builtin_pcre2']:
++        env.ParseConfig('pkg-config libpcre2-32 --cflags --libs')
++
++
+     ## Flags
+ 
+     env.Append(CPPPATH=['#platform/haiku'])
+diff --git a/platform/haiku/haiku_application.h b/platform/haiku/haiku_application.h
+index f92969b..d8e43d9 100644
+--- a/platform/haiku/haiku_application.h
++++ b/platform/haiku/haiku_application.h
+@@ -31,8 +31,10 @@
+ #ifndef HAIKU_APPLICATION_H
+ #define HAIKU_APPLICATION_H
+ 
++#include <kernel/image.h> // Application.h includes <image.h>, but this
++                          // ends up including the godot header of the same
++						  // name.
+ #include <Application.h>
+-#include <kernel/image.h> // needed for image_id
+ 
+ class HaikuApplication : public BApplication {
+ public:
+diff --git a/platform/haiku/haiku_direct_window.cpp b/platform/haiku/haiku_direct_window.cpp
+index b234a2f..db15d4d 100644
+--- a/platform/haiku/haiku_direct_window.cpp
++++ b/platform/haiku/haiku_direct_window.cpp
+@@ -41,10 +41,14 @@ HaikuDirectWindow::HaikuDirectWindow(BRect p_frame) :
+ 	last_buttons_state = 0;
+ 	last_button_mask = 0;
+ 	last_key_modifier_state = 0;
++
++	view = NULL;
++	update_runner = NULL;
++	input = NULL;
++	main_loop = NULL;
+ }
+ 
+ HaikuDirectWindow::~HaikuDirectWindow() {
+-	delete update_runner;
+ }
+ 
+ void HaikuDirectWindow::SetHaikuGLView(HaikuGLView *p_view) {
+@@ -53,7 +57,7 @@ void HaikuDirectWindow::SetHaikuGLView(HaikuGLView *p_view) {
+ 
+ void HaikuDirectWindow::StartMessageRunner() {
+ 	update_runner = new BMessageRunner(BMessenger(this),
+-			new BMessage(REDRAW_MSG), 1000000 / 30 /* 30 fps */);
++			new BMessage(REDRAW_MSG), 1000000 / 60 /* 60 fps */);
+ }
+ 
+ void HaikuDirectWindow::StopMessageRunner() {
+@@ -69,6 +73,7 @@ void HaikuDirectWindow::SetMainLoop(MainLoop *p_main_loop) {
+ }
+ 
+ bool HaikuDirectWindow::QuitRequested() {
++	StopMessageRunner();
+ 	main_loop->notification(MainLoop::NOTIFICATION_WM_QUIT_REQUEST);
+ 	return false;
+ }
+@@ -152,39 +157,36 @@ void HaikuDirectWindow::HandleMouseButton(BMessage *message) {
+ 	}
+ 	*/
+ 
+-	Ref<InputEvent> mouse_event;
+-	mouse_event.type = Ref<InputEvent>::MOUSE_BUTTON;
+-	mouse_event.device = 0;
++	Ref<InputEventMouseButton> mouse_event;
++	mouse_event.instance();
+ 
+-	mouse_event.mouse_button.mod = GetKeyModifierState(modifiers);
+-	mouse_event->get_button_mask() = GetMouseButtonState(buttons);
+-	mouse_event->get_position().x = where.x;
+-	mouse_event->get_position().y = where.y;
+-	mouse_event.mouse_button.global_x = where.x;
+-	mouse_event.mouse_button.global_y = where.y;
++	mouse_event->set_button_mask(GetMouseButtonState(buttons));
++	mouse_event->set_position({where.x, where.y});
++	mouse_event->set_global_position({where.x, where.y});
++	GetKeyModifierState(mouse_event, modifiers);
+ 
+ 	switch (button) {
+ 		default:
+ 		case B_PRIMARY_MOUSE_BUTTON:
+-			mouse_event->get_button_index() = 1;
++			mouse_event->set_button_index(1);
+ 			break;
+ 
+ 		case B_SECONDARY_MOUSE_BUTTON:
+-			mouse_event->get_button_index() = 2;
++			mouse_event->set_button_index(2);
+ 			break;
+ 
+ 		case B_TERTIARY_MOUSE_BUTTON:
+-			mouse_event->get_button_index() = 3;
++			mouse_event->set_button_index(3);
+ 			break;
+ 	}
+ 
+-	mouse_event->is_pressed() = (message->what == B_MOUSE_DOWN);
++	mouse_event->set_pressed(message->what == B_MOUSE_DOWN);
+ 
+ 	if (message->what == B_MOUSE_DOWN && mouse_event->get_button_index() == 1) {
+ 		int32 clicks = message->FindInt32("clicks");
+ 
+ 		if (clicks > 1) {
+-			mouse_event.mouse_button.doubleclick = true;
++			mouse_event->set_doubleclick(true);
+ 		}
+ 	}
+ 
+@@ -208,22 +210,18 @@ void HaikuDirectWindow::HandleMouseMoved(BMessage *message) {
+ 
+ 	Point2i rel = pos - last_mouse_position;
+ 
+-	Ref<InputEvent> motion_event;
+-	motion_event.type = Ref<InputEvent>::MOUSE_MOTION;
+-	motion_event.device = 0;
++	Ref<InputEventMouseMotion> motion_event;
++	motion_event.instance();
++	GetKeyModifierState(motion_event, modifiers);
+ 
+-	motion_event.mouse_motion.mod = GetKeyModifierState(modifiers);
+-	motion_event->get_button_mask() = GetMouseButtonState(buttons);
+-	motion_event.mouse_motion.x = pos.x;
+-	motion_event.mouse_motion.y = pos.y;
++	motion_event->set_button_mask(GetMouseButtonState(buttons));
++	motion_event->set_position({pos.x, pos.y});
+ 	input->set_mouse_position(pos);
+-	motion_event.mouse_motion.global_x = pos.x;
+-	motion_event.mouse_motion.global_y = pos.y;
+-	motion_event.mouse_motion.speed_x = input->get_last_mouse_speed().x;
+-	motion_event.mouse_motion.speed_y = input->get_last_mouse_speed().y;
++	motion_event->set_global_position({pos.x, pos.y});
++	motion_event->set_speed({input->get_last_mouse_speed().x,
++		input->get_last_mouse_speed().y});
+ 
+-	motion_event->get_relative().x = rel.x;
+-	motion_event->get_relative().y = rel.y;
++	motion_event->set_relative({rel.x, rel.y});
+ 
+ 	last_mouse_position = pos;
+ 
+@@ -236,22 +234,21 @@ void HaikuDirectWindow::HandleMouseWheelChanged(BMessage *message) {
+ 		return;
+ 	}
+ 
+-	Ref<InputEvent> mouse_event;
+-	mouse_event.type = Ref<InputEvent>::MOUSE_BUTTON;
+-	mouse_event.device = 0;
++	Ref<InputEventMouseButton> mouse_event;
++	mouse_event.instance();
++	//GetKeyModifierState(mouse_event, modifiers);
+ 
+-	mouse_event->get_button_index() = wheel_delta_y < 0 ? 4 : 5;
+-	mouse_event.mouse_button.mod = GetKeyModifierState(last_key_modifier_state);
+-	mouse_event->get_button_mask() = last_button_mask;
+-	mouse_event->get_position().x = last_mouse_position.x;
+-	mouse_event->get_position().y = last_mouse_position.y;
+-	mouse_event.mouse_button.global_x = last_mouse_position.x;
+-	mouse_event.mouse_button.global_y = last_mouse_position.y;
++	mouse_event->set_button_index(wheel_delta_y < 0 ? 4 : 5);
++	mouse_event->set_button_mask(last_button_mask);
++	mouse_event->set_position({last_mouse_position.x,
++		last_mouse_position.y});
++	mouse_event->set_global_position({last_mouse_position.x,
++		last_mouse_position.y});
+ 
+-	mouse_event->is_pressed() = true;
++	mouse_event->set_pressed(true);
+ 	input->parse_input_event(mouse_event);
+ 
+-	mouse_event->is_pressed() = false;
++	mouse_event->set_pressed(false);
+ 	input->parse_input_event(mouse_event);
+ }
+ 
+@@ -272,24 +269,23 @@ void HaikuDirectWindow::HandleKeyboardEvent(BMessage *message) {
+ 		return;
+ 	}
+ 
+-	Ref<InputEvent> event;
+-	event.type = Ref<InputEvent>::KEY;
+-	event.device = 0;
+-	event.key.mod = GetKeyModifierState(modifiers);
+-	event->is_pressed() = (message->what == B_KEY_DOWN);
+-	event->get_scancode() = KeyMappingHaiku::get_keysym(raw_char, key);
+-	event->is_echo() = message->HasInt32("be:key_repeat");
+-	event.key.unicode = 0;
++	Ref<InputEventKey> event;
++	event.instance();
++	GetKeyModifierState(event, modifiers);
++	event->set_pressed(message->what == B_KEY_DOWN);
++	event->set_scancode(KeyMappingHaiku::get_keysym(raw_char, key));
++	event->set_echo(message->HasInt32("be:key_repeat"));
++	event->set_unicode(0);
+ 
+ 	const char *bytes = NULL;
+ 	if (message->FindString("bytes", &bytes) == B_OK) {
+-		event.key.unicode = BUnicodeChar::FromUTF8(&bytes);
++		event->set_unicode(BUnicodeChar::FromUTF8(&bytes));
+ 	}
+ 
+ 	//make it consistent across platforms.
+ 	if (event->get_scancode() == KEY_BACKTAB) {
+-		event->get_scancode() = KEY_TAB;
+-		event->get_shift() = true;
++		event->set_scancode(KEY_TAB);
++		event->set_shift(true);
+ 	}
+ 
+ 	input->parse_input_event(event);
+@@ -309,14 +305,14 @@ void HaikuDirectWindow::HandleKeyboardModifierEvent(BMessage *message) {
+ 
+ 	int32 key = old_modifiers ^ modifiers;
+ 
+-	Ref<InputEvent> event;
+-	event.type = Ref<InputEvent>::KEY;
+-	event.device = 0;
+-	event.key.mod = GetKeyModifierState(modifiers);
+-	event->is_pressed() = ((modifiers & key) != 0);
+-	event->get_scancode() = KeyMappingHaiku::get_modifier_keysym(key);
+-	event->is_echo() = false;
+-	event.key.unicode = 0;
++	Ref<InputEventWithModifiers> event;
++	event.instance();
++	GetKeyModifierState(event, modifiers);
++
++	event->set_shift(key & B_SHIFT_KEY);
++	event->set_alt(key & B_OPTION_KEY);
++	event->set_control(key & B_CONTROL_KEY);
++	event->set_command(key & B_COMMAND_KEY);
+ 
+ 	input->parse_input_event(event);
+ }
+@@ -333,18 +329,17 @@ void HaikuDirectWindow::HandleWindowResized(BMessage *message) {
+ 	current_video_mode->height = height;
+ }
+ 
+-inline InputModifierState HaikuDirectWindow::GetKeyModifierState(uint32 p_state) {
+-	last_key_modifier_state = p_state;
+-	InputModifierState state;
+ 
+-	state.shift = (p_state & B_SHIFT_KEY) != 0;
+-	state.control = (p_state & B_CONTROL_KEY) != 0;
+-	state.alt = (p_state & B_OPTION_KEY) != 0;
+-	state.meta = (p_state & B_COMMAND_KEY) != 0;
++inline void HaikuDirectWindow::GetKeyModifierState(Ref<InputEventWithModifiers> event, uint32 p_state) {
++	last_key_modifier_state = p_state;
+ 
+-	return state;
++	event->set_shift(p_state & B_SHIFT_KEY);
++	event->set_control(p_state & B_CONTROL_KEY);
++	event->set_alt(p_state & B_OPTION_KEY);
++	event->set_metakey(p_state & B_COMMAND_KEY);
+ }
+ 
++
+ inline int HaikuDirectWindow::GetMouseButtonState(uint32 p_state) {
+ 	int state = 0;
+ 
+diff --git a/platform/haiku/haiku_direct_window.h b/platform/haiku/haiku_direct_window.h
+index 55c2f5f..9866d4a 100644
+--- a/platform/haiku/haiku_direct_window.h
++++ b/platform/haiku/haiku_direct_window.h
+@@ -31,8 +31,10 @@
+ #ifndef HAIKU_DIRECT_WINDOW_H
+ #define HAIKU_DIRECT_WINDOW_H
+ 
++#include <kernel/image.h> // DirectWindow.h includes <image.h>, but this
++                          // ends up including the godot header of the same
++						  // name.
+ #include <DirectWindow.h>
+-#include <kernel/image.h> // needed for image_id
+ 
+ #include "core/os/os.h"
+ #include "main/input_default.h"
+@@ -61,9 +63,9 @@ private:
+ 	void HandleMouseMoved(BMessage *message);
+ 	void HandleMouseWheelChanged(BMessage *message);
+ 	void HandleWindowResized(BMessage *message);
++	inline void GetKeyModifierState(Ref<InputEventWithModifiers> event, uint32 p_state);
+ 	void HandleKeyboardEvent(BMessage *message);
+ 	void HandleKeyboardModifierEvent(BMessage *message);
+-	inline InputModifierState GetKeyModifierState(uint32 p_state);
+ 	inline int GetMouseButtonState(uint32 p_state);
+ 
+ public:
+diff --git a/platform/haiku/haiku_gl_view.h b/platform/haiku/haiku_gl_view.h
+index 1a694dc..5b067b0 100644
+--- a/platform/haiku/haiku_gl_view.h
++++ b/platform/haiku/haiku_gl_view.h
+@@ -31,8 +31,8 @@
+ #ifndef HAIKU_GL_VIEW_H
+ #define HAIKU_GL_VIEW_H
+ 
+-#include <GLView.h>
+ #include <kernel/image.h> // needed for image_id
++#include <GLView.h>
+ 
+ class HaikuGLView : public BGLView {
+ public:
+diff --git a/platform/haiku/os_haiku.cpp b/platform/haiku/os_haiku.cpp
+index 97fab5c..5fcc9cf 100644
+--- a/platform/haiku/os_haiku.cpp
++++ b/platform/haiku/os_haiku.cpp
+@@ -28,9 +28,10 @@
+ /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                */
+ /*************************************************************************/
+ 
++#include "drivers/gles3/rasterizer_gles3.h"
++
+ #include "os_haiku.h"
+ 
+-#include "drivers/gles3/rasterizer_gles3.h"
+ #include "main/main.h"
+ #include "servers/physics/physics_server_sw.h"
+ #include "servers/visual/visual_server_raster.h"
+@@ -106,14 +107,13 @@ Error OS_Haiku::initialize(const VideoMode &p_desired, int p_video_driver, int p
+ 	context_gl = memnew(ContextGL_Haiku(window));
+ 	context_gl->initialize();
+ 	context_gl->make_current();
++	RasterizerGLES3::register_config();
++	RasterizerGLES3::make_current();
+ 	context_gl->set_use_vsync(current_video_mode.use_vsync);
+ 
+-	/* Port to GLES 3 rasterizer */
+-	//rasterizer = memnew(RasterizerGLES2);
+-
+ #endif
+ 
+-	visual_server = memnew(VisualServerRaster(rasterizer));
++	visual_server = memnew(VisualServerRaster());
+ 
+ 	ERR_FAIL_COND_V(!visual_server, ERR_UNAVAILABLE);
+ 
+@@ -132,8 +132,6 @@ Error OS_Haiku::initialize(const VideoMode &p_desired, int p_video_driver, int p
+ 
+ 	AudioDriverManager::initialize(p_audio_driver);
+ 
+-	power_manager = memnew(PowerHaiku);
+-
+ 	return OK;
+ }
+ 
+@@ -146,7 +144,6 @@ void OS_Haiku::finalize() {
+ 
+ 	visual_server->finish();
+ 	memdelete(visual_server);
+-	memdelete(rasterizer);
+ 
+ 	memdelete(input);
+ 
+@@ -357,3 +354,19 @@ String OS_Haiku::get_cache_path() const {
+ 		return get_config_path();
+ 	}
+ }
++
++OS::PowerState OS_Haiku::get_power_state() {
++		WARN_PRINT("Power management is not implemented on this platform, defaulting to POWERSTATE_UNKNOWN");
++		return OS::POWERSTATE_UNKNOWN;
++}
++
++int OS_Haiku::get_power_seconds_left() {
++		WARN_PRINT("Power management is not implemented on this platform, defaulting to -1");
++		return -1;
++}
++
++int OS_Haiku::get_power_percent_left() {
++		WARN_PRINT("Power management is not implemented on this platform, defaulting to -1");
++		return -1;
++}
++
+diff --git a/platform/haiku/os_haiku.h b/platform/haiku/os_haiku.h
+index 615ae68..bef031a 100644
+--- a/platform/haiku/os_haiku.h
++++ b/platform/haiku/os_haiku.h
+@@ -37,9 +37,7 @@
+ #include "haiku_application.h"
+ #include "haiku_direct_window.h"
+ #include "main/input_default.h"
+-#include "power_haiku.h"
+ #include "servers/audio_server.h"
+-#include "servers/visual/rasterizer.h"
+ #include "servers/visual_server.h"
+ 
+ class OS_Haiku : public OS_Unix {
+@@ -48,10 +46,8 @@ private:
+ 	HaikuDirectWindow *window;
+ 	MainLoop *main_loop;
+ 	InputDefault *input;
+-	Rasterizer *rasterizer;
+ 	VisualServer *visual_server;
+ 	VideoMode current_video_mode;
+-	PowerHaiku *power_manager;
+ 
+ #ifdef MEDIA_KIT_ENABLED
+ 	AudioDriverMediaKit driver_media_kit;
+diff --git a/platform/haiku/power_haiku.cpp b/platform/haiku/power_haiku.cpp
+deleted file mode 100644
+index 2a26dd0..0000000
+--- a/platform/haiku/power_haiku.cpp
++++ /dev/null
+@@ -1,74 +0,0 @@
+-/*************************************************************************/
+-/*  power_haiku.cpp                                                      */
+-/*************************************************************************/
+-/*                       This file is part of:                           */
+-/*                           GODOT ENGINE                                */
+-/*                      https://godotengine.org                          */
+-/*************************************************************************/
+-/* Copyright (c) 2007-2018 Juan Linietsky, Ariel Manzur.                 */
+-/* Copyright (c) 2014-2018 Godot Engine contributors (cf. AUTHORS.md)    */
+-/*                                                                       */
+-/* Permission is hereby granted, free of charge, to any person obtaining */
+-/* a copy of this software and associated documentation files (the       */
+-/* "Software"), to deal in the Software without restriction, including   */
+-/* without limitation the rights to use, copy, modify, merge, publish,   */
+-/* distribute, sublicense, and/or sell copies of the Software, and to    */
+-/* permit persons to whom the Software is furnished to do so, subject to */
+-/* the following conditions:                                             */
+-/*                                                                       */
+-/* The above copyright notice and this permission notice shall be        */
+-/* included in all copies or substantial portions of the Software.       */
+-/*                                                                       */
+-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,       */
+-/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF    */
+-/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.*/
+-/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY  */
+-/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,  */
+-/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE     */
+-/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                */
+-/*************************************************************************/
+-
+-#include "core/error_macros.h"
+-
+-#include "power_haiku.h"
+-
+-bool PowerHaiku::UpdatePowerInfo() {
+-
+-	return false;
+-}
+-
+-OS::PowerState PowerHaiku::get_power_state() {
+-	if (UpdatePowerInfo()) {
+-		return power_state;
+-	} else {
+-		WARN_PRINT("Power management is not implemented on this platform, defaulting to POWERSTATE_UNKNOWN");
+-		return OS::POWERSTATE_UNKNOWN;
+-	}
+-}
+-
+-int PowerX11::get_power_seconds_left() {
+-	if (UpdatePowerInfo()) {
+-		return nsecs_left;
+-	} else {
+-		WARN_PRINT("Power management is not implemented on this platform, defaulting to -1");
+-		return -1;
+-	}
+-}
+-
+-int PowerX11::get_power_percent_left() {
+-	if (UpdatePowerInfo()) {
+-		return percent_left;
+-	} else {
+-		WARN_PRINT("Power management is not implemented on this platform, defaulting to -1");
+-		return -1;
+-	}
+-}
+-
+-PowerHaiku::PowerHaiku() :
+-		nsecs_left(-1),
+-		percent_left(-1),
+-		power_state(OS::POWERSTATE_UNKNOWN) {
+-}
+-
+-PowerHaiku::~PowerHaiku() {
+-}
+diff --git a/platform/haiku/power_haiku.h b/platform/haiku/power_haiku.h
+deleted file mode 100644
+index 2fe85cd..0000000
+--- a/platform/haiku/power_haiku.h
++++ /dev/null
+@@ -1,53 +0,0 @@
+-/*************************************************************************/
+-/*  power_haiku.h                                                        */
+-/*************************************************************************/
+-/*                       This file is part of:                           */
+-/*                           GODOT ENGINE                                */
+-/*                      https://godotengine.org                          */
+-/*************************************************************************/
+-/* Copyright (c) 2007-2018 Juan Linietsky, Ariel Manzur.                 */
+-/* Copyright (c) 2014-2018 Godot Engine contributors (cf. AUTHORS.md)    */
+-/*                                                                       */
+-/* Permission is hereby granted, free of charge, to any person obtaining */
+-/* a copy of this software and associated documentation files (the       */
+-/* "Software"), to deal in the Software without restriction, including   */
+-/* without limitation the rights to use, copy, modify, merge, publish,   */
+-/* distribute, sublicense, and/or sell copies of the Software, and to    */
+-/* permit persons to whom the Software is furnished to do so, subject to */
+-/* the following conditions:                                             */
+-/*                                                                       */
+-/* The above copyright notice and this permission notice shall be        */
+-/* included in all copies or substantial portions of the Software.       */
+-/*                                                                       */
+-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,       */
+-/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF    */
+-/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.*/
+-/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY  */
+-/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,  */
+-/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE     */
+-/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                */
+-/*************************************************************************/
+-
+-#ifndef PLATFORM_HAIKU_POWER_HAIKU_H_
+-#define PLATFORM_HAIKU_POWER_HAIKU_H_
+-
+-#include <os/os.h>
+-
+-class PowerHaiku {
+-private:
+-	int nsecs_left;
+-	int percent_left;
+-	OS::PowerState power_state;
+-
+-	bool UpdatePowerInfo();
+-
+-public:
+-	PowerHaiku();
+-	virtual ~PowerHaiku();
+-
+-	OS::PowerState get_power_state();
+-	int get_power_seconds_left();
+-	int get_power_percent_left();
+-};
+-
+-#endif /* PLATFORM_HAIKU_POWER_HAIKU_H_ */
+diff --git a/thirdparty/glad/glad.c b/thirdparty/glad/glad.c
+index 8f8b218..8685297 100644
+--- a/thirdparty/glad/glad.c
++++ b/thirdparty/glad/glad.c
+@@ -76,7 +76,7 @@ void close_gl(void) {
+ #include <dlfcn.h>
+ static void* libGL;
+ 
+-#ifndef __APPLE__
++#if !defined(__APPLE__) && !defined(__HAIKU__)
+ typedef void* (APIENTRYP PFNGLXGETPROCADDRESSPROC_PRIVATE)(const char*);
+ static PFNGLXGETPROCADDRESSPROC_PRIVATE gladGetProcAddressPtr;
+ #endif
+@@ -99,7 +99,7 @@ int open_gl(void) {
+         libGL = dlopen(NAMES[index], RTLD_NOW | RTLD_GLOBAL);
+ 
+         if(libGL != NULL) {
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__HAIKU__)
+             return 1;
+ #else
+             gladGetProcAddressPtr = (PFNGLXGETPROCADDRESSPROC_PRIVATE)dlsym(libGL,
+@@ -126,7 +126,7 @@ void* get_proc(const char *namez) {
+     void* result = NULL;
+     if(libGL == NULL) return NULL;
+ 
+-#ifndef __APPLE__
++#if !defined(__APPLE__) && !defined(__HAIKU__)
+     if(gladGetProcAddressPtr != NULL) {
+         result = gladGetProcAddressPtr(namez);
+     }
+@@ -148,7 +148,7 @@ int gladLoadGL(void) {
+     if(open_gl()) {
+         status = gladLoadGLLoader(&get_proc);
+         close_gl();
+-    }
++	}
+ 
+     return status;
+ }
+diff --git a/thirdparty/thekla_atlas/nvcore/nvcore.h b/thirdparty/thekla_atlas/nvcore/nvcore.h
+index a3deb66..5ef6966 100644
+--- a/thirdparty/thekla_atlas/nvcore/nvcore.h
++++ b/thirdparty/thekla_atlas/nvcore/nvcore.h
+@@ -44,6 +44,9 @@
+ #elif defined POSH_OS_FREEBSD
+ #   define NV_OS_FREEBSD 1
+ #   define NV_OS_UNIX 1
++#elif defined POSH_OS_HAIKU
++#   define NV_OS_HAIKU 1
++#   define NV_OS_UNIX 1
+ #elif defined POSH_OS_OPENBSD
+ #   define NV_OS_OPENBSD 1
+ #   define NV_OS_UNIX 1
+@@ -341,7 +344,7 @@ template <typename T, size_t N> char (&ArraySizeHelper(T (&array)[N]))[N];
+ #elif NV_CC_GNUC
+ #   if NV_OS_LINUX
+ #       include "DefsGnucLinux.h"
+-#   elif NV_OS_DARWIN || NV_OS_FREEBSD || NV_OS_OPENBSD
++#   elif NV_OS_DARWIN || NV_OS_FREEBSD || NV_OS_OPENBSD || NV_OS_HAIKU
+ #       include "DefsGnucDarwin.h"
+ #   elif NV_OS_ORBIS
+ #       include "DefsOrbis.h"
+diff --git a/thirdparty/thekla_atlas/nvmath/nvmath.h b/thirdparty/thekla_atlas/nvmath/nvmath.h
+index f2b6942..09690b1 100644
+--- a/thirdparty/thekla_atlas/nvmath/nvmath.h
++++ b/thirdparty/thekla_atlas/nvmath/nvmath.h
+@@ -181,7 +181,7 @@ namespace nv
+     {
+ #if NV_OS_WIN32 || NV_OS_XBOX || NV_OS_DURANGO
+         return _finite(f) != 0;
+-#elif NV_OS_DARWIN || NV_OS_FREEBSD || NV_OS_OPENBSD || NV_OS_ORBIS
++#elif NV_OS_DARWIN || NV_OS_FREEBSD || NV_OS_OPENBSD || NV_OS_ORBIS || NV_OS_HAIKU
+         return isfinite(f);
+ #elif NV_OS_LINUX
+         return finitef(f);
+@@ -196,7 +196,7 @@ namespace nv
+     {
+ #if NV_OS_WIN32 || NV_OS_XBOX || NV_OS_DURANGO
+         return _isnan(f) != 0;
+-#elif NV_OS_DARWIN || NV_OS_FREEBSD || NV_OS_OPENBSD || NV_OS_ORBIS
++#elif NV_OS_DARWIN || NV_OS_FREEBSD || NV_OS_OPENBSD || NV_OS_ORBIS || NV_OS_HAIKU
+         return isnan(f);
+ #elif NV_OS_LINUX
+         return isnanf(f);
+diff --git a/thirdparty/thekla_atlas/poshlib/posh.h b/thirdparty/thekla_atlas/poshlib/posh.h
+index 3038297..16dc694 100644
+--- a/thirdparty/thekla_atlas/poshlib/posh.h
++++ b/thirdparty/thekla_atlas/poshlib/posh.h
+@@ -298,8 +298,13 @@ Metrowerks:
+ #  define POSH_OS_STRING "Linux"
+ #endif
+ 
++#if defined __HAIKU__
++#  define POSH_OS_HAIKU 1
++#  define POSH_OS_STRING "Haiku"
++#endif
++
+ #if defined __FreeBSD__
+-#  define POSH_OS_FREEBSD 1 
++#  define POSH_OS_FREEBSD 1
+ #  define POSH_OS_STRING "FreeBSD"
+ #endif
+ 
+-- 
+2.16.4
+
+
+From 4f2f7b002fdacb2fa383765ce536dce1344d15db Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Tue, 10 Jul 2018 15:26:41 +0200
+Subject: Update patches for Godot 3.0.6
+
+- OpenSSL was replaced with mbedtls
+- libwebsockets cannot use an external version yet and need some
+  configuration patches
+
+diff --git a/modules/websocket/SCsub b/modules/websocket/SCsub
+index 15a8877..c0985b3 100644
+--- a/modules/websocket/SCsub
++++ b/modules/websocket/SCsub
+@@ -7,87 +7,88 @@ Import('env_modules')
+ 
+ env_lws = env_modules.Clone()
+ 
+-thirdparty_dir = "#thirdparty/libwebsockets/"
+-helper_dir = "win32helpers/"
+-thirdparty_sources = [
+-
+-    "core/alloc.c",
+-    "core/context.c",
+-    "core/libwebsockets.c",
+-    "core/output.c",
+-    "core/pollfd.c",
+-    "core/service.c",
+-
+-    "event-libs/poll/poll.c",
+-
+-    "misc/base64-decode.c",
+-    "misc/lejp.c",
+-    "misc/sha-1.c",
+-
+-    "roles/h1/ops-h1.c",
+-    "roles/http/header.c",
+-    "roles/http/client/client.c",
+-    "roles/http/client/client-handshake.c",
+-    "roles/http/server/fops-zip.c",
+-    "roles/http/server/lejp-conf.c",
+-    "roles/http/server/parsers.c",
+-    "roles/http/server/server.c",
+-    "roles/listen/ops-listen.c",
+-    "roles/pipe/ops-pipe.c",
+-    "roles/raw/ops-raw.c",
+-
+-    "roles/ws/client-ws.c",
+-    "roles/ws/client-parser-ws.c",
+-    "roles/ws/ops-ws.c",
+-    "roles/ws/server-ws.c",
+-
+-    "tls/tls.c",
+-    "tls/tls-client.c",
+-    "tls/tls-server.c",
+-
+-    "tls/mbedtls/wrapper/library/ssl_cert.c",
+-    "tls/mbedtls/wrapper/library/ssl_pkey.c",
+-    "tls/mbedtls/wrapper/library/ssl_stack.c",
+-    "tls/mbedtls/wrapper/library/ssl_methods.c",
+-    "tls/mbedtls/wrapper/library/ssl_lib.c",
+-    "tls/mbedtls/wrapper/library/ssl_x509.c",
+-    "tls/mbedtls/wrapper/platform/ssl_port.c",
+-    "tls/mbedtls/wrapper/platform/ssl_pm.c",
+-    "tls/mbedtls/lws-genhash.c",
+-    "tls/mbedtls/mbedtls-client.c",
+-    "tls/mbedtls/lws-genrsa.c",
+-    "tls/mbedtls/ssl.c",
+-    "tls/mbedtls/mbedtls-server.c"
+-]
+-
+-if env_lws["platform"] == "android": # Builtin getifaddrs
+-    thirdparty_sources += ["misc/getifaddrs.c"]
+-
+-if env_lws["platform"] == "windows" or env_lws["platform"] == "uwp": # Winsock
+-    thirdparty_sources += ["plat/lws-plat-win.c", helper_dir + "getopt.c", helper_dir + "getopt_long.c", helper_dir + "gettimeofday.c"]
+-else: # Unix socket
+-    thirdparty_sources += ["plat/lws-plat-unix.c"]
+-
+-
+-thirdparty_sources = [thirdparty_dir + file for file in thirdparty_sources]
+-
+-if env_lws["platform"] == "javascript": # No need to add third party libraries at all
+-    pass
+-else:
+-    env_lws.add_source_files(env.modules_sources, thirdparty_sources)
+-    env_lws.Append(CPPPATH=[thirdparty_dir])
+-
+-    wrapper_includes = ["#thirdparty/libwebsockets/tls/mbedtls/wrapper/include/" + inc for inc in ["internal", "openssl", "platform", ""]]
+-    env_lws.Prepend(CPPPATH=wrapper_includes)
+-
+-    if env['builtin_mbedtls']:
+-        mbedtls_includes = "#thirdparty/mbedtls/include"
+-        env_lws.Prepend(CPPPATH=[mbedtls_includes])
+-
+-    if env_lws["platform"] == "windows" or env_lws["platform"] == "uwp":
+-        env_lws.Append(CPPPATH=[thirdparty_dir + helper_dir])
+-
+-    if env_lws["platform"] == "uwp":
+-        env_lws.Append(CCFLAGS=["/DLWS_MINGW_SUPPORT"])
++if env['builtin_libwebsockets']:
++    thirdparty_dir = "#thirdparty/libwebsockets/"
++    helper_dir = "win32helpers/"
++    thirdparty_sources = [
++
++        "core/alloc.c",
++        "core/context.c",
++        "core/libwebsockets.c",
++        "core/output.c",
++        "core/pollfd.c",
++        "core/service.c",
++
++        "event-libs/poll/poll.c",
++
++        "misc/base64-decode.c",
++        "misc/lejp.c",
++        "misc/sha-1.c",
++
++        "roles/h1/ops-h1.c",
++        "roles/http/header.c",
++        "roles/http/client/client.c",
++        "roles/http/client/client-handshake.c",
++        "roles/http/server/fops-zip.c",
++        "roles/http/server/lejp-conf.c",
++        "roles/http/server/parsers.c",
++        "roles/http/server/server.c",
++        "roles/listen/ops-listen.c",
++        "roles/pipe/ops-pipe.c",
++        "roles/raw/ops-raw.c",
++
++        "roles/ws/client-ws.c",
++        "roles/ws/client-parser-ws.c",
++        "roles/ws/ops-ws.c",
++        "roles/ws/server-ws.c",
++
++        "tls/tls.c",
++        "tls/tls-client.c",
++        "tls/tls-server.c",
++
++        "tls/mbedtls/wrapper/library/ssl_cert.c",
++        "tls/mbedtls/wrapper/library/ssl_pkey.c",
++        "tls/mbedtls/wrapper/library/ssl_stack.c",
++        "tls/mbedtls/wrapper/library/ssl_methods.c",
++        "tls/mbedtls/wrapper/library/ssl_lib.c",
++        "tls/mbedtls/wrapper/library/ssl_x509.c",
++        "tls/mbedtls/wrapper/platform/ssl_port.c",
++        "tls/mbedtls/wrapper/platform/ssl_pm.c",
++        "tls/mbedtls/lws-genhash.c",
++        "tls/mbedtls/mbedtls-client.c",
++        "tls/mbedtls/lws-genrsa.c",
++        "tls/mbedtls/ssl.c",
++        "tls/mbedtls/mbedtls-server.c"
++    ]
++
++    if env_lws["platform"] == "android": # Builtin getifaddrs
++        thirdparty_sources += ["misc/getifaddrs.c"]
++
++    if env_lws["platform"] == "windows" or env_lws["platform"] == "uwp": # Winsock
++        thirdparty_sources += ["plat/lws-plat-win.c", helper_dir + "getopt.c", helper_dir + "getopt_long.c", helper_dir + "gettimeofday.c"]
++    else: # Unix socket
++        thirdparty_sources += ["plat/lws-plat-unix.c"]
++
++
++    thirdparty_sources = [thirdparty_dir + file for file in thirdparty_sources]
++
++    if env_lws["platform"] == "javascript": # No need to add third party libraries at all
++        pass
++    else:
++        env_lws.add_source_files(env.modules_sources, thirdparty_sources)
++        env_lws.Append(CPPPATH=[thirdparty_dir])
++
++        wrapper_includes = ["#thirdparty/libwebsockets/tls/mbedtls/wrapper/include/" + inc for inc in ["internal", "openssl", "platform", ""]]
++        env_lws.Prepend(CPPPATH=wrapper_includes)
++
++        if env['builtin_mbedtls']:
++            mbedtls_includes = "#thirdparty/mbedtls/include"
++            env_lws.Prepend(CPPPATH=[mbedtls_includes])
++
++        if env_lws["platform"] == "windows" or env_lws["platform"] == "uwp":
++            env_lws.Append(CPPPATH=[thirdparty_dir + helper_dir])
++
++        if env_lws["platform"] == "uwp":
++            env_lws.Append(CCFLAGS=["/DLWS_MINGW_SUPPORT"])
+ 
+ env_lws.add_source_files(env.modules_sources, "*.cpp")
+diff --git a/platform/haiku/detect.py b/platform/haiku/detect.py
+index 20bdf85..e972876 100644
+--- a/platform/haiku/detect.py
++++ b/platform/haiku/detect.py
+@@ -66,9 +66,6 @@ def configure(env):
+ 
+     ## Dependencies
+ 
+-    if not env['builtin_openssl']:
+-        env.ParseConfig('pkg-config openssl --cflags --libs')
+-
+     if not env['builtin_libwebp']:
+         env.ParseConfig('pkg-config libwebp --cflags --libs')
+ 
+@@ -131,6 +128,18 @@ def configure(env):
+         if any(platform.machine() in s for s in list_of_x86):
+             env["x86_libtheora_opt_gcc"] = True
+ 
++    if not env['builtin_libwebsockets']:
++        env.ParseConfig('pkg-config libwebsockets --cflags --libs')
++
++    if not env['builtin_mbedtls']:
++        # mbedTLS does not provide a pkgconfig config yet. See https://github.com/ARMmbed/mbedtls/issues/228
++        env.Append(LIBS=['mbedtls', 'mbedcrypto', 'mbedx509'])
++
++    if not env['builtin_miniupnpc']:
++        # No pkgconfig file so far, hardcode default paths.
++        env.Append(CPPPATH=["/system/develop/headers/x86/miniupnpc"])
++        env.Append(LIBS=["miniupnpc"])
++
+     # On Linux wchar_t should be 32-bits
+     # 16-bit library shouldn't be required due to compiler optimisations
+     if not env['builtin_pcre2']:
+diff --git a/platform/haiku/platform_config.h b/platform/haiku/platform_config.h
+index bbd72df..72c8ee2 100644
+--- a/platform/haiku/platform_config.h
++++ b/platform/haiku/platform_config.h
+@@ -34,3 +34,4 @@
+ #define _BSD_SOURCE 1
+ 
+ #define GLES3_INCLUDE_H "glad/glad.h"
++#define GLES2_INCLUDE_H "glad/glad.h"
+diff --git a/thirdparty/libwebsockets/lws_config.h b/thirdparty/libwebsockets/lws_config.h
+index 7185a80..e5e15cc 100644
+--- a/thirdparty/libwebsockets/lws_config.h
++++ b/thirdparty/libwebsockets/lws_config.h
+@@ -174,7 +174,7 @@
+ #define LWS_HAVE_MALLOC_H
+ #endif
+ 
+-#if !defined(IPHONE_ENABLED) && !defined(OSX_ENABLED)
++#if !defined(IPHONE_ENABLED) && !defined(OSX_ENABLED) && !defined(__HAIKU__)
+ #define LWS_HAVE_PIPE2
+ #endif
+ 
+diff --git a/thirdparty/libwebsockets/lws_config_private.h b/thirdparty/libwebsockets/lws_config_private.h
+index 9d04078..b26d225 100644
+--- a/thirdparty/libwebsockets/lws_config_private.h
++++ b/thirdparty/libwebsockets/lws_config_private.h
+@@ -81,7 +81,7 @@
+ 
+ /* Define to 1 if you have the <sys/prctl.h> header file. */
+ #define LWS_HAVE_SYS_PRCTL_H
+-#if defined(OSX_ENABLED) || defined(IPHONE_ENABLED) || defined(__FreeBSD__) || defined(__OpenBSD__)
++#if defined(OSX_ENABLED) || defined(IPHONE_ENABLED) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__HAIKU__)
+ #undef LWS_HAVE_SYS_PRCTL_H
+ #endif
+ 
+-- 
+2.16.4
+

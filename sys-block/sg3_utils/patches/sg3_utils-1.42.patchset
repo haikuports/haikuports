@@ -1,0 +1,411 @@
+From 1a6a39d4c3f8e51e792135327b5eb433da260859 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Sat, 30 Dec 2017 17:52:21 +0700
+Subject: introduce Haiku support
+
+
+diff --git a/configure.ac b/configure.ac
+index 4c63024..5aa9144 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -63,6 +63,10 @@ case "${host}" in
+ 		AC_DEFINE_UNQUOTED(SG_LIB_MINGW, 1, [also MinGW environment])
+                 AC_SUBST([os_cflags], [''])
+                 AC_SUBST([os_libs], ['']) ;;
++        *-*-haiku*)
++		AC_DEFINE_UNQUOTED(SG_LIB_HAIKU, 1, [sg3_utils on Haiku])
++                AC_SUBST([os_cflags], [''])
++                AC_SUBST([os_libs], ['']) ;;
+         *)
+ 		AC_DEFINE_UNQUOTED(SG_LIB_LINUX, 1, [assume sg3_utils on linux])
+                 AC_SUBST([os_cflags], [''])
+@@ -76,6 +80,7 @@ AM_CONDITIONAL(OS_OSF, [echo $host_os | grep '^osf' > /dev/null])
+ AM_CONDITIONAL(OS_SOLARIS, [echo $host_os | grep '^solaris' > /dev/null])
+ AM_CONDITIONAL(OS_WIN32_MINGW, [echo $host_os | grep '^mingw' > /dev/null])
+ AM_CONDITIONAL(OS_WIN32_CYGWIN, [echo $host_os | grep '^cygwin' > /dev/null])
++AM_CONDITIONAL(OS_HAIKU, [echo $host_os | grep '^haiku' > /dev/null])
+ 
+ AC_ARG_ENABLE([linuxbsg],
+   AC_HELP_STRING([--disable-linuxbsg], [ignore linux bsg (sgv4) if present]),
+diff --git a/lib/Makefile.am b/lib/Makefile.am
+index c8ab0cc..42dc367 100644
+--- a/lib/Makefile.am
++++ b/lib/Makefile.am
+@@ -33,6 +33,10 @@ if OS_OSF
+ libsgutils2_la_SOURCES += sg_pt_osf1.c
+ endif
+ 
++if OS_HAIKU
++libsgutils2_la_SOURCES += sg_pt_haiku.c
++endif
++
+ # For C++/clang testing
+ ## CC = gcc
+ ## CC = g++
+diff --git a/lib/sg_pt_haiku.c b/lib/sg_pt_haiku.c
+new file mode 100644
+index 0000000..09dce28
+--- /dev/null
++++ b/lib/sg_pt_haiku.c
+@@ -0,0 +1,358 @@
++/*
++ * Copyright (c) 2017 Leorize.
++ * All rights reserved.
++ * Use of this source code is governed by a BSD-style
++ * license that can be found in the BSD_LICENSE file.
++ */
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <device/CAM.h>
++#include <scsi.h>
++
++#include "sg_lib.h"
++#include "sg_pt.h"
++
++#if defined(__GNUC__) || defined(__clang__)
++static int pr2ws(const char * fmt, ...)
++        __attribute__ ((format (printf, 1, 2)));
++#else
++static int pr2ws(const char * fmt, ...);
++#endif
++
++static int
++pr2ws(const char * fmt, ...)
++{
++    va_list args;
++    int n;
++
++    va_start(args, fmt);
++    n = vfprintf(sg_warnings_strm ? sg_warnings_strm : stderr, fmt, args);
++    va_end(args);
++    return n;
++}
++
++struct sg_pt_haiku_scsi {
++    raw_device_command raw_command;
++    size_t data_len;
++    int in_err;
++    int os_err;
++};
++
++struct sg_pt_base {
++    struct sg_pt_haiku_scsi impl;
++};
++
++/* Returns >= 0 if successful. If error in Unix returns negated errno. */
++int
++scsi_pt_open_device(const char * device_name, int read_only, int verbose)
++{
++    int oflags = O_NONBLOCK;
++
++    oflags |= (read_only ? O_RDONLY : O_RDWR);
++    return scsi_pt_open_flags(device_name, oflags, verbose);
++}
++
++/* Similar to scsi_pt_open_device() but takes Unix style open flags OR-ed */
++/* together. The 'flags' argument is advisory and may be ignored. */
++/* Returns >= 0 if successful, otherwise returns negated errno. */
++int
++scsi_pt_open_flags(const char * device_name, int flags, int verbose)
++{
++    int fd;
++
++    if (verbose > 1) {
++        pr2ws("open %s with flags=0x%x\n", device_name, flags);
++    }
++    fd = open(device_name, flags);
++    if (fd < 0)
++        fd = -errno;
++    return fd;
++}
++
++/* Returns 0 if successful. If error in Unix returns negated errno. */
++int
++scsi_pt_close_device(int device_fd)
++{
++    int res;
++
++    res = close(device_fd);
++    if (res < 0)
++        res = -errno;
++    return res;
++}
++
++struct sg_pt_base *
++construct_scsi_pt_obj()
++{
++    struct sg_pt_haiku_scsi * ptp;
++
++    /* The following 2 lines are temporary. It is to avoid a NULL pointer
++     * crash when an old utility is used with a newer library built after
++     * the sg_warnings_strm cleanup */
++    if (NULL == sg_warnings_strm)
++        sg_warnings_strm = stderr;
++
++    ptp = (struct sg_pt_haiku_scsi *)
++           calloc(1, sizeof(struct sg_pt_haiku_scsi));
++    if (ptp)
++        ptp->raw_command.flags = B_RAW_DEVICE_REPORT_RESIDUAL;
++
++    return (struct sg_pt_base *)ptp;
++}
++
++void
++destruct_scsi_pt_obj(struct sg_pt_base * vp)
++{
++    struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    if (ptp)
++        free(ptp);
++}
++
++void
++clear_scsi_pt_obj(struct sg_pt_base * vp)
++{
++    struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    if (ptp) {
++        memset(ptp, 0, sizeof(struct sg_pt_haiku_scsi));
++        ptp->raw_command.flags = B_RAW_DEVICE_REPORT_RESIDUAL;
++    }
++}
++
++void
++set_scsi_pt_cdb(struct sg_pt_base * vp, const unsigned char * cdb,
++                int cdb_len)
++{
++    struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    for (int i = 0; i < 16; ++i)
++        if (ptp->raw_command.command[i])
++            ++ptp->in_err;
++    memcpy(ptp->raw_command.command, cdb, cdb_len);
++    ptp->raw_command.command_length = (uint8)cdb_len;
++}
++
++void
++set_scsi_pt_sense(struct sg_pt_base * vp, unsigned char * sense,
++                  int max_sense_len)
++{
++    struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    if (ptp->raw_command.sense_data)
++        ++ptp->in_err;
++    memset(sense, 0, max_sense_len);
++    ptp->raw_command.sense_data = sense;
++    ptp->raw_command.sense_data_length = max_sense_len;
++}
++
++/* Setup for data transfer from device */
++void
++set_scsi_pt_data_in(struct sg_pt_base * vp, unsigned char * dxferp,
++                    int dxfer_len)
++{
++    struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    if (ptp->raw_command.data)
++        ++ptp->in_err;
++    if (dxfer_len > 0) {
++        ptp->raw_command.data = dxferp;
++        ptp->raw_command.data_length = dxfer_len;
++        ptp->data_len = dxfer_len;
++        ptp->raw_command.flags |= B_RAW_DEVICE_DATA_IN;
++    }
++}
++
++/* Setup for data transfer toward device */
++void
++set_scsi_pt_data_out(struct sg_pt_base * vp, const unsigned char * dxferp,
++                     int dxfer_len)
++{
++    struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    if (ptp->raw_command.data)
++        ++ptp->in_err;
++    if (dxfer_len > 0) {
++        ptp->raw_command.data = (unsigned char *)dxferp;
++        ptp->raw_command.data_length = dxfer_len;
++        ptp->raw_command.flags &= ~B_RAW_DEVICE_DATA_IN;
++    }
++}
++
++void
++set_scsi_pt_packet_id(struct sg_pt_base * vp __attribute__ ((unused)),
++                      int pack_id __attribute__ ((unused)))
++{
++}
++
++void
++set_scsi_pt_tag(struct sg_pt_base * vp, uint64_t tag __attribute__ ((unused)))
++{
++    struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    ++ptp->in_err;
++}
++
++void
++set_scsi_pt_task_management(struct sg_pt_base * vp,
++                            int tmf_code __attribute__ ((unused)))
++{
++    struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    ++ptp->in_err;
++}
++
++void
++set_scsi_pt_task_attr(struct sg_pt_base * vp,
++                      int attrib __attribute__ ((unused)),
++                      int priority __attribute__ ((unused)))
++{
++    struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    ++ptp->in_err;
++}
++
++void
++set_scsi_pt_flags(struct sg_pt_base * vp __attribute__ ((unused)),
++                  int flags __attribute__ ((unused)))
++{
++}
++
++/* Executes SCSI command (or at least forwards it to lower layers).
++ * Clears os_err field prior to active call (whose result may set it
++ * again). */
++int
++do_scsi_pt(struct sg_pt_base * vp, int fd, int timeout_secs, int verbose)
++{
++    struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    ptp->os_err = 0;
++    if (ptp->in_err) {
++        if (verbose)
++            pr2ws("Replicated or unused set_scsi_pt...\n");
++        return SCSI_PT_DO_BAD_PARAMS;
++    }
++    if (NULL == ptp->raw_command.command) {
++        if (verbose)
++            pr2ws("No SCSI command (cdb) given\n");
++        return SCSI_PT_DO_BAD_PARAMS;
++    }
++    /* raw_command.timeout is in microseconds */
++    ptp->raw_command.timeout = ((timeout_secs > 0) ? (timeout_secs * 1000000) :
++                                                   CAM_TIME_DEFAULT);
++
++    if (ioctl(fd, B_RAW_DEVICE_COMMAND, &ptp->raw_command) < 0) {
++        ptp->os_err = errno;
++        if (verbose > 1)
++            pr2ws("ioctl(B_RAW_DEVICE_COMMAND) failed: %s (errno=%d)\n",
++                  safe_strerror(ptp->os_err), ptp->os_err);
++        return -ptp->os_err;
++    }
++
++    return SCSI_PT_DO_START_OK;
++}
++
++int
++get_scsi_pt_result_category(const struct sg_pt_base * vp)
++{
++    const struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    if (ptp->os_err)
++        return SCSI_PT_RESULT_OS_ERR;
++    else if ((ptp->raw_command.cam_status & CAM_STATUS_MASK) != CAM_REQ_CMP &&
++             (ptp->raw_command.cam_status & CAM_STATUS_MASK) != CAM_REQ_CMP_ERR)
++        return SCSI_PT_RESULT_TRANSPORT_ERR;
++    else if ((SAM_STAT_CHECK_CONDITION == ptp->raw_command.scsi_status) ||
++             (SAM_STAT_COMMAND_TERMINATED == ptp->raw_command.scsi_status))
++        return SCSI_PT_RESULT_SENSE;
++    else if (ptp->raw_command.scsi_status)
++        return SCSI_PT_RESULT_STATUS;
++    else
++        return SCSI_PT_RESULT_GOOD;
++}
++
++int
++get_scsi_pt_resid(const struct sg_pt_base * vp)
++{
++    const struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    /* For various reasons Haiku return data_len - data_resid */
++    return ptp->data_len - ptp->raw_command.data_length;
++}
++
++int
++get_scsi_pt_status_response(const struct sg_pt_base * vp)
++{
++    const struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    return ptp->raw_command.scsi_status;
++}
++
++int
++get_scsi_pt_sense_len(const struct sg_pt_base * vp)
++{
++    const struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    return ptp->raw_command.sense_data_length;
++}
++
++int
++get_scsi_pt_os_err(const struct sg_pt_base * vp)
++{
++    const struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    return ptp->os_err;
++}
++
++char *
++get_scsi_pt_os_err_str(const struct sg_pt_base * vp __attribute__ ((unused)),
++                       int max_b_len, char * b)
++{
++    const struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    const char *cp;
++
++    cp = safe_strerror(ptp->os_err);
++    strncpy(b, cp, max_b_len);
++    if ((int)strlen(cp) >= max_b_len)
++        b[max_b_len - 1] = '\0';
++    return b;
++}
++
++int
++get_scsi_pt_transport_err(const struct sg_pt_base * vp)
++{
++    const struct sg_pt_haiku_scsi * ptp = &vp->impl;
++
++    if ((ptp->raw_command.cam_status & CAM_STATUS_MASK) != CAM_REQ_CMP ||
++        (ptp->raw_command.cam_status & CAM_STATUS_MASK) != CAM_REQ_CMP_ERR)
++        return ptp->raw_command.cam_status & CAM_STATUS_MASK;
++
++    return 0;
++}
++
++char *
++get_scsi_pt_transport_err_str(const struct sg_pt_base * vp __attribute__ ((unused)),
++                              int max_b_len, char * b)
++{
++    strncpy(b, "no transport error available", max_b_len);
++    b[max_b_len - 1] = '\0';
++    return b;
++}
++
++int
++get_scsi_pt_duration_ms(const struct sg_pt_base * vp __attribute__ ((unused)))
++{
++    return -1;
++}
++
++bool pt_device_is_nvme(const struct sg_pt_base * vp __attribute__ ((unused)))
++{
++    return 0;
++}
+-- 
+2.15.0
+

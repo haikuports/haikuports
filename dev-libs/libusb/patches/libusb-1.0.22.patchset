@@ -1,0 +1,220 @@
+From f4267b4e34668722beb8cefc6487fb980be4faa6 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Fri, 14 Jul 2017 14:51:19 +0200
+Subject: Add a stub for clear_halt.
+
+Fixes a crash in picolcd driver.
+
+diff --git a/libusb/os/haiku_usb_raw.cpp b/libusb/os/haiku_usb_raw.cpp
+index c701e34..c81658f 100644
+--- a/libusb/os/haiku_usb_raw.cpp
++++ b/libusb/os/haiku_usb_raw.cpp
+@@ -128,6 +128,13 @@ haiku_set_altsetting(struct libusb_device_handle *dev_handle, int interface_numb
+ 	return handle->SetAltSetting(interface_number, altsetting);
+ }
+ 
++static int
++haiku_clear_halt(libusb_device_handle*, unsigned char)
++{
++	/* TODO */
++	return 0;
++}
++
+ static int
+ haiku_release_interface(struct libusb_device_handle *dev_handle, int interface_number)
+ {
+@@ -218,7 +225,7 @@ const struct usbi_os_backend usbi_backend = {
+ 	/*.release_interface =*/ haiku_release_interface,
+ 
+ 	/*.set_interface_altsetting =*/ haiku_set_altsetting,
+-	/*.clear_halt =*/ NULL,
++	/*.clear_halt =*/ haiku_clear_halt,
+ 	/*.reset_device =*/ NULL,
+ 
+ 	/*.alloc_streams =*/ NULL,
+-- 
+2.16.4
+
+
+From 5338068972352f26c70b98142e8f94832cba52f5 Mon Sep 17 00:00:00 2001
+From: fbrosson <fbrosson@localhost>
+Date: Tue, 27 Mar 2018 11:17:19 +0000
+Subject: Use the default alignment when compiling with gcc2.
+
+
+diff --git a/libusb/libusbi.h b/libusb/libusbi.h
+index 31d6ce9..221d2c2 100644
+--- a/libusb/libusbi.h
++++ b/libusb/libusbi.h
+@@ -47,7 +47,7 @@
+ #else
+ #define PTR_ALIGNED __declspec(align(4))
+ #endif
+-#elif defined(__GNUC__)
++#elif defined(__GNUC__) && (__GNUC__ >= 3)
+ #define PTR_ALIGNED __attribute__((aligned(sizeof(void *))))
+ #else
+ #define PTR_ALIGNED
+-- 
+2.16.4
+
+
+From cfe2018ebb07ccb12bacc30a9450d240e05f060a Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Wed, 15 Aug 2018 10:03:17 +0200
+Subject: Use new GET_CONFIGURATION_DESCRIPTOR_ETC ioctl
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Fixes the problem I was getting, at least for usb2 ports. Time to dig in
+the xhci driver now…
+
+diff --git a/libusb/os/haiku_usb_backend.cpp b/libusb/os/haiku_usb_backend.cpp
+index d3de8cc..bac8297 100644
+--- a/libusb/os/haiku_usb_backend.cpp
++++ b/libusb/os/haiku_usb_backend.cpp
+@@ -432,6 +432,7 @@ USBDevice::EndpointToInterface(uint8 address) const
+ int
+ USBDevice::Initialise()		//Do we need more error checking, etc? How to report?
+ {
++	usbi_dbg("Haiku init dev %s", fPath);
+ 	int fRawFD = open(fPath, O_RDWR | O_CLOEXEC);
+ 	if (fRawFD < 0)
+ 		return B_ERROR;
+@@ -458,15 +459,13 @@ USBDevice::Initialise()		//Do we need more error checking, etc? How to report?
+ 		}
+ 		fConfigToIndex[tmp_config.configuration_value] = i;
+ 		fConfigurationDescriptors[i] = new(std::nothrow) unsigned char[tmp_config.total_length];
+-		command.control.request_type = 128;
+-		command.control.request = 6;
+-		command.control.value = (2 << 8) | i;
+-		command.control.index = 0;
+-		command.control.length = tmp_config.total_length;
+-		command.control.data = fConfigurationDescriptors[i];
+-		if (ioctl(fRawFD, B_USB_RAW_COMMAND_CONTROL_TRANSFER, &command, sizeof(command)) ||
+-				command.control.status!=B_USB_RAW_STATUS_SUCCESS) {
+-			usbi_err(NULL, "failed retrieving full configuration descriptor");
++
++		command.config_etc.descriptor = (usb_configuration_descriptor*)fConfigurationDescriptors[i];
++		command.config_etc.length = tmp_config.total_length;
++		command.config_etc.config_index = i;
++		if (ioctl(fRawFD, B_USB_RAW_COMMAND_GET_CONFIGURATION_DESCRIPTOR_ETC, &command, sizeof(command)) ||
++				command.config_etc.status != B_USB_RAW_STATUS_SUCCESS) {
++			usbi_err(NULL, "failed retrieving configuration descriptor");
+ 			close(fRawFD);
+ 			return B_ERROR;
+ 		}
+diff --git a/libusb/os/haiku_usb_raw.h b/libusb/os/haiku_usb_raw.h
+index 5baf53d..d371f01 100644
+--- a/libusb/os/haiku_usb_raw.h
++++ b/libusb/os/haiku_usb_raw.h
+@@ -25,6 +25,7 @@ typedef enum {
+ 	B_USB_RAW_COMMAND_GET_INTERFACE_DESCRIPTOR_ETC,
+ 	B_USB_RAW_COMMAND_GET_ENDPOINT_DESCRIPTOR_ETC,
+ 	B_USB_RAW_COMMAND_GET_GENERIC_DESCRIPTOR_ETC,
++	B_USB_RAW_COMMAND_GET_CONFIGURATION_DESCRIPTOR_ETC,
+ 
+ 	B_USB_RAW_COMMAND_SET_CONFIGURATION = 0x3000,
+ 	B_USB_RAW_COMMAND_SET_FEATURE,
+@@ -74,6 +75,13 @@ typedef union {
+ 		uint32 config_index;
+ 	} config;
+ 
++	struct {
++		status_t status;
++		usb_configuration_descriptor *descriptor;
++		uint32 config_index;
++		size_t length;
++	} config_etc;
++
+ 	struct {
+ 		status_t status;
+ 		uint32 alternate_info;
+-- 
+2.16.4
+
+
+From 3732447bc4ba8841312096a804a3d882abe887d3 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sat, 18 Aug 2018 11:08:16 +0200
+Subject: implement clear_halt and provide reset_device
+
+Fix crashes in ec2drv.
+
+diff --git a/libusb/os/haiku_usb.h b/libusb/os/haiku_usb.h
+index d51ae9e..1e4e863 100644
+--- a/libusb/os/haiku_usb.h
++++ b/libusb/os/haiku_usb.h
+@@ -69,6 +69,7 @@ public:
+ 	int			ReleaseInterface(int);
+ 	int			SetConfiguration(int);
+ 	int			SetAltSetting(int, int);
++	int			ClearHalt(int endpoint);
+ 	status_t		SubmitTransfer(struct usbi_transfer *);
+ 	status_t		CancelTransfer(USBTransfer *);
+ 	bool			InitCheck();
+diff --git a/libusb/os/haiku_usb_backend.cpp b/libusb/os/haiku_usb_backend.cpp
+index bac8297..765a0d7 100644
+--- a/libusb/os/haiku_usb_backend.cpp
++++ b/libusb/os/haiku_usb_backend.cpp
+@@ -310,6 +310,23 @@ USBDeviceHandle::SetAltSetting(int inumber, int alt)
+ }
+ 
+ 
++int
++USBDeviceHandle::ClearHalt(int endpoint)
++{
++	usb_raw_command command;
++	command.control.request_type = USB_REQTYPE_ENDPOINT_OUT;
++	command.control.request = USB_REQUEST_CLEAR_FEATURE;
++	command.control.value = USB_FEATURE_ENDPOINT_HALT;
++	command.control.index = endpoint;
++	command.control.length = 0;
++
++	if (ioctl(fRawFD, B_USB_RAW_COMMAND_CONTROL_TRANSFER, &command, sizeof(command)) ||
++			command.control.status != B_USB_RAW_STATUS_SUCCESS) {
++		return _errno_to_libusb(command.config.status);
++	}
++}
++
++
+ USBDevice::USBDevice(const char *path)
+ 	:
+ 	fPath(NULL),
+diff --git a/libusb/os/haiku_usb_raw.cpp b/libusb/os/haiku_usb_raw.cpp
+index c81658f..e46ce5e 100644
+--- a/libusb/os/haiku_usb_raw.cpp
++++ b/libusb/os/haiku_usb_raw.cpp
+@@ -129,10 +129,17 @@ haiku_set_altsetting(struct libusb_device_handle *dev_handle, int interface_numb
+ }
+ 
+ static int
+-haiku_clear_halt(libusb_device_handle*, unsigned char)
++haiku_clear_halt(libusb_device_handle* dev_handle, unsigned char endpoint)
++{
++	USBDeviceHandle *handle = *((USBDeviceHandle **)dev_handle->os_priv);
++	return handle->ClearHalt(endpoint);
++}
++
++static int
++haiku_reset_device(libusb_device_handle*)
+ {
+ 	/* TODO */
+-	return 0;
++	return LIBUSB_ERROR_NOT_SUPPORTED;
+ }
+ 
+ static int
+@@ -226,7 +233,7 @@ const struct usbi_os_backend usbi_backend = {
+ 
+ 	/*.set_interface_altsetting =*/ haiku_set_altsetting,
+ 	/*.clear_halt =*/ haiku_clear_halt,
+-	/*.reset_device =*/ NULL,
++	/*.reset_device =*/ haiku_reset_device,
+ 
+ 	/*.alloc_streams =*/ NULL,
+ 	/*.free_streams =*/ NULL,
+-- 
+2.16.4
+

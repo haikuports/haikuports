@@ -1,0 +1,201 @@
+From 847dbc2803cdf64610ed4cdf36574a07aef374b5 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@gmail.com>
+Date: Sat, 6 Aug 2016 22:27:19 +0200
+Subject: Import changes from 1.55.0: buildtools
+
+
+diff --git a/tools/build/src/engine/boehm_gc/include/gc_config_macros.h b/tools/build/src/engine/boehm_gc/include/gc_config_macros.h
+index 762162a..723b4c3 100644
+--- a/tools/build/src/engine/boehm_gc/include/gc_config_macros.h
++++ b/tools/build/src/engine/boehm_gc/include/gc_config_macros.h
+@@ -62,7 +62,7 @@
+ 
+ # if defined(GC_SOLARIS_THREADS) || defined(GC_FREEBSD_THREADS) || \
+ 	defined(GC_IRIX_THREADS) || defined(GC_LINUX_THREADS) || \
+-	defined(GC_HPUX_THREADS) || defined(GC_OSF1_THREADS) || \
++	defined(GC_HPUX_THREADS) || defined(GC_OSF1_THREADS) || defined(GC_HAIKU_THREADS) || \
+ 	defined(GC_DGUX386_THREADS) || defined(GC_DARWIN_THREADS) || \
+         defined(GC_AIX_THREADS) || defined(GC_NETBSD_THREADS) || \
+         (defined(GC_WIN32_THREADS) && defined(__CYGWIN32__)) || \
+diff --git a/tools/build/src/engine/boehm_gc/include/private/gcconfig.h b/tools/build/src/engine/boehm_gc/include/private/gcconfig.h
+index 61cf9eac..427a9be 100644
+--- a/tools/build/src/engine/boehm_gc/include/private/gcconfig.h
++++ b/tools/build/src/engine/boehm_gc/include/private/gcconfig.h
+@@ -219,6 +219,12 @@
+ #    define I386
+ #    define HAIKU
+ #    define mach_type_known
++# endif
++# if defined(__HAIKU__) && defined(__x86_64__)
++#    define X86_64
++#    define HAIKU
++#    define mach_type_known
++# endif
+ # if defined(LINUX) && (defined(i386) || defined(__i386__))
+ #    define I386
+ #    define mach_type_known
+@@ -1025,6 +1031,13 @@
+ #     extern int etext[];
+ #     define DATASTART ((ptr_t)((((word) (etext)) + 0xfff) & ~0xfff))
+ #   endif
++#   ifdef HAIKU
++#     define OS_TYPE "HAIKU"
++#     include <OS.h>
++#     define GETPAGESIZE() B_PAGE_SIZE
++      extern int etext[];
++#     define DATASTART ((ptr_t)((((word) (etext)) + 0xfff) & ~0xfff))
++#   endif
+ #   ifdef SOLARIS
+ #	define OS_TYPE "SOLARIS"
+         extern int _etext[], _end[];
+diff --git a/tools/build/src/engine/boehm_gc/os_dep.c b/tools/build/src/engine/boehm_gc/os_dep.c
+index 2dd087f..8be17f8 100644
+--- a/tools/build/src/engine/boehm_gc/os_dep.c
++++ b/tools/build/src/engine/boehm_gc/os_dep.c
+@@ -776,6 +776,15 @@ ptr_t GC_get_main_stack_base(void){
+ }
+ # endif /* BEOS */
+ 
++# ifdef HAIKU
++# include <OS.h>
++ptr_t GC_get_main_stack_base(void){
++       thread_info th;
++       get_thread_info(find_thread(NULL),&th);
++       return th.stack_end;
++}
++# endif /* HAIKU */
++
+ 
+ # ifdef HAIKU
+ # include <OS.h>
+@@ -1106,7 +1115,7 @@ ptr_t GC_get_main_stack_base(void)
+ 
+ #endif /* FREEBSD_STACKBOTTOM */
+ 
+-#if !defined(BEOS) && !defined(AMIGA) && !defined(MSWIN32) \
++#if !defined(BEOS) && !defined(__HAIKU__) && !defined(AMIGA) && !defined(MSWIN32) \
+     && !defined(MSWINCE) && !defined(OS2) && !defined(NOSYS) && !defined(ECOS) \
+     && !defined(CYGWIN32) && !defined(HAIKU)
+ 
+diff --git a/tools/build/src/engine/jam.h b/tools/build/src/engine/jam.h
+index a6abf41..b774a59 100644
+--- a/tools/build/src/engine/jam.h
++++ b/tools/build/src/engine/jam.h
+@@ -162,6 +162,11 @@
+     #define OS_BEOS
+     #define NO_VFORK
+ #endif
++#ifdef __HAIKU__
++    #define unix
++    #define OSMINOR "OS=HAIKU"
++    #define OS_HAIKU
++#endif
+ #ifdef __bsdi__
+     #define OSMINOR "OS=BSDI"
+     #define OS_BSDI
+diff --git a/tools/build/src/engine/jambase.c b/tools/build/src/engine/jambase.c
+index 80a7e12..93f05e5 100644
+--- a/tools/build/src/engine/jambase.c
++++ b/tools/build/src/engine/jambase.c
+@@ -548,6 +548,18 @@ char *jambase[] = {
+ "NOARSCAN    ?= true ;\n",
+ "STDHDRS     ?= /boot/develop/headers/posix ;\n",
+ "}\n",
++"else if $(OS) = HAIKU\n",
++"{\n",
++"BINDIR      ?= /boot/system/bin ;\n",
++"CC          ?= gcc ;\n",
++"C++         ?= $(CC) ;\n",
++"FORTRAN     ?= \"\" ;\n",
++"LIBDIR      ?= /boot/system/lib ;\n",
++"LINK        ?= gcc ;\n",
++"LINKLIBS    ?= -lnetwork ;\n",
++"NOARSCAN    ?= true ;\n",
++"STDHDRS     ?= /boot/develop/headers/posix ;\n",
++"}\n",
+ "else if $(OS) = BEOS\n",
+ "{\n",
+ "BINDIR      ?= /boot/apps ;\n",
+diff --git a/tools/build/src/tools/builtin.py b/tools/build/src/tools/builtin.py
+index ee6474b..d2bc86d 100644
+--- a/tools/build/src/tools/builtin.py
++++ b/tools/build/src/tools/builtin.py
+@@ -82,7 +82,7 @@ def variant (name, parents_or_properties, explicit_properties = []):
+     feature.compose ("<variant>" + name, explicit_properties.all())
+ 
+ __os_names = """
+-    amiga aix appletv bsd cygwin darwin dos emx freebsd hpux iphone linux netbsd
++    amiga aix appletv bsd cygwin darwin dos emx freebsd haiku hpux iphone linux netbsd
+     openbsd osf qnx qnxnto sgi solaris sun sunos svr4 sysv ultrix unix unixware
+     vms windows
+ """.split()
+-- 
+2.14.2
+
+
+From 3ce44dbce12c8c8ccaaf544ec28aeed1255b854e Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@gmail.com>
+Date: Sat, 6 Aug 2016 22:27:41 +0200
+Subject: Import changes from 1.55.0: sourcecode
+
+
+diff --git a/boost/thread/detail/platform.hpp b/boost/thread/detail/platform.hpp
+index 1f33b1a..3670ffa 100644
+--- a/boost/thread/detail/platform.hpp
++++ b/boost/thread/detail/platform.hpp
+@@ -32,7 +32,7 @@
+ #  define BOOST_THREAD_CYGWIN
+ #elif (defined(_WIN32) || defined(__WIN32__) || defined(WIN32)) && !defined(BOOST_DISABLE_WIN32)
+ #  define BOOST_THREAD_WIN32
+-#elif defined(__BEOS__)
++#elif defined(__BEOS__) || defined(__HAIKU__)
+ #  define BOOST_THREAD_BEOS
+ #elif defined(macintosh) || defined(__APPLE__) || defined(__APPLE_CC__)
+ #  define BOOST_THREAD_MACOS
+-- 
+2.14.2
+
+
+From 4622b1ba7c6141478a00aec5d529d148e9832305 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 14 Oct 2017 11:47:09 +0200
+Subject: Haiku needs bsd and _BSD_SOURCE.
+
+
+diff --git a/tools/build/src/engine/build.jam b/tools/build/src/engine/build.jam
+index e711c08..f81e349 100644
+--- a/tools/build/src/engine/build.jam
++++ b/tools/build/src/engine/build.jam
+@@ -583,6 +583,11 @@ if $(OS) = VMS
+ {
+     --defs += VMS ;
+ }
++if $(OS) = HAIKU
++{
++	--defs += _BSD_SOURCE ;
++	--libs += -lbsd ;
++}
+ --defs += YYSTACKSIZE=5000 ;
+ 
+ if $(with-python)
+diff --git a/tools/build/src/engine/build.sh b/tools/build/src/engine/build.sh
+index 1d0dcc8..30d74f1 100755
+--- a/tools/build/src/engine/build.sh
++++ b/tools/build/src/engine/build.sh
+@@ -148,6 +148,13 @@ case $BOOST_JAM_TOOLSET in
+         BOOST_JAM_OS="NT"
+         ;;
+ 
++	    *haiku*)
++	    BOOST_JAM_CC=cc
++	    BOOST_JAM_OPT_JAM="$BOOST_JAM_OPT_JAM -D_BSD_SOURCE -lbsd"
++	    BOOST_JAM_OPT_MKJAMBASE="$BOOST_JAM_OPT_MKJAMBASE -D_BSD_SOURCE -lbsd"
++	    BOOST_JAM_OPT_YYACC="$BOOST_JAM_OPT_YYACC -D_BSD_SOURCE -lbsd"
++	    ;;
++
+         *)
+         BOOST_JAM_CC=gcc
+         esac
+-- 
+2.14.2
+

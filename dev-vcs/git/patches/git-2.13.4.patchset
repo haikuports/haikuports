@@ -1,0 +1,128 @@
+From 56477ddf63ce9a0539ef89435a9fc3a1cf099940 Mon Sep 17 00:00:00 2001
+From: Ingo Weinhold <ingo_weinhold@gmx.de>
+Date: Tue, 13 Aug 2013 08:07:25 +0200
+Subject: git-web--browse.sh: use "open" on Haiku
+
+
+diff --git a/git-web--browse.sh b/git-web--browse.sh
+index ae15253..1f6e306 100755
+--- a/git-web--browse.sh
++++ b/git-web--browse.sh
+@@ -132,6 +132,10 @@ if test -z "$browser" ; then
+ 	if test -x /usr/bin/cygstart; then
+ 		browser_candidates="cygstart $browser_candidates"
+ 	fi
++	# /boot/system/haiku_loader indicates Haiku
++	if test -f /boot/system/haiku_loader; then
++		browser_candidates="open $browser_candidates"
++	fi
+ 
+ 	for i in $browser_candidates; do
+ 		init_browser_path $i
+-- 
+2.12.2
+
+
+From d1ed34da6e4be7c02834778e1da9f99364faa7c1 Mon Sep 17 00:00:00 2001
+From: Ingo Weinhold <ingo_weinhold@gmx.de>
+Date: Mon, 19 Jan 2015 15:37:16 -0500
+Subject: On Haiku use the user settings directory instead of HOME
+
+
+diff --git a/path.c b/path.c
+index c1cb1cf..f149593 100644
+--- a/path.c
++++ b/path.c
+@@ -8,6 +8,11 @@
+ #include "worktree.h"
+ #include "submodule-config.h"
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#include <StorageDefs.h>
++#endif
++
+ static int get_st_mode_bits(const char *path, int *mode)
+ {
+ 	struct stat st;
+@@ -1245,10 +1250,18 @@ char *xdg_config_home(const char *filename)
+ {
+ 	const char *home, *config_home;
+ 
++#ifdef __HAIKU__
++	char settingsPath[B_PATH_NAME_LENGTH];
+ 	assert(filename);
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, true, settingsPath,
++		sizeof(settingsPath)) == B_OK)
++		return mkpathdup("%s/git/%s", settingsPath, filename);
++#else
+ 	config_home = getenv("XDG_CONFIG_HOME");
++	assert(filename);
+ 	if (config_home && *config_home)
+ 		return mkpathdup("%s/git/%s", config_home, filename);
++#endif
+ 
+ 	home = getenv("HOME");
+ 	if (home)
+-- 
+2.12.2
+
+
+From e196f78624417e80bb3f3e1bc1ff4f6806dbba14 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Mon, 19 Jan 2015 15:50:09 -0500
+Subject: Ensure config-directory exists before using it.
+
+
+diff --git a/config.c b/config.c
+index b4a3205..6a25930 100644
+--- a/config.c
++++ b/config.c
+@@ -2308,6 +2308,7 @@ int git_config_set_multivar_in_file_gently(const char *config_filename,
+ 	int ret;
+ 	struct lock_file *lock = NULL;
+ 	char *filename_buf = NULL;
++	char *config_dir = NULL;
+ 	char *contents = NULL;
+ 	size_t contents_sz;
+ 
+@@ -2321,6 +2322,12 @@ int git_config_set_multivar_in_file_gently(const char *config_filename,
+ 	if (!config_filename)
+ 		config_filename = filename_buf = git_pathdup("config");
+ 
++	config_dir = xstrdup(config_filename);
++	* find_last_dir_sep(config_dir) = '\0';
++	if (access(config_dir, F_OK) != 0)
++		mkdir(config_dir, 0755);
++	free(config_dir);
++
+ 	/*
+ 	 * The lock serves a purpose in addition to locking: the new
+ 	 * contents of .git/config will be written into it.
+-- 
+2.12.2
+
+
+From 573b3f6d779310b7b4e7f19f60bd7a5a13385da4 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sun, 14 Feb 2016 10:32:12 +0100
+Subject: Move credential cache to the config directory.
+
+Do not clutter the home dir.
+
+diff --git a/credential-cache.c b/credential-cache.c
+index 91550bf..e2432dc 100644
+--- a/credential-cache.c
++++ b/credential-cache.c
+@@ -87,7 +87,7 @@ static char *get_socket_path(void)
+ {
+ 	struct stat sb;
+ 	char *old_dir, *socket;
+-	old_dir = expand_user_path("~/.git-credential-cache", 0);
++	old_dir = xdg_config_home("credential-cache");
+ 	if (old_dir && !stat(old_dir, &sb) && S_ISDIR(sb.st_mode))
+ 		socket = xstrfmt("%s/socket", old_dir);
+ 	else
+-- 
+2.12.2
+

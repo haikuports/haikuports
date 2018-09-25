@@ -1,0 +1,1313 @@
+From 4f1bd749631c9b1cfee90170aa8ae2b225910c2c Mon Sep 17 00:00:00 2001
+From: Sergei Reznikov <diver@gelios.net>
+Date: Wed, 23 Aug 2017 16:56:18 +0300
+Subject: initial Haiku support
+
+
+diff --git a/Makefile.am b/Makefile.am
+index febdc63..992fff9 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -981,15 +981,16 @@ dist_noinst_SCRIPTS += test/run_vlc.sh
+ ###############################################################################
+ # Installing plugins cache
+ ###############################################################################
+-install-exec-hook:
+-	if test "$(build)" = "$(host)"; then \
+-		PATH="$(DESTDIR)$(bindir):$$PATH" \
+-		LD_LIBRARY_PATH="$(DESTDIR)$(libdir):$$LD_LIBRARY_PATH" \
+-		"$(DESTDIR)$(vlclibdir)/vlc-cache-gen$(EXEEXT)" \
+-			 "$(DESTDIR)$(vlclibdir)/plugins" ; \
+-	else \
+-		echo "Cross-compilation: cache generation skipped!" ; \
+-	fi
++#Haiku bug #13159
++#install-exec-hook:
++#	if test "$(build)" = "$(host)"; then \
++#		PATH="$(DESTDIR)$(bindir):$$PATH" \
++#		LD_LIBRARY_PATH="$(DESTDIR)$(libdir):$$LD_LIBRARY_PATH" \
++#		"$(DESTDIR)$(vlclibdir)/vlc-cache-gen$(EXEEXT)" \
++#			 "$(DESTDIR)$(vlclibdir)/plugins" ; \
++#	else \
++#		echo "Cross-compilation: cache generation skipped!" ; \
++#	fi
+ 
+ uninstall-hook:
+ 	rm -f -- "$(DESTDIR)$(vlclibdir)/plugins/plugins.dat"
+diff --git a/bin/Makefile.am b/bin/Makefile.am
+index 869ac56..669f612 100644
+--- a/bin/Makefile.am
++++ b/bin/Makefile.am
+@@ -79,11 +79,11 @@ noinst_DATA += ../modules/plugins.dat
+ MOSTLYCLEANFILES = $(noinst_DATA)
+ 
+ .PHONY: ../modules/plugins.dat
+-
+-../modules/plugins.dat: vlc-cache-gen$(EXEEXT)
+-	$(AM_V_at)rm -f ../modules/plugins.dat
+-	$(AM_V_GEN)if test "$(build)" = "$(host)"; then \
+-		./vlc-cache-gen$(EXEEXT) ../modules ; \
+-	else \
+-		echo "Cross-compilation: cache generation skipped!" ; \
+-	fi
++# Haiku bug #13159
++#../modules/plugins.dat: vlc-cache-gen$(EXEEXT)
++#	$(AM_V_at)rm -f ../modules/plugins.dat
++#	$(AM_V_GEN)if test "$(build)" = "$(host)"; then \
++#		./vlc-cache-gen$(EXEEXT) ../modules ; \
++#	else \
++#		echo "Cross-compilation: cache generation skipped!" ; \
++#	fi
+diff --git a/bin/override.c b/bin/override.c
+index fb4608c..9c7c085 100644
+--- a/bin/override.c
++++ b/bin/override.c
+@@ -125,6 +125,8 @@ static void *getsym (const char *name)
+  *
+  * Some evil libraries modify the environment. We currently ignore the calls as
+  * they could crash the process. This may cause funny behaviour though. */
++#ifndef __HAIKU__
++//not working
+ int putenv (char *str)
+ {
+     if (override)
+@@ -135,6 +137,7 @@ int putenv (char *str)
+     return CALL(putenv, str);
+ }
+ 
++#endif
+ int setenv (const char *name, const char *value, int overwrite)
+ {
+     if (override)
+diff --git a/configure.ac b/configure.ac
+index b49281c..2ec9809 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -298,11 +298,19 @@ case "${host_os}" in
+     LDFLAGS="${LDFLAGS} -Zomf -Zbin-files -Zargs-wild -Zhigh-mem"
+     AC_LIBOBJ([freeaddrinfo])
+     ;;
++    *haiku*)
++    SYS=haiku
++    VLC_ADD_LIBS([libvlccore libvlc vlc],[-lnetwork -lbe])
++    VLC_ADD_PLUGIN([haiku_aout])
++    VLC_ADD_LIBS([haiku_aout],[-lmedia])
++    VLC_ADD_CXXFLAGS([qt4],[-std=c++11])
++    ;;
+   *)
+     SYS="${host_os}"
+     ;;
+ esac
+ AM_CONDITIONAL(HAVE_DARWIN,  test "${SYS}" = "darwin")
++AM_CONDITIONAL(HAVE_HAIKU,   test "${SYS}" = "haiku")
+ AM_CONDITIONAL(HAVE_LINUX,   test "${SYS}" = "linux")
+ AM_CONDITIONAL(HAVE_OS2,     test "${SYS}" = "os2")
+ AM_CONDITIONAL(HAVE_WIN32,   test "${SYS}" = "mingw32")
+@@ -535,10 +543,13 @@ VLC_LIBRARY_SUFFIX
+ dnl Check for system libs needed
+ need_libc=false
+ 
++# this fails to detect that we have if_nameindex and if_nametoindex on Haiku
++# and then it fails to detect that we don't have tdestroy...
++
+ dnl Check for usual libc functions
+ AC_CHECK_DECLS([nanosleep],,,[#include <time.h>])
+ AC_CHECK_FUNCS([daemon fcntl fstatvfs fork getenv getpwuid_r isatty lstat memalign mmap open_memstream openat pread posix_fadvise posix_madvise setlocale stricmp strnicmp strptime uselocale])
+-AC_REPLACE_FUNCS([atof atoll dirfd fdopendir flockfile fsync getdelim getpid gmtime_r lldiv localtime_r nrand48 poll posix_memalign rewind setenv strcasecmp strcasestr strdup strlcpy strndup strnlen strsep strtof strtok_r strtoll swab tdestroy strverscmp])
++AC_REPLACE_FUNCS([atof atoll dirfd fdopendir flockfile fsync getdelim getpid gmtime_r lldiv localtime_r nrand48 poll posix_memalign rewind setenv strcasecmp strcasestr strdup strlcpy strndup strnlen strsep strtof strtok_r strtoll swab strverscmp])
+ AC_CHECK_FUNCS(fdatasync,,
+   [AC_DEFINE(fdatasync, fsync, [Alias fdatasync() to fsync() if missing.])
+ ])
+@@ -606,8 +617,10 @@ AC_SEARCH_LIBS(connect, [socket], [
+   AS_IF([test "${SYS}" = "mingw32"], [
+     SOCKET_LIBS="-lws2_32"
+   ])
++  AS_IF([test "${SYS}" = "haiku"], [
++    SOCKET_LIBS="-lnetwork"
++  ])
+ ])
+-
+ AC_SEARCH_LIBS([inet_pton], [nsl], [
+  AS_IF([test "$ac_cv_search_inet_pton" != "none required"], [
+     SOCKET_LIBS="$ac_cv_search_inet_pton $SOCKET_LIBS"
+@@ -867,7 +880,7 @@ dnl
+ dnl  Compiler warnings
+ dnl
+ 
+-RDC_PROG_CC_WFLAGS([all extra sign-compare undef pointer-arith bad-function-cast write-strings missing-prototypes volatile-register-var error-implicit-function-declaration])
++RDC_PROG_CC_WFLAGS([all extra sign-compare undef pointer-arith bad-function-cast write-strings missing-prototypes volatile-register-var])
+ RDC_PROG_CC_FLAGS([-pipe])
+ AC_LANG_PUSH([C++])
+ RDC_PROG_CXX_WFLAGS([all extra sign-compare undef pointer-arith volatile-register-var])
+@@ -2549,7 +2562,7 @@ then
+       VLC_SAVE_FLAGS
+       CPPFLAGS="${CPPFLAGS} ${POSTPROC_CFLAGS}"
+       CFLAGS="${CFLAGS} ${POSTPROC_CFLAGS}"
+-      AC_CHECK_HEADERS(postproc/postprocess.h)
++      AC_CHECK_HEADERS(libpostproc/postprocess.h)
+       VLC_ADD_PLUGIN([postproc])
+       VLC_ADD_LIBS([postproc],[$POSTPROC_LIBS $AVUTIL_LIBS])
+       VLC_ADD_CFLAGS([postproc],[$POSTPROC_CFLAGS $AVUTIL_CFLAGS])
+@@ -3109,7 +3122,7 @@ dnl  X C Bindings modules
+ dnl
+ AC_ARG_ENABLE(xcb,
+   [  --enable-xcb            X11 support with XCB (default enabled)],, [
+-  AS_IF([test "${SYS}" != "mingw32" -a "${SYS}" != "darwin" -a "${SYS}" != "symbian"], [
++  AS_IF([test "${SYS}" != "mingw32" -a "${SYS}" != "darwin" -a "${SYS}" != "haiku" -a "${SYS}" != "symbian"], [
+     enable_xcb="yes"
+   ], [
+     enable_xcb="no"
+@@ -3207,7 +3220,7 @@ then
+       if test "${SYS}" != "darwin"; then
+         VLC_ADD_PLUGIN([vout_sdl])
+       fi
+-      if test "${SYS}" != "mingw32" -a "${SYS}" != "os2"; then
++      if test "${SYS}" != "mingw32" -a "${SYS}" != "os2" -a "${SYS}" != "haiku"; then
+         VLC_ADD_LIBS([vout_sdl],[${X_LIBS} ${X_PRE_LIBS} -lX11])
+       fi
+       VLC_ADD_CFLAGS([vout_sdl],[${SDL_CFLAGS}])
+@@ -4166,7 +4179,7 @@ AC_ARG_WITH(kde-solid,
+   AS_HELP_STRING([--with-kde-solid=PATH],
+                  [KDE Solid actions directory (auto)]),, [
+ 
+-if test "${SYS}" != "mingw32" -a "${SYS}" != "darwin" ; then
++if test "${SYS}" != "mingw32" -a "${SYS}" != "darwin" -a "${SYS}" != "haiku" ; then
+   with_kde_solid="yes"
+ fi
+ ])
+diff --git a/include/vlc_fixups.h b/include/vlc_fixups.h
+index 997f600..47b566e 100644
+--- a/include/vlc_fixups.h
++++ b/include/vlc_fixups.h
+@@ -261,10 +261,13 @@ void swab (const void *, void *, ssize_t);
+ #endif
+ 
+ /* Socket stuff */
++// configure doesn't detect these, likely not linking to -lnetwork, must investigate
++#ifndef __HAIKU__
+ #ifndef HAVE_INET_PTON
+ int inet_pton(int, const char *, void *);
+ const char *inet_ntop(int, const void *, char *, int);
+ #endif
++#endif
+ 
+ #ifndef HAVE_STRUCT_POLLFD
+ enum
+@@ -289,6 +292,8 @@ struct pollfd;
+ int poll (struct pollfd *, unsigned, int);
+ #endif
+ 
++// or these
++#ifndef __HAIKU__
+ #ifndef HAVE_IF_NAMEINDEX
+ #include <errno.h>
+ struct if_nameindex
+@@ -302,6 +307,7 @@ struct if_nameindex
+ # define if_nameindex()         (errno = ENOBUFS, NULL)
+ # define if_freenameindex(list) (void)0
+ #endif
++#endif
+ 
+ /* search.h */
+ #ifndef HAVE_SEARCH_H
+diff --git a/include/vlc_threads.h b/include/vlc_threads.h
+index ff43d6f..deb3bc7 100644
+--- a/include/vlc_threads.h
++++ b/include/vlc_threads.h
+@@ -166,7 +166,13 @@ typedef struct
+ #define VLC_STATIC_COND  { PTHREAD_COND_INITIALIZER, 0 }
+ typedef semaphore_t     vlc_sem_t;
+ typedef pthread_rwlock_t vlc_rwlock_t;
++// Haiku bug #8798
++#ifdef __HAIKU__
++#define VLC_STATIC_RWLOCK \
++	{ VLC_STATIC_MUTEX, VLC_STATIC_COND, 0, 0, 0 }
++#else
+ #define VLC_STATIC_RWLOCK PTHREAD_RWLOCK_INITIALIZER
++#endif
+ typedef pthread_key_t   vlc_threadvar_t;
+ typedef struct vlc_timer *vlc_timer_t;
+ 
+@@ -192,7 +198,13 @@ typedef pthread_cond_t  vlc_cond_t;
+ #define VLC_STATIC_COND  PTHREAD_COND_INITIALIZER
+ typedef sem_t           vlc_sem_t;
+ typedef pthread_rwlock_t vlc_rwlock_t;
++// Haiku bug #8798
++#ifdef __HAIKU__
++#define VLC_STATIC_RWLOCK \
++	{ VLC_STATIC_MUTEX, VLC_STATIC_COND, 0, 0, 0 }
++#else
+ #define VLC_STATIC_RWLOCK PTHREAD_RWLOCK_INITIALIZER
++#endif
+ typedef pthread_key_t   vlc_threadvar_t;
+ typedef struct vlc_timer *vlc_timer_t;
+ 
+diff --git a/modules/audio_output/Makefile.am b/modules/audio_output/Makefile.am
+index 1e6a233..ba072a4 100644
+--- a/modules/audio_output/Makefile.am
++++ b/modules/audio_output/Makefile.am
+@@ -91,6 +91,12 @@ if HAVE_SNDIO
+ aout_LTLIBRARIES += libsndio_plugin.la
+ endif
+ 
++libhaiku_aout_plugin_la_SOURCES = audio_output/haiku.cpp
++libhaiku_aout_plugin_la_LIBADD = -lmedia
++#if HAVE_HAIKU
++#aout_LTLIBRARIES += libhaiku_aout_plugin.la
++#endif
++
+ libwaveout_plugin_la_SOURCES = audio_output/waveout.c \
+ 	audio_output/windows_audio_common.h
+ libwaveout_plugin_la_LIBADD = -lwinmm
+diff --git a/modules/audio_output/haiku.cpp b/modules/audio_output/haiku.cpp
+new file mode 100644
+index 0000000..7a8c2ec
+--- /dev/null
++++ b/modules/audio_output/haiku.cpp
+@@ -0,0 +1,196 @@
++/*****************************************************************************
++ * Haiku.cpp - Haiku Media Kit audio output
++ *****************************************************************************
++ * Copyright (C) 1999, 2000, 2001, 2012 the VideoLAN team
++ *
++ * Authors: Jean-Marc Dressler <polux@via.ecp.fr>
++ *          Samuel Hocevar <sam@zoy.org>
++ *          Eric Petit <titer@videolan.org>
++ *			Cian Duffy <myob87@gmail.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
++ *****************************************************************************/
++
++/*****************************************************************************
++ * Preamble
++ *****************************************************************************/
++#include <stdio.h>
++#include <stdlib.h>                                      /* malloc(), free() */
++#include <malloc.h>
++#include <string.h>
++
++#include <iostream>
++#include <queue>
++using namespace std;
++
++#include <SoundPlayer.h>
++#include <media/MediaDefs.h>
++
++#ifdef HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <vlc_aout.h>
++#include <vlc_common.h>
++#include <vlc_plugin.h>
++
++/*****************************************************************************
++ * aout_sys_t: BeOS audio output method descriptor
++ *****************************************************************************/
++
++queue<uint8> 		a_queue;
++
++struct aout_sys_t
++{
++   BSoundPlayer * 			p_player;
++   mtime_t      			latency;
++   media_raw_audio_format * p_format;
++};
++
++/*****************************************************************************
++ * Local prototypes.
++ *****************************************************************************/
++static void Close        ( vlc_object_t * );
++static void Pause (audio_output_t *, bool, mtime_t);
++static void Play  (audio_output_t *, block_t *);
++
++static void Flush (audio_output_t *, bool);static int  Open         ( vlc_object_t * );
++static void BufferProc   ( void * p_aout, void * p_buffer, size_t size,
++                         const media_raw_audio_format & format );
++
++/*****************************************************************************
++ * Module descriptor
++ *****************************************************************************/
++vlc_module_begin ()
++    set_shortname( "haiku_aout" )
++    set_description( N_("Haiku Media Kit audio output") )
++    set_capability( "audio output", 100 )
++    set_category( CAT_AUDIO )
++    set_subcategory( SUBCAT_AUDIO_AOUT )
++    set_callbacks( Open, Close )
++vlc_module_end ()
++/*****************************************************************************
++ * OpenAudio
++ *****************************************************************************/
++static int Open( vlc_object_t * p_this )
++{
++    audio_output_t *p_aout = (audio_output_t *)p_this;
++    p_aout->sys = (aout_sys_t*)malloc( sizeof( aout_sys_t ) );
++        if( p_aout->sys == NULL )
++    {
++		return VLC_ENOMEM;
++    }
++
++    aout_sys_t * p_sys =  p_aout->sys;
++
++    audio_format_t format =  p_aout->format;
++
++   int i_nb_channels = aout_FormatNbChannels( &format );
++
++// media_raw_audio_format must be passed to BSoundPlayer
++    p_sys->p_format = (media_raw_audio_format*)
++        malloc( sizeof( media_raw_audio_format ) );
++
++    p_aout->format.i_format = VLC_CODEC_FI32;
++    p_aout->format.i_physical_channels = AOUT_CHAN_LEFT | AOUT_CHAN_RIGHT;
++    p_aout->format.i_rate = 44100;
++
++    p_sys->p_format->channel_count = i_nb_channels;
++    p_sys->p_format->frame_rate = p_aout->format.i_rate;
++    p_sys->p_format->format = media_raw_audio_format::B_AUDIO_INT;
++    p_sys->p_format->byte_order = B_MEDIA_LITTLE_ENDIAN;
++    // 'magic' number obtained from checking what size the buffers being
++    // passed by the callback were
++    // in theory, any buffer size should work
++    p_sys->p_format->buffer_size = 9216;
++
++    aout_VolumeSoftInit( p_aout );
++
++	//BSoundPlayer init - format, name, buffer producer, notifier, cookie
++
++    p_sys->p_player = new BSoundPlayer( p_sys->p_format, "player", BufferProc, NULL, NULL );
++    if( p_sys->p_player->InitCheck() != B_OK )
++    {
++        msg_Err( p_aout, "BSoundPlayer InitCheck failed" );
++        delete p_sys->p_player;
++        free( p_sys );
++    }
++    p_sys->latency = p_sys->p_player->Latency();
++
++    p_aout->pf_play = Play;
++    p_aout->pf_pause = Pause;
++    p_aout->pf_flush = Flush;
++
++	return VLC_SUCCESS;
++
++}
++
++/*****************************************************************************
++ * BufferProc- buffer producer function
++ *****************************************************************************/
++static void BufferProc( void * _p_aout, void * _p_buffer, size_t i_size,
++                  const media_raw_audio_format &format )
++{
++// Load buffer
++	for (size_t i = 0; i < i_size; i++)
++		{
++			uint8 data = a_queue.front();
++			vlc_memset(_p_buffer + i, data, 1);
++			a_queue.pop();
++		}
++
++}
++/*****************************************************************************
++ * CloseAudio
++ *****************************************************************************/
++static void Close( vlc_object_t * p_this )
++{
++	printf("Close Called");
++	audio_output_t *p_aout = (audio_output_t *)p_this;
++    struct aout_sys_t *p_sys;
++    p_aout->sys = p_sys;
++
++    /* Clean up */
++    p_sys->p_player->Stop();
++    delete p_sys->p_player;
++    free( p_sys );
++}
++
++
++static void Play (audio_output_t *aout, block_t *block)
++{
++    aout_sys_t * p_sys =  aout->sys;
++
++// load buffer to STL queue, sample by sample
++	for (size_t i = 0; i < block->i_buffer; i++)
++	{
++		a_queue.push(block->p_buffer[i]);
++	}
++
++    p_sys->p_player->Start();
++    p_sys->p_player->SetHasData( true );
++// release buffer
++	block_Release (block);
++}
++
++
++static void Pause (audio_output_t *aout, bool pause, mtime_t date)
++{
++}
++
++
++static void Flush (audio_output_t *aout, bool wait)
++{
++}
+diff --git a/modules/gui/qt4/Makefile.am b/modules/gui/qt4/Makefile.am
+index 1a564cf..4d12501 100644
+--- a/modules/gui/qt4/Makefile.am
++++ b/modules/gui/qt4/Makefile.am
+@@ -22,7 +22,7 @@ else
+ if HAVE_WIN32
+ libqt4_plugin_la_LIBADD += -lole32 -lcomctl32 -luuid
+ else
+-libqt4_plugin_la_LIBADD += $(X_LIBS) $(X_PRE_LIB) -lX11
++libqt4_plugin_la_LIBADD += $(X_LIBS) $(X_PRE_LIB)
+ endif
+ endif
+ if HAVE_DARWIN
+diff --git a/modules/video_output/Modules.am b/modules/video_output/Modules.am
+index 51bd09c..fcf60c7 100644
+--- a/modules/video_output/Modules.am
++++ b/modules/video_output/Modules.am
+@@ -226,7 +226,7 @@ libcaca_plugin_la_CFLAGS = $(AM_CFLAGS) $(CACA_CFLAGS)
+ libcaca_plugin_la_LIBADD = $(CACA_LIBS)
+ if !HAVE_WIN32
+ if !HAVE_DARWIN
+-libcaca_plugin_la_LIBADD += $(X_LIBS) $(X_PRE_LIBS) -lX11
++libcaca_plugin_la_LIBADD += $(X_LIBS) $(X_PRE_LIBS)
+ endif
+ endif
+ libcaca_plugin_la_LDFLAGS = $(AM_LDFLAGS) -rpath '$(voutdir)'
+diff --git a/modules/video_output/caca.c b/modules/video_output/caca.c
+index 75c83e6..8922732 100644
+--- a/modules/video_output/caca.c
++++ b/modules/video_output/caca.c
+@@ -34,7 +34,7 @@
+ #include <vlc_plugin.h>
+ #include <vlc_vout_display.h>
+ #include <vlc_picture_pool.h>
+-#if !defined(_WIN32) && !defined(__APPLE__)
++#if !defined(_WIN32) && !defined(__APPLE__) && !defined(__HAIKU__)
+ # ifdef X_DISPLAY_MISSING
+ #  error Xlib required due to XInitThreads
+ # endif
+diff --git a/modules/video_output/sdl.c b/modules/video_output/sdl.c
+index e56c976..76b7ef4 100644
+--- a/modules/video_output/sdl.c
++++ b/modules/video_output/sdl.c
+@@ -40,7 +40,7 @@
+ 
+ #include <SDL.h>
+ 
+-#if !defined(_WIN32) && !defined(__OS2__)
++#if !defined(_WIN32) && !defined(__OS2__) && !defined(__HAIKU__)
+ # ifdef X_DISPLAY_MISSING
+ #  error Xlib required due to XInitThreads
+ # endif
+@@ -116,7 +116,7 @@ static int Open(vlc_object_t *object)
+     vout_display_t *vd = (vout_display_t *)object;
+     vout_display_sys_t *sys;
+ 
+-#if !defined(_WIN32) && !defined(__OS2__)
++#if !defined(_WIN32) && !defined(__OS2__) && !defined(__HAIKU__)
+     if (!vlc_xlib_init (object))
+         return VLC_EGENERIC;
+ #endif
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 4aaf405..b2ead2c 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -231,6 +231,9 @@ else
+ if HAVE_OS2
+ libvlccore_la_SOURCES += $(SOURCES_libvlc_os2)
+ else
++if HAVE_HAIKU
++libvlccore_la_SOURCES += $(SOURCES_libvlc_haiku)
++else
+ libvlccore_la_SOURCES += $(SOURCES_libvlc_other)
+ endif
+ endif
+@@ -238,6 +241,7 @@ endif
+ endif
+ endif
+ endif
++endif
+ if BUILD_HTTPD
+ libvlccore_la_SOURCES += $(SOURCES_libvlc_httpd)
+ endif
+@@ -319,6 +323,18 @@ SOURCES_libvlc_os2 = \
+ 	os2/rand.c \
+ 	$(NULL)
+ 
++SOURCES_libvlc_haiku = \
++	posix/dirs.c \
++	posix/error.c \
++	posix/filesystem.c \
++	posix/netconf.c \
++	posix/plugin.c \
++	posix/rand.c \
++	posix/thread.c \
++	posix/timer.c \
++	haiku/specific.cpp \
++	$(NULL)
++
+ SOURCES_libvlc_other = \
+ 	posix/dirs.c \
+ 	posix/error.c \
+diff --git a/src/haiku/specific.cpp b/src/haiku/specific.cpp
+new file mode 100644
+index 0000000..ddf7070
+--- /dev/null
++++ b/src/haiku/specific.cpp
+@@ -0,0 +1,57 @@
++/*****************************************************************************
++ * specific.c: stubs for POSIX OS-specific initialization
++ *****************************************************************************
++ * Copyright © 2008 Rémi Denis-Courmont
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU Lesser General Public License as published by
++ * the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with this program; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
++ *****************************************************************************/
++
++#ifdef HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <Application.h>
++
++
++#include <vlc_common.h>
++extern "C"
++{
++#include "../libvlc.h"
++#include <pthread.h>
++
++
++static void set_libvlc_path (void)
++{
++    return;
++}
++
++void system_Init (void)
++{
++	BApplication app("application/x-vnd.vlc");
++    pthread_once_t once = PTHREAD_ONCE_INIT;
++
++    pthread_once (&once, set_libvlc_path);
++}
++
++void system_Configure (libvlc_int_t *libvlc,
++                       int argc, const char *const argv[])
++{
++    (void)libvlc; (void)argc; (void)argv;
++}
++
++void system_End (void)
++{
++}
++}
+diff --git a/src/modules/bank.c b/src/modules/bank.c
+index b439440..d4245cd 100644
+--- a/src/modules/bank.c
++++ b/src/modules/bank.c
+@@ -67,6 +67,7 @@ static void module_StoreBank (module_t *module)
+     modules.head = module;
+ }
+ 
++/* Haiku bug #8288
+ #if defined(__ELF__) || !HAVE_DYNAMIC_PLUGINS
+ # ifdef __GNUC__
+ __attribute__((weak))
+@@ -86,9 +87,9 @@ static void module_InitStaticModules(void)
+             module_StoreBank (module);
+     }
+ }
+-#else
++#else */
+ static void module_InitStaticModules(void) { }
+-#endif
++//#endif
+ 
+ /**
+  * Init bank
+diff --git a/src/network/io.c b/src/network/io.c
+index ea1b1b9..acdd9b1 100644
+--- a/src/network/io.c
++++ b/src/network/io.c
+@@ -216,7 +216,9 @@ int *net_Listen (vlc_object_t *p_this, const char *psz_host,
+         switch (ptr->ai_socktype)
+         {
+             case SOCK_STREAM:
++#ifdef SOCK_RDM
+             case SOCK_RDM:
++#endif
+             case SOCK_SEQPACKET:
+ #ifdef SOCK_DCCP
+             case SOCK_DCCP:
+-- 
+2.16.4
+
+
+From f8f783594747bb967335b7bf35d7e9a0d2e7140b Mon Sep 17 00:00:00 2001
+From: Sergei Reznikov <diver@gelios.net>
+Date: Wed, 23 Aug 2017 16:58:12 +0300
+Subject: fix build with ffmpeg 3.x and lua 5.2
+
+
+diff --git a/configure.ac b/configure.ac
+index 2ec9809..bbb6ce6 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1535,7 +1535,7 @@ then
+       AC_MSG_ERROR([Could not find lua. Lua is needed for some interfaces (rc, telnet, http) as well as many other custom scripts. Use --disable-lua to ignore this error.])
+   fi
+   AC_ARG_VAR([LUAC], [LUA byte compiler])
+-  AC_PATH_PROGS(LUAC,[${LUAC} luac], [false])
++  AC_PATH_PROGS(LUAC,[${LUAC} luac5.2], [false])
+   AS_IF([test "${LUAC}" = "false"], [
+     AC_MSG_ERROR([Could not find the LUA byte compiler.])
+   ])
+@@ -2330,7 +2330,7 @@ AC_ARG_ENABLE(avcodec,
+ [  --enable-avcodec        libavcodec codec (default enabled)])
+ AS_IF([test "${enable_avcodec}" != "no"], [
+   PKG_CHECK_MODULES(AVCODEC,[libavcodec >= 53.34.0 libavutil >= 51.22.0], [
+-    PKG_CHECK_EXISTS([libavutil < 55],, [
++    PKG_CHECK_EXISTS([libavutil > 55],, [
+       AC_MSG_ERROR([libavutil versions 55 and later are not supported.])
+     ])
+     VLC_SAVE_FLAGS
+@@ -2389,7 +2389,7 @@ have_avcodec_vaapi="no"
+ AS_IF([test "${have_vaapi}" = "yes" -a "${have_avcodec}" = "yes"], [
+   case "${avfork}" in
+     ffmpeg)
+-      PKG_CHECK_EXISTS([libavcodec >= 57.10.100], [
++      PKG_CHECK_EXISTS([libavcodec >= 60.10.100], [
+         AC_MSG_ERROR([VA API requires FFmpeg libavcodec < 57.10 or libav.])
+       ])
+       ;;
+@@ -2423,7 +2423,7 @@ AS_IF([test "${enable_dxva2}" != "no"], [
+   AS_IF([test "x${have_avcodec}" = "xyes"], [
+     case "${avfork}" in
+       ffmpeg)
+-        PKG_CHECK_EXISTS([libavcodec >= 57.10.100], [
++        PKG_CHECK_EXISTS([libavcodec >= 60.10.100], [
+           AC_MSG_ERROR([DXVA2 requires FFmpeg libavcodec < 57.10 or libav.])
+         ])
+         ;;
+@@ -3187,7 +3187,7 @@ AS_IF([test "${have_vdpau}" = "yes" -a "${have_avcodec}" = "yes"], [
+   case "${avfork}" in
+     libav) av_vdpau_ver="55.26.0" ;;
+     ffmpeg) av_vdpau_ver="55.42.100"
+-      PKG_CHECK_EXISTS([libavcodec >= 57.10.100], [
++      PKG_CHECK_EXISTS([libavcodec >= 60.10.100], [
+         AC_MSG_ERROR([VDPAU requires FFmpeg libavcodec < 57.10 or libav.])
+       ])
+       ;;
+@@ -3746,7 +3746,7 @@ AS_IF([test "${enable_qt}" != "no"], [
+   PKG_CHECK_MODULES([QT], [Qt5Core >= 5.1.0 Qt5Widgets Qt5Gui], [
+       PKG_CHECK_MODULES([QTX11], [Qt5X11Extras], [
+           VLC_ADD_LIBS([qt4],[${QTX11_LIBS}])
+-          VLC_ADD_CXXFLAGS([qt4],[${QTX11_CFLAGS} -DQT5_HAS_X11])
++          VLC_ADD_CXXFLAGS([qt4],[${QTX11_CFLAGS} -DQT5_HAS_X11 -std=c++11])
+           PKG_CHECK_MODULES([XI], [xi], [
+             VLC_ADD_LIBS([qt4], [${XI_LIBS}])
+             VLC_ADD_CXXFLAGS([qt4], [${XI_CFLAGS} -DHAVE_XI])
+diff --git a/modules/codec/avcodec/audio.c b/modules/codec/avcodec/audio.c
+index c6a0a6c..cb17991 100644
+--- a/modules/codec/avcodec/audio.c
++++ b/modules/codec/avcodec/audio.c
+@@ -36,12 +36,11 @@
+ #include <vlc_codec.h>
+ #include <vlc_avcodec.h>
+ 
++#include "avcodec.h"
++
+ #include <libavcodec/avcodec.h>
+ #include <libavutil/mem.h>
+ 
+-#include <libavutil/audioconvert.h>
+-
+-#include "avcodec.h"
+ 
+ /*****************************************************************************
+  * decoder_sys_t : decoder descriptor
+diff --git a/modules/codec/avcodec/avcommon_compat.h b/modules/codec/avcodec/avcommon_compat.h
+index 91b3f5b..3c66a1e 100644
+--- a/modules/codec/avcodec/avcommon_compat.h
++++ b/modules/codec/avcodec/avcommon_compat.h
+@@ -506,6 +506,15 @@ enum {
+ 
+ #endif /* HAVE_LIBAVUTIL_AVUTIL_H */
+ 
++#if LIBAVUTIL_VERSION_MAJOR >= 55
++# define FF_API_AUDIOCONVERT 1
++#endif
++
++/* libavutil/pixfmt.h */
++#ifndef PixelFormat
++# define PixelFormat AVPixelFormat
++#endif
++
+ #ifdef HAVE_LIBAVFORMAT_AVFORMAT_H
+ # include <libavformat/avformat.h>
+ 
+diff --git a/modules/codec/avcodec/encoder.c b/modules/codec/avcodec/encoder.c
+index ca7674f..9020576 100644
+--- a/modules/codec/avcodec/encoder.c
++++ b/modules/codec/avcodec/encoder.c
+@@ -41,7 +41,6 @@
+ #include <vlc_cpu.h>
+ 
+ #include <libavcodec/avcodec.h>
+-#include <libavutil/audioconvert.h>
+ 
+ #include "avcodec.h"
+ #include "avcommon.h"
+@@ -311,7 +310,7 @@ int OpenEncoder( vlc_object_t *p_this )
+     else if( !GetFfmpegCodec( p_enc->fmt_out.i_codec, &i_cat, &i_codec_id,
+                              &psz_namecodec ) )
+     {
+-        if( FindFfmpegChroma( p_enc->fmt_out.i_codec ) == PIX_FMT_NONE )
++        if( FindFfmpegChroma( p_enc->fmt_out.i_codec ) == AV_PIX_FMT_NONE )
+             return VLC_EGENERIC; /* handed chroma output */
+ 
+         i_cat      = VIDEO_ES;
+@@ -1017,7 +1016,7 @@ errmsg:
+         }
+     }
+ 
+-    p_sys->frame = avcodec_alloc_frame();
++    p_sys->frame = av_frame_alloc();
+     if( !p_sys->frame )
+     {
+         goto error;
+@@ -1088,7 +1087,8 @@ static block_t *EncodeVideo( encoder_t *p_enc, picture_t *p_pict )
+     AVFrame *frame = NULL;
+     if( likely(p_pict) ) {
+         frame = p_sys->frame;
+-        avcodec_get_frame_defaults( frame );
++        av_frame_unref( frame );
++
+         for( i_plane = 0; i_plane < p_pict->i_planes; i_plane++ )
+         {
+             p_sys->frame->data[i_plane] = p_pict->p[i_plane].p_pixels;
+@@ -1329,7 +1329,7 @@ static block_t *handle_delay_buffer( encoder_t *p_enc, encoder_sys_t *p_sys, int
+     //How much we need to copy from new packet
+     const int leftover = leftover_samples * p_sys->p_context->channels * p_sys->i_sample_bytes;
+ 
+-    avcodec_get_frame_defaults( p_sys->frame );
++    av_frame_unref( p_sys->frame );
+     p_sys->frame->format     = p_sys->p_context->sample_fmt;
+     p_sys->frame->nb_samples = leftover_samples + p_sys->i_samples_delay;
+ 
+@@ -1451,7 +1451,8 @@ static block_t *EncodeAudio( encoder_t *p_enc, block_t *p_aout_buf )
+     while( ( p_aout_buf->i_nb_samples >= p_sys->i_frame_size ) ||
+            ( p_sys->b_variable && p_aout_buf->i_nb_samples ) )
+     {
+-        avcodec_get_frame_defaults( p_sys->frame );
++        av_frame_unref( p_sys->frame );
++
+         if( p_sys->b_variable )
+             p_sys->frame->nb_samples = p_aout_buf->i_nb_samples;
+         else
+diff --git a/modules/codec/avcodec/vaapi.c b/modules/codec/avcodec/vaapi.c
+index 1d8f7fa..d9643d0 100644
+--- a/modules/codec/avcodec/vaapi.c
++++ b/modules/codec/avcodec/vaapi.c
+@@ -595,7 +595,7 @@ static int Create( vlc_va_t *p_va, AVCodecContext *ctx,
+         return err;
+ 
+     /* Only VLD supported */
+-    p_va->pix_fmt = PIX_FMT_VAAPI_VLD;
++    p_va->pix_fmt = AV_PIX_FMT_VAAPI_VLD;
+     p_va->setup = Setup;
+     p_va->get = Get;
+     p_va->release = Release;
+diff --git a/modules/codec/avcodec/video.c b/modules/codec/avcodec/video.c
+index 4c3e9bc..a720fd8 100644
+--- a/modules/codec/avcodec/video.c
++++ b/modules/codec/avcodec/video.c
+@@ -236,7 +236,7 @@ int InitVideoDec( decoder_t *p_dec, AVCodecContext *p_context,
+     p_sys->p_codec = p_codec;
+     p_sys->i_codec_id = i_codec_id;
+     p_sys->psz_namecodec = psz_namecodec;
+-    p_sys->p_ff_pic = avcodec_alloc_frame();
++    p_sys->p_ff_pic = av_frame_alloc();
+     p_sys->b_delayed_open = true;
+     p_sys->p_va = NULL;
+     vlc_sem_init( &p_sys->sem_mt, 0 );
+@@ -448,7 +448,7 @@ int InitVideoDec( decoder_t *p_dec, AVCodecContext *p_context,
+     if( ffmpeg_OpenCodec( p_dec ) < 0 )
+     {
+         msg_Err( p_dec, "cannot open codec (%s)", p_sys->psz_namecodec );
+-        avcodec_free_frame( &p_sys->p_ff_pic );
++        av_frame_free( &p_sys->p_ff_pic );
+         vlc_sem_destroy( &p_sys->sem_mt );
+         free( p_sys );
+         return VLC_EGENERIC;
+@@ -849,7 +849,7 @@ void EndVideoDec( decoder_t *p_dec )
+     wait_mt( p_sys );
+ 
+     if( p_sys->p_ff_pic )
+-        avcodec_free_frame( &p_sys->p_ff_pic );
++        av_frame_free( &p_sys->p_ff_pic );
+ 
+     if( p_sys->p_va )
+         vlc_va_Delete( p_sys->p_va );
+-- 
+2.16.4
+
+
+From 8ff84f986f9a180c2e2a84c14d5b6d29e1f9a69b Mon Sep 17 00:00:00 2001
+From: Sergei Reznikov <diver@gelios.net>
+Date: Wed, 23 Aug 2017 18:44:51 +0300
+Subject: backport static assert fix from vlc 3.0
+
+
+diff --git a/include/vlc_fixups.h b/include/vlc_fixups.h
+index 47b566e..9ee135f 100644
+--- a/include/vlc_fixups.h
++++ b/include/vlc_fixups.h
+@@ -239,11 +239,14 @@ static inline locale_t newlocale(int mask, const char * locale, locale_t base)
+ }
+ #endif
+ 
+-#if !defined (HAVE_STATIC_ASSERT)
+-# define _Static_assert(x, s) ((void) sizeof (struct { unsigned:-!(x); }))
++#if !defined (HAVE_STATIC_ASSERT) && !defined(__cpp_static_assert)
++# define STATIC_ASSERT_CONCAT_(a, b) a##b
++# define STATIC_ASSERT_CONCAT(a, b) STATIC_ASSERT_CONCAT_(a, b)
++# define _Static_assert(x, s) extern char STATIC_ASSERT_CONCAT(static_assert_, __LINE__)[sizeof(struct { unsigned:-!(x); })]
+ # define static_assert _Static_assert
+ #endif
+ 
++
+ /* Alignment of critical static data structures */
+ #ifdef ATTRIBUTE_ALIGNED_MAX
+ #   define ATTR_ALIGN(align) __attribute__ ((__aligned__ ((ATTRIBUTE_ALIGNED_MAX < align) ? ATTRIBUTE_ALIGNED_MAX : align)))
+-- 
+2.16.4
+
+
+From 2957d5ed6e13d52863ac9b2835f8beb93c7bb3f4 Mon Sep 17 00:00:00 2001
+From: Sergei Reznikov <diver@gelios.net>
+Date: Thu, 30 Aug 2018 12:54:55 +0300
+Subject: Fix build on Qt 5.11
+
+
+diff --git a/modules/gui/qt4/actions_manager.cpp b/modules/gui/qt4/actions_manager.cpp
+index a88c972..2b7ce9d 100644
+--- a/modules/gui/qt4/actions_manager.cpp
++++ b/modules/gui/qt4/actions_manager.cpp
+@@ -27,6 +27,8 @@
+ 
+ #include "qt4.hpp"
+ 
++#include <QAction>
++
+ #include <vlc_vout.h>
+ #include <vlc_keys.h>
+ 
+diff --git a/modules/gui/qt4/components/simple_preferences.cpp b/modules/gui/qt4/components/simple_preferences.cpp
+index eca0a45..3ef7880 100644
+--- a/modules/gui/qt4/components/simple_preferences.cpp
++++ b/modules/gui/qt4/components/simple_preferences.cpp
+@@ -33,6 +33,7 @@
+ #include <vlc_config_cat.h>
+ #include <vlc_configuration.h>
+ 
++#include <QButtonGroup>
+ #include <QString>
+ #include <QFont>
+ #include <QToolButton>
+-- 
+2.16.4
+
+
+From 54b75e39cd706655e1e987658944d6a211789d6a Mon Sep 17 00:00:00 2001
+From: Sergei Reznikov <diver@gelios.net>
+Date: Thu, 30 Aug 2018 12:56:59 +0300
+Subject: Fix build with ffmpeg 4.0
+
+
+diff --git a/modules/codec/avcodec/avcommon_compat.h b/modules/codec/avcodec/avcommon_compat.h
+index 3c66a1e..b977ef5 100644
+--- a/modules/codec/avcodec/avcommon_compat.h
++++ b/modules/codec/avcodec/avcommon_compat.h
+@@ -47,6 +47,45 @@
+ #   define AV_SAMPLE_FMT_S32        SAMPLE_FMT_S32
+ #   define AV_SAMPLE_FMT_FLT        SAMPLE_FMT_FLT
+ #   define AV_SAMPLE_FMT_DBL        SAMPLE_FMT_DBL
++#ifndef AV_CODEC_FLAG_OUTPUT_CORRUPT
++# define AV_CODEC_FLAG_OUTPUT_CORRUPT CODEC_FLAG_OUTPUT_CORRUPT
++#endif
++#ifndef AV_CODEC_FLAG_GRAY
++# define AV_CODEC_FLAG_GRAY CODEC_FLAG_GRAY
++#endif
++#ifndef AV_CODEC_FLAG_DR1
++# define AV_CODEC_FLAG_DR1 CODEC_FLAG_DR1
++#endif
++#ifndef AV_CODEC_FLAG_DELAY
++# define AV_CODEC_FLAG_DELAY CODEC_FLAG_DELAY
++#endif
++#ifndef AV_CODEC_FLAG2_FAST
++# define AV_CODEC_FLAG2_FAST CODEC_FLAG2_FAST
++#endif
++#ifndef FF_INPUT_BUFFER_PADDING_SIZE
++# define FF_INPUT_BUFFER_PADDING_SIZE AV_INPUT_BUFFER_PADDING_SIZE
++#endif
++#ifndef AV_CODEC_FLAG_INTERLACED_DCT
++# define AV_CODEC_FLAG_INTERLACED_DCT CODEC_FLAG_INTERLACED_DCT
++#endif
++#ifndef AV_CODEC_FLAG_INTERLACED_ME
++# define AV_CODEC_FLAG_INTERLACED_ME CODEC_FLAG_INTERLACED_ME
++#endif
++#ifndef AV_CODEC_FLAG_GLOBAL_HEADER
++# define AV_CODEC_FLAG_GLOBAL_HEADER CODEC_FLAG_GLOBAL_HEADER
++#endif
++#ifndef AV_CODEC_FLAG_LOW_DELAY
++# define AV_CODEC_FLAG_LOW_DELAY CODEC_FLAG_LOW_DELAY
++#endif
++#ifndef AV_CODEC_CAP_SMALL_LAST_FRAME
++# define AV_CODEC_CAP_SMALL_LAST_FRAME CODEC_CAP_SMALL_LAST_FRAME
++#endif
++#ifndef AV_INPUT_BUFFER_MIN_SIZE
++# define AV_INPUT_BUFFER_MIN_SIZE FF_MIN_BUFFER_SIZE
++#endif
++#ifndef  FF_MAX_B_FRAMES
++# define  FF_MAX_B_FRAMES 16 // FIXME: remove this
++#endif
+ 
+ #ifndef AV_CH_FRONT_LEFT
+ #   define AV_CH_FRONT_LEFT         CH_FRONT_LEFT
+@@ -479,6 +518,46 @@ enum {
+ # define err_recognition error_recognition
+ #endif
+ 
++#ifndef AV_CODEC_FLAG_OUTPUT_CORRUPT
++# define AV_CODEC_FLAG_OUTPUT_CORRUPT CODEC_FLAG_OUTPUT_CORRUPT
++#endif
++#ifndef AV_CODEC_FLAG_GRAY
++# define AV_CODEC_FLAG_GRAY CODEC_FLAG_GRAY
++#endif
++#ifndef AV_CODEC_FLAG_DR1
++# define AV_CODEC_FLAG_DR1 CODEC_FLAG_DR1
++#endif
++#ifndef AV_CODEC_FLAG_DELAY
++# define AV_CODEC_FLAG_DELAY CODEC_FLAG_DELAY
++#endif
++#ifndef AV_CODEC_FLAG2_FAST
++# define AV_CODEC_FLAG2_FAST CODEC_FLAG2_FAST
++#endif
++#ifndef FF_INPUT_BUFFER_PADDING_SIZE
++# define FF_INPUT_BUFFER_PADDING_SIZE AV_INPUT_BUFFER_PADDING_SIZE
++#endif
++#ifndef AV_CODEC_FLAG_INTERLACED_DCT
++# define AV_CODEC_FLAG_INTERLACED_DCT CODEC_FLAG_INTERLACED_DCT
++#endif
++#ifndef AV_CODEC_FLAG_INTERLACED_ME
++# define AV_CODEC_FLAG_INTERLACED_ME CODEC_FLAG_INTERLACED_ME
++#endif
++#ifndef AV_CODEC_FLAG_GLOBAL_HEADER
++# define AV_CODEC_FLAG_GLOBAL_HEADER CODEC_FLAG_GLOBAL_HEADER
++#endif
++#ifndef AV_CODEC_FLAG_LOW_DELAY
++# define AV_CODEC_FLAG_LOW_DELAY CODEC_FLAG_LOW_DELAY
++#endif
++#ifndef AV_CODEC_CAP_SMALL_LAST_FRAME
++# define AV_CODEC_CAP_SMALL_LAST_FRAME CODEC_CAP_SMALL_LAST_FRAME
++#endif
++#ifndef AV_INPUT_BUFFER_MIN_SIZE
++# define AV_INPUT_BUFFER_MIN_SIZE FF_MIN_BUFFER_SIZE
++#endif
++#ifndef  FF_MAX_B_FRAMES
++# define  FF_MAX_B_FRAMES 16 // FIXME: remove this
++#endif
++
+ #endif /* HAVE_LIBAVCODEC_AVCODEC_H */
+ 
+ #ifdef HAVE_LIBAVUTIL_AVUTIL_H
+diff --git a/modules/codec/avcodec/encoder.c b/modules/codec/avcodec/encoder.c
+index 9020576..5016226 100644
+--- a/modules/codec/avcodec/encoder.c
++++ b/modules/codec/avcodec/encoder.c
+@@ -284,6 +284,24 @@ static void probe_video_frame_rate( encoder_t *p_enc, AVCodecContext *p_context,
+     msg_Dbg( p_enc, "Time base set to %d/%d", p_context->time_base.num, p_context->time_base.den );
+ }
+ 
++static void add_av_option_int( encoder_t *p_enc, AVDictionary** pp_dict, const char* psz_name, int i_value )
++{
++    char buff[32];
++    if ( snprintf( buff, sizeof(buff), "%d", i_value ) < 0 )
++        return;
++    if( av_dict_set( pp_dict, psz_name, buff, 0 ) < 0 )
++        msg_Warn( p_enc, "Failed to set encoder option %s", psz_name );
++}
++
++static void add_av_option_float( encoder_t *p_enc, AVDictionary** pp_dict, const char* psz_name, float f_value )
++{
++    char buff[128];
++    if ( snprintf( buff, sizeof(buff), "%f", f_value ) < 0 )
++        return;
++    if( av_dict_set( pp_dict, psz_name, buff, 0 ) < 0 )
++        msg_Warn( p_enc, "Failed to set encoder option %s", psz_name );
++}
++
+ int OpenEncoder( vlc_object_t *p_this )
+ {
+     encoder_t *p_enc = (encoder_t *)p_this;
+@@ -492,6 +510,7 @@ int OpenEncoder( vlc_object_t *p_this )
+         }
+     }
+     free( psz_val );
++    AVDictionary *options = NULL;
+ 
+     if( p_enc->fmt_in.i_cat == VIDEO_ES )
+     {
+@@ -521,7 +540,7 @@ int OpenEncoder( vlc_object_t *p_this )
+         p_context->lumi_masking = p_sys->f_lumi_masking;
+         p_context->dark_masking = p_sys->f_dark_masking;
+         p_context->p_masking = p_sys->f_p_masking;
+-        p_context->border_masking = p_sys->f_border_masking;
++        add_av_option_float( p_enc, &options, "border_mask", p_sys->f_border_masking );
+ #if (LIBAVCODEC_VERSION_MAJOR < 55)
+         p_context->luma_elim_threshold = p_sys->i_luma_elim;
+         p_context->chroma_elim_threshold = p_sys->i_chroma_elim;
+@@ -535,7 +554,7 @@ int OpenEncoder( vlc_object_t *p_this )
+         if( !p_context->max_b_frames  &&
+             (  p_enc->fmt_out.i_codec == VLC_CODEC_MPGV ||
+                p_enc->fmt_out.i_codec == VLC_CODEC_MP2V ) )
+-            p_context->flags |= CODEC_FLAG_LOW_DELAY;
++            p_context->flags |= AV_CODEC_FLAG_LOW_DELAY;
+ 
+         av_reduce( &p_context->sample_aspect_ratio.num,
+                    &p_context->sample_aspect_ratio.den,
+@@ -593,16 +612,16 @@ int OpenEncoder( vlc_object_t *p_this )
+             }
+             else
+             {
+-                p_context->flags |= CODEC_FLAG_INTERLACED_DCT;
++                p_context->flags |= AV_CODEC_FLAG_INTERLACED_DCT;
+                 if ( p_sys->b_interlace_me )
+-                    p_context->flags |= CODEC_FLAG_INTERLACED_ME;
++                    p_context->flags |= AV_CODEC_FLAG_INTERLACED_ME;
+             }
+         }
+ 
+         p_context->trellis = p_sys->b_trellis;
+ 
+         if ( p_sys->i_qmin > 0 && p_sys->i_qmin == p_sys->i_qmax )
+-            p_context->flags |= CODEC_FLAG_QSCALE;
++            p_context->flags |= AV_CODEC_FLAG_QSCALE;
+         /* These codecs cause libavcodec to exit if thread_count is > 1.
+            See libavcodec/mpegvideo_enc.c:MPV_encode_init and
+            libavcodec/svq3.c , WMV2 calls MPV_encode_init also.
+@@ -638,12 +657,14 @@ int OpenEncoder( vlc_object_t *p_this )
+         if( p_sys->i_qmin > 0 )
+         {
+             p_context->qmin = p_sys->i_qmin;
+-            p_context->mb_lmin = p_context->lmin = p_sys->i_qmin * FF_QP2LAMBDA;
++            p_context->mb_lmin = p_sys->i_qmin * FF_QP2LAMBDA;
++            add_av_option_int( p_enc, &options, "lmin", p_context->mb_lmin);
+         }
+         if( p_sys->i_qmax > 0 )
+         {
+             p_context->qmax = p_sys->i_qmax;
+-            p_context->mb_lmax = p_context->lmax = p_sys->i_qmax * FF_QP2LAMBDA;
++            p_context->mb_lmax = p_sys->i_qmax * FF_QP2LAMBDA;
++            add_av_option_int( p_enc, &options, "lmax", p_context->mb_lmax);
+         }
+         p_context->max_qdiff = 3;
+ 
+@@ -651,12 +672,12 @@ int OpenEncoder( vlc_object_t *p_this )
+ 
+         if( p_sys->i_quality && !p_enc->fmt_out.i_bitrate )
+         {
+-            p_context->flags |= CODEC_FLAG_QSCALE;
++            p_context->flags |= AV_CODEC_FLAG_QSCALE;
+             p_context->global_quality = p_sys->i_quality;
+         }
+         else
+         {
+-            p_context->rc_qsquish = 1.0;
++            av_dict_set(&options, "qsquish", "1.0", 0);
+             /* Default to 1/2 second buffer for given bitrate unless defined otherwise*/
+             if( !p_sys->i_rc_buffer_size )
+             {
+@@ -670,7 +691,7 @@ int OpenEncoder( vlc_object_t *p_this )
+             /* This is from ffmpeg's ffmpeg.c : */
+             p_context->rc_initial_buffer_occupancy
+                 = p_sys->i_rc_buffer_size * 3/4;
+-            p_context->rc_buffer_aggressivity = p_sys->f_rc_buffer_aggressivity;
++            add_av_option_float( p_enc, &options, "rc_buffer_aggressivity", p_sys->f_rc_buffer_aggressivity );
+         }
+     }
+     else if( p_enc->fmt_in.i_cat == AUDIO_ES )
+@@ -807,20 +828,23 @@ int OpenEncoder( vlc_object_t *p_this )
+             if( !var_GetInteger( p_enc, ENC_CFG_PREFIX "qmin" ) )
+             {
+                 p_context->qmin = 10;
+-                p_context->mb_lmin = p_context->lmin = 10 * FF_QP2LAMBDA;
++                p_context->mb_lmin = 10 * FF_QP2LAMBDA;
++                add_av_option_int( p_enc, &options, "lmin", p_context->mb_lmin );
+             }
+ 
+             if( !var_GetInteger( p_enc, ENC_CFG_PREFIX "qmax" ) )
+             {
+                 p_context->qmax = 42;
+-                p_context->mb_lmax = p_context->lmax = 42 * FF_QP2LAMBDA;
++                p_context->mb_lmax = 42 * FF_QP2LAMBDA;
++                add_av_option_int( p_enc, &options, "lmax", p_context->mb_lmax );
+             }
+ 
+             } else {
+             if( !var_GetInteger( p_enc, ENC_CFG_PREFIX "qmin" ) )
+             {
+                 p_context->qmin = 1;
+-                p_context->mb_lmin = p_context->lmin = FF_QP2LAMBDA;
++                p_context->mb_lmin = FF_QP2LAMBDA;
++                add_av_option_int( p_enc, &options, "lmin", p_context->mb_lmin );
+             }
+         }
+ 
+@@ -845,7 +869,7 @@ int OpenEncoder( vlc_object_t *p_this )
+     /* Make sure we get extradata filled by the encoder */
+     p_context->extradata_size = 0;
+     p_context->extradata = NULL;
+-    p_context->flags |= CODEC_FLAG_GLOBAL_HEADER;
++    p_context->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+ 
+     if( p_enc->i_threads >= 1)
+         p_context->thread_count = p_enc->i_threads;
+@@ -854,7 +878,6 @@ int OpenEncoder( vlc_object_t *p_this )
+ 
+     int ret;
+     char *psz_opts = var_InheritString(p_enc, ENC_CFG_PREFIX "options");
+-    AVDictionary *options = NULL;
+     if (psz_opts && *psz_opts)
+         options = vlc_av_get_options(psz_opts);
+     free(psz_opts);
+@@ -982,7 +1005,7 @@ errmsg:
+         }
+     }
+ 
+-    p_context->flags &= ~CODEC_FLAG_GLOBAL_HEADER;
++    p_context->flags &= ~AV_CODEC_FLAG_GLOBAL_HEADER;
+ 
+     if( p_enc->fmt_in.i_cat == AUDIO_ES )
+     {
+@@ -992,7 +1015,7 @@ errmsg:
+         p_sys->i_sample_bytes = (p_enc->fmt_in.audio.i_bitspersample / 8);
+         p_sys->i_frame_size = p_context->frame_size > 1 ?
+                                     p_context->frame_size :
+-                                    FF_MIN_BUFFER_SIZE;
++                                    AV_INPUT_BUFFER_MIN_SIZE;
+         p_sys->i_buffer_out = av_samples_get_buffer_size(NULL,
+                 p_sys->p_context->channels, p_sys->i_frame_size,
+                 p_sys->p_context->sample_fmt, DEFAULT_ALIGN);
+@@ -1359,7 +1382,7 @@ static block_t *handle_delay_buffer( encoder_t *p_enc, encoder_sys_t *p_sys, int
+     }
+ 
+     if(unlikely( ( (leftover + buffer_delay) < p_sys->i_buffer_out ) &&
+-                 !(p_sys->p_codec->capabilities & CODEC_CAP_SMALL_LAST_FRAME )))
++                 !(p_sys->p_codec->capabilities & AV_CODEC_CAP_SMALL_LAST_FRAME )))
+     {
+         msg_Dbg( p_enc, "No small last frame support, padding");
+         size_t padding_size = p_sys->i_buffer_out - (leftover+buffer_delay);
+diff --git a/modules/codec/avcodec/video.c b/modules/codec/avcodec/video.c
+index a720fd8..975ab5d 100644
+--- a/modules/codec/avcodec/video.c
++++ b/modules/codec/avcodec/video.c
+@@ -251,11 +251,11 @@ int InitVideoDec( decoder_t *p_dec, AVCodecContext *p_context,
+         var_InheritInteger( p_dec, "avcodec-error-resilience" );
+ 
+     if( var_CreateGetBool( p_dec, "grayscale" ) )
+-        p_sys->p_context->flags |= CODEC_FLAG_GRAY;
++        p_sys->p_context->flags |= AV_CODEC_FLAG_GRAY;
+ 
+     /* ***** Output always the frames ***** */
+ #if LIBAVCODEC_VERSION_CHECK(55, 23, 1, 40, 101)
+-    p_sys->p_context->flags |= CODEC_FLAG_OUTPUT_CORRUPT;
++    p_sys->p_context->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT;
+ #endif
+ 
+     i_val = var_CreateGetInteger( p_dec, "avcodec-vismv" );
+@@ -268,7 +268,7 @@ int InitVideoDec( decoder_t *p_dec, AVCodecContext *p_context,
+     else if( i_val == 1 ) p_sys->p_context->skip_loop_filter = AVDISCARD_NONREF;
+ 
+     if( var_CreateGetBool( p_dec, "avcodec-fast" ) )
+-        p_sys->p_context->flags2 |= CODEC_FLAG2_FAST;
++        p_sys->p_context->flags2 |= AV_CODEC_FLAG2_FAST;
+ 
+     /* ***** libavcodec frame skipping ***** */
+     p_sys->b_hurry_up = var_CreateGetBool( p_dec, "avcodec-hurry-up" );
+@@ -295,7 +295,7 @@ int InitVideoDec( decoder_t *p_dec, AVCodecContext *p_context,
+     p_sys->b_direct_rendering = false;
+     p_sys->i_direct_rendering_used = -1;
+     if( var_CreateGetBool( p_dec, "avcodec-dr" ) &&
+-       (p_sys->p_codec->capabilities & CODEC_CAP_DR1) &&
++       (p_sys->p_codec->capabilities & AV_CODEC_CAP_DR1) &&
+         /* No idea why ... but this fixes flickering on some TSCC streams */
+         p_sys->i_codec_id != AV_CODEC_ID_TSCC && p_sys->i_codec_id != AV_CODEC_ID_CSCD &&
+         p_sys->i_codec_id != AV_CODEC_ID_CINEPAK &&
+@@ -308,16 +308,9 @@ int InitVideoDec( decoder_t *p_dec, AVCodecContext *p_context,
+ 
+     /* libavcodec doesn't properly release old pictures when frames are skipped */
+     //if( p_sys->b_hurry_up ) p_sys->b_direct_rendering = false;
+-    if( p_sys->b_direct_rendering )
+-    {
+-        msg_Dbg( p_dec, "trying to use direct rendering" );
+-        p_sys->p_context->flags |= CODEC_FLAG_EMU_EDGE;
+-    }
+-    else
+-    {
+-        msg_Dbg( p_dec, "direct rendering is disabled" );
+-    }
+-
++#if !LIBAVCODEC_VERSION_CHECK(55, 32, 1, 48, 102)
++    p_sys->p_context->flags |= CODEC_FLAG_EMU_EDGE;
++#endif
+     p_sys->p_context->get_format = ffmpeg_GetFormat;
+     /* Always use our get_buffer wrapper so we can calculate the
+      * PTS correctly */
+@@ -484,7 +477,7 @@ picture_t *DecodeVideo( decoder_t *p_dec, block_t **pp_block )
+     }
+ 
+     p_block = *pp_block;
+-    if(!p_block && !(p_sys->p_codec->capabilities & CODEC_CAP_DELAY) )
++    if(!p_block && !(p_sys->p_codec->capabilities & AV_CODEC_CAP_DELAY) )
+         return NULL;
+ 
+     if( p_sys->b_delayed_open )
+@@ -621,7 +614,7 @@ picture_t *DecodeVideo( decoder_t *p_dec, block_t **pp_block )
+         }
+         else
+         {
+-            /* Return delayed frames if codec has CODEC_CAP_DELAY */
++            /* Return delayed frames if codec has AV_CODEC_CAP_DELAY */
+             pkt.data = NULL;
+             pkt.size = 0;
+         }
+-- 
+2.16.4
+

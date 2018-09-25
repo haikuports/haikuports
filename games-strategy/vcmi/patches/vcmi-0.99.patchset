@@ -1,0 +1,170 @@
+From bd0d48e6d2354d8e437f97bff5c59697b7b2248f Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Tue, 7 Jan 2014 23:02:10 +0100
+Subject: Link to libnetwork, since we use sockets.
+
+
+diff --git a/server/CMakeLists.txt b/server/CMakeLists.txt
+index 563913b..f1e6424 100644
+--- a/server/CMakeLists.txt
++++ b/server/CMakeLists.txt
+@@ -24,6 +24,10 @@ set_target_properties(vcmiserver PROPERTIES ${PCH_PROPERTIES})
+ set_target_properties(vcmiserver PROPERTIES XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/../Frameworks @executable_path/")
+ cotire(vcmiserver)
+ 
++if (HAIKU)
++	target_link_libraries(vcmiserver network)
++endif()
++
+ if (NOT APPLE) # Already inside vcmiclient bundle
+ 	install(TARGETS vcmiserver DESTINATION ${BIN_DIR})
+ endif()
+-- 
+2.19.0
+
+
+From cb7a53869f9cea3e40692ccebbe6b5185704efd6 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Wed, 8 Jan 2014 21:14:51 +0100
+Subject: Support for renaming threads.
+
+
+diff --git a/lib/CThreadHelper.cpp b/lib/CThreadHelper.cpp
+index 2027390..3a0a207 100644
+--- a/lib/CThreadHelper.cpp
++++ b/lib/CThreadHelper.cpp
+@@ -3,6 +3,8 @@
+ 
+ #ifdef VCMI_WINDOWS
+ 	#include <windows.h>
++#elif defined(__HAIKU__)
++	#include <OS.h>
+ #elif !defined(VCMI_APPLE) && !defined(VCMI_FREEBSD) && !defined(VCMI_HURD)
+ 	#include <sys/prctl.h>
+ #endif
+@@ -80,6 +82,8 @@ void setThreadName(const std::string &name)
+ //not supported
+ #endif
+ 
++#elif defined(__HAIKU__)
++	rename_thread(find_thread(NULL), name.c_str());
+ #elif defined(__linux__)
+ 	prctl(PR_SET_NAME, name.c_str(), 0, 0, 0);
+ #endif
+-- 
+2.19.0
+
+
+From 3df6c3e7826ff3277e77194d5b0bc131497d93d6 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Mon, 27 Jan 2014 20:18:36 +0100
+Subject: Fix settings dir path.
+
+
+diff --git a/Global.h b/Global.h
+index b661afa..c90fbc6 100644
+--- a/Global.h
++++ b/Global.h
+@@ -51,7 +51,7 @@ static_assert(sizeof(bool) == 1, "Bool needs to be 1 byte in size.");
+ #  define VCMI_WINDOWS_32
+ #elif defined(_WIN32_WCE)
+ #  error "Windows CE isn't supported"
+-#elif defined(__linux__) || defined(__gnu_linux__) || defined(linux) || defined(__linux)
++#elif defined(__linux__) || defined(__gnu_linux__) || defined(linux) || defined(__linux) || defined(__HAIKU__)
+ #  define VCMI_UNIX
+ #  define VCMI_XDG
+ #  ifdef __ANDROID__
+diff --git a/vcmibuilder b/vcmibuilder
+index d9f9c97..fd824a8 100755
+--- a/vcmibuilder
++++ b/vcmibuilder
+@@ -56,7 +56,7 @@ then
+ #	echo " --download       " "Automatically download optional package using wget"
+ #	echo "                  " "Requires wget and Internet connection"
+ #	echo
+-	echo " --dest DIRECTORY " "Path where resulting data will be placed. Default is ~/.local/share/vcmi"
++	echo " --dest DIRECTORY " "Path where resulting data will be placed. Default is `finddir B_USER_NONPACKAGED_DATA_DIRECTORY`/vcmi"
+ 	echo
+ 	echo " --validate       " "Run basic validness checks"
+ 	exit 0
+@@ -146,7 +146,7 @@ if [[ -z "$dest_dir" ]]
+ then
+ 	if [[ -z "$XDG_DATA_HOME" ]]
+ 	then
+-		dest_dir="$HOME/.local/share/vcmi"
++		dest_dir="`finddir B_USER_NONPACKAGED_DATA_DIRECTORY`/vcmi"
+ 	else
+ 		dest_dir="$XDG_DATA_HOME/vcmi"
+ 	fi
+-- 
+2.19.0
+
+
+From 620082b7acc5e44a70643e7479a02fa4e8710ce4 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Mon, 6 Nov 2017 21:23:13 +0100
+Subject: don't use backtrace on Haiku
+
+
+diff --git a/Global.h b/Global.h
+index c90fbc6..f4e959b 100644
+--- a/Global.h
++++ b/Global.h
+@@ -57,6 +57,9 @@ static_assert(sizeof(bool) == 1, "Bool needs to be 1 byte in size.");
+ #  ifdef __ANDROID__
+ #    define VCMI_ANDROID
+ #  endif
++#  ifdef __HAIKU__
++#    define VCMI_HAIKU
++#  endif
+ #elif defined(__FreeBSD_kernel__) || defined(__FreeBSD__)
+ #  define VCMI_UNIX
+ #  define VCMI_XDG
+diff --git a/server/CVCMIServer.cpp b/server/CVCMIServer.cpp
+index 2856422..1d2ba8d 100644
+--- a/server/CVCMIServer.cpp
++++ b/server/CVCMIServer.cpp
+@@ -540,7 +540,7 @@ static void handleCommandOptions(int argc, char *argv[])
+ 	}
+ }
+ 
+-#if defined(__GNUC__) && !defined (__MINGW32__) && !defined(VCMI_ANDROID)
++#if defined(__GNUC__) && !defined (__MINGW32__) && !defined(VCMI_ANDROID) && !defined(VCMI_HAIKU)
+ void handleLinuxSignal(int sig)
+ {
+ 	const int STACKTRACE_SIZE = 100;
+@@ -571,7 +571,7 @@ int main(int argc, char** argv)
+ {
+ 	// Installs a sig sev segmentation violation handler
+ 	// to log stacktrace
+-	#if defined(__GNUC__) && !defined (__MINGW32__) && !defined(VCMI_ANDROID)
++	#if defined(__GNUC__) && !defined (__MINGW32__) && !defined(VCMI_ANDROID) && !defined(VCMI_HAIKU)
+ 	signal(SIGSEGV, handleLinuxSignal);
+ 	#endif
+ 
+-- 
+2.19.0
+
+
+From 8c28309d2ef0f009cae8fcdac8a5413093911d0e Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 15 Sep 2018 21:12:35 +0200
+Subject: fix data dir
+
+
+diff --git a/lib/VCMIDirs.cpp b/lib/VCMIDirs.cpp
+index a2148a6..0768ee7 100644
+--- a/lib/VCMIDirs.cpp
++++ b/lib/VCMIDirs.cpp
+@@ -470,7 +470,7 @@ bfs::path VCMIDirsXDG::userDataPath() const
+ 	// $XDG_DATA_HOME, default: $HOME/.local/share
+ 	const char* homeDir;
+ 	if ((homeDir = getenv("XDG_DATA_HOME")))
+-		return homeDir;
++		return bfs::path(homeDir) / "vcmi";
+ 	else if ((homeDir = getenv("HOME")))
+ 		return bfs::path(homeDir) / ".local" / "share" / "vcmi";
+ 	else
+-- 
+2.19.0
+

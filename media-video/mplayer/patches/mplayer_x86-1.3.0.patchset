@@ -1,0 +1,1454 @@
+From 683eb6964591da827fe9f7c7827507d999a12696 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Zolt=C3=A1n=20Mizsei?= <zmizsei@extrowerk.com>
+Date: Mon, 26 Dec 2016 17:18:13 +0100
+Subject: [PATCH] Haiku supporting code from Sergei Reznikov
+
+---
+ Makefile               |   3 +
+ configure              |  42 ++++++-
+ libao2/ao_haiku.cpp    | 195 +++++++++++++++++++++++++++++++
+ libao2/audio_out.c     |   7 ++
+ libvo/haiku_common.cpp | 304 +++++++++++++++++++++++++++++++++++++++++++++++++
+ libvo/haiku_common.h   |  69 +++++++++++
+ libvo/haiku_view.cpp   | 171 ++++++++++++++++++++++++++++
+ libvo/haiku_view.h     |  36 ++++++
+ libvo/haiku_window.cpp | 125 ++++++++++++++++++++
+ libvo/haiku_window.h   |  31 +++++
+ libvo/video_out.c      |   4 +
+ libvo/vo_haiku.cpp     | 201 ++++++++++++++++++++++++++++++++
+ 12 files changed, 1185 insertions(+), 3 deletions(-)
+ create mode 100644 libao2/ao_haiku.cpp
+ create mode 100644 libvo/haiku_common.cpp
+ create mode 100644 libvo/haiku_common.h
+ create mode 100644 libvo/haiku_view.cpp
+ create mode 100644 libvo/haiku_view.h
+ create mode 100644 libvo/haiku_window.cpp
+ create mode 100644 libvo/haiku_window.h
+ create mode 100644 libvo/vo_haiku.cpp
+
+diff --git a/Makefile b/Makefile
+index f59f635..3d422c3 100644
+--- a/Makefile
++++ b/Makefile
+@@ -544,6 +544,9 @@ SRCS_MPLAYER-$(S3FB)          += libvo/vo_s3fb.c
+ SRCS_MPLAYER-$(SDL)           += libao2/ao_sdl.c                        \
+                                  libvo/vo_sdl.c                         \
+                                  libvo/sdl_common.c
++SRCS_MPLAYER-$(HAIKU)         += libao2/ao_haiku.cpp                    \
++                                 libvo/vo_haiku.cpp                     \
++                                 libvo/haiku_common.cpp
+ SRCS_MPLAYER-$(SGIAUDIO)      += libao2/ao_sgi.c
+ SRCS_MPLAYER-$(SNDIO)         += libao2/ao_sndio.c
+ SRCS_MPLAYER-$(SUNAUDIO)      += libao2/ao_sun.c
+diff --git a/configure b/configure
+index d18543d..02f2004 100755
+--- a/configure
++++ b/configure
+@@ -228,6 +228,7 @@ qnx()       { issystem "QNX"; }
+ sunos()     { issystem "SunOS"; }
+ wine()      { issystem "Wine"; }
+ win32()     { cygwin || mingw32 || wine; }
++haiku()      { issystem "Haiku"; }
+ 
+ # arch test boolean functions
+ # x86/x86pc is used by QNX
+@@ -469,6 +470,7 @@ Video output:
+   --enable-vesa            enable VESA video output [autodetect]
+   --enable-svga            enable SVGAlib video output [autodetect]
+   --enable-sdl             enable SDL video output [autodetect]
++  --enable-haiku           enable Haiku video and audio output [autodetect]
+   --enable-kva             enable KVA video output [autodetect]
+   --enable-aa              enable AAlib video output [autodetect]
+   --enable-caca            enable CACA  video output [autodetect]
+@@ -678,6 +680,7 @@ _xvmc=no  #auto when complete
+ _vda=auto
+ _vdpau=auto
+ _sdl=auto
++_haiku=auto
+ _kva=auto
+ _direct3d=auto
+ _directx=auto
+@@ -1028,6 +1031,8 @@ for ac_option do
+   --disable-vdpau)      _vdpau=no       ;;
+   --enable-sdl)         _sdl=yes        ;;
+   --disable-sdl)        _sdl=no         ;;
++  --enable-haiku)       _haiku=yes      ;;
++  --disable-haiku)      _haiku=no       ;;
+   --enable-kva)         _kva=yes        ;;
+   --disable-kva)        _kva=no         ;;
+   --enable-direct3d)    _direct3d=yes   ;;
+@@ -1640,7 +1645,7 @@ else
+       cc_name=$cc_name_tmp
+       echocheck "$_cc version"
+       cc_vendor=gnu
+-      cc_version=$($_cc -dumpversion 2>&1)
++      cc_version=$( ( $_cc -dumpversion | sed -e 's/-nb[0-9]//' ) 2>&1 )
+       case $cc_version in
+         2.96*)
+           cc_fail=yes
+@@ -1710,7 +1715,7 @@ if test -z "$_target" ; then
+   # host's CPU/instruction set
+   set_host_arch() {
+   case "$1" in
+-      x86_64|amd64|i[3-9]86*|i86pc|x86|x86pc|k5|k6|k6_2|k6_3|k6-2|k6-3|pentium*|athlon*|i586_i686|i586-i686) host_arch=i386 ;;
++      x86_64|amd64|i[3-9]86*|i86pc|x86|x86pc|k5|k6|k6_2|k6_3|k6-2|k6-3|pentium*|athlon*|i586_i686|i586-i686|BePC) host_arch=i386 ;;
+       ia64) host_arch=ia64 ;;
+       macppc|ppc*|Power*) host_arch=ppc ;;
+       alpha) host_arch=alpha ;;
+@@ -1749,6 +1754,7 @@ else # if test -z "$_target"
+       amigaos) system_name=AmigaOS ;;
+       mingw32*) system_name=MINGW32 ;;
+       wine) system_name=Wine ;;
++      haiku) system_name=Haiku ;;
+     esac
+   done
+   # We need to convert underscores so that values like k6-2 and pentium-mmx can be passed
+@@ -1825,6 +1831,11 @@ if wine ; then
+   extra_cflags="-fno-pic -UWIN32 -U_WIN32 -U__WIN32 -U__WIN32__ -DWINE_NOWINSOCK $extra_cflags"
+ fi
+ 
++if haiku ; then
++  extra_ldflags="$extra_ldflags -lbe -lmedia -lsupc++"
++  extra_cflags="-fno-pic $extra_cflags"
++fi
++
+ if darwin && test "$cc_vendor" != "clang" ; then
+   extra_cflags="-falign-loops=16 -shared-libgcc $extra_cflags"
+ fi
+@@ -5766,6 +5777,29 @@ fi
+ echores "$_v4l2"
+ 
+ 
++echocheck "Haiku"
++if test "$_haiku" = auto || test "$_haiku" = yes ; then
++  cat > $TMPC << EOF
++int main(void) {
++#ifdef __HAIKU__
++  return 0;
++#endif
++}
++EOF
++   _haiku=no
++   cc_check && _haiku=yes
++fi
++if test "$_haiku" = yes ; then
++  def_haiku='#define CONFIG_HAIKU 1'
++  vomodules="haiku $vomodules"
++  aomodules="haiku $aomodules"
++else
++  def_haiku='#undef CONFIG_HAIKU'
++  novomodules="haiku $novomodules"
++  noaomodules="haiku $noaomodules"
++fi
++echores "$_haiku"
++
+ 
+ #########
+ # AUDIO #
+@@ -8005,7 +8039,7 @@ fi
+ # (FIXME: 'echocheck "dynamic linking"' above and modify here accordingly)
+ ld_dl_dynamic=''
+ freebsd || netbsd || openbsd || dragonfly || bsdos && ld_dl_dynamic='-rdynamic'
+-if test "$_real" = yes || test "$_xanim" = yes && ! win32 && ! qnx && ! darwin && ! os2 && ! sunos; then
++if test "$_real" = yes || test "$_xanim" = yes && ! win32 && ! qnx && ! darwin && ! os2 && ! sunos && ! haiku; then
+   ld_dl_dynamic='-rdynamic'
+ fi
+ 
+@@ -8498,6 +8532,7 @@ RADIO_CAPTURE=$_radio_capture
+ REAL_CODECS = $_real
+ S3FB = $_s3fb
+ SDL = $_sdl
++HAIKU = $_haiku
+ SDL_IMAGE = $sdl_image
+ SPEEX = $_speex
+ STREAM_CACHE = $_stream_cache
+@@ -9080,6 +9115,7 @@ $def_quartz
+ $def_s3fb
+ $def_sdl
+ $def_sdl_sdl_h
++$def_haiku
+ $def_svga
+ $def_tdfxfb
+ $def_tdfxvid
+diff --git a/libao2/ao_haiku.cpp b/libao2/ao_haiku.cpp
+new file mode 100644
+index 0000000..e201f17
+--- /dev/null
++++ b/libao2/ao_haiku.cpp
+@@ -0,0 +1,195 @@
++/*
++ * Haiku audio output driver for MPlayer
++ * (c) 2011 3dEyes**
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/time.h>
++#include <Application.h>
++#include <PushGameSound.h>
++#include <SoundPlayer.h>
++
++#include "config.h"
++
++extern "C" {
++#include "config.h"
++#include "audio_out.h"
++#include "audio_out_internal.h"
++#include "libaf/af_format.h"
++#include "mp_msg.h"
++#include "help_mp.h"
++#include "osdep/timer.h"
++#include "libavutil/fifo.h"
++}
++
++static const ao_info_t info =
++{
++	"Haiku audio output",
++	"haiku",
++	"3dEyes** (3dEyes@gmail.com)",
++	""
++};
++
++extern "C" {
++ao_functions_t audio_out_haiku =
++	{
++		&info,
++		control,
++		init,
++	    uninit,
++		reset,
++		get_space,
++		play,
++		get_delay,
++		audio_pause,
++		audio_resume
++	};
++}
++
++
++
++#define SAMPLESIZE 1024
++#define CHUNK_SIZE 4096
++#define NUM_CHUNKS 10
++#define BUFFSIZE (NUM_CHUNKS * CHUNK_SIZE)
++
++static AVFifoBuffer *buffer;
++
++BApplication app("application/x-vnd.mplayer");
++static BSoundPlayer *player = NULL;
++
++static int write_buffer(unsigned char* data,int len){
++  int free = av_fifo_space(buffer);
++  if (len > free) len = free;
++  return av_fifo_generic_write(buffer, data, len, NULL);
++}
++
++
++static int read_buffer(unsigned char* data,int len){
++  int buffered = av_fifo_size(buffer);
++  if (len > buffered) len = buffered;
++  av_fifo_generic_read(buffer, data, len, NULL);
++  return len;
++}
++
++//BSoundPlayer proc func
++static void proc(void *cookie, void *buffer, size_t len, const media_raw_audio_format &format)
++{
++	read_buffer((unsigned char*)buffer, len);
++}
++
++// to set/get/query special features/parameters
++static int control(int cmd,void *arg){
++	return CONTROL_UNKNOWN;
++}
++
++// open & setup audio device
++// return: 1=success 0=fail
++static int init(int rate,int channels,int format,int flags){
++	buffer = av_fifo_alloc(BUFFSIZE);
++
++	ao_data.channels = channels;
++	ao_data.samplerate = rate;
++	ao_data.buffersize = CHUNK_SIZE;
++	ao_data.outburst = CHUNK_SIZE;
++    ao_data.format = format;
++
++	media_raw_audio_format hspec = {
++		rate,
++		channels,
++		media_raw_audio_format::B_AUDIO_SHORT,
++		B_MEDIA_LITTLE_ENDIAN,
++		CHUNK_SIZE /  2
++	};
++
++	switch(format) {
++	    case AF_FORMAT_U8:
++			hspec.format = media_raw_audio_format::B_AUDIO_UCHAR;
++			break;
++	    case AF_FORMAT_S8:
++			hspec.format = media_raw_audio_format::B_AUDIO_CHAR;;
++			break;
++	    case AF_FORMAT_S16_LE:
++			hspec.format = media_raw_audio_format::B_AUDIO_SHORT;
++            hspec.byte_order = B_MEDIA_LITTLE_ENDIAN;
++			break;
++	    case AF_FORMAT_S16_BE:
++			hspec.format = media_raw_audio_format::B_AUDIO_SHORT;
++			hspec.byte_order = B_MEDIA_BIG_ENDIAN;
++			break;
++      	case AF_FORMAT_FLOAT_LE:
++			hspec.format = media_raw_audio_format::B_AUDIO_FLOAT;
++            hspec.byte_order = B_MEDIA_LITTLE_ENDIAN;	
++			break;
++      	case AF_FORMAT_FLOAT_BE:
++			hspec.format = media_raw_audio_format::B_AUDIO_FLOAT;
++			hspec.byte_order = B_MEDIA_BIG_ENDIAN;	
++			break;
++	    default:
++            hspec.format = media_raw_audio_format::B_AUDIO_SHORT;
++            hspec.byte_order = B_MEDIA_LITTLE_ENDIAN;
++            ao_data.format = AF_FORMAT_S16_LE;
++			break;
++	}
++	
++	hspec.buffer_size = CHUNK_SIZE / (af_fmt2bits(ao_data.format) / 8);
++	ao_data.bps = channels * rate * (af_fmt2bits(ao_data.format) / 8);
++	
++	player = new BSoundPlayer(&hspec, "MPlayer", proc);
++	
++	if(player->InitCheck() != B_OK) {
++		delete player; 
++		player = NULL;
++		return 0;
++	}
++	
++	player->Start();
++	player->SetHasData(true);		
++
++	return 1;
++}
++
++// close audio device
++static void uninit(int immed){
++
++	if (!immed)
++	  usec_sleep(get_delay() * 1000 * 1000);
++	
++	player->SetHasData(false);
++	delete player;
++
++	av_fifo_free(buffer);
++}
++
++static void reset(void){
++
++	av_fifo_reset(buffer);
++}
++
++static void audio_pause(void)
++{
++	player->Stop();
++}
++
++static void audio_resume(void)
++{
++	player->Start();
++	player->SetHasData(true);	
++}
++
++static int get_space(void){
++    return av_fifo_space(buffer);
++}
++
++static int play(void* data,int len,int flags){
++	if (!(flags & AOPLAY_FINAL_CHUNK))
++	len = (len/ao_data.outburst)*ao_data.outburst;
++	return write_buffer((unsigned char*)data, len);
++}
++
++static float get_delay(void){
++    int buffered = av_fifo_size(buffer); // could be less
++    return (float)(buffered + ao_data.buffersize)/(float)ao_data.bps;
++}
+diff --git a/libao2/audio_out.c b/libao2/audio_out.c
+index 197a63b..7f7baff 100644
+--- a/libao2/audio_out.c
++++ b/libao2/audio_out.c
+@@ -43,6 +43,7 @@ extern const ao_functions_t audio_out_alsa;
+ extern const ao_functions_t audio_out_sndio;
+ extern const ao_functions_t audio_out_nas;
+ extern const ao_functions_t audio_out_sdl;
++extern const ao_functions_t audio_out_haiku;
+ extern const ao_functions_t audio_out_sun;
+ extern const ao_functions_t audio_out_sgi;
+ extern const ao_functions_t audio_out_win32;
+@@ -108,6 +109,12 @@ const ao_functions_t* const audio_out_drivers[] =
+ #ifdef CONFIG_SDL
+         &audio_out_sdl,
+ #endif
++#ifdef CONFIG_HAIKU
++        &audio_out_haiku,
++#endif
++#ifdef CONFIG_HAIKU
++        &audio_out_haiku,
++#endif
+ #ifdef CONFIG_OPENAL
+         &audio_out_openal,
+ #endif
+diff --git a/libvo/haiku_common.cpp b/libvo/haiku_common.cpp
+new file mode 100644
+index 0000000..1ea5f96
+--- /dev/null
++++ b/libvo/haiku_common.cpp
+@@ -0,0 +1,304 @@
++/*
++ * Copyright 2011 3dEyes** <3dEyes@gmail.com>
++ * All rights reserved. Distributed under the terms of the MIT license.
++ */
++
++#include "haiku_common.h"
++
++extern "C" {
++#include "config.h"
++#include "mp_msg.h"
++#include "m_option.h"
++#include "mp_fifo.h"
++#include "mpbswap.h"
++#include "sub/sub.h"
++#include "video_out.h"
++#include "help_mp.h"
++#include "aspect.h"
++#include "command.h"
++#include "osdep/keycodes.h"
++#include "input/input.h"
++#include "input/mouse.h"
++}
++
++
++FBView::FBView(BRect rect) : 
++	BView(rect, "FBView", B_FOLLOW_ALL, B_WILL_DRAW)
++{
++	FBView(rect, rect.IntegerWidth(), rect.IntegerHeight());
++}
++
++FBView::FBView(BRect rect, int width, int height) : 
++	BView(rect, "FBView", B_FOLLOW_ALL, B_WILL_DRAW)
++{
++	renderRect = Bounds();
++	
++	buffer_width = width;
++	buffer_height = height;
++	
++	BRect	fbRect = BRect(0,0,buffer_width-1,buffer_height-1);	
++	bufferView = new BView(fbRect, "bufferView", B_FOLLOW_ALL_SIDES, 0);
++	bufferBitmap = new BBitmap(fbRect, B_RGB32, true);
++	bufferBitmap->AddChild(bufferView);		
++}
++
++FBView::~FBView()
++{
++	
++}
++
++void
++FBView::MouseDown(BPoint point)
++{
++	uint32 buttons = Window()->CurrentMessage()->FindInt32("buttons");
++    int32 clicks = Window()->CurrentMessage()->FindInt32("clicks");
++	
++	if( buttons & B_PRIMARY_MOUSE_BUTTON ) {
++		if(clicks==1)
++			mplayer_put_key(MOUSE_BTN0);
++		else {
++			vo_fs = !vo_fs;
++     	 	((MWindow*)Window())->SetFullscreen(vo_fs);	
++     	 	mplayer_put_key(MOUSE_BTN0);
++		}			
++	}
++	if( buttons & B_SECONDARY_MOUSE_BUTTON ) {
++		mplayer_put_key(clicks==1?MOUSE_BTN2:MOUSE_BTN2_DBL);
++	}
++	if( buttons &  B_TERTIARY_MOUSE_BUTTON ) {
++		mplayer_put_key(clicks==1?MOUSE_BTN1:MOUSE_BTN1_DBL);
++	}	
++}
++
++void
++FBView::MouseWheelChanged(BMessage *msg)
++{
++	float dy;
++	if (msg->FindFloat("be:wheel_delta_y", &dy) == B_OK) {
++		if(dy<0)
++			mplayer_put_key(MOUSE_BTN3);
++        else
++            mplayer_put_key(MOUSE_BTN4);
++	}
++}
++
++void 
++FBView::MouseMoved(BPoint point, uint32 transit,const BMessage *message)
++{
++   switch(transit)
++	 {
++	 	case B_INSIDE_VIEW:
++	 	case B_ENTERED_VIEW:
++	 		{
++	 			BPoint p = point;
++				vo_mouse_movement(p.x, p.y);
++	 			break;
++	 		}
++	 }	
++}
++
++void
++FBView::MessageReceived(BMessage *pmsg)
++{
++	switch (pmsg->what) {
++		case B_MOUSE_WHEEL_CHANGED:
++			MouseWheelChanged(pmsg);
++			break;
++		default:
++			BView::MessageReceived(pmsg);
++			break;
++	}
++}
++
++void 
++FBView::Draw(BRect rect)
++{
++	Paint();
++}
++
++void 
++FBView::SetRenderRect(BRect rect)
++{
++	renderRect = rect;
++	MoveTo(rect.left, rect.top);
++	ResizeTo(rect.Width(),rect.Height());
++	Paint();
++}
++
++void 
++FBView::Paint()
++{
++  if(LockLooper())	{
++ 	 bufferView->LockLooper();
++ 	 SetDrawingMode(B_OP_COPY);
++	 DrawBitmap(bufferBitmap,bufferView->Bounds(),Bounds());
++	 bufferView->UnlockLooper();
++	 UnlockLooper();
++	}
++}
++
++uint32 *
++FBView::GetBuffer()
++{
++	if(bufferBitmap) {
++		return (uint32*)bufferBitmap->Bits();
++	}
++	return NULL;
++}
++
++uint32	
++FBView::GetBufferSize()
++{
++	if(bufferBitmap) {
++		return bufferBitmap->BitsLength()/4;
++	}
++	return 0;
++}
++
++int
++FBView::Width() 
++{
++	return buffer_width;
++}
++
++int
++FBView::Height()
++{
++	return buffer_height;
++}
++
++
++MWindow::MWindow(int width, int height, const char* title)
++	: BWindow(BRect(80,80,80+width,80+height), title, B_TITLED_WINDOW_LOOK,B_NORMAL_WINDOW_FEEL,0)//B_NOT_RESIZABLE|B_NOT_ZOOMABLE)
++{	
++	BScreen scr;
++	image_width = width;
++	image_height = height;
++	
++	float oWidth = ( Frame().left + width )<scr.Frame().Width()?width:(scr.Frame().Width()-Frame().left-20);
++	float oHeight = ( Frame().top + height )<scr.Frame().Height()?height:(scr.Frame().Height()-Frame().top-20);
++	
++	renderRect = Bounds();
++	prev_frame = Frame();
++	
++	BView *view = new BView(Bounds(),"container",B_FOLLOW_ALL, B_WILL_DRAW);
++	view->SetViewColor(0,0,0);
++	AddChild(view);
++	
++	fb = new FBView(Bounds(), width, height);
++	fb->SetViewColor(B_TRANSPARENT_32_BIT);
++	view->AddChild(fb);
++	
++	ResizeTo(oWidth, oHeight);
++
++	renderRect = Bounds();
++	prev_frame = Frame();
++	
++}
++
++
++MWindow::~MWindow()
++{
++	
++}
++
++void
++MWindow::SetFullscreen(int fs)
++{
++	if(fs==1) {
++		prev_frame = Frame();
++		BScreen scr;
++		MoveTo(0,0);		
++		ResizeTo(scr.Frame().right+1,scr.Frame().bottom+1);
++	} else {
++		MoveTo(prev_frame.left,prev_frame.top);
++		ResizeTo(prev_frame.Width(),prev_frame.Height());				
++	}	
++}
++
++void
++MWindow::FrameResized(float width, float height)
++{
++    int d_width=width;
++    int d_height=height;
++    
++    float winaspect = width/height;
++    float videoaspect = image_width/image_height;
++               
++   	d_width = width;
++   	d_height = width/videoaspect;
++   	
++   	if(d_height>height) {
++	   	d_height = height;
++   		d_width = height*videoaspect;   		
++   	}
++    	
++	renderRect.left = (width - d_width) / 2;
++	renderRect.top = (height - d_height) / 2;
++	renderRect.right = renderRect.left + d_width;
++	renderRect.bottom = renderRect.top + d_height;
++	fb->SetRenderRect(renderRect);
++}
++
++void 
++MWindow::Zoom(BPoint origin, float width,float height)
++{
++ 	vo_fs = !vo_fs;
++ 	SetFullscreen(vo_fs);	
++}
++
++void 
++MWindow::MessageReceived(BMessage *message)
++{
++	switch (message->what) {
++		case B_KEY_DOWN:
++		{
++			uint32 code = message->FindInt32("key");
++			uint32 raw_char = message->FindInt32("raw_char");
++
++			switch (raw_char) {
++				case B_ESCAPE:
++					if(vo_fs==1) {
++						vo_fs = !vo_fs;
++	     	 			SetFullscreen(vo_fs);
++					} else {
++		     	 		mplayer_put_key(KEY_ESC);
++					}
++					break;
++				case B_LEFT_ARROW:
++					mplayer_put_key(KEY_LEFT);
++					break;
++				case B_RIGHT_ARROW:
++					mplayer_put_key(KEY_RIGHT);
++					break;
++				case B_UP_ARROW:
++					mplayer_put_key(KEY_UP);
++					break;					
++				case B_DOWN_ARROW:
++					mplayer_put_key(KEY_DOWN);
++					break;
++				case B_FUNCTION_KEY:
++					mplayer_put_key(KEY_F+code-1);
++					break;
++				case B_ENTER:
++					mplayer_put_key(KEY_ENTER);
++					break;					
++				default:
++					mplayer_put_key(raw_char);
++					break;
++					
++			}     	 	
++			break;
++		}	
++		default:
++			BWindow::MessageReceived(message);
++			break;
++	}
++}
++
++bool
++MWindow::QuitRequested()
++{
++	mplayer_put_key(KEY_CLOSE_WIN);
++	return true;
++}
+diff --git a/libvo/haiku_common.h b/libvo/haiku_common.h
+new file mode 100644
+index 0000000..53e21ef
+--- /dev/null
++++ b/libvo/haiku_common.h
+@@ -0,0 +1,69 @@
++/*
++ * Copyright 2011 3dEyes** <3dEyes@gmail.com>
++ * All rights reserved. Distributed under the terms of the MIT license.
++ */
++
++#ifndef MPLAYER_HAIKU_COMMON_H
++#define MPLAYER_HAIKU_COMMON_H
++
++#include <stdio.h>
++
++#include <SupportDefs.h>
++#include <Application.h>
++#include <Window.h>
++#include <View.h>
++#include <Bitmap.h>
++#include <Rect.h>
++#include <OS.h>
++#include <Screen.h>
++
++
++class FBView : public BView 
++{
++ public:
++						FBView(BRect rect);
++						FBView(BRect rect, int width, int height);
++		virtual			~FBView();
++		
++		void 			SetRenderRect(BRect r);
++		void 			Paint(void);
++		uint32			*GetBuffer();
++		uint32			GetBufferSize();
++		void 			Draw(BRect rect);
++		virtual void 	MouseDown(BPoint point);
++		virtual void 	MouseMoved(BPoint point, uint32 transit,const BMessage *message);
++		void 			MouseWheelChanged(BMessage *msg);
++		void 			MessageReceived(BMessage *pmsg);
++		
++		int				Width();
++		int				Height();
++ private:
++ 		int				buffer_width;
++ 		int				buffer_height;
++		BView			*bufferView;
++		BBitmap			*bufferBitmap; 		
++		BRect			renderRect;
++};
++
++class MWindow : public BWindow {
++	public:
++						MWindow(int w, int h, const char* name);
++		virtual			~MWindow();
++
++		virtual void 	MessageReceived(BMessage *message);
++		virtual void 	FrameResized(float width, float height);
++		virtual void 	Zoom(BPoint origin, float width,float height);
++		bool			QuitRequested();
++		void			SetFullscreen(int fs);
++		
++		FBView			*fb;
++public:
++		BRect			prev_frame;
++		BRect			renderRect;
++		thread_id 		renderer_thread;	
++		float 			image_width, image_height;	
++};
++
++#endif //MPLAYER_HAIKU_COMMON_H
++
++
+diff --git a/libvo/haiku_view.cpp b/libvo/haiku_view.cpp
+new file mode 100644
+index 0000000..e491de4
+--- /dev/null
++++ b/libvo/haiku_view.cpp
+@@ -0,0 +1,171 @@
++/*
++ * Copyright 2010 Your Name <your@email.address>
++ * All rights reserved. Distributed under the terms of the MIT license.
++ */
++ 
++#include "haiku_window.h"
++#include "haiku_view.h"
++
++#include <stdio.h>
++
++extern "C" {
++#include "config.h"
++#include "mp_msg.h"
++#include "m_option.h"
++#include "mp_fifo.h"
++#include "mpbswap.h"
++#include "sub/sub.h"
++#include "video_out.h"
++
++#include "input/input.h"
++#include "input/mouse.h"
++}
++
++extern void haiku_fullscreen(void);
++
++FBView::FBView(BRect rect) : 
++	BView(rect, "FBView", B_FOLLOW_ALL, B_WILL_DRAW) //B_WILL_DRAW|B_PULSE_NEEDED|B_FRAME_EVENTS
++{
++	FBView(rect, rect.IntegerWidth(), rect.IntegerHeight());
++}
++
++FBView::FBView(BRect rect, int width, int height) : 
++	BView(rect, "FBView", B_FOLLOW_ALL, B_WILL_DRAW) //B_WILL_DRAW|B_PULSE_NEEDED|B_FRAME_EVENTS
++{
++	renderRect = Bounds();
++	
++	buffer_width = width;
++	buffer_height = height;
++	
++	BRect	fbRect = BRect(0,0,buffer_width-1,buffer_height-1);	
++	bufferView = new BView(fbRect, "bufferView", B_FOLLOW_ALL_SIDES, 0);
++	bufferBitmap = new BBitmap(fbRect, B_RGB32, true);
++	bufferBitmap->AddChild(bufferView);		
++}
++
++FBView::~FBView()
++{
++	
++}
++
++void
++FBView::MouseDown(BPoint point)
++{
++	uint32 buttons = Window()->CurrentMessage()->FindInt32("buttons");
++    int32 clicks = Window()->CurrentMessage()->FindInt32("clicks");
++	
++	if( buttons & B_PRIMARY_MOUSE_BUTTON ) {
++		if(clicks==1)
++			mplayer_put_key(MOUSE_BTN0);
++		else {
++			vo_fs = !vo_fs;
++     	 	haiku_fullscreen();	
++     	 	mplayer_put_key(MOUSE_BTN0);
++		}			
++	}
++	if( buttons & B_SECONDARY_MOUSE_BUTTON ) {
++		mplayer_put_key(clicks==1?MOUSE_BTN2:MOUSE_BTN2_DBL);
++	}
++	if( buttons &  B_TERTIARY_MOUSE_BUTTON ) {
++		mplayer_put_key(clicks==1?MOUSE_BTN1:MOUSE_BTN1_DBL);
++	}	
++}
++
++void
++FBView::MouseWheelChanged(BMessage *msg)
++{
++	float dy;
++	if (msg->FindFloat("be:wheel_delta_y", &dy) == B_OK) {
++		if(dy>0)
++			mplayer_put_key(MOUSE_BTN3);
++        else
++            mplayer_put_key(MOUSE_BTN4);
++	}
++}
++
++void 
++FBView::MouseMoved(BPoint point, uint32 transit,const BMessage *message)
++{
++   switch(transit)
++	 {
++	 	case B_INSIDE_VIEW:
++	 	case B_ENTERED_VIEW:
++	 		{
++	 			BPoint p = point;
++				vo_mouse_movement(p.x, p.y);
++	 			break;
++	 		}
++	 }	
++}
++
++void
++FBView::MessageReceived(BMessage *pmsg)
++{
++	switch (pmsg->what) {
++		case B_MOUSE_WHEEL_CHANGED:
++			MouseWheelChanged(pmsg);
++			break;
++		default:
++			BView::MessageReceived(pmsg);
++			break;
++	}
++}
++
++void 
++FBView::Draw(BRect rect)
++{
++	Paint();
++}
++
++void 
++FBView::SetRenderRect(BRect rect)
++{
++	renderRect = rect;
++	MoveTo(rect.left, rect.top);
++	ResizeTo(rect.Width(),rect.Height());
++	Paint();
++}
++
++void 
++FBView::Paint()
++{
++  if(LockLooper())	{
++ 	 bufferView->LockLooper();
++ 	 SetDrawingMode(B_OP_COPY);
++	 DrawBitmap(bufferBitmap,bufferView->Bounds(),B_FILTER_BITMAP_BILINEAR,Bounds());
++	 bufferView->UnlockLooper();
++	 UnlockLooper();
++	}
++}
++
++uint32 *
++FBView::GetBuffer()
++{
++	if(bufferBitmap) {
++		return (uint32*)bufferBitmap->Bits();
++	}
++	return NULL;
++}
++
++uint32	
++FBView::GetBufferSize()
++{
++	if(bufferBitmap) {
++		return bufferBitmap->BitsLength()/4;
++	}
++	return 0;
++}
++
++int
++FBView::Width() 
++{
++	return buffer_width;
++}
++
++int
++FBView::Height()
++{
++	return buffer_height;
++}
++
++
+diff --git a/libvo/haiku_view.h b/libvo/haiku_view.h
+new file mode 100644
+index 0000000..21103eb
+--- /dev/null
++++ b/libvo/haiku_view.h
+@@ -0,0 +1,36 @@
++#ifndef _H_FBVIEW_
++#define _H_FBVIEW_
++
++#include <SupportDefs.h>
++#include <Bitmap.h>
++#include <View.h>
++#include <Rect.h>
++
++class FBView : public BView 
++{
++ public:
++		FBView(BRect rect);
++		FBView(BRect rect, int width, int height);
++		~FBView();
++		
++		void 	SetRenderRect(BRect r);
++		void 	Paint(void);
++		uint32	*GetBuffer();
++		uint32	GetBufferSize();
++		void Draw(BRect rect);
++		virtual void MouseDown(BPoint point);
++		virtual void MouseMoved(BPoint point, uint32 transit,const BMessage *message);
++		void MouseWheelChanged(BMessage *msg);
++		void MessageReceived(BMessage *pmsg);
++		
++		int		Width();
++		int		Height();
++ private:
++ 		int		buffer_width;
++ 		int		buffer_height;
++		BView	*bufferView;
++		BBitmap *bufferBitmap; 		
++		BRect	renderRect;
++};
++
++#endif
+diff --git a/libvo/haiku_window.cpp b/libvo/haiku_window.cpp
+new file mode 100644
+index 0000000..2f4c8bf
+--- /dev/null
++++ b/libvo/haiku_window.cpp
+@@ -0,0 +1,125 @@
++#include <stdio.h>
++
++extern "C" {
++#include "config.h"
++#include "command.h"
++#include "mp_fifo.h"
++#include "aspect.h"
++#include "osdep/keycodes.h"
++#include "mp_msg.h"
++#include "help_mp.h"
++#include "sub/sub.h"
++#include "video_out.h"
++}
++
++extern void haiku_fullscreen(void);
++#include "haiku_window.h"
++
++
++TestWindow::TestWindow(int width, int height, const char* title)
++	: BWindow(BRect(100,100,100+width,100+height), title, B_TITLED_WINDOW_LOOK,B_NORMAL_WINDOW_FEEL,0)//B_NOT_RESIZABLE|B_NOT_ZOOMABLE)
++{	
++	image_width = width;
++	image_height = height;
++	renderRect = Bounds();
++	BView *view = new BView(Bounds(),"back",B_FOLLOW_ALL, B_WILL_DRAW);
++	view->SetViewColor(0,0,0);
++	AddChild(view);
++	
++	fb = new FBView(Bounds(), width, height);
++	fb->SetViewColor(B_TRANSPARENT_32_BIT);
++	view->AddChild(fb);
++}
++
++
++TestWindow::~TestWindow()
++{
++	
++}
++
++void
++TestWindow::FrameResized(float width, float height)
++{
++    int d_width=width;
++    int d_height=height;
++    
++    float winaspect = width/height;
++    float videoaspect = image_width/image_height;
++               
++   	d_width = width;
++   	d_height = width/videoaspect;
++   	
++   	if(d_height>height) {
++	   	d_height = height;
++   		d_width = height*videoaspect;   		
++   	}
++    	
++	renderRect.left = (width - d_width) / 2;
++	renderRect.top = (height - d_height) / 2;
++	renderRect.right = renderRect.left + d_width;
++	renderRect.bottom = renderRect.top + d_height;
++	fb->SetRenderRect(renderRect);
++}
++
++void 
++TestWindow::Zoom(BPoint origin, float width,float height)
++{
++ 	vo_fs = !vo_fs;
++ 	haiku_fullscreen();	
++}
++
++void 
++TestWindow::MessageReceived(BMessage *message)
++{
++	switch (message->what) {
++		case B_KEY_DOWN:
++		{
++			uint32 code = message->FindInt32("key");
++			uint32 raw_char = message->FindInt32("raw_char");
++			switch (raw_char) {
++				case B_ESCAPE:
++					if(vo_fs==1) {
++						vo_fs = !vo_fs;
++	     	 			haiku_fullscreen();
++					} else {
++		     	 		mplayer_put_key(KEY_ESC);
++					}
++					break;
++				case B_LEFT_ARROW:
++					mplayer_put_key(KEY_LEFT);
++					break;
++				case B_RIGHT_ARROW:
++					mplayer_put_key(KEY_RIGHT);
++					break;
++				case B_UP_ARROW:
++					mplayer_put_key(KEY_UP);
++					break;					
++				case B_DOWN_ARROW:
++					mplayer_put_key(KEY_DOWN);
++					break;
++				case B_FUNCTION_KEY:
++					mplayer_put_key(KEY_F+code-1);
++					break;
++				case B_ENTER:
++					mplayer_put_key(KEY_ENTER);
++					break;					
++				default:
++					mplayer_put_key(raw_char);
++					break;
++					
++			}     	 	
++			break;
++		}	
++		default:
++			BWindow::MessageReceived(message);
++			break;
++	}
++}
++
++bool
++TestWindow::QuitRequested()
++{
++	mplayer_put_key(KEY_CLOSE_WIN);
++	//be_app->PostMessage(B_QUIT_REQUESTED);
++	return true;
++}
+diff --git a/libvo/haiku_window.h b/libvo/haiku_window.h
+new file mode 100644
+index 0000000..34513df
+--- /dev/null
++++ b/libvo/haiku_window.h
+@@ -0,0 +1,31 @@
++#ifndef _TEST_WINDOW_H
++#define _TEST_WINDOW_H
++
++#include <Application.h>
++#include <Window.h>
++#include <View.h>
++#include <OS.h>
++
++#include "haiku_window.h"
++#include "haiku_view.h"
++
++class TestWindow : public BWindow {
++	public:
++						TestWindow(int w, int h, const char* name);
++		virtual			~TestWindow();
++
++		virtual void 	MessageReceived(BMessage *message);
++		virtual void FrameResized(float width, float height);
++		virtual void Zoom(BPoint origin, float width,float height);
++		bool			QuitRequested();
++
++		FBView			*fb;
++public:
++		BRect			renderRect;
++		thread_id 		renderer_thread;	
++		float 			image_width, image_height;	
++};
++
++#endif
++
++
+diff --git a/libvo/video_out.c b/libvo/video_out.c
+index bcf5174..c797ae8 100644
+--- a/libvo/video_out.c
++++ b/libvo/video_out.c
+@@ -109,6 +109,7 @@ extern const vo_functions_t video_out_gl_tiled;
+ extern const vo_functions_t video_out_matrixview;
+ extern const vo_functions_t video_out_dga;
+ extern const vo_functions_t video_out_sdl;
++extern const vo_functions_t video_out_haiku;
+ extern const vo_functions_t video_out_3dfx;
+ extern const vo_functions_t video_out_tdfxfb;
+ extern const vo_functions_t video_out_s3fb;
+@@ -211,6 +212,9 @@ const vo_functions_t* const video_out_drivers[] =
+ #ifdef CONFIG_SDL
+         &video_out_sdl,
+ #endif
++#ifdef CONFIG_HAIKU
++        &video_out_haiku,
++#endif
+ #ifdef CONFIG_GL
+         &video_out_gl,
+ #endif
+diff --git a/libvo/vo_haiku.cpp b/libvo/vo_haiku.cpp
+new file mode 100644
+index 0000000..614c8ff
+--- /dev/null
++++ b/libvo/vo_haiku.cpp
+@@ -0,0 +1,201 @@
++/*
++ * Copyright 2011 3dEyes** <3dEyes@gmail.com>
++ * All rights reserved. Distributed under the terms of the MIT license.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <errno.h>
++
++#include "haiku_common.h"
++
++extern "C" {
++#include "config.h"
++#include "mp_msg.h"
++#include "aspect.h"
++#include "mp_fifo.h"
++#include "help_mp.h"
++#include "video_out.h"
++#include "video_out_internal.h"
++#include "sub/sub.h"
++#include "libswscale/swscale.h"
++#include "libmpcodecs/vf_scale.h"
++}
++
++static int cnt = 0;
++static MWindow	*haiku_wnd=NULL;
++
++#define BLOCK 16384
++static port_id port=B_BAD_VALUE;
++
++static const vo_info_t info =
++{
++	"Haiku video output",
++	"haiku",
++	"3dEyes**",
++	""
++};
++
++extern "C" {
++vo_functions_t video_out_haiku =
++	{
++		&info,
++		preinit,
++		config,
++		control,
++		draw_frame,
++		draw_slice,
++     	draw_osd,
++		flip_page,
++		check_events,
++		uninit
++	};
++
++}
++
++static uint32_t image_width, image_height;
++static uint32_t image_depth;
++static uint32_t image_format;
++static uint32_t image_size;
++static uint32_t image_buffer_size;
++static unsigned char *image_data = NULL;
++
++static int draw_slice(uint8_t *image[], int stride[], int w,int h,int x,int y)
++{
++	return 0;
++}
++
++static void draw_alpha(int x0, int y0, int w, int h, unsigned char *src, unsigned char *srca, int stride)
++{
++    switch (image_format)
++    {
++    case IMGFMT_BGR32:
++	   	vo_draw_alpha_rgb32(w,h,src,srca,stride, image_data+4*(y0*image_width+x0),4*image_width);
++        break;
++    }
++}
++
++static void draw_osd(void)
++{
++	if(image_data)
++		vo_draw_text(image_width, image_height, draw_alpha);
++}
++
++static void
++flip_page(void)
++{
++	if(haiku_wnd) {
++		haiku_wnd->fb->Paint();	
++	} else {
++		int32 msg_code='RGBA';
++		int32 w = image_width, h = image_height, cmd = 0;
++		int32 sizeBuf = w*h*4;
++		unsigned char *pbuffer = (unsigned char *)image_data;
++		
++		int n = sizeBuf/BLOCK;
++		 	int ln = sizeBuf%BLOCK;
++		 	unsigned char* ptr=pbuffer;
++		
++		write_port(port,'BITS',(void*)&cmd, sizeof(int));
++		
++		write_port(port,msg_code,(void*)&w, sizeof(int));
++		write_port(port,msg_code,(void*)&h, sizeof(int));
++		
++		 	for(int i=0;i<n;i++,ptr+=BLOCK)
++		 		write_port(port,msg_code,(void*)ptr, BLOCK);
++		 	write_port(port,msg_code,(void*)ptr, ln);	
++	}
++}
++
++static int
++draw_frame(uint8_t *src[])
++{	
++	memcpy(image_data,src[0],image_size);	
++	return 0;
++}
++
++static int
++query_format(uint32_t format)
++{
++	image_format = format;
++    switch(format){
++    case IMGFMT_BGR32:
++        return VFCAP_CSP_SUPPORTED|VFCAP_OSD|VFCAP_SWSCALE;
++    }
++    return 0;
++}
++
++static int
++config(uint32_t width, uint32_t height, uint32_t d_width, uint32_t d_height, uint32_t flags, char *title, uint32_t format)
++{
++	image_width = width;
++	image_height = height;
++	image_depth = 32;
++	image_size = (image_width * image_height * image_depth + 7) / 8;
++	
++	aspect_save_orig(width,height);
++    aspect_save_prescale(d_width,d_height);
++
++	//printf("WinID=%d\n",WinID);
++	port=find_port("WID:12345");	
++	
++	if(port==B_NAME_NOT_FOUND || port==B_BAD_VALUE)	{
++		haiku_wnd = new MWindow(image_width,image_height, title);
++		image_data=(unsigned char *)haiku_wnd->fb->GetBuffer();
++		haiku_wnd->Show();
++		if(flags&VOFLAG_FULLSCREEN) {    
++			vo_fs=1;
++	        if(haiku_wnd)
++	        	haiku_wnd->SetFullscreen(vo_fs);
++		}		
++	} else {
++		image_data=(unsigned char *)malloc(image_size);
++	}
++					
++	return 0;
++}
++
++static void
++uninit(void)
++{
++	if(!haiku_wnd)	
++		free(image_data);
++}
++
++
++static void check_events(void)
++{
++}
++
++static int preinit(const char *arg)
++{	
++//    if(be_app==NULL)
++//    	be_app = new BApplication("application/x-vnd.mplayer");
++    if(arg)
++    {
++	mp_msg(MSGT_VO,MSGL_WARN, MSGTR_LIBVO_NULL_UnknownSubdevice,arg);
++	return ENOSYS;
++    }
++    return 0;
++}
++
++static int control(uint32_t request, void *data)
++{
++  switch (request) {
++  	case VOCTRL_QUERY_FORMAT:
++  	{
++    	return query_format(*((uint32_t*)data));
++  	}
++    case VOCTRL_FULLSCREEN: 
++    {
++    	vo_fs = !vo_fs;
++      	if(haiku_wnd)
++	       	haiku_wnd->SetFullscreen(vo_fs);
++      	return VO_TRUE; 
++	}
++  }
++  return VO_NOTIMPL;
++}
++
++
+-- 
+2.10.2
+
+From 38ddddaa2dd35b98fdbdaf063163cf28e288dea6 Mon Sep 17 00:00:00 2001
+From: Damillora <duniapengetahuan.12345@gmail.com>
+Date: Sun, 24 Dec 2017 13:13:40 +0700
+Subject: Put settings to user settings folder
+
+
+diff --git a/path.c b/path.c
+index b8d9335..a98f43b 100644
+--- a/path.c
++++ b/path.c
+@@ -42,6 +42,11 @@
+ #include <sys/cygwin.h>
+ #endif
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#include <fs_info.h>
++#endif
++
+ #include "osdep/osdep.h"
+ 
+ char *get_path(const char *filename){
+@@ -51,6 +56,13 @@ char *get_path(const char *filename){
+ 	char *buff;
+ #ifdef __MINGW32__
+ 	const char *config_dir = "/mplayer";
++#elif defined(__HAIKU__)
++	dev_t volume = dev_for_path("/boot");
++	char buffer[B_PATH_NAME_LENGTH+B_FILE_NAME_LENGTH];
++	status_t result;
++	result = find_directory(B_USER_SETTINGS_DIRECTORY,volume,false,buffer,sizeof(buffer));
++	strcat(buffer,"/mplayer");
++	const char *config_dir = &buffer;
+ #else
+ 	const char *config_dir = "/.mplayer";
+ #endif
+@@ -94,6 +106,12 @@ char *get_path(const char *filename){
+ 		else config_dir++;
+ #endif
+ 	}
++#ifdef __HAIKU__
++	// As the home directory path is already on the
++	// find_directory call above, we empty the homedir
++	// variable
++	homedir = "";
++#endif
+ 	len = strlen(homedir) + strlen(config_dir) + 1;
+ 	if (filename == NULL) {
+ 		if ((buff = malloc(len)) == NULL)
+-- 
+2.14.2
+

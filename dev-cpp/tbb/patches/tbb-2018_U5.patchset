@@ -1,0 +1,524 @@
+From 5571b623b44a1821423e12ae0ac7bdc1c128bb6f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Zolt=C3=A1n=20Mizsei?= <zmizsei@extrowerk.com>
+Date: Sun, 10 Dec 2017 04:47:06 +0100
+Subject: [PATCH] Haiku patches
+
+---
+ build/common.inc                          |   3 +
+ build/haiku.gcc.inc                       | 155 ++++++++++++++++++++++++++++++
+ build/haiku.inc                           | 142 +++++++++++++++++++++++++++
+ examples/parallel_for/tachyon/src/types.h |   2 +-
+ include/tbb/machine/linux_common.h        |   3 +
+ include/tbb/tbb_config.h                  |   2 +-
+ include/tbb/tbb_machine.h                 |   2 +-
+ src/perf/perf.cpp                         |   2 +-
+ src/rml/client/rml_factory.h              |   2 +-
+ src/tbb/cache_aligned_allocator.cpp       |   2 +-
+ src/tbb/tbb_misc.h                        |   2 +-
+ src/tbbmalloc/MapMemory.h                 |   2 +-
+ src/tbbmalloc/frontend.cpp                |   2 +-
+ src/tbbmalloc/proxy.h                     |   2 +-
+ src/tbbmalloc/tbbmalloc.cpp               |   2 +-
+ src/test/harness_dynamic_libs.h           |   2 +-
+ 16 files changed, 315 insertions(+), 12 deletions(-)
+ create mode 100644 build/haiku.gcc.inc
+ create mode 100644 build/haiku.inc
+
+diff --git a/build/common.inc b/build/common.inc
+index b2c20de..a5dd62c 100644
+--- a/build/common.inc
++++ b/build/common.inc
+@@ -36,6 +36,9 @@ ifndef tbb_os
+   ifeq ($(OS), Darwin)
+     export tbb_os=macos
+   endif
++  ifeq ($(OS), Haiku)
++    export tbb_os=haiku
++  endif
+ 
+ endif # !tbb_os
+ 
+diff --git a/build/haiku.gcc.inc b/build/haiku.gcc.inc
+new file mode 100644
+index 0000000..96a0809
+--- /dev/null
++++ b/build/haiku.gcc.inc
+@@ -0,0 +1,155 @@
++# Copyright (c) 2005-2017 Intel Corporation
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
++#
++#
++#
++
++COMPILE_ONLY = -c -MMD
++PREPROC_ONLY = -E -x c++
++INCLUDE_KEY = -I
++DEFINE_KEY = -D
++OUTPUT_KEY = -o #
++OUTPUTOBJ_KEY = -o #
++PIC_KEY = -fPIC
++WARNING_AS_ERROR_KEY = -Werror
++WARNING_KEY = -Wall
++TEST_WARNING_KEY = -Wshadow -Wcast-qual -Woverloaded-virtual -Wnon-virtual-dtor
++
++WARNING_SUPPRESS = -Wno-parentheses -Wno-non-virtual-dtor
++DYLIB_KEY = -shared
++EXPORT_KEY = -Wl,--version-script,
++LIBDL = 
++
++CPLUS = g++
++CONLY = gcc
++LIB_LINK_FLAGS = $(DYLIB_KEY) -Wl,-soname=$(BUILDING_LIBRARY)
++LIBS += -lpthread
++LINK_FLAGS = -Wl,-rpath-link=. 
++C_FLAGS = $(CPLUS_FLAGS)
++
++# gcc 4.2 and higher support OpenMP
++ifneq (,$(shell gcc -dumpversion | egrep  "^(4\.[2-9]|[5-9])"))
++    OPENMP_FLAG = -fopenmp
++endif
++
++# gcc 4.8 and later support RTM intrinsics, but require command line switch to enable them
++ifneq (,$(shell gcc -dumpversion | egrep  "^(4\.[8-9]|[5-9])"))
++    RTM_KEY = -mrtm
++endif
++
++# gcc 4.0 and later have -Wextra that is used by some our customers.
++ifneq (,$(shell gcc -dumpversion | egrep  "^([4-9])"))
++    TEST_WARNING_KEY += -Wextra
++endif
++
++# gcc 5.0 and later have -Wsuggest-override option
++# enable it via a pre-included header in order to limit to C++11 and above
++ifneq (,$(shell gcc -dumpversion | egrep  "^([5-9])"))
++    INCLUDE_TEST_HEADERS = -include $(tbb_root)/src/test/harness_preload.h
++endif
++
++# gcc 6.0 and later have -flifetime-dse option that controls
++# elimination of stores done outside the object lifetime
++ifneq (,$(shell gcc -dumpversion | egrep  "^([6-9])"))
++    # keep pre-contruction stores for zero initialization
++    DSE_KEY = -flifetime-dse=1
++endif
++
++ifeq ($(cfg), release)
++        CPLUS_FLAGS = $(ITT_NOTIFY) -g -O2 -DUSE_PTHREAD
++endif
++ifeq ($(cfg), debug)
++        CPLUS_FLAGS = -DTBB_USE_DEBUG $(ITT_NOTIFY) -g -O0 -DUSE_PTHREAD
++endif
++
++TBB_ASM.OBJ=
++MALLOC_ASM.OBJ=
++
++ifeq (ia64,$(arch))
++# Position-independent code (PIC) is a must on IA-64 architecture, even for regular (not shared) executables
++    CPLUS_FLAGS += $(PIC_KEY)
++endif
++
++ifeq (intel64,$(arch))
++    ITT_NOTIFY = -DDO_ITT_NOTIFY
++    CPLUS_FLAGS += -m64 $(RTM_KEY)
++    LIB_LINK_FLAGS += -m64
++endif
++
++ifeq (ia32,$(arch))
++    ITT_NOTIFY = -DDO_ITT_NOTIFY
++    CPLUS_FLAGS += -m32 -march=pentium4 $(RTM_KEY)
++    LIB_LINK_FLAGS += -m32
++endif
++
++ifeq (ppc64,$(arch))
++    CPLUS_FLAGS += -m64
++    LIB_LINK_FLAGS += -m64
++endif
++
++ifeq (ppc32,$(arch))
++    CPLUS_FLAGS += -m32
++    LIB_LINK_FLAGS += -m32
++endif
++
++ifeq (bg,$(arch))
++    CPLUS = $(firstword $(notdir $(shell which powerpc{64,32,}-bg{z..a}-linux-g++ 2>/dev/null)))
++    CONLY = $(firstword $(notdir $(shell which powerpc{64,32,}-bg{z..a}-linux-gcc 2>/dev/null)))
++endif
++
++# for some gcc versions on Solaris, -m64 may imply V9, but perhaps not everywhere (TODO: verify)
++ifeq (sparc,$(arch))
++    CPLUS_FLAGS    += -mcpu=v9 -m64
++    LIB_LINK_FLAGS += -mcpu=v9 -m64
++endif
++
++# automatically generate "IT" instructions when compiling for Thumb ISA
++ifeq (armv7,$(arch))
++    CPLUS_FLAGS    += -Wa,-mimplicit-it=thumb
++endif
++
++#------------------------------------------------------------------------------
++# Setting assembler data.
++#------------------------------------------------------------------------------
++ASM = as
++ifeq (intel64,$(arch))
++    ASM_FLAGS += --64
++endif
++ifeq (ia32,$(arch))
++    ASM_FLAGS += --32
++endif
++ifeq ($(cfg),debug)
++    ASM_FLAGS += -g
++endif
++
++ASSEMBLY_SOURCE=$(arch)-gas
++ifeq (ia64,$(arch))
++    ASM_FLAGS += -xexplicit
++    TBB_ASM.OBJ += atomic_support.o lock_byte.o log2.o pause.o ia64_misc.o
++    MALLOC_ASM.OBJ += atomic_support.o lock_byte.o pause.o log2.o
++endif
++#------------------------------------------------------------------------------
++# End of setting assembler data.
++#------------------------------------------------------------------------------
++
++#------------------------------------------------------------------------------
++# Setting tbbmalloc data.
++#------------------------------------------------------------------------------
++
++M_CPLUS_FLAGS = $(CPLUS_FLAGS) -fno-rtti -fno-exceptions
++
++#------------------------------------------------------------------------------
++# End of setting tbbmalloc data.
++#------------------------------------------------------------------------------
+diff --git a/build/haiku.inc b/build/haiku.inc
+new file mode 100644
+index 0000000..daeaaf9
+--- /dev/null
++++ b/build/haiku.inc
+@@ -0,0 +1,142 @@
++# Copyright (c) 2005-2017 Intel Corporation
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
++#
++#
++#
++
++####### Detections and Commands ###############################################
++
++ifeq (icc,$(compiler))
++  export COMPILER_VERSION := ICC: $(shell icc -V </dev/null 2>&1 | grep 'Version')
++  ifneq (,$(findstring running on IA-32, $(COMPILER_VERSION)))
++    export arch:=ia32
++  else
++    ifneq (,$(findstring running on Intel(R) 64, $(COMPILER_VERSION)))
++      export arch:=intel64
++    else
++      ifneq (,$(findstring IA-64, $(COMPILER_VERSION)))
++        export arch:=ia64
++      endif
++    endif
++  endif
++  ifeq (,$(arch))
++    $(warning "Unknown Intel compiler")
++  endif
++endif
++
++ifndef arch
++        uname_m:=$(shell uname -m)
++        ifeq ($(uname_m),i686)
++                export arch:=ia32
++        endif
++        ifeq ($(uname_m),ia64)
++                export arch:=ia64
++        endif
++        ifeq ($(uname_m),x86_64)
++                export arch:=intel64
++        endif
++        ifeq ($(uname_m),sparc64)
++                export arch:=sparc
++        endif
++        ifeq ($(uname_m),armv7l)
++                export arch:=armv7
++        endif
++        ifndef arch
++                export arch:=$(uname_m)
++        endif
++endif
++
++ifndef runtime
++        export gcc_version:=$(shell gcc -dumpversion)
++        os_version:=$(shell uname -r)
++        os_kernel_version:=$(shell uname -r | sed -e 's/-.*$$//')
++        export os_glibc_version_full:=$(shell getconf GNU_LIBC_VERSION | grep glibc | sed -e 's/^glibc //')
++        os_glibc_version:=$(shell echo "$(os_glibc_version_full)" | sed -e '2,$$d' -e 's/-.*$$//')
++        export runtime:=cc$(gcc_version)_libc$(os_glibc_version)_kernel$(os_kernel_version)
++endif
++
++native_compiler := gcc
++export compiler ?= gcc
++debugger ?= gdb
++
++CMD=sh -c
++CWD=$(shell pwd)
++CP=cp
++RM?=rm -f
++RD?=rmdir
++MD?=mkdir -p
++NUL= /dev/null
++SLASH=/
++MAKE_VERSIONS=sh $(tbb_root)/build/version_info_linux.sh $(VERSION_FLAGS) >version_string.ver
++MAKE_TBBVARS=sh $(tbb_root)/build/generate_tbbvars.sh
++
++ifdef LD_LIBRARY_PATH
++        export LD_LIBRARY_PATH := .:$(LD_LIBRARY_PATH)
++else
++        export LD_LIBRARY_PATH := .
++endif
++
++####### Build settings ########################################################
++
++OBJ = o
++DLL = so
++MALLOC_DLL?=$(DLL)
++LIBEXT = so
++SONAME_SUFFIX =$(shell grep TBB_COMPATIBLE_INTERFACE_VERSION $(tbb_root)/include/tbb/tbb_stddef.h | egrep -o [0-9.]+)
++
++ifeq ($(arch),ia64)
++        def_prefix = lin64ipf
++endif
++ifneq (,$(findstring $(arch),sparc s390x))
++        def_prefix = lin64
++endif
++ifeq ($(arch),armv7)
++        def_prefix = lin32
++endif
++ifeq (,$(def_prefix))
++    ifeq (64,$(findstring 64,$(arch)))
++            def_prefix = lin64
++    else
++            def_prefix = lin32
++    endif
++endif
++TBB.LST = $(tbb_root)/src/tbb/$(def_prefix)-tbb-export.lst
++TBB.DEF = $(TBB.LST:.lst=.def)
++
++TBB.DLL = $(TBB_NO_VERSION.DLL).$(SONAME_SUFFIX)
++TBB.LIB = $(TBB.DLL)
++TBB_NO_VERSION.DLL=libtbb$(CPF_SUFFIX)$(DEBUG_SUFFIX).$(DLL)
++LINK_TBB.LIB = $(TBB_NO_VERSION.DLL)
++
++MALLOC_NO_VERSION.DLL = libtbbmalloc$(DEBUG_SUFFIX).$(MALLOC_DLL)
++MALLOC.DEF = $(MALLOC_ROOT)/$(def_prefix)-tbbmalloc-export.def
++MALLOC.DLL = $(MALLOC_NO_VERSION.DLL).$(SONAME_SUFFIX)
++MALLOC.LIB = $(MALLOC_NO_VERSION.DLL)
++LINK_MALLOC.LIB = $(MALLOC_NO_VERSION.DLL)
++
++MALLOCPROXY_NO_VERSION.DLL = libtbbmalloc_proxy$(DEBUG_SUFFIX).$(DLL)
++MALLOCPROXY.DEF = $(MALLOC_ROOT)/$(def_prefix)-proxy-export.def
++MALLOCPROXY.DLL = $(MALLOCPROXY_NO_VERSION.DLL).$(SONAME_SUFFIX)
++MALLOCPROXY.LIB = $(MALLOCPROXY_NO_VERSION.DLL)
++LINK_MALLOCPROXY.LIB = $(MALLOCPROXY.LIB)
++
++RML_NO_VERSION.DLL = libirml$(DEBUG_SUFFIX).$(DLL)
++RML.DEF = $(RML_SERVER_ROOT)/lin-rml-export.def
++RML.DLL = $(RML_NO_VERSION.DLL).1
++RML.LIB = $(RML_NO_VERSION.DLL)
++
++TEST_LAUNCHER=sh $(tbb_root)/build/test_launcher.sh $(largs)
++
++OPENCL.LIB = -lOpenCL
+diff --git a/examples/parallel_for/tachyon/src/types.h b/examples/parallel_for/tachyon/src/types.h
+index c32c8f7..8e8023a 100644
+--- a/examples/parallel_for/tachyon/src/types.h
++++ b/examples/parallel_for/tachyon/src/types.h
+@@ -52,7 +52,7 @@
+ #elif _WIN32
+ #include <malloc.h>
+ #define alloca _alloca
+-#elif __FreeBSD__||__NetBSD__
++#elif __FreeBSD__||__NetBSD__||__HAIKU__
+ #include <stdlib.h>
+ #else
+ #include <alloca.h>
+diff --git a/include/tbb/machine/linux_common.h b/include/tbb/machine/linux_common.h
+index 4d2d355..c52b8b2 100644
+--- a/include/tbb/machine/linux_common.h
++++ b/include/tbb/machine/linux_common.h
+@@ -26,8 +26,11 @@
+ #define __TBB_Yield()  sched_yield()
+ 
+ #include <unistd.h>
++
++#ifndef __HAIKU__
+ /* Futex definitions */
+ #include <sys/syscall.h>
++#endif
+ 
+ #if defined(SYS_futex)
+ 
+diff --git a/include/tbb/tbb_config.h b/include/tbb/tbb_config.h
+index d8e0e20..6cf7dc1 100644
+--- a/include/tbb/tbb_config.h
++++ b/include/tbb/tbb_config.h
+@@ -463,7 +463,7 @@ There are four cases that are supported:
+ 
+ /** __TBB_WEAK_SYMBOLS_PRESENT denotes that the system supports the weak symbol mechanism **/
+ #ifndef __TBB_WEAK_SYMBOLS_PRESENT
+-#define __TBB_WEAK_SYMBOLS_PRESENT ( !_WIN32 && !__APPLE__ && !__sun && (__TBB_GCC_VERSION >= 40000 || __INTEL_COMPILER ) )
++#define __TBB_WEAK_SYMBOLS_PRESENT ( !__HAIKU__ && !_WIN32 && !__APPLE__ && !__sun && (__TBB_GCC_VERSION >= 40000 || __INTEL_COMPILER ) )
+ #endif
+ 
+ /** __TBB_DYNAMIC_LOAD_ENABLED describes the system possibility to load shared libraries at run time **/
+diff --git a/include/tbb/tbb_machine.h b/include/tbb/tbb_machine.h
+index 2857ea5..6f0522c 100644
+--- a/include/tbb/tbb_machine.h
++++ b/include/tbb/tbb_machine.h
+@@ -227,7 +227,7 @@ template<> struct atomic_selector<8> {
+         #include "machine/linux_intel64.h"
+     #endif
+ 
+-#elif __linux__ || __FreeBSD__ || __NetBSD__
++#elif __linux__ || __FreeBSD__ || __NetBSD__ || __HAIKU__
+ 
+     #if (TBB_USE_GCC_BUILTINS && __TBB_GCC_BUILTIN_ATOMICS_PRESENT)
+         #include "machine/gcc_generic.h"
+diff --git a/src/perf/perf.cpp b/src/perf/perf.cpp
+index 36a3ba8..3888bc0 100644
+--- a/src/perf/perf.cpp
++++ b/src/perf/perf.cpp
+@@ -36,7 +36,7 @@
+ #include "tbb/task.h"
+ #include "tbb/atomic.h"
+ 
+-#if  __linux__ || __APPLE__ || __FreeBSD__ || __NetBSD__
++#if  __linux__ || __APPLE__ || __FreeBSD__ || __NetBSD__ || __HAIKU__
+     #include <sys/resource.h>
+ #endif
+ 
+diff --git a/src/rml/client/rml_factory.h b/src/rml/client/rml_factory.h
+index 0c4626a..c903436 100644
+--- a/src/rml/client/rml_factory.h
++++ b/src/rml/client/rml_factory.h
+@@ -33,7 +33,7 @@
+ #define RML_SERVER_NAME "libirml" DEBUG_SUFFIX ".dylib"
+ #elif __linux__
+ #define RML_SERVER_NAME "libirml" DEBUG_SUFFIX ".so.1"
+-#elif __FreeBSD__ || __NetBSD__ || __sun || _AIX
++#elif __FreeBSD__ || __NetBSD__ || __sun || _AIX || __HAIKU__
+ #define RML_SERVER_NAME "libirml" DEBUG_SUFFIX ".so"
+ #else
+ #error Unknown OS
+diff --git a/src/tbb/cache_aligned_allocator.cpp b/src/tbb/cache_aligned_allocator.cpp
+index e1e8713..2e7085c 100644
+--- a/src/tbb/cache_aligned_allocator.cpp
++++ b/src/tbb/cache_aligned_allocator.cpp
+@@ -104,7 +104,7 @@ static const dynamic_link_descriptor MallocLinkTable[] = {
+ #define MALLOCLIB_NAME "tbbmalloc" DEBUG_SUFFIX ".dll"
+ #elif __APPLE__
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX ".dylib"
+-#elif __FreeBSD__ || __NetBSD__ || __sun || _AIX || __ANDROID__
++#elif __FreeBSD__ || __NetBSD__ || __sun || _AIX || __ANDROID__ || __HAIKU__
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX ".so"
+ #elif __linux__  // Note that order of these #elif's is important!
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX  __TBB_STRING(.so.TBB_COMPATIBLE_INTERFACE_VERSION)
+diff --git a/src/tbb/tbb_misc.h b/src/tbb/tbb_misc.h
+index 8a05197..53fb43a 100644
+--- a/src/tbb/tbb_misc.h
++++ b/src/tbb/tbb_misc.h
+@@ -25,7 +25,7 @@
+ #include "tbb/tbb_machine.h"
+ #include "tbb/atomic.h"     // For atomic_xxx definitions
+ 
+-#if __linux__ || __FreeBSD__
++#if __linux__ || __FreeBSD__ || __HAIKU__
+ #include <sys/param.h>  // __FreeBSD_version
+ #if __FreeBSD_version >= 701000
+ #include <sys/cpuset.h>
+diff --git a/src/tbbmalloc/MapMemory.h b/src/tbbmalloc/MapMemory.h
+index 552917a..238ab1b 100644
+--- a/src/tbbmalloc/MapMemory.h
++++ b/src/tbbmalloc/MapMemory.h
+@@ -32,7 +32,7 @@ void *ErrnoPreservingMalloc(size_t bytes)
+     return ret;
+ }
+ 
+-#if __linux__ || __APPLE__ || __sun || __FreeBSD__
++#if __linux__ || __APPLE__ || __sun || __FreeBSD__ || __HAIKU__
+ 
+ #if __sun && !defined(_XPG4_2)
+  // To have void* as mmap's 1st argument
+diff --git a/src/tbbmalloc/frontend.cpp b/src/tbbmalloc/frontend.cpp
+index 9aa9a13..eb5ceee 100644
+--- a/src/tbbmalloc/frontend.cpp
++++ b/src/tbbmalloc/frontend.cpp
+@@ -747,7 +747,7 @@ static inline unsigned int highestBitPos(unsigned int n)
+     unsigned int pos;
+ #if __ARCH_x86_32||__ARCH_x86_64
+ 
+-# if __linux__||__APPLE__||__FreeBSD__||__NetBSD__||__sun||__MINGW32__
++# if __linux__||__APPLE__||__FreeBSD__||__NetBSD__||__sun||__MINGW32__||__HAIKU__
+     __asm__ ("bsr %1,%0" : "=r"(pos) : "r"(n));
+ # elif (_WIN32 && (!_WIN64 || __INTEL_COMPILER))
+     __asm
+diff --git a/src/tbbmalloc/proxy.h b/src/tbbmalloc/proxy.h
+index 8db526c..1bc0478 100644
+--- a/src/tbbmalloc/proxy.h
++++ b/src/tbbmalloc/proxy.h
+@@ -26,7 +26,7 @@
+ 
+ // MALLOC_UNIXLIKE_OVERLOAD_ENABLED depends on MALLOC_CHECK_RECURSION stuff
+ // TODO: limit MALLOC_CHECK_RECURSION to *_OVERLOAD_ENABLED only
+-#if __linux__ || __APPLE__ || __sun || __FreeBSD__ || MALLOC_UNIXLIKE_OVERLOAD_ENABLED
++#if __linux__ || __APPLE__ || __sun || __FreeBSD__ || MALLOC_UNIXLIKE_OVERLOAD_ENABLED || __HAIKU__
+ #define MALLOC_CHECK_RECURSION 1
+ #endif
+ 
+diff --git a/src/tbbmalloc/tbbmalloc.cpp b/src/tbbmalloc/tbbmalloc.cpp
+index fa0e698..1b8cab5 100644
+--- a/src/tbbmalloc/tbbmalloc.cpp
++++ b/src/tbbmalloc/tbbmalloc.cpp
+@@ -45,7 +45,7 @@ namespace internal {
+ #define MALLOCLIB_NAME "tbbmalloc" DEBUG_SUFFIX ".dll"
+ #elif __APPLE__
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX ".dylib"
+-#elif __FreeBSD__ || __NetBSD__ || __sun || _AIX || __ANDROID__
++#elif __FreeBSD__ || __NetBSD__ || __sun || _AIX || __ANDROID__ || __HAIKU__
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX ".so"
+ #elif __linux__
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX  __TBB_STRING(.so.TBB_COMPATIBLE_INTERFACE_VERSION)
+diff --git a/src/test/harness_dynamic_libs.h b/src/test/harness_dynamic_libs.h
+index dcf856a..baa9abd 100644
+--- a/src/test/harness_dynamic_libs.h
++++ b/src/test/harness_dynamic_libs.h
+@@ -50,7 +50,7 @@ namespace Harness {
+ #if __APPLE__
+ #define EXT ".dylib"
+ // Android SDK build system does not support .so file name versioning
+-#elif __FreeBSD__ || __NetBSD__ || __sun || _AIX || __ANDROID__
++#elif __FreeBSD__ || __NetBSD__ || __sun || _AIX || __ANDROID__ || __HAIKU__
+ #define EXT ".so"
+ #elif __linux__  // Order of these elif's matters!
+ #define EXT __TBB_STRING(.so.TBB_COMPATIBLE_INTERFACE_VERSION)
+-- 
+2.15.0
+
