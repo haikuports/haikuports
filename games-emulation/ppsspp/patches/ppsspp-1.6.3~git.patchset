@@ -1,0 +1,212 @@
+From 9361d6cabcfab31e3490c5bb2ab5431591c0b809 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sat, 22 Sep 2018 20:20:53 +1000
+Subject: Fixes for Haiku
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 82d3034..e6ea7dc 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -88,8 +88,12 @@ if(${CMAKE_SYSTEM_NAME} MATCHES "Android")
+ 	set(ANDROID ON)
+ endif()
+ 
++if(${CMAKE_SYSTEM_NAME} MATCHES "Haiku")
++    set(HAIKU ON)
++endif()
++
+ # We only support Vulkan on Unix, Android and Windows.
+-if(ANDROID OR WIN32 OR (UNIX AND NOT APPLE AND NOT ARM_NO_VULKAN))
++if(ANDROID OR WIN32 OR (UNIX AND NOT APPLE AND NOT ARM_NO_VULKAN AND NOT HAIKU))
+ 	set(VULKAN ON)
+ endif()
+ 
+@@ -137,7 +141,7 @@ option(USE_SYSTEM_LIBZIP "Dynamically link against system libzip" ${USE_SYSTEM_L
+ option(USE_WAYLAND_WSI "Set to ON to require Wayland support for Vulkan" ${USE_WAYLAND_WSI})
+ option(USE_ADDRESS_SANITIZER "Use Clang memory sanitizer" ${USE_ADDRESS_SANITIZER})
+ 
+-if(UNIX AND NOT (APPLE OR ANDROID) AND VULKAN)
++if(UNIX AND NOT (APPLE OR ANDROID OR HAIKU) AND VULKAN)
+ 	if(USING_X11_VULKAN)
+ 		message("Using X11 for Vulkan")
+ 		add_definitions(-DVK_USE_PLATFORM_XLIB_KHR)
+@@ -1770,7 +1774,7 @@ if(FFmpeg_FOUND)
+ endif()
+ 
+ # Discord integration
+-if(NOT IOS)
++if(NOT IOS AND NOT HAIKU)
+ target_link_libraries(${CoreLibName} discord-rpc)
+ endif()
+ 
+@@ -1883,6 +1887,10 @@ set(WindowsFiles
+ 
+ list(APPEND LinkCommon ${CoreLibName} ${CMAKE_THREAD_LIBS_INIT})
+ 
++if(HAIKU)
++    list(APPEND LinkCommon network)
++endif()
++
+ if(WIN32)
+ 	list(APPEND LinkCommon kernel32 user32 gdi32 shell32 comctl32 dsound xinput d3d9 winmm dinput8 ole32 winspool ksuser)
+ 	#setup_target_project(${TargetBin} Windows)
+diff --git a/SDL/SDLMain.cpp b/SDL/SDLMain.cpp
+index 6dd6d22..b3be204 100644
+--- a/SDL/SDLMain.cpp
++++ b/SDL/SDLMain.cpp
+@@ -128,7 +128,7 @@ void LaunchBrowser(const char *url) {
+ #elif defined(_WIN32)
+ 	std::wstring wurl = ConvertUTF8ToWString(url);
+ 	ShellExecute(NULL, L"open", wurl.c_str(), NULL, NULL, SW_SHOWNORMAL);
+-#elif defined(__APPLE__)
++#elif defined(__APPLE__) || defined(__HAIKU__)
+ 	std::string command = std::string("open ") + url;
+ 	system(command.c_str());
+ #else
+@@ -146,7 +146,7 @@ void LaunchMarket(const char *url) {
+ #elif defined(_WIN32)
+ 	std::wstring wurl = ConvertUTF8ToWString(url);
+ 	ShellExecute(NULL, L"open", wurl.c_str(), NULL, NULL, SW_SHOWNORMAL);
+-#elif defined(__APPLE__)
++#elif defined(__APPLE__) || defined(__HAIKU__)
+ 	std::string command = std::string("open ") + url;
+ 	system(command.c_str());
+ #else
+@@ -164,7 +164,7 @@ void LaunchEmail(const char *email_address) {
+ #elif defined(_WIN32)
+ 	std::wstring mailto = std::wstring(L"mailto:") + ConvertUTF8ToWString(email_address);
+ 	ShellExecute(NULL, L"open", mailto.c_str(), NULL, NULL, SW_SHOWNORMAL);
+-#elif defined(__APPLE__)
++#elif defined(__APPLE__) || defined(__HAIKU__)
+ 	std::string command = std::string("open mailto:") + email_address;
+ 	system(command.c_str());
+ #else
+@@ -185,6 +185,8 @@ std::string System_GetProperty(SystemProperty prop) {
+ 		return "SDL:Linux";
+ #elif __APPLE__
+ 		return "SDL:OSX";
++#elif __HAIKU__
++		return "SDL:Haiku";
+ #else
+ 		return "SDL:";
+ #endif
+@@ -339,6 +341,23 @@ int main(int argc, char *argv[]) {
+ 		}
+ 	}
+ 
++#ifdef __HAIKU__
++	char abs_exe_path[PATH_MAX];
++	char path_save[PATH_MAX];
++	char *p;
++
++	if(!(p = strrchr(argv[0], '/'))) {
++   		getcwd(abs_exe_path, sizeof(abs_exe_path));
++	} else  {
++    	*p = '\0';
++    	getcwd(path_save, sizeof(path_save));
++    	chdir(argv[0]);
++    	getcwd(abs_exe_path, sizeof(abs_exe_path));
++    	chdir(path_save);
++	}
++	chdir(abs_exe_path);
++#endif
++
+ 	glslang::InitializeProcess();
+ 
+ #if PPSSPP_PLATFORM(RPI)
+diff --git a/UI/NativeApp.cpp b/UI/NativeApp.cpp
+index 00bf8a3..278d855 100644
+--- a/UI/NativeApp.cpp
++++ b/UI/NativeApp.cpp
+@@ -452,6 +452,9 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
+ 	// most sense.
+ 	g_Config.memStickDirectory = std::string(external_dir) + "/";
+ 	g_Config.flash0Directory = std::string(external_dir) + "/flash0/";
++#elif defined(__HAIKU__)
++	g_Config.memStickDirectory = "/boot/home/config/settings/ppsspp/";
++	g_Config.flash0Directory = File::GetExeDirectory() + "/assets/flash0/";
+ #elif defined(IOS)
+ 	g_Config.memStickDirectory = user_data_path;
+ 	g_Config.flash0Directory = std::string(external_dir) + "/flash0/";
+diff --git a/ext/CMakeLists.txt b/ext/CMakeLists.txt
+index ade6594..0c85ffa 100644
+--- a/ext/CMakeLists.txt
++++ b/ext/CMakeLists.txt
+@@ -12,6 +12,6 @@ add_subdirectory(glslang)
+ add_subdirectory(snappy)
+ add_subdirectory(udis86)
+ add_subdirectory(SPIRV-Cross-build)
+-if(NOT IOS)
++if(NOT IOS AND NOT HAIKU)
+ add_subdirectory(discord-rpc-build)
+ endif()
+-- 
+2.19.0
+
+
+From 6babd0c990ba7903b5f35032dd43808cae45390f Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sat, 22 Sep 2018 20:21:20 +1000
+Subject: Tune default settings for Haiku
+
+
+diff --git a/Core/Config.cpp b/Core/Config.cpp
+index e2fd65c..0860562 100644
+--- a/Core/Config.cpp
++++ b/Core/Config.cpp
+@@ -482,7 +482,7 @@ static int DefaultRenderingMode() {
+ 
+ static int DefaultInternalResolution() {
+ 	// Auto on Windows, 2x on large screens, 1x elsewhere.
+-#if defined(USING_WIN_UI)
++#if defined(USING_WIN_UI) || defined(__HAIKU__)
+ 	return 0;
+ #else
+ 	int longestDisplaySide = std::max(System_GetPropertyInt(SYSPROP_DISPLAY_XRES), System_GetPropertyInt(SYSPROP_DISPLAY_YRES));
+@@ -620,7 +620,11 @@ static ConfigSetting graphicsSettings[] = {
+ 	ReportedConfigSetting("InternalResolution", &g_Config.iInternalResolution, &DefaultInternalResolution, true, true),
+ 	ReportedConfigSetting("AndroidHwScale", &g_Config.iAndroidHwScale, &DefaultAndroidHwScale),
+ 	ReportedConfigSetting("HighQualityDepth", &g_Config.bHighQualityDepth, true, true, true),
++#ifdef __HAIKU__
++	ReportedConfigSetting("FrameSkip", &g_Config.iFrameSkip, 2, true, true),
++#else
+ 	ReportedConfigSetting("FrameSkip", &g_Config.iFrameSkip, 0, true, true),
++#endif
+ 	ReportedConfigSetting("AutoFrameSkip", &g_Config.bAutoFrameSkip, false, true, true),
+ 	ConfigSetting("FrameRate", &g_Config.iFpsLimit1, 0, true, true),
+ 	ConfigSetting("FrameRate2", &g_Config.iFpsLimit2, -1, true, true),
+@@ -631,10 +635,17 @@ static ConfigSetting graphicsSettings[] = {
+ 	ReportedConfigSetting("ForceMaxEmulatedFPS", &g_Config.iForceMaxEmulatedFPS, 60, true, true),
+ 
+ 	// Most low-performance (and many high performance) mobile GPUs do not support aniso anyway so defaulting to 4 is fine.
++#ifdef __HAIKU__
++	ConfigSetting("AnisotropyLevel", &g_Config.iAnisotropyLevel, 0, true, true),
++#else
+ 	ConfigSetting("AnisotropyLevel", &g_Config.iAnisotropyLevel, 4, true, true),
+-
++#endif
+ 	ReportedConfigSetting("VertexDecCache", &g_Config.bVertexCache, &DefaultVertexCache, true, true),
++#ifdef __HAIKU__
++	ReportedConfigSetting("TextureBackoffCache", &g_Config.bTextureBackoffCache, true, true, true),
++#else
+ 	ReportedConfigSetting("TextureBackoffCache", &g_Config.bTextureBackoffCache, false, true, true),
++#endif
+ 	ReportedConfigSetting("TextureSecondaryCache", &g_Config.bTextureSecondaryCache, false, true, true),
+ 	ReportedConfigSetting("VertexDecJit", &g_Config.bVertexDecoderJit, &DefaultCodeGen, false),
+ 
+@@ -668,7 +679,11 @@ static ConfigSetting graphicsSettings[] = {
+ 	ReportedConfigSetting("PostShader", &g_Config.sPostShaderName, "Off", true, true),
+ 
+ 	ReportedConfigSetting("MemBlockTransferGPU", &g_Config.bBlockTransferGPU, true, true, true),
++#ifdef __HAIKU__
++	ReportedConfigSetting("DisableSlowFramebufEffects", &g_Config.bDisableSlowFramebufEffects, true, true, true),
++#else
+ 	ReportedConfigSetting("DisableSlowFramebufEffects", &g_Config.bDisableSlowFramebufEffects, false, true, true),
++#endif
+ 	ReportedConfigSetting("FragmentTestCache", &g_Config.bFragmentTestCache, true, true, true),
+ 
+ 	ConfigSetting("GfxDebugOutput", &g_Config.bGfxDebugOutput, false, false, false),
+-- 
+2.19.0
+
