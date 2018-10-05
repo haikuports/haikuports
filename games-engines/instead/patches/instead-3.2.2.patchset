@@ -1,0 +1,169 @@
+From 7e225b914e9bbc926812c0eeb81cdf096620f422 Mon Sep 17 00:00:00 2001
+From: Peter Kosyh <p.kosyh@gmail.com>
+Date: Thu, 4 Oct 2018 17:15:24 +0300
+Subject: instead: open file dialog
+
+
+diff --git a/Rules.make.system b/Rules.make.system
+index a473816..91198ed 100644
+--- a/Rules.make.system
++++ b/Rules.make.system
+@@ -28,7 +28,8 @@ LUA_LFLAGS=$(shell pkg-config --libs lua5.1)
+ SDL_CFLAGS=$(shell sdl-config --cflags)
+ SDL_LFLAGS=$(shell sdl-config --libs) -lSDL_ttf -lSDL_mixer -lSDL_image -lm
+ 
+-CFLAGS	+= -Wall -Dunix -D_USE_UNPACK # -D_SDL_MOD_BUG
++CFLAGS	+= -O2 -Wall -Dunix -D_USE_UNPACK -D_USE_BROWSE -D_LOCAL_APPDATA # -D_SDL_MOD_BUG
++EXTRA_LDFLAGS += -ltracker -lbe -lstdc++
+ 
+ INSTALLD=install -d -m 0755
+ INSTALLB=install -m 0755
+@@ -36,7 +37,7 @@ INSTALL=install -m 0644
+ LN=ln -sf
+ 
+ EXE=
+-PLATFORM=unix.c
++PLATFORM=haiku.cpp unix.c
+ RESOURCES=
+ RM=rm
+ AR=ar rc
+diff --git a/src/haiku.cpp b/src/haiku.cpp
+new file mode 100644
+index 0000000..0ff1a7a
+--- /dev/null
++++ b/src/haiku.cpp
+@@ -0,0 +1,110 @@
++#include <FilePanel.h>
++#include <Looper.h>
++#include <Path.h>
++#include <Messenger.h>
++#include <Window.h>
++#include <MenuItem.h>
++#include <MenuBar.h>
++#include <stdio.h>
++#include <compat/sys/stat.h>
++#include <string.h>
++
++extern "C" char *open_file_dialog(void);
++
++class FileFilter: public BRefFilter
++{
++	public:
++	bool Filter(const entry_ref *ref,
++		BNode *node,
++		struct stat_beos *stat,
++		const char *mimeType)
++	{
++		if (S_ISDIR(stat->st_mode))
++			return true;
++		if (!strcmp(mimeType, "application/zip"))
++			return true;
++		if (!strcasecmp(ref->name, "main.lua") ||
++			!strcasecmp(ref->name, "main3.lua"))
++			return true;
++		return false;
++	}
++};
++
++class FileHandler: public BLooper
++{
++	public:
++
++	FileHandler()
++		: BLooper("filepanel listener")
++	{
++		lock = create_sem(0, "filepanel sem");
++		path = NULL;
++		Run();
++	}
++
++	~FileHandler()
++	{
++		delete_sem(lock);
++		if (path != NULL)
++			free(path);
++	}
++	void MessageReceived(BMessage* message)
++	{
++		switch(message->what)
++		{
++			case B_REFS_RECEIVED:
++			{
++				entry_ref ref;
++
++				message->FindRef("refs", 0, &ref);
++				BEntry entry(&ref, true);
++				BPath xpath;
++				entry.GetPath(&xpath);
++				path = strdup(xpath.Path());
++				break;
++			}
++			case B_CANCEL:
++				break;
++			default:
++				BHandler::MessageReceived(message);
++				return;
++		}
++		release_sem(lock);
++	}
++
++	void Wait() {
++		acquire_sem(lock);
++	}
++
++	char* path;
++
++	private:
++		sem_id lock;
++};
++
++static char ret[PATH_MAX];
++
++char *open_file_dialog(void)
++{
++	FileHandler *handler = new FileHandler();
++	FileFilter filter;
++	BMessenger messenger(handler);
++	BFilePanel panel(B_OPEN_PANEL,
++		&messenger,
++		NULL,
++		B_FILE_NODE,
++		false,
++		NULL,
++		&filter,
++		true);
++	panel.Show();
++	handler->Wait();
++	if (handler->path == NULL) {
++		messenger.SendMessage(B_QUIT_REQUESTED);
++		return NULL;
++	}
++	snprintf(ret, sizeof(ret), "%s", handler->path);
++	ret[sizeof(ret) - 1] = 0;
++	messenger.SendMessage(B_QUIT_REQUESTED);
++	return ret;
++}
+diff --git a/src/unix.c b/src/unix.c
+index 1d62a3d..7e69728 100644
+--- a/src/unix.c
++++ b/src/unix.c
+@@ -104,6 +104,7 @@ GdkPixbuf *create_pixbuf(const gchar * filename)
+ 
+ extern char *BROWSE_MENU;
+ 
++#ifndef __HAIKU__
+ char *open_file_dialog(void)
+ {
+ #ifndef _USE_GTK
+@@ -205,7 +206,7 @@ char *open_file_dialog(void)
+ 	return (file[0])?file:NULL;
+ #endif
+ }
+-
++#endif
+ char *appdir(void)
+ {
+ 	static char dir[PATH_MAX] = "";
+-- 
+2.19.0
+
