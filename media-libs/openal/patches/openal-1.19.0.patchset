@@ -1,0 +1,382 @@
+From 3de30a70beb189d18034126f5986528615288d26 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Thu, 11 Oct 2018 21:55:36 +1000
+Subject: Add Haiku backend
+
+
+diff --git a/Alc/ALc.c b/Alc/ALc.c
+index 535f947..c4c1515 100644
+--- a/Alc/ALc.c
++++ b/Alc/ALc.c
+@@ -90,6 +90,9 @@ static struct BackendInfo BackendList[] = {
+ #ifdef HAVE_WASAPI
+     { "wasapi", ALCwasapiBackendFactory_getFactory },
+ #endif
++#ifdef HAVE_HAIKU
++    { "haiku", ALChaikuBackendFactory_getFactory },
++#endif
+ #ifdef HAVE_DSOUND
+     { "dsound", ALCdsoundBackendFactory_getFactory },
+ #endif
+diff --git a/Alc/backends/base.h b/Alc/backends/base.h
+index ba92b4a..45a510d 100644
+--- a/Alc/backends/base.h
++++ b/Alc/backends/base.h
+@@ -150,6 +150,7 @@ ALCbackendFactory *ALCwinmmBackendFactory_getFactory(void);
+ ALCbackendFactory *ALCportBackendFactory_getFactory(void);
+ ALCbackendFactory *ALCopenslBackendFactory_getFactory(void);
+ ALCbackendFactory *ALCnullBackendFactory_getFactory(void);
++ALCbackendFactory *ALChaikuBackendFactory_getFactory(void);
+ ALCbackendFactory *ALCwaveBackendFactory_getFactory(void);
+ ALCbackendFactory *ALCsdl2BackendFactory_getFactory(void);
+ ALCbackendFactory *ALCloopbackFactory_getFactory(void);
+diff --git a/Alc/backends/haiku.c b/Alc/backends/haiku.c
+new file mode 100644
+index 0000000..e3c1ada
+--- /dev/null
++++ b/Alc/backends/haiku.c
+@@ -0,0 +1,177 @@
++#include "config.h"
++
++#include <stdlib.h>
++
++#include "alMain.h"
++#include "alu.h"
++#include "threads.h"
++#include "compat.h"
++
++#include "backends/base.h"
++
++bool haikuSoundPlayerInit(int channels, int samplerate,  \
++	void  (*soundproc) (void* , void* buffer, size_t size), void *cookie);
++bool haikuSoundPlayerStart(void);
++bool haikuSoundPlayerStop(void);
++bool haikuSoundPlayerDelete(void);
++const char *haikuProcessName(void);
++
++typedef struct ALChaikuBackend {
++    DERIVE_FROM_TYPE(ALCbackend);
++	ALvoid *mix_data;
++    ALsizei data_size;
++	ALsizei frameSize;
++} ALChaikuBackend;
++
++static void ALChaikuBackend_Construct(ALChaikuBackend *self, ALCdevice *device);
++static void ALChaikuBackend_Destruct(ALChaikuBackend *self);
++static ALCenum ALChaikuBackend_open(ALChaikuBackend *self, const ALCchar *name);
++static ALCboolean ALChaikuBackend_reset(ALChaikuBackend *self);
++static ALCboolean ALChaikuBackend_start(ALChaikuBackend *self);
++static void ALChaikuBackend_stop(ALChaikuBackend *self);
++static DECLARE_FORWARD2(ALChaikuBackend, ALCbackend, ALCenum, captureSamples, void*, ALCuint)
++static DECLARE_FORWARD(ALChaikuBackend, ALCbackend, ALCuint, availableSamples)
++static DECLARE_FORWARD(ALChaikuBackend, ALCbackend, ClockLatency, getClockLatency)
++static DECLARE_FORWARD(ALChaikuBackend, ALCbackend, void, lock)
++static DECLARE_FORWARD(ALChaikuBackend, ALCbackend, void, unlock)
++DECLARE_DEFAULT_ALLOCATORS(ALChaikuBackend)
++
++DEFINE_ALCBACKEND_VTABLE(ALChaikuBackend);
++
++
++static const ALCchar haikuDevice[] = "Haiku MediaKit";
++
++static void ALChaikuBackend_audioCallback(void *cookie, void *buffer, size_t len)
++{
++	ALChaikuBackend *self = (ALChaikuBackend*)cookie;
++    ALCdevice *device = STATIC_CAST(ALCbackend, self)->mDevice;
++    assert((len % self->frameSize) == 0);
++    aluMixData(device, buffer, len / self->frameSize);
++}
++
++static void ALChaikuBackend_Construct(ALChaikuBackend *self, ALCdevice *device)
++{
++    ALCbackend_Construct(STATIC_CAST(ALCbackend, self), device);
++    SET_VTABLE2(ALChaikuBackend, ALCbackend, self);
++	self->mix_data = NULL;
++	self->frameSize = FrameSizeFromDevFmt(device->FmtChans, device->FmtType, device->AmbiOrder);
++}
++
++static void ALChaikuBackend_Destruct(ALChaikuBackend *self)
++{
++    haikuSoundPlayerDelete();
++    ALCbackend_Destruct(STATIC_CAST(ALCbackend, self));
++}
++
++static ALCenum ALChaikuBackend_open(ALChaikuBackend *self, const ALCchar *name)
++{
++    ALCdevice *device;
++
++    if(!name)
++        name = haikuDevice;
++    else if(strcmp(name, haikuDevice) != 0)
++        return ALC_INVALID_VALUE;
++
++    device = STATIC_CAST(ALCbackend, self)->mDevice;
++    alstr_copy_cstr(&device->DeviceName, name);
++
++    return ALC_NO_ERROR;
++}
++
++static ALCboolean ALChaikuBackend_reset(ALChaikuBackend *self)
++{
++    SetDefaultWFXChannelOrder(STATIC_CAST(ALCbackend, self)->mDevice);
++	ALCdevice *device = STATIC_CAST(ALCbackend,self)->mDevice;	
++
++	if(device->FmtChans != DevFmtMono)
++        device->FmtChans = DevFmtStereo;
++
++	ALsizei numChannels = ChannelsFromDevFmt(device->FmtChans, device->AmbiOrder);
++	device->FmtType = DevFmtShort;
++	self->frameSize = FrameSizeFromDevFmt(device->FmtChans, device->FmtType, device->AmbiOrder);
++
++	if (haikuSoundPlayerInit(numChannels, device->Frequency, ALChaikuBackend_audioCallback, (void*)self))
++		return ALC_TRUE;
++
++	return ALC_FALSE;
++}
++
++static ALCboolean ALChaikuBackend_start(ALChaikuBackend *self)
++{
++	ALCdevice *device = STATIC_CAST(ALCbackend,self)->mDevice;
++
++	self->data_size = device->UpdateSize * FrameSizeFromDevFmt(
++        device->FmtChans, device->FmtType, device->AmbiOrder
++    );
++    al_free(self->mix_data);
++    self->mix_data = al_calloc(16, self->data_size);
++
++	if (haikuSoundPlayerStart())
++		return ALC_TRUE;
++
++	return ALC_FALSE;
++}
++
++static void ALChaikuBackend_stop(ALChaikuBackend *self)
++{
++	haikuSoundPlayerStop();
++	al_free(self->mix_data);
++    self->mix_data = NULL;
++}
++
++typedef struct ALChaikuBackendFactory {
++    DERIVE_FROM_TYPE(ALCbackendFactory);
++} ALChaikuBackendFactory;
++#define ALChaikuBACKENDFACTORY_INITIALIZER { { GET_VTABLE2(ALChaikuBackendFactory, ALCbackendFactory) } }
++
++ALCbackendFactory *ALChaikuBackendFactory_getFactory(void);
++
++static ALCboolean ALChaikuBackendFactory_init(ALChaikuBackendFactory *self);
++static DECLARE_FORWARD(ALChaikuBackendFactory, ALCbackendFactory, void, deinit)
++static ALCboolean ALChaikuBackendFactory_querySupport(ALChaikuBackendFactory *self, ALCbackend_Type type);
++static void ALChaikuBackendFactory_probe(ALChaikuBackendFactory *self, enum DevProbe type);
++static ALCbackend* ALChaikuBackendFactory_createBackend(ALChaikuBackendFactory *self, ALCdevice *device, ALCbackend_Type type);
++DEFINE_ALCBACKENDFACTORY_VTABLE(ALChaikuBackendFactory);
++
++ALCbackendFactory *ALChaikuBackendFactory_getFactory(void)
++{
++    static ALChaikuBackendFactory factory = ALChaikuBACKENDFACTORY_INITIALIZER;
++    return STATIC_CAST(ALCbackendFactory, &factory);
++}
++
++static ALCboolean ALChaikuBackendFactory_init(ALChaikuBackendFactory* UNUSED(self))
++{
++    return ALC_TRUE;
++}
++
++static ALCboolean ALChaikuBackendFactory_querySupport(ALChaikuBackendFactory* UNUSED(self), ALCbackend_Type type)
++{
++    if(type == ALCbackend_Playback)
++        return ALC_TRUE;
++    return ALC_FALSE;
++}
++
++static void ALChaikuBackendFactory_probe(ALChaikuBackendFactory* UNUSED(self), enum DevProbe type)
++{
++    switch(type)
++    {
++        case ALL_DEVICE_PROBE:
++            AppendAllDevicesList(haikuDevice);
++            break;
++        case CAPTURE_DEVICE_PROBE:
++            break;
++    }
++}
++
++static ALCbackend* ALChaikuBackendFactory_createBackend(ALChaikuBackendFactory* UNUSED(self), ALCdevice *device, ALCbackend_Type type)
++{
++    if(type == ALCbackend_Playback)
++    {
++        ALChaikuBackend *backend;
++        NEW_OBJ(backend, ALChaikuBackend)(device);
++        if(!backend) return NULL;
++        return STATIC_CAST(ALCbackend, backend);
++    }
++
++    return NULL;
++}
+\ No newline at end of file
+diff --git a/Alc/backends/haikusnd.cpp b/Alc/backends/haikusnd.cpp
+new file mode 100644
+index 0000000..538b3f0
+--- /dev/null
++++ b/Alc/backends/haikusnd.cpp
+@@ -0,0 +1,91 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <Application.h>
++#include <Roster.h>
++#include <OS.h>
++#include <Path.h>
++#include <SoundPlayer.h>
++
++#define HAIKU_PLAYER_BUFFER_SIZE 4096
++
++static BSoundPlayer *haikuSoundPlayer = NULL;
++static void (*haikuMixerProcFunc) (void *cookie, void *buffer, size_t len) = NULL;
++static BPath selfProcessPath;
++static const char *defualtProcessName = "OpenAL";
++
++static void haikuPlayerProc(void *cookie, void *buffer, size_t len, const media_raw_audio_format &)
++{
++	if (haikuMixerProcFunc != NULL)
++		haikuMixerProcFunc(cookie, buffer, len);
++}
++
++extern "C" {
++
++const char *haikuProcessName(void)
++{
++	app_info appInfo;
++	if (be_app->GetAppInfo(&appInfo) == B_OK) {
++		BPath path(&appInfo.ref);
++		selfProcessPath = path;
++		return selfProcessPath.Leaf();
++	} else {
++		return defualtProcessName;
++	}
++}
++
++bool haikuSoundPlayerInit(int channels, int samplerate, \
++	void  (*soundproc) (void* , void* buffer, size_t size), void *cookie)
++{
++	haikuMixerProcFunc = soundproc;
++
++	media_raw_audio_format format = {
++		(float)samplerate,
++		(uint32)channels,
++		media_raw_audio_format::B_AUDIO_SHORT,
++		B_MEDIA_LITTLE_ENDIAN,
++		HAIKU_PLAYER_BUFFER_SIZE * sizeof(short)
++	};
++
++	haikuSoundPlayer = new BSoundPlayer(&format, haikuProcessName(), haikuPlayerProc, NULL, cookie);
++
++	if(haikuSoundPlayer->InitCheck() != B_OK) {
++		delete haikuSoundPlayer;
++		haikuSoundPlayer = NULL;
++		return false;
++	}
++	return true;
++}
++
++bool haikuSoundPlayerStart(void)
++{
++	if(haikuSoundPlayer) {
++		haikuSoundPlayer->Start();
++		haikuSoundPlayer->SetHasData(true);
++		return true;
++	}
++	return false;
++}
++
++bool haikuSoundPlayerStop(void)
++{
++	if(haikuSoundPlayer) {
++		haikuSoundPlayer->Stop();
++		return true;
++	}
++	return false;
++}
++
++bool haikuSoundPlayerDelete(void)
++{
++	if(haikuSoundPlayer) {
++		haikuSoundPlayer->Stop();
++		delete haikuSoundPlayer;
++		haikuSoundPlayer = NULL;
++		return true;
++	}
++	return true;
++}
++
++}
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f6d0037..67b66fa 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2,7 +2,7 @@
+ 
+ CMAKE_MINIMUM_REQUIRED(VERSION 3.0.2)
+ 
+-PROJECT(OpenAL)
++PROJECT(OpenAL C CXX)
+ 
+ IF(COMMAND CMAKE_POLICY)
+     CMAKE_POLICY(SET CMP0003 NEW)
+@@ -28,6 +28,7 @@ INCLUDE(CheckIncludeFiles)
+ INCLUDE(CheckSymbolExists)
+ INCLUDE(CheckCCompilerFlag)
+ INCLUDE(CheckCXXCompilerFlag)
++INCLUDE(CheckCXXSourceCompiles)
+ INCLUDE(CheckCSourceCompiles)
+ INCLUDE(CheckTypeSize)
+ include(CheckStructHasMember)
+@@ -849,6 +850,7 @@ SET(HAVE_NEON       0)
+ SET(HAVE_ALSA       0)
+ SET(HAVE_OSS        0)
+ SET(HAVE_SOLARIS    0)
++SET(HAVE_HAIKU      0)
+ SET(HAVE_SNDIO      0)
+ SET(HAVE_QSA        0)
+ SET(HAVE_DSOUND     0)
+@@ -1034,6 +1036,22 @@ IF(ALSOFT_REQUIRE_SOLARIS AND NOT HAVE_SOLARIS)
+     MESSAGE(FATAL_ERROR "Failed to enabled required Solaris backend")
+ ENDIF()
+ 
++# Check Haiku backend
++OPTION(ALSOFT_REQUIRE_HAIKU "Require Haiku backend" OFF)
++IF(HAIKU)
++    OPTION(ALSOFT_BACKEND_HAIKU "Enable Haiku backend" ON)
++    IF(ALSOFT_BACKEND_HAIKU)
++        SET(HAVE_HAIKU 1)
++        SET(BACKENDS  "${BACKENDS} Haiku,")
++        SET(ALC_OBJS  ${ALC_OBJS} Alc/backends/haiku.c Alc/backends/haikusnd.cpp)
++		SET(EXTRA_LIBS be ${EXTRA_LIBS})
++		SET(EXTRA_LIBS media ${EXTRA_LIBS})
++    ENDIF()
++ENDIF()
++IF(ALSOFT_REQUIRE_HAIKU AND NOT HAVE_HAIKU)
++    MESSAGE(FATAL_ERROR "Failed to enabled required Haiku backend")
++ENDIF()
++
+ # Check SndIO backend
+ OPTION(ALSOFT_REQUIRE_SNDIO "Require SndIO backend" OFF)
+ FIND_PACKAGE(SoundIO)
+diff --git a/config.h.in b/config.h.in
+index 9cc6c16..16abf3f 100644
+--- a/config.h.in
++++ b/config.h.in
+@@ -47,6 +47,9 @@
+ /* Define if we have the Solaris backend */
+ #cmakedefine HAVE_SOLARIS
+ 
++/* Define if we have the Haiku backend */
++#cmakedefine HAVE_HAIKU
++
+ /* Define if we have the SndIO backend */
+ #cmakedefine HAVE_SNDIO
+ 
+-- 
+2.19.1
+
