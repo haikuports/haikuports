@@ -1,0 +1,328 @@
+From 2e7bdc01a8cdabdc6072b547a3cbbcda21e3ffdf Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Zolt=C3=A1n=20Mizsei?= <zmizsei@extrowerk.com>
+Date: Sun, 30 Sep 2018 21:21:22 +0200
+Subject: [PATCH] Dirty Haiku patches
+
+---
+ autogen.sh             |  2 +-
+ configure-xsdl.sh      | 12 +++++-----
+ hw/kdrive/sdl/sdl.c    | 50 ++++++++++++++++++++++++------------------
+ hw/kdrive/src/kinput.c |  7 ++++++
+ os/WaitFor.c           |  6 ++---
+ os/access.c            |  6 ++++-
+ os/connection.c        |  8 +++----
+ os/io.c                |  4 ++--
+ os/xstrans.c           |  1 +
+ 9 files changed, 59 insertions(+), 37 deletions(-)
+
+diff --git a/autogen.sh b/autogen.sh
+index 4e8b11b..b80cf37 100755
+--- a/autogen.sh
++++ b/autogen.sh
+@@ -9,4 +9,4 @@ cd $srcdir
+ autoreconf --force -v --install || exit 1
+ cd $ORIGDIR || exit $?
+ 
+-$srcdir/configure --enable-maintainer-mode "$@"
++#$srcdir/configure --enable-maintainer-mode "$@"
+diff --git a/configure-xsdl.sh b/configure-xsdl.sh
+index 3754979..37a0438 100755
+--- a/configure-xsdl.sh
++++ b/configure-xsdl.sh
+@@ -1,10 +1,12 @@
+ #!/bin/sh
+-env SDL=yes CFLAGS="-O0 -g -DDEBUG" \
+-./configure --prefix=`pwd`/data/usr \
++SDL=yes CFLAGS="-O0 -g -DDEBUG -D_BSD_SOURCE" \
++LDFLAGS="-lpthread -lnetwork -lbsd" \
++../configure --prefix=/Ports/Inst/xsdl \
+ --enable-debug \
+ --disable-xorg --disable-dmx --disable-xvfb --disable-xnest --disable-xquartz --disable-xwin \
+ --disable-xephyr --disable-xfake --disable-xfbdev --disable-unit-tests \
+---disable-shm --disable-mitshm --disable-dri --disable-dri2 --disable-glx --disable-xf86vidmode \
+---enable-xsdl --enable-kdrive --enable-kdrive-kbd --enable-kdrive-mouse --enable-kdrive-evdev \
++--disable-mitshm --disable-dri --disable-dri2 --disable-glx --disable-xf86vidmode \
++--enable-xsdl --enable-kdrive --enable-kdrive-kbd --enable-kdrive-mouse --enable-kdrive-evdev
+ 
+-nice -n19 make -j8
++
++#make -j4
+diff --git a/hw/kdrive/sdl/sdl.c b/hw/kdrive/sdl/sdl.c
+index 4371465..f33be50 100644
+--- a/hw/kdrive/sdl/sdl.c
++++ b/hw/kdrive/sdl/sdl.c
+@@ -36,13 +36,19 @@
+ #include <sys/socket.h>
+ #include <sys/un.h>
+ #include <pthread.h>
++#ifndef __HAIKU__
+ #include <sys/inotify.h>
++#endif
+ #include <fcntl.h>
+ 
+ #ifdef __ANDROID__
+ #include <SDL/SDL_screenkeyboard.h>
+ #include <android/log.h>
+ 
++#ifdef __HAIKU__
++#include <posix/errno.h>
++#endif
++
+ // DEBUG
+ //#define printf(...)
+ #define printf(...) __android_log_print(ANDROID_LOG_INFO, "XSDL", __VA_ARGS__)
+@@ -213,9 +219,9 @@ static Bool sdlScreenInit(KdScreenInfo *screen)
+ 
+ 	SDL_EnableUNICODE(1);
+ 	SDL_EventState(SDL_SYSWMEVENT, SDL_ENABLE);
+-	set_clipboard_text(SDL_GetClipboardText());
+-
+-	sdlScreenButtons = SDL_ANDROID_GetScreenKeyboardButtonShown(SDL_ANDROID_SCREENKEYBOARD_BUTTON_0);
++//	set_clipboard_text(SDL_GetClipboardText());
++//
++//	sdlScreenButtons = SDL_ANDROID_GetScreenKeyboardButtonShown(SDL_ANDROID_SCREENKEYBOARD_BUTTON_0);
+ 	setScreenButtons(10000);
+ 
+ 	if (getenv("XSDL_BUILTIN_KEYBOARD") != NULL)
+@@ -775,10 +781,10 @@ static void sdlPollInput(void)
+ 				// Oherwise SDL will stuck and we will get a permanent black screen
+ 				SDL_Flip(SDL_GetVideoSurface());
+ 				break;
+-			case SDL_SYSWMEVENT:
+-				if (event.syswm.msg != NULL && event.syswm.msg->type == SDL_SYSWM_ANDROID_CLIPBOARD_CHANGED)
+-					set_clipboard_text(SDL_GetClipboardText());
+-				break;
++//			case SDL_SYSWMEVENT:
++//				if (event.syswm.msg != NULL && event.syswm.msg->type == SDL_SYSWM_ANDROID_CLIPBOARD_CHANGED)
++//					set_clipboard_text(SDL_GetClipboardText());
++//				break;
+ 			//case SDL_QUIT:
+ 				/* this should never happen */
+ 				//SDL_Quit(); // SDL_Quit() on Android is buggy
+@@ -798,6 +804,7 @@ static Bool xsdlConnectionClosed = 0;
+ 
+ static void xsdlAudioCallback(void *userdata, Uint8 *stream, int len)
+ {
++	#if 0
+ 	int fd = (int)userdata;
+ 	if (xsdlConnectionClosed)
+ 		return;
+@@ -813,6 +820,7 @@ static void xsdlAudioCallback(void *userdata, Uint8 *stream, int len)
+ 		stream += count;
+ 		len -= count;
+ 	}
++	#endif
+ }
+ 
+ static void initPulseAudioConfig()
+@@ -850,7 +858,7 @@ static void executeBackground(const char *cmd)
+ 		dup2(2, fd);
+ 		*/
+ 		execlp("logwrapper", "logwrapper", "sh", "-c", cmd, NULL);
+-		printf("Error: cannot launch command: %s\n", strerror(errno));
++//		printf("Error: cannot launch command: %s\n", strerror(errno));
+ 		exit(0);
+ 	}
+ }
+@@ -882,7 +890,7 @@ static void *xsdlAudioThread(void *data)
+ {
+ 	char infile[PATH_MAX];
+ 	int fd, notify;
+-	struct inotify_event notifyEvents[8];
++//	struct inotify_event notifyEvents[8];
+ 
+ 	strcpy(infile, getenv("SECURE_STORAGE_DIR"));
+ 	strcat(infile, "/pulse/pulseaudio");
+@@ -897,13 +905,13 @@ static void *xsdlAudioThread(void *data)
+ 	strcat(infile, "/pulse");
+ 
+ 	printf("Registering inotify listener on %s", infile);
+-	notify = inotify_init();
+-	if (inotify_add_watch(notify, infile, IN_CREATE | IN_DELETE) < 0)
+-	{
+-		printf("Cannot set inotify event on dir %s, disabling audio: %s\n", infile, strerror(errno));
+-		close(notify);
+-		return NULL;
+-	}
++//	notify = inotify_init();
++//	if (inotify_add_watch(notify, infile, IN_CREATE | IN_DELETE) < 0)
++//	{
++//		printf("Cannot set inotify event on dir %s, disabling audio: %s\n", infile, strerror(errno));
++//		close(notify);
++//		return NULL;
++//	}
+ 
+ 	initPulseAudioConfig();
+ 	launchPulseAudio();
+@@ -925,13 +933,13 @@ static void *xsdlAudioThread(void *data)
+ 			spec.channels = 2;
+ 			spec.samples = 4096;
+ 			spec.callback = xsdlAudioCallback;
+-			spec.userdata = (void *)fd;
++			spec.userdata = (void *)(size_t) fd;
+ 			SDL_OpenAudio(&spec, &obtained);
+ 			SDL_PauseAudio(0);
+ 			while (!xsdlConnectionClosed)
+ 			{
+ 				printf("Waiting for audio pipe to close");
+-				read(notify, notifyEvents, sizeof(notifyEvents));
++//				read(notify, notifyEvents, sizeof(notifyEvents));
+ 			}
+ 			SDL_CloseAudio();
+ 			close(fd);
+@@ -940,7 +948,7 @@ static void *xsdlAudioThread(void *data)
+ 		else
+ 		{
+ 			printf("Waiting for audio pipe to open");
+-			read(notify, notifyEvents, sizeof(notifyEvents));
++//			read(notify, notifyEvents, sizeof(notifyEvents));
+ 		}
+ 	}
+ 	close(notify);
+@@ -988,7 +996,7 @@ void OsVendorInit (void)
+ static void *send_unicode_thread(void *param)
+ {
+ 	// International text input - copy symbol to clipboard, and send copypaste key
+-	int unicode = (int)param;
++	int unicode = (uintptr_t)param;
+ 	char cmd[1024] = "";
+ 	char c[5] = "";
+ 	sprintf (cmd, "127.0.0.1:%s", display);
+@@ -1022,7 +1030,7 @@ void send_unicode(int unicode)
+ 	pthread_attr_t attr;
+ 	pthread_attr_init (&attr);
+ 	pthread_attr_setdetachstate (&attr, PTHREAD_CREATE_DETACHED);
+-	pthread_create (&thread_id, &attr, &send_unicode_thread, (void *)unicode);
++	pthread_create (&thread_id, &attr, &send_unicode_thread, (void *)(size_t)unicode);
+ 	pthread_attr_destroy (&attr);
+ }
+ 
+diff --git a/hw/kdrive/src/kinput.c b/hw/kdrive/src/kinput.c
+index d258aeb..4921610 100644
+--- a/hw/kdrive/src/kinput.c
++++ b/hw/kdrive/src/kinput.c
+@@ -50,6 +50,13 @@
+ #include "xserver-properties.h"
+ #include "inpututils.h"
+ 
++#ifdef __HAIKU__
++#define F_SETOWN        8
++#define FNDELAY O_NONBLOCK
++#define SIGIO -1
++#define FASYNC		00020000
++#endif
++
+ #define AtomFromName(x) MakeAtom(x, strlen(x), 1)
+ 
+ struct KdConfigDevice {
+diff --git a/os/WaitFor.c b/os/WaitFor.c
+index 867cb04..9026833 100644
+--- a/os/WaitFor.c
++++ b/os/WaitFor.c
+@@ -335,11 +335,11 @@ WaitForSomething(int *pClientsReady)
+ 	{
+ 	    int highest_priority = 0;
+ 
+-	    while (clientsReadable.fds_bits[i])
++	    while (clientsReadable.bits[i])
+ 	    {
+ 	        int client_priority, client_index;
+ 
+-		curclient = mffs (clientsReadable.fds_bits[i]) - 1;
++		curclient = mffs (clientsReadable.bits[i]) - 1;
+ 		client_index = /* raphael: modified */
+ 			ConnectionTranslation[curclient + (i * (sizeof(fd_mask) * 8))];
+ #else
+@@ -383,7 +383,7 @@ WaitForSomething(int *pClientsReady)
+ 		    pClientsReady[nready++] = client_index;
+ 		}
+ #ifndef WIN32
+-		clientsReadable.fds_bits[i] &= ~(((fd_mask)1L) << curclient);
++		clientsReadable.bits[i] &= ~(((fd_mask)1L) << curclient);
+ 	    }
+ #else
+ 	    FD_CLR(curclient, &clientsReadable);
+diff --git a/os/access.c b/os/access.c
+index b7b1927..7e4580e 100644
+--- a/os/access.c
++++ b/os/access.c
+@@ -113,7 +113,7 @@ SOFTWARE.
+ # endif
+ #endif
+ 
+-#if defined(SVR4) ||  (defined(SYSV) && defined(__i386__)) || defined(__GNU__)
++#if defined(SVR4) ||  (defined(SYSV) && defined(__i386__)) || defined(__GNU__) || defined(__HAIKU__)
+ # include <sys/utsname.h>
+ #endif
+ #if defined(SYSV) &&  defined(__i386__)
+@@ -126,6 +126,10 @@ SOFTWARE.
+ # include <net/if.h>
+ #endif /*__GNU__ */
+ 
++#ifdef __HAIKU__
++#include <arpa/inet.h>
++#endif
++
+ #ifdef SVR4
+ #include <sys/sockio.h>
+ #include <sys/stropts.h>
+diff --git a/os/connection.c b/os/connection.c
+index cbce6d5..2275676 100644
+--- a/os/connection.c
++++ b/os/connection.c
+@@ -814,7 +814,7 @@ EstablishNewConnections(ClientPtr clientUnused, pointer closure)
+ #ifndef WIN32
+     for (i = 0; i < howmany(XFD_SETSIZE, NFDBITS); i++)
+     {
+-      while (readyconnections.fds_bits[i])
++      while (readyconnections.bits[i])
+ #else
+       for (i = 0; i < XFD_SETCOUNT(&readyconnections); i++) 
+ #endif
+@@ -823,8 +823,8 @@ EstablishNewConnections(ClientPtr clientUnused, pointer closure)
+ 	int status;
+ 
+ #ifndef WIN32
+-	curconn = mffs (readyconnections.fds_bits[i]) - 1;
+-	readyconnections.fds_bits[i] &= ~((fd_mask)1 << curconn);
++	curconn = mffs (readyconnections.bits[i]) - 1;
++	readyconnections.bits[i] &= ~((fd_mask)1 << curconn);
+ 	curconn += (i * (sizeof(fd_mask)*8));
+ #else
+ 	curconn = XFD_FD(&readyconnections, i);
+@@ -984,7 +984,7 @@ CheckConnections(void)
+ #ifndef WIN32
+     for (i=0; i<howmany(XFD_SETSIZE, NFDBITS); i++)
+     {
+-	mask = AllClients.fds_bits[i];
++	mask = AllClients.bits[i];
+         while (mask)
+     	{
+ 	    curoff = mffs (mask) - 1;
+diff --git a/os/io.c b/os/io.c
+index c59e18c..10b5e21 100644
+--- a/os/io.c
++++ b/os/io.c
+@@ -660,8 +660,8 @@ FlushAllOutput(void)
+ #ifndef WIN32
+     for (base = 0; base < howmany(XFD_SETSIZE, NFDBITS); base++)
+     {
+-	mask = OutputPending.fds_bits[ base ];
+-	OutputPending.fds_bits[ base ] = 0;
++	mask = OutputPending.bits[ base ];
++	OutputPending.bits[ base ] = 0;
+ 	while (mask)
+ 	{
+ 	    index = ffs(mask) - 1;
+diff --git a/os/xstrans.c b/os/xstrans.c
+index 44ff976..127f5ab 100644
+--- a/os/xstrans.c
++++ b/os/xstrans.c
+@@ -11,3 +11,4 @@ extern _X_EXPORT void ErrorF(const char *f, ...) _X_ATTRIBUTE_PRINTF(1,2);
+ #define TRANS_SERVER
+ #define XSERV_t
+ #include <X11/Xtrans/transport.c>
++
+-- 
+2.19.0
+
