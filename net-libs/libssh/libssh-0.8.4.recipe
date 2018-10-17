@@ -14,17 +14,18 @@ COPYRIGHT="1995 Tatu Ylonen
 	2017 Sartura d.o.o.
 	2017 Jan-Lukas Wynen
 	2018 Anderson Toshiyuki Sasaki
-	2018 by Red Hat, Inc."
-LICENSE="GNU LGPL v2.1"
-REVISION="3"
+	2018 Red Hat, Inc."
+LICENSE="GNU LGPL v2.1
+	BSD (2-clause)"
+REVISION="1"
 SOURCE_URI="https://www.libssh.org/files/${portVersion%.*}/libssh-$portVersion.tar.xz"
-CHECKSUM_SHA256="302f31f606f2368cd3ce77d7a69f7464c18eae176e73e59102e0524401bd29d0"
+CHECKSUM_SHA256="6bb07713021a8586ba2120b2c36c468dc9ac8096d043f9b1726639aa4275b81b"
 PATCHES="libssh-$portVersion.patchset"
 
-ARCHITECTURES="?x86_gcc2 x86 x86_64"
-SECONDARY_ARCHITECTURES="?x86_gcc2 x86"
+ARCHITECTURES="!x86_gcc2 x86 x86_64"
+SECONDARY_ARCHITECTURES="x86"
 
-libVersion="4.7.0"
+libVersion="4.7.1"
 libVersionCompat="$libVersion compat >= ${libVersion%%.*}"
 
 PROVIDES="
@@ -57,43 +58,63 @@ BUILD_PREREQUIRES="
 	cmd:cmake
 	cmd:gcc$secondaryArchSuffix
 	cmd:ld$secondaryArchSuffix
-	cmd:libtoolize
 	cmd:make
 	cmd:pkg_config$secondaryArchSuffix
 	"
+
+if [ -z "$secondaryArchSuffix" ]; then
+	ARCHITECTURES_doc="any"
+
+	PROVIDES_doc="
+		libssh_doc = $portVersion
+		"
+
+	BUILD_PREREQUIRES+="
+		cmd:doxygen
+		"
+fi
 
 defineDebugInfoPackage libssh$secondaryArchSuffix \
 	"$libDir"/libssh.so.$libVersion
 
 PATCH()
 {
-	# keyfile torture test is currently broken
+	# Requires: https://review.haiku-os.org/c/haiku/+/632
 	sed -i \
 		-e '/torture_threads_pki_rsa/d' \
 		-e '/torture_rand/d' \
 		-e '/torture_threads_init/d' \
 		-e '/torture_threads_buffer/d' \
 		-e '/torture_threads_crypto/d' \
-		tests/unittests/CMakeLists.txt || die
+		tests/unittests/CMakeLists.txt
+
+	# Doesn't work in chroot, probably due to the lack of the passwd database
+	sed -i 's/cmocka_unit_test(torture_path_expand_tilde_unix),//' \
+		tests/unittests/torture_misc.c
 }
 
 BUILD()
 {
+	_maybe_pie=()
+	if [ "$effectiveTargetArchitecture" = x86_64 ]; then
+		_maybe_pie=("-DCMAKE_EXE_LINKER_FLAGS=-pie -fstack-protector")
+	fi
+
 	mkdir -p build; cd build
 	cmake .. \
+		-DCMAKE_BUILD_TYPE="RelWithDebInfo" \
+		-DCMAKE_INSTALL_PREFIX="$prefix" \
 		-DUNIT_TESTING=ON \
-		-DWITH_STACK_PROTECTOR=OFF \
-		-DCMAKE_C_FLAGS="-Wno-return-type" \
 		-DLIB_INSTALL_DIR="$libDir" \
-		-DLIBEXEC_INSTALL_DIR="$libDir" \
 		-DDATA_INSTALL_DIR="$dataDir" \
-		-DDATA_INSTALL_PREFIX="$dataDir" \
 		-DHTML_INSTALL_DIR="$developDocDir" \
 		-DINCLUDE_INSTALL_DIR="$includeDir" \
-		-DINFO_INSTALL_DIR="$developDocDir" \
-		-DMAN_INSTALL_DIR="$manDir" \
-		$cmakeDirArgs
+		"${_maybe_pie[@]}"
 	make $jobArgs
+
+	if [ -z "$secondaryArchSuffix" ]; then
+		make docs
+	fi
 }
 
 INSTALL()
@@ -108,6 +129,12 @@ INSTALL()
 	packageEntries devel \
 		"$developDir" \
 		"$libDir"/cmake
+
+	if [ -z "$secondaryArchSuffix" ]; then
+		install -d -m 755 "$developDocDir"
+		cp -rT doc/html "$developDocDir"
+		packageEntries doc "$developDir"
+	fi
 }
 
 TEST()
