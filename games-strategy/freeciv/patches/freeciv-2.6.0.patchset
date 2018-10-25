@@ -1,0 +1,233 @@
+From f7d7df9c246926873333e53eca683d93ff09d8df Mon Sep 17 00:00:00 2001
+From: Bach Nguyen <bach5000@gmail.com>
+Date: Fri, 26 Oct 2018 17:45:41 +0000
+Subject: [PATCH] Haiku support #1
+
+---
+ configure.ac | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/configure.ac b/configure.ac
+index 9cb722a..6aa18a8 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -178,6 +178,7 @@ AM_CONDITIONAL(SERVER, test x$server = xyes)
+ dnl Host type variable defaults
+ MINGW=no
+ AMIGA=no
++HAIKU=no
+ 
+ dnl Settings specific to host OS
+ case "$host_os" in
+@@ -193,6 +194,9 @@ case "$host_os" in
+     dnl Without WINSOCK2, use: LIBS="$LIBS -lwsock32"
+     LIBS="${LIBS} -lws2_32"
+     ;;
++  *haiku*)
++    dnl Haiku-specific settings
++    HAIKU=yes ;;
+ esac
+ 
+ dnl Networking headers
+@@ -1357,9 +1361,15 @@ if test x"$MINGW" = xyes; then
+   fi
+ else
+   FC_CONF_PATH="$sysconfdir/freeciv"
+-  DEFAULT_DATA_PATH=".:data:~/.freeciv/$DATASUBDIR:$datadir/freeciv"
+-  DEFAULT_SAVE_PATH=".:~/.freeciv/saves"
+-  DEFAULT_SCENARIO_PATH=".:data/scenarios:~/.freeciv/$DATASUBDIR/scenarios:~/.freeciv/scenarios:$datadir/freeciv/scenarios"
++  if test x"$HAIKU" = xyes; then
++    DEFAULT_DATA_PATH=".:data:~/config/settings/freeciv/$DATASUBDIR:$datadir/freeciv"
++    DEFAULT_SAVE_PATH=".:~/config/settings/freeciv/saves"
++    DEFAULT_SCENARIO_PATH=".:data/scenarios:~/config/settings/freeciv/$DATASUBDIR/scenarios:~/config/settings/freeciv/scenarios:$datadir/freeciv/scenarios"
++  else
++    DEFAULT_DATA_PATH=".:data:~/.freeciv/$DATASUBDIR:$datadir/freeciv"
++    DEFAULT_SAVE_PATH=".:~/.freeciv/saves"
++    DEFAULT_SCENARIO_PATH=".:data/scenarios:~/.freeciv/$DATASUBDIR/scenarios:~/.freeciv/scenarios:$datadir/freeciv/scenarios"
++  fi
+ fi
+ CPPFLAGS="$CPPFLAGS -DFC_CONF_PATH=\"\\\"$FC_CONF_PATH\\\"\""
+ CPPFLAGS="$CPPFLAGS -DDEFAULT_DATA_PATH=\"\\\"$DEFAULT_DATA_PATH\\\"\""
+-- 
+2.19.0
+
+
+From ed55a9b2f0ce7ca20af1c32beb66854235a30418 Mon Sep 17 00:00:00 2001
+From: Bach Nguyen <bach5000@gmail.com>
+Date: Fri, 26 Oct 2018 18:39:18 +0000
+Subject: [PATCH] Reapply patches
+
+---
+ client/connectdlg_common.c | 18 +++++++++++++++++-
+ client/options.c           | 19 +++++++++++++++++--
+ common/mapimg.c            |  2 +-
+ server/gamehand.c          |  3 ++-
+ server/sernet.c            | 17 ++++++++++++++++-
+ 5 files changed, 53 insertions(+), 6 deletions(-)
+
+diff --git a/client/connectdlg_common.c b/client/connectdlg_common.c
+index 2ec9b13..fa20a8f 100644
+--- a/client/connectdlg_common.c
++++ b/client/connectdlg_common.c
+@@ -293,9 +293,17 @@ bool client_start_server(void)
+     argv[argc++] = "1";
+     argv[argc++] = "-e";
+     argv[argc++] = "--saves";
++#ifdef __HAIKU__
++    argv[argc++] = "~/config/settings/freeciv/saves";
++#else
+     argv[argc++] = "~" DIR_SEPARATOR ".freeciv" DIR_SEPARATOR "saves";
++#endif
+     argv[argc++] = "--scenarios";
++#ifdef __HAIKU__
++    argv[argc++] = "~/config/settings/freeciv/scenarios";
++#else
+     argv[argc++] = "~" DIR_SEPARATOR ".freeciv" DIR_SEPARATOR "scenarios";
++#endif
+     argv[argc++] = "-A";
+     argv[argc++] = "none";
+     if (logfile) {
+@@ -431,12 +439,19 @@ bool client_start_server(void)
+     free(savefile_in_local_encoding);
+   }
+ 
++#ifdef __HAIKU__
++  interpret_tilde(savesdir, sizeof(savesdir), "~/config/settings/freeciv/saves");
++#else
+   interpret_tilde(savesdir, sizeof(savesdir),
+                   "~" DIR_SEPARATOR ".freeciv" DIR_SEPARATOR "saves");
++#endif
+   internal_to_local_string_buffer(savesdir, savescmdline, sizeof(savescmdline));
+-
++#ifdef __HAIKU__
++  interpret_tilde(scensdir, sizeof(scensdir), "~/config/settings/freeciv/scenarios");
++#else
+   interpret_tilde(scensdir, sizeof(scensdir),
+                   "~" DIR_SEPARATOR ".freeciv" DIR_SEPARATOR "scenarios");
++#endif
+   internal_to_local_string_buffer(scensdir, scenscmdline, sizeof(scenscmdline));
+ 
+   if (are_deprecation_warnings_enabled()) {
+@@ -599,6 +614,7 @@ void send_client_wants_hack(const char *filename)
+     }
+ 
+     /* get the full filename path */
++    
+     interpret_tilde(challenge_fullname, sizeof(challenge_fullname),
+                     "~" DIR_SEPARATOR ".freeciv" DIR_SEPARATOR);
+     make_dir(challenge_fullname);
+diff --git a/client/options.c b/client/options.c
+index c8fb482..d5ee371 100644
+--- a/client/options.c
++++ b/client/options.c
+@@ -19,6 +19,9 @@
+ #include <string.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#ifdef __HAIKU__
++  #include <libgen.h>
++#endif
+ 
+ /* utility */
+ #include "capability.h"
+@@ -5107,7 +5110,13 @@ static void save_cma_presets(struct section_file *file)
+ /* Old rc file name. */
+ #define OLD_OPTION_FILE_NAME ".civclientrc"
+ /* New rc file name. */
+-#define MID_OPTION_FILE_NAME ".freeciv-client-rc-%d.%d"
++#ifdef __HAIKU__
++#  define MID_OPTION_FILE_NAME "config/settings/freeciv/freeciv-client-rc-%d.%d"
++#  define NEW_OPTION_FILE_NAME "config/settings/freeciv/freeciv-client-rc-%d.%d"
++#else
++#  define MID_OPTION_FILE_NAME ".freeciv-client-rc-%d.%d"
++#  define NEW_OPTION_FILE_NAME ".freeciv-client-rc-%d.%d"
++#endif
+ #define NEW_OPTION_FILE_NAME "freeciv-client-rc-%d.%d"
+ #if MINOR_VERSION >= 90
+ #define MAJOR_NEW_OPTION_FILE_NAME (MAJOR_VERSION + 1)
+@@ -5931,7 +5940,13 @@ void options_save(option_save_log_callback log_cb)
+ 
+   /* insert global worklists */
+   global_worklists_save(sf);
+-
++#ifdef __HAIKU__
++{
++  char path[PATH_MAX];
++  strcpy(path, name);
++  make_dir(dirname(path));
++}
++#endif
+   /* Directory name */
+   sz_strlcpy(dir_name, name);
+   for (i = strlen(dir_name) - 1 ; dir_name[i] != DIR_SEPARATOR_CHAR && i >= 0; i--) {
+diff --git a/common/mapimg.c b/common/mapimg.c
+index 4f1c1ad..6f32b4f 100644
+--- a/common/mapimg.c
++++ b/common/mapimg.c
+@@ -18,7 +18,7 @@
+ #include <stdarg.h>
+ 
+ #ifdef HAVE_MAPIMG_MAGICKWAND
+-  #include <wand/MagickWand.h>
++  #include <MagickWand/MagickWand.h>
+ #endif /* HAVE_MAPIMG_MAGICKWAND */
+ 
+ /* utility */
+diff --git a/server/gamehand.c b/server/gamehand.c
+index 3b8a03e..f1466cd 100644
+--- a/server/gamehand.c
++++ b/server/gamehand.c
+@@ -1023,7 +1023,8 @@ static const char *get_challenge_fullname(struct connection *pc)
+ {
+   static char fullname[MAX_LEN_PATH];
+ 
+-  interpret_tilde(fullname, sizeof(fullname), "~" DIR_SEPARATOR ".freeciv" DIR_SEPARATOR);
++  //interpret_tilde(fullname, sizeof(fullname), "~" DIR_SEPARATOR ".freeciv" DIR_SEPARATOR);
++  interpret_tilde(fullname, sizeof(fullname), "~/config/settings/freeciv/");
+   sz_strlcat(fullname, get_challenge_filename(pc));
+ 
+   return fullname;
+diff --git a/server/sernet.c b/server/sernet.c
+index 46ec7d5..5317471 100644
+--- a/server/sernet.c
++++ b/server/sernet.c
+@@ -44,6 +44,9 @@
+ #ifdef FREECIV_HAVE_LIBREADLINE
+ #include <readline/history.h>
+ #include <readline/readline.h>
++#ifdef __HAIKU__
++#include <libgen.h>
++#endif
+ #endif
+ #ifdef HAVE_SYS_SELECT_H
+ #include <sys/select.h>
+@@ -157,7 +160,12 @@ static void handle_stdin_close(void)
+ #ifdef FREECIV_HAVE_LIBREADLINE
+ /****************************************************************************/
+ 
+-#define HISTORY_FILENAME  "freeciv-server_history"
++//#define HISTORY_FILENAME  "freeciv-server_history"
++#ifdef __HAIKU__
++#  define HISTORY_FILENAME  "config/settings/freeciv/server_history"
++#else
++#  define HISTORY_FILENAME  ".freeciv-server_history"
++#endif
+ #define HISTORY_LENGTH    100
+ 
+ static char *history_file = NULL;
+@@ -523,6 +531,13 @@ enum server_events server_sniff_all_input(void)
+               strcpy(history_file, fc_dir);
+               strcat(history_file, "/");
+               strcat(history_file, HISTORY_FILENAME);
++#ifdef __HAIKU__
++	{
++    char path[PATH_MAX];
++    strcpy(path, history_file);
++    make_dir(dirname(path));
++	}
++#endif
+               using_history();
+               read_history(history_file);
+             }
+-- 
+2.19.0
