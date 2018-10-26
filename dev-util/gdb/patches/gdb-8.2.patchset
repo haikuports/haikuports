@@ -1,0 +1,3134 @@
+From: Ken Mays <kmays2000@gmail.com>
+Date: Fri Oct 26 18:45:24 GMT 2018
+Subject: [PATCH] Add Haiku-specific code logic to GDB 8.2
+
+Revised patchset for GDB 8.2 build on Haiku R1B1.
+
+From a3b840020a783940bf20c4e82e0297bc7e5737c1 Mon Sep 17 00:00:00 2001
+From: Augustin Cavalier <waddlesplash@gmail.com>
+Date: Sun, 2 Sep 2018 14:12:11 -0400
+Subject: [PATCH] Add Haiku-specific code and build system logic.
+
+Originally based on the 6.3 port, with heavy modifications for the new
+GCC APIs (surprisingly not a massive amount has changed in 14 years,
+though still a significant amount.)
+---
+ bfd/config.bfd             |    9 +
+ gdb/Makefile.in            |   13 +
+ gdb/amd64-haiku-nat.c      |   96 +++
+ gdb/amd64-haiku-tdep.c     |   62 ++
+ gdb/config/i386/nm-haiku.h |   27 +
+ gdb/config/nm-haiku.h      |   25 +
+ gdb/config/tm-haiku.h      |   25 +
+ gdb/configure.host         |    2 +
+ gdb/configure.nat          |   21 +
+ gdb/configure.tgt          |   17 +-
+ gdb/defs.h                 |   23 +-
+ gdb/haiku-nat.c            | 1704 ++++++++++++++++++++++++++++++++++++++++++++
+ gdb/haiku-nat.h            |   53 ++
+ gdb/haiku-tdep.c           |   22 +
+ gdb/i386-haiku-nat.c       |   87 +++
+ gdb/i386-haiku-tdep.c      |   77 ++
+ gdb/osabi.c                |    9 +-
+ gdb/solib-haiku.c          |  446 ++++++++++++
+ gdb/solib-haiku.h          |   34 +
+ readline/histfile.c        |    2 +-
+ readline/input.c           |    2 +-
+ 21 files changed, 2736 insertions(+), 20 deletions(-)
+ create mode 100644 gdb/amd64-haiku-nat.c
+ create mode 100644 gdb/amd64-haiku-tdep.c
+ create mode 100644 gdb/config/i386/nm-haiku.h
+ create mode 100644 gdb/config/nm-haiku.h
+ create mode 100644 gdb/config/tm-haiku.h
+ create mode 100644 gdb/haiku-nat.c
+ create mode 100644 gdb/haiku-nat.h
+ create mode 100644 gdb/haiku-tdep.c
+ create mode 100644 gdb/i386-haiku-nat.c
+ create mode 100644 gdb/i386-haiku-tdep.c
+ create mode 100644 gdb/solib-haiku.c
+ create mode 100644 gdb/solib-haiku.h
+
+diff --git a/gdb/amd64-haiku-nat.c b/gdb/amd64-haiku-nat.c
+new file mode 100644
+index 0000000..bbce696
+--- /dev/null
++++ b/gdb/amd64-haiku-nat.c
+@@ -0,0 +1,96 @@
++/* Native-dependent code for Haiku x86_64.
++
++   Copyright 2012 Alex Smith <alex@alex-smith.me.uk>.
++   Copyright 2005 Ingo Weinhold <bonefish@cs.tu-berlin.de>.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 2 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place - Suite 330,
++   Boston, MA 02111-1307, USA.  */
++
++#include "defs.h"
++#include "haiku-nat.h"
++#include "amd64-tdep.h"
++#include "i387-tdep.h"
++#include "inferior.h"
++#include "regcache.h"
++#include "target.h"
++
++/* Offset in `struct debug_cpu_state' where MEMBER is stored.  */
++#define REG_OFFSET(member) offsetof (struct x86_64_debug_cpu_state, member)
++
++/* At kHaikuAMD64RegOffset[REGNUM] you'll find the offset in `struct
++   debug_cpu_state' where the GDB register REGNUM is stored. */
++static int kHaikuAMD64RegOffset[] = {
++	REG_OFFSET (rax),
++	REG_OFFSET (rbx),
++	REG_OFFSET (rcx),
++	REG_OFFSET (rdx),
++	REG_OFFSET (rsi),
++	REG_OFFSET (rdi),
++	REG_OFFSET (rbp),
++	REG_OFFSET (rsp),
++	REG_OFFSET (r8),
++	REG_OFFSET (r9),
++	REG_OFFSET (r10),
++	REG_OFFSET (r11),
++	REG_OFFSET (r12),
++	REG_OFFSET (r13),
++	REG_OFFSET (r14),
++	REG_OFFSET (r15),
++	REG_OFFSET (rip),
++	REG_OFFSET (rflags),
++	REG_OFFSET (cs),
++	REG_OFFSET (ss),
++	REG_OFFSET (ds),
++	REG_OFFSET (es),
++	REG_OFFSET (fs),
++	REG_OFFSET (gs)
++};
++
++
++void
++haiku_supply_registers(int reg, struct regcache *regcache, const debug_cpu_state *cpuState)
++{
++	if (reg == -1) {
++		int i;
++		for (i = 0; i < AMD64_NUM_REGS; i++)
++			haiku_supply_registers(i, regcache, cpuState);
++	} else if (reg < AMD64_ST0_REGNUM) {
++		int offset = kHaikuAMD64RegOffset[reg];
++		regcache_raw_supply (regcache, reg, (char*)cpuState + offset);
++	} else {
++		amd64_supply_fxsave (regcache, -1,
++			&cpuState->extended_registers);
++	}
++}
++
++
++void
++haiku_collect_registers(int reg, struct regcache *regcache, debug_cpu_state *cpuState)
++{
++	if (reg == -1) {
++		int i;
++		for (i = 0; i < AMD64_NUM_REGS; i++)
++			haiku_collect_registers(i, regcache, cpuState);
++	} else if (reg < AMD64_ST0_REGNUM) {
++		int offset = kHaikuAMD64RegOffset[reg];
++		regcache_raw_collect (regcache, reg, (char*)cpuState + offset);
++	} else {
++		amd64_collect_fxsave (regcache, -1,
++			&cpuState->extended_registers);
++	}
++}
++
+diff --git a/gdb/amd64-haiku-tdep.c b/gdb/amd64-haiku-tdep.c
+new file mode 100644
+index 0000000..a34ce13
+--- /dev/null
++++ b/gdb/amd64-haiku-tdep.c
+@@ -0,0 +1,62 @@
++/* Target-dependent code for Haiku x86_64.
++
++   Copyright 2012 Alex Smith <alex@alex-smith.me.uk>.
++   Copyright 2005 Ingo Weinhold <bonefish@cs.tu-berlin.de>.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 2 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place - Suite 330,
++   Boston, MA 02111-1307, USA.  */
++
++#include "defs.h"
++#include "gdbarch.h"
++#include "amd64-tdep.h"
++#include "x86-xstate.h"
++#include "osabi.h"
++
++
++static void
++amd64_haiku_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
++{
++	struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
++
++	amd64_init_abi (info, gdbarch, amd64_target_description (X86_XSTATE_SSE_MASK));
++
++	// the offset of the PC in the jmp_buf structure (cf. setjmp(), longjmp())
++	tdep->jb_pc_offset = 0;
++}
++
++
++static enum gdb_osabi
++amd64_haiku_osabi_sniffer (bfd * abfd)
++{
++	char *targetName = bfd_get_target (abfd);
++
++	if (strcmp (targetName, "elf64-x86-64") == 0)
++		return GDB_OSABI_HAIKU;
++
++	return GDB_OSABI_UNKNOWN;
++}
++
++
++void
++_initialize_amd64_haiku_tdep (void)
++{
++	gdbarch_register_osabi_sniffer (bfd_arch_i386, bfd_target_elf_flavour,
++		amd64_haiku_osabi_sniffer);
++
++	gdbarch_register_osabi (bfd_arch_i386, bfd_mach_x86_64, GDB_OSABI_HAIKU,
++		amd64_haiku_init_abi);
++}
+diff --git a/gdb/config/i386/nm-haiku.h b/gdb/config/i386/nm-haiku.h
+new file mode 100644
+index 0000000..b392360
+--- /dev/null
++++ b/gdb/config/i386/nm-haiku.h
+@@ -0,0 +1,27 @@
++/* Native support for Haiku x86.
++
++   Copyright 2005 Ingo Weinhold <bonefish@cs.tu-berlin.de>.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 2 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place - Suite 330,
++   Boston, MA 02111-1307, USA.  */
++
++#ifndef NM_HAIKU_H
++#define NM_HAIKU_H
++
++#include "config/nm-haiku.h"
++
++#endif /* nm-haiku.h */
+diff --git a/gdb/config/nm-haiku.h b/gdb/config/nm-haiku.h
+new file mode 100644
+index 0000000..e85a1c2
+--- /dev/null
++++ b/gdb/config/nm-haiku.h
+@@ -0,0 +1,25 @@
++/* Native support Haiku.
++
++   Copyright 2005 Ingo Weinhold <bonefish@cs.tu-berlin.de>.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 2 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place - Suite 330,
++   Boston, MA 02111-1307, USA.  */
++
++// #define REALTIME_{LO,HI}?
++
++/* Support for shared libraries.  */
++#include "solib.h"
+diff --git a/gdb/config/tm-haiku.h b/gdb/config/tm-haiku.h
+new file mode 100644
+index 0000000..cdead7b
+--- /dev/null
++++ b/gdb/config/tm-haiku.h
+@@ -0,0 +1,25 @@
++/* Target support Haiku.
++
++   Copyright 2005 Ingo Weinhold <bonefish@cs.tu-berlin.de>.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 2 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place - Suite 330,
++   Boston, MA 02111-1307, USA.  */
++
++// #define REALTIME_{LO,HI}?
++
++/* Support for shared libraries.  */
++#include "solib.h"
+diff --git a/gdb/configure.host b/gdb/configure.host
+index 8e31834..901276d 100644
+--- a/gdb/configure.host
++++ b/gdb/configure.host
+@@ -115,6 +115,7 @@ i[34567]86-*-linux*)	gdb_host=linux ;;
+ i[34567]86-*-gnu*)	gdb_host=i386gnu ;;
+ i[3456]86-*-nto*) 	gdb_host=nto ;;
+ i[34567]86-*-openbsd*)	gdb_host=obsd ;;
++i[34567]86-*-haiku*)	gdb_host=haiku ;;
+ i[34567]86-*-solaris2* | x86_64-*-solaris2*)
+ 			gdb_host=sol2 ;;
+ i[34567]86-*-cygwin*)	gdb_host=cygwin ;;
+@@ -182,6 +183,7 @@ x86_64-*-freebsd* | x86_64-*-kfreebsd*-gnu)
+ x86_64-*-netbsd* | x86_64-*-knetbsd*-gnu)
+ 			gdb_host=nbsd64 ;;
+ x86_64-*-openbsd*)	gdb_host=obsd64 ;;
++x86_64-*-haiku*)	gdb_host=haiku64 ;;
+ x86_64-*-mingw*)        gdb_host=mingw64
+ 			gdb_host_obs=mingw-hdep.o
+ 			;;
+diff --git a/gdb/configure.nat b/gdb/configure.nat
+index 8e14892..aebbc02 100644
+--- a/gdb/configure.nat
++++ b/gdb/configure.nat
+@@ -73,6 +73,9 @@ case ${gdb_host} in
+     obsd*)
+ 	NATDEPFILES='fork-child.o fork-inferior.o inf-ptrace.o'
+ 	;;
++	haiku*)
++	NATDEPFILES='fork-child.o fork-inferior.o haiku-nat.o'
++	;;
+     cygwin*)
+ 	NATDEPFILES='x86-nat.o x86-dregs.o windows-nat.o'
+ 	;;
+@@ -450,6 +453,24 @@ case ${gdb_host} in
+ 		;;
+ 	esac
+ 	;;
++	haiku)
++	case ${gdb_host_cpu} in
++	    i386)
++		# Host: Haiku/i386 ELF
++		NATDEPFILES="${NATDEPFILES} i386-haiku-nat.o"
++		LOADLIBES='-ldebug -lnetwork'
++		;;
++	esac
++	;;
++	haiku64)
++	case ${gdb_host_cpu} in
++	    i386)
++		# Host: Haiku/amd64
++		NATDEPFILES="${NATDEPFILES} amd64-haiku-nat.o"
++		LOADLIBES='-ldebug -lnetwork'
++		;;
++	esac
++	;;
+     ppc64-linux)
+ 	case ${gdb_host_cpu} in
+ 	    powerpc)
+diff --git a/gdb/configure.tgt b/gdb/configure.tgt
+index fb8014a..c894bd4 100644
+--- a/gdb/configure.tgt
++++ b/gdb/configure.tgt
+@@ -97,6 +97,8 @@ case "${targ}" in
+ 	os_obs="nbsd-tdep.o solib-svr4.o";;
+ *-*-openbsd*)
+ 	os_obs="obsd-tdep.o solib-svr4.o";;
++*-*-haiku*)
++	os_obs="haiku-tdep.o solib-haiku.o symfile-mem.o";;
+ esac
+ 
+ # 3. Get the rest of objects.
+@@ -259,6 +261,10 @@ i[34567]86-*-openbsd*)
+ 	# Target: OpenBSD/i386
+ 	gdb_target_obs="i386-bsd-tdep.o i386-obsd-tdep.o bsd-uthread.o"
+ 	;;
++i[34567]86-*-haiku*)
++	# Target: Haiku/i386
++	gdb_target_obs="i386-haiku-tdep.o"
++	;;
+ i[34567]86-*-nto*)
+ 	# Target: Intel 386 running qnx6.
+ 	gdb_target_obs="solib-svr4.o \
+@@ -318,8 +324,8 @@ iq2000-*-*)
+ 	gdb_sim=../sim/iq2000/libsim.a
+ 	;;
+ 
+-lm32-*-*)		
+-	gdb_target_obs="lm32-tdep.o" 
++lm32-*-*)
++	gdb_target_obs="lm32-tdep.o"
+ 	gdb_sim=../sim/lm32/libsim.a
+ 	;;
+ 
+@@ -651,7 +657,7 @@ tic6x-*-*linux)
+ 	;;
+ 
+ tic6x-*-*)
+-	# Target: TI C6X 
++	# Target: TI C6X
+ 	gdb_target_obs="tic6x-tdep.o"
+ 	;;
+ 
+@@ -736,6 +742,11 @@ x86_64-*-openbsd*)
+ 			i386-bsd-tdep.o i386-obsd-tdep.o \
+ 			bsd-uthread.o"
+ 	;;
++x86_64-*-haiku*)
++	# Target: Haiku/amd64
++	gdb_target_obs="amd64-haiku-tdep.o ${i386_tobjs} \
++			i386-haiku-tdep.o"
++	;;
+ x86_64-*-rtems*)
+ 	gdb_target_obs="${amd64_tobjs} ${i386_tobjs} i386-bsd-tdep.o"
+ 	;;
+diff --git a/gdb/defs.h b/gdb/defs.h
+index 4fb2129..77dee99 100644
+--- a/gdb/defs.h
++++ b/gdb/defs.h
+@@ -99,7 +99,7 @@ using RequireLongest = gdb::Requires<gdb::Or<std::is_same<T, LONGEST>,
+ /* The O_BINARY flag is defined in fcntl.h on some non-Posix platforms.
+    It is used as an access modifier in calls to open(), where it acts
+    similarly to the "b" character in fopen()'s MODE argument.  On Posix
+-   platforms it should be a no-op, so it is defined as 0 here.  This 
++   platforms it should be a no-op, so it is defined as 0 here.  This
+    ensures that the symbol may be used freely elsewhere in gdb.  */
+ 
+ #ifndef O_BINARY
+@@ -284,11 +284,11 @@ struct value;
+    globals that are currently only available to main.c.  */
+ extern char *relocate_gdb_directory (const char *initial, int flag);
+ 
+-
++
+ /* Annotation stuff.  */
+ 
+ extern int annotation_level;	/* in stack.c */
+-
++
+ 
+ /* From regex.c or libc.  BSD 4.4 declares this with the argument type as
+    "const char *" in unistd.h, so we can't declare the argument
+@@ -518,6 +518,7 @@ enum gdb_osabi
+   GDB_OSABI_FREEBSD,
+   GDB_OSABI_NETBSD,
+   GDB_OSABI_OPENBSD,
++  GDB_OSABI_HAIKU,
+   GDB_OSABI_WINCE,
+   GDB_OSABI_GO32,
+   GDB_OSABI_QNXNTO,
+@@ -635,9 +636,9 @@ extern void (*deprecated_post_add_symbol_hook) (void);
+ extern void (*selected_frame_level_changed_hook) (int);
+ extern int (*deprecated_ui_loop_hook) (int signo);
+ extern void (*deprecated_show_load_progress) (const char *section,
+-					      unsigned long section_sent, 
+-					      unsigned long section_size, 
+-					      unsigned long total_sent, 
++					      unsigned long section_sent,
++					      unsigned long section_size,
++					      unsigned long total_sent,
+ 					      unsigned long total_size);
+ extern void (*deprecated_print_frame_info_listing_hook) (struct symtab * s,
+ 							 int line,
+diff --git a/gdb/haiku-nat.c b/gdb/haiku-nat.c
+new file mode 100644
+index 0000000..6d10161
+--- /dev/null
++++ b/gdb/haiku-nat.c
+@@ -0,0 +1,1704 @@
++/* Haiku native-dependent code common to multiple platforms.
++
++   Copyright 2005 Ingo Weinhold <bonefish@cs.tu-berlin.de>.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 2 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place - Suite 330,
++   Boston, MA 02111-1307, USA.  */
++
++#define _GL_ALREADY_INCLUDING_STRING_H
++#include <stdio.h>
++#include <string.h>
++
++#include "defs.h"	// include this first -- otherwise "command.h" will choke
++#include "command.h"
++#include "gdbcore.h"
++#include "gdbthread.h"
++#include "haiku-nat.h"
++#include "inferior.h"
++#include "observer.h"
++#include "regcache.h"
++#include "solib.h"
++#include "solib-haiku.h"
++#include "symfile.h"
++#include "target.h"
++#include "nat/fork-inferior.h"
++
++// Include these last, as haiku-nat.h takes care of including OS.h.
++#include <image.h>
++#include <private/debug/debug_support.h>
++
++#define TRACE_HAIKU_NAT
++#ifdef TRACE_HAIKU_NAT
++	#define TRACE(x)	printf x
++#else
++	#define TRACE(x)	while (false) {}
++#endif
++
++static struct target_ops *sHaikuTarget = NULL;
++
++typedef struct debug_event {
++	struct debug_event			*next;
++	debug_debugger_message		message;
++	debug_debugger_message_data	data;
++} debug_event;
++
++typedef enum {
++	SIGNAL_ARRIVED,		// the signal has actually arrived and is going to be
++						// handled (in any way)
++	SIGNAL_WILL_ARRIVE,	// the signal has not yet been sent, but will be sent
++						// (e.g. an exception occurred and will cause the
++						// signal when not being ignored)
++	SIGNAL_FAKED,		// the signal didn't arrive and won't arrive, we faked
++						// it (often in case of SIGTRAP)
++} pending_signal_status;
++
++typedef struct thread_debug_info {
++	thread_id					thread;
++	bool						stopped;
++	debug_event					*last_event;		// last debug message from
++													// the thread; valid only,
++													// if stopped
++	int							reprocess_event;	// > 0, the event
++													// shall be processed a
++													// that many times, which
++													// will probably trigger
++													// another target event
++	int							signal;				// only valid, if stopped
++	pending_signal_status		signal_status;
++} thread_debug_info;
++
++typedef struct extended_image_info {
++	haiku_image_info			info;
++	struct extended_image_info	*next;
++} extended_image_info;
++
++typedef struct team_debug_info {
++	team_id				team;
++	port_id				debugger_port;
++	thread_id			nub_thread;
++	debug_context		context;
++	std::vector<thread_debug_info*> threads;
++	extended_image_info	*images;
++	std::vector<debug_event*>		events;
++} team_debug_info;
++
++static team_debug_info sTeamDebugInfo;
++
++
++typedef struct signal_map_entry {
++	enum gdb_signal	target;
++	int					haiku;
++} signal_map_entry;
++
++static const signal_map_entry sSignalMap[] = {
++	{ GDB_SIGNAL_0,			0 },
++	{ GDB_SIGNAL_HUP,		SIGHUP },
++	{ GDB_SIGNAL_INT,		SIGINT },
++	{ GDB_SIGNAL_QUIT,		SIGQUIT },
++	{ GDB_SIGNAL_ILL,		SIGILL },
++	{ GDB_SIGNAL_CHLD,		SIGCHLD },
++	{ GDB_SIGNAL_ABRT,		SIGABRT },
++	{ GDB_SIGNAL_PIPE,		SIGPIPE },
++	{ GDB_SIGNAL_FPE,		SIGFPE },
++	{ GDB_SIGNAL_KILL,		SIGKILL },
++	{ GDB_SIGNAL_STOP,		SIGSTOP },
++	{ GDB_SIGNAL_SEGV,		SIGSEGV },
++	{ GDB_SIGNAL_CONT,		SIGCONT },
++	{ GDB_SIGNAL_TSTP,		SIGTSTP },
++	{ GDB_SIGNAL_ALRM,		SIGALRM },
++	{ GDB_SIGNAL_TERM,		SIGTERM },
++	{ GDB_SIGNAL_TTIN,		SIGTTIN },
++	{ GDB_SIGNAL_TTOU,		SIGTTOU },
++	{ GDB_SIGNAL_USR1,		SIGUSR1 },
++	{ GDB_SIGNAL_USR2,		SIGUSR2 },
++	{ GDB_SIGNAL_WINCH,		SIGWINCH },
++	{ GDB_SIGNAL_TRAP,		SIGTRAP },
++	{ GDB_SIGNAL_0,			SIGKILLTHR },	// not debuggable anyway
++	{ (gdb_signal)-1, (gdb_signal)-1 }
++};
++
++
++// #pragma mark -
++
++
++static const char *haiku_pid_to_str (target_ops* ops, ptid_t ptid);
++
++
++static int
++target_to_haiku_signal(enum gdb_signal targetSignal)
++{
++	int i;
++
++	if (targetSignal < 0)
++		return -1;
++
++	for (i = 0; sSignalMap[i].target != -1 || sSignalMap[i].haiku != -1; i++) {
++		if (targetSignal == sSignalMap[i].target)
++			return sSignalMap[i].haiku;
++	}
++
++	return -1;
++}
++
++
++static enum gdb_signal
++haiku_to_target_signal(int haikuSignal)
++{
++	int i;
++
++	if (haikuSignal < 0)
++		return GDB_SIGNAL_0;
++
++	for (i = 0; sSignalMap[i].target != -1 || sSignalMap[i].haiku != -1; i++) {
++		if (haikuSignal == sSignalMap[i].haiku)
++			return sSignalMap[i].target;
++	}
++
++	return GDB_SIGNAL_UNKNOWN;
++}
++
++
++static thread_debug_info *
++haiku_find_thread(team_debug_info *teamDebugInfo, thread_id threadID)
++{
++	for (thread_debug_info *info : teamDebugInfo->threads) {
++		if (info->thread == threadID)
++			return info;
++	}
++
++	return NULL;
++}
++
++
++static thread_debug_info *
++haiku_add_thread(team_debug_info *teamDebugInfo, thread_id threadID)
++{
++	thread_info *gdbThreadInfo;
++	thread_debug_info *threadDebugInfo;
++
++	if (threadID == teamDebugInfo->nub_thread) {
++		error("haiku_thread_added(): Trying to add debug nub thread (%ld)\n",
++			threadID);
++	}
++
++	// find the thread first
++	threadDebugInfo = haiku_find_thread(teamDebugInfo, threadID);
++	if (threadDebugInfo)
++		return threadDebugInfo;
++
++	// allocate a new thread debug info
++	threadDebugInfo = new thread_debug_info;
++	if (!threadDebugInfo)
++		error("haiku_thread_added(): Out of memory!\n");
++
++	// init and add it
++	threadDebugInfo->thread = threadID;
++	threadDebugInfo->stopped = false;
++	threadDebugInfo->last_event = NULL;
++	teamDebugInfo->threads.push_back(threadDebugInfo);
++
++	// add it to gdb's thread DB
++	gdbThreadInfo = add_thread(ptid_build(teamDebugInfo->team, 0, threadID));
++
++	// Note: In theory we could spare us the whole thread list management, since
++	// gdb's thread DB is doing exactly the same. We could put our data as
++	// haiku_thread_info::private. The only catch is that when the haiku_thread_info is
++	// freed, xfree() is invoked on the private data directly, but there's no
++	// callback invoked before that would allow us to do cleanup (e.g. free
++	// last_event).
++
++	TRACE(("haiku_add_thread(): team %ld thread %ld added: "
++		"gdb thread info: %p\n", teamDebugInfo->team, threadID, gdbThreadInfo));
++
++	return threadDebugInfo;
++}
++
++
++static void
++haiku_remove_thread(team_debug_info *teamDebugInfo, thread_id threadID)
++{
++	for (size_t i = 0; i < teamDebugInfo->threads.size(); i++) {
++		thread_debug_info *info = teamDebugInfo->threads[i];
++		if (info->thread == threadID) {
++			if (info->last_event)
++				delete info->last_event;
++			delete info;
++			teamDebugInfo->threads.erase(teamDebugInfo->threads.begin() + i);
++
++			// remove it from gdb's thread DB
++			delete_thread(ptid_build(teamDebugInfo->team, 0, threadID));
++
++			return;
++		}
++	}
++}
++
++
++static void
++haiku_init_thread_list(team_debug_info *teamDebugInfo)
++{
++	haiku_thread_info threadInfo;
++	int32 cookie = 0;
++
++	// init gdb's thread DB
++	init_thread_list();
++
++	while (get_next_thread_info(teamDebugInfo->team, &cookie, &threadInfo)
++		== B_OK) {
++		if (threadInfo.thread != teamDebugInfo->nub_thread)
++			haiku_add_thread(teamDebugInfo, threadInfo.thread);
++	}
++}
++
++
++static void
++haiku_cleanup_thread_list(team_debug_info *teamDebugInfo)
++{
++	for (thread_debug_info *thread : teamDebugInfo->threads)
++		delete thread;
++	teamDebugInfo->threads.clear();
++
++	// clear gdb's thread DB
++	init_thread_list();
++}
++
++
++// #pragma mark -
++
++static extended_image_info **
++haiku_find_image_insert_location(team_debug_info *teamDebugInfo,
++	image_id imageID)
++{
++	extended_image_info **image;
++
++	for (image = &teamDebugInfo->images; *image; image = &(*image)->next) {
++		if ((*image)->info.id >= imageID)
++			return image;
++	}
++
++	return image;
++}
++
++
++static extended_image_info *
++haiku_find_image(team_debug_info *teamDebugInfo, image_id imageID)
++{
++	extended_image_info *image = *haiku_find_image_insert_location(
++		teamDebugInfo, imageID);
++
++	return (image && image->info.id == imageID ? image : NULL);
++}
++
++
++static extended_image_info *
++haiku_add_image(team_debug_info *teamDebugInfo, image_info *imageInfo)
++{
++	extended_image_info **imageP = haiku_find_image_insert_location(
++		teamDebugInfo, imageInfo->id);
++	extended_image_info *image = *imageP;
++
++	// already known?
++	if (image && image->info.id == imageInfo->id)
++		return image;
++
++	image = new extended_image_info;
++	if (!image)
++		error("haiku_add_image(): Out of memory!");
++
++	image->info.id = imageInfo->id;
++	strncpy(image->info.name, imageInfo->name, sizeof(image->info.name));
++	image->info.name[sizeof(image->info.name) - 1] = '\0';
++		// TODO: This should be the shared objects soname, not the path. We
++		// probably need to extend the debugger API.
++	strncpy(image->info.path, imageInfo->name, sizeof(image->info.path));
++	image->info.path[sizeof(image->info.path) - 1] = '\0';
++	image->info.text_address = (CORE_ADDR)imageInfo->text;
++	image->info.text_size = imageInfo->text_size;
++	image->info.data_address = (CORE_ADDR)imageInfo->data;
++	image->info.data_size = imageInfo->data_size;
++	image->info.is_app_image = (imageInfo->type == B_APP_IMAGE);
++
++	image->next = *imageP;
++	*imageP = image;
++
++	return image;
++}
++
++
++static void
++haiku_remove_image(team_debug_info *teamDebugInfo, image_id imageID)
++{
++	extended_image_info **imageP = haiku_find_image_insert_location(
++		teamDebugInfo, imageID);
++	extended_image_info *image = *imageP;
++
++	if (image && image->info.id == imageID) {
++		*imageP = image->next;
++		xfree(image);
++	}
++}
++
++
++static void
++haiku_init_image_list(team_debug_info *teamDebugInfo)
++{
++	int32 cookie = 0;
++	image_info info;
++	while (get_next_image_info(teamDebugInfo->team, &cookie, &info) == B_OK)
++		haiku_add_image(teamDebugInfo, &info);
++}
++
++
++static void
++haiku_cleanup_image_list(team_debug_info *teamDebugInfo)
++{
++	while (teamDebugInfo->images) {
++		extended_image_info *image = teamDebugInfo->images;
++		teamDebugInfo->images = image->next;
++		xfree(image);
++	}
++}
++
++
++/*
++ * Service function. Call with -1 the first time.
++ */
++haiku_image_info *
++haiku_get_next_image_info(int lastID)
++{
++	extended_image_info *image = *haiku_find_image_insert_location(
++		&sTeamDebugInfo, (lastID >= 0 ? lastID : 0));
++
++	if (image && image->info.id == lastID)
++		image = image->next;
++
++	return (image ? &image->info : NULL);
++}
++
++
++// #pragma mark -
++
++static debug_event *
++haiku_enqueue_debug_event(std::vector<debug_event*> *list, int32 message,
++	debug_debugger_message_data *data, int32 size)
++{
++	debug_event *event = new debug_event;
++
++	if (!event)
++		error("haiku_enqueue_debug_event(): Out of memory!\n");
++
++	// init the event
++	event->next = NULL;
++	event->message = (debug_debugger_message)message;
++	memcpy(&event->data, data,
++		(size >= 0 ? size : sizeof(debug_debugger_message_data)));
++
++	// add it to the queue
++	list->push_back(event);
++
++	return event;
++}
++
++
++static debug_event *
++haiku_dequeue_next_debug_event(std::vector<debug_event*> *list)
++{
++	debug_event *event = list->size() ? (*list)[0] : NULL;
++
++	if (event) {
++		list->erase(list->begin());
++	}
++
++	return event;
++}
++
++
++static debug_event *
++haiku_remove_debug_event(std::vector<debug_event*> *list, debug_event *eventToRemove)
++{
++	debug_event **event;
++
++	if (eventToRemove) {
++		for (size_t i = 0; i < list->size(); i++) {
++			if ((*list)[i] == eventToRemove) {
++				list->erase(list->begin() + i);
++				return eventToRemove;
++			}
++		}
++	}
++
++	error("haiku_remove_debug_event(): event %p not found in list %p\n",
++		eventToRemove, list);
++
++	return NULL;
++}
++
++
++static void
++haiku_clear_debug_event_list(std::vector<debug_event*> *list)
++{
++	debug_event *event;
++
++	while ((event = haiku_dequeue_next_debug_event(list)))
++		delete event;
++}
++
++
++static debug_event *
++haiku_find_next_debug_event(std::vector<debug_event*> *list,
++	bool (*predicate)(void *closure, debug_event *event), void *closure)
++{
++	for (debug_event* event : *list) {
++		if ((*predicate)(closure, event))
++			return event;
++	}
++
++	return NULL;
++}
++
++
++static void
++haiku_read_pending_debug_events(team_debug_info *teamDebugInfo,
++	bool block, bool (*block_predicate)(void *closure, debug_event *event),
++	void *closure)
++{
++	while (true) {
++		// read the next message from the debugger port
++		debug_debugger_message_data message;
++		int32 code;
++		ssize_t bytesRead;
++		debug_event *event;
++
++//		TRACE(("haiku_read_pending_debug_events(): reading from debugger port "
++//			"(%sblocking)...\n", (block ? "" : "non-")));
++
++		do {
++			bytesRead = read_port_etc(teamDebugInfo->debugger_port, &code,
++				&message, sizeof(message), (block ? 0 : B_RELATIVE_TIMEOUT), 0);
++		} while (bytesRead == B_INTERRUPTED);
++
++		if (bytesRead < 0) {
++			if (bytesRead == B_WOULD_BLOCK && !block)
++				break;
++
++			error("Failed to read from debugger port: %s\n",
++				strerror(bytesRead));
++		}
++
++//		TRACE(("haiku_read_pending_debug_events(): got event: %lu, "
++//			"thread: %ld, team: %ld, nub port: %ld\n", code,
++//			message.origin.thread, message.origin.team,
++//			message.origin.nub_port));
++
++		// got a message: queue it
++		event = haiku_enqueue_debug_event(&teamDebugInfo->events, code,
++			&message, bytesRead);
++
++		block = !(*block_predicate)(closure, event);
++	}
++}
++
++
++typedef struct thread_event_closure {
++	team_debug_info	*context;
++	thread_id		thread;
++	debug_event		*event;
++} thread_event_closure;
++
++
++static bool
++haiku_thread_event_predicate(void *_closure, debug_event *event)
++{
++	thread_event_closure *closure = (thread_event_closure*)_closure;
++
++	if (event->message == B_DEBUGGER_MESSAGE_TEAM_DELETED) {
++		if (closure->context->team < 0
++			|| event->data.origin.team == closure->context->team) {
++			closure->event = event;
++		}
++	}
++
++	if (!closure->event) {
++		if (event->data.origin.team == closure->context->team
++			&& (closure->thread < 0
++				|| closure->thread == event->data.origin.thread)) {
++			closure->event = event;
++		}
++	}
++
++	return (closure->event != NULL);
++}
++
++
++// #pragma mark -
++
++static void
++haiku_cleanup_team_debug_info()
++{
++	destroy_debug_context(&sTeamDebugInfo.context);
++	delete_port(sTeamDebugInfo.debugger_port);
++	sTeamDebugInfo.debugger_port = -1;
++	sTeamDebugInfo.team = -1;
++
++	haiku_cleanup_thread_list(&sTeamDebugInfo);
++	haiku_cleanup_image_list(&sTeamDebugInfo);
++}
++
++
++static status_t
++haiku_send_debugger_message(team_debug_info *teamDebugInfo, int32 messageCode,
++	const void *message, int32 messageSize, void *reply, int32 replySize)
++{
++	return send_debug_message(&teamDebugInfo->context, messageCode,
++		message, messageSize, reply, replySize);
++}
++
++
++static void
++haiku_init_child_debugging (thread_id threadID, bool debugThread)
++{
++	haiku_thread_info threadInfo;
++	status_t result;
++	port_id nubPort;
++
++	TRACE(("haiku_init_child_debugging()\n"));
++
++	// get a thread info
++	result = get_thread_info(threadID, &threadInfo);
++	if (result != B_OK)
++		error("Thread with ID %ld not found: %s", threadID, strerror(result));
++
++	// init our team debug structure
++	sTeamDebugInfo.team = threadInfo.team;
++	sTeamDebugInfo.debugger_port = -1;
++	sTeamDebugInfo.context.nub_port = -1;
++	sTeamDebugInfo.context.reply_port = -1;
++	sTeamDebugInfo.threads = std::vector<thread_debug_info*>();
++	sTeamDebugInfo.events = std::vector<debug_event*>();
++
++	// create the debugger port
++	sTeamDebugInfo.debugger_port = create_port(10, "gdb debug");
++	if (sTeamDebugInfo.debugger_port < 0) {
++		error("Failed to create debugger port: %s",
++			strerror(sTeamDebugInfo.debugger_port));
++	}
++
++	// install ourselves as the team debugger
++	nubPort = install_team_debugger(sTeamDebugInfo.team,
++		sTeamDebugInfo.debugger_port);
++	if (nubPort < 0) {
++		error("Failed to install ourselves as debugger for team %ld: %s",
++			sTeamDebugInfo.team, strerror(nubPort));
++	}
++
++	// get the nub thread
++	{
++		team_info teamInfo;
++		result = get_team_info(sTeamDebugInfo.team, &teamInfo);
++		if (result != B_OK) {
++			error("Failed to get info for team %ld: %s\n",
++				sTeamDebugInfo.team, strerror(result));
++		}
++
++		sTeamDebugInfo.nub_thread = teamInfo.debugger_nub_thread;
++	}
++
++	// init the debug context
++	result = init_debug_context(&sTeamDebugInfo.context, sTeamDebugInfo.team,
++		nubPort);
++	if (result != B_OK) {
++		error("Failed to init debug context for team %ld: %s\n",
++			sTeamDebugInfo.team, strerror(result));
++	}
++
++	// start debugging the thread
++	if (debugThread) {
++		result = debug_thread(threadID);
++		if (result != B_OK) {
++			error("Failed to start debugging thread %ld: %s", threadID,
++				strerror(result));
++		}
++	}
++
++	// set the team debug flags
++	{
++		debug_nub_set_team_flags message;
++		message.flags = B_TEAM_DEBUG_SIGNALS /*| B_TEAM_DEBUG_PRE_SYSCALL
++			| B_TEAM_DEBUG_POST_SYSCALL*/ | B_TEAM_DEBUG_TEAM_CREATION
++			| B_TEAM_DEBUG_THREADS | B_TEAM_DEBUG_IMAGES;
++			// TODO: We probably don't need all events
++
++		haiku_send_debugger_message(&sTeamDebugInfo,
++			B_DEBUG_MESSAGE_SET_TEAM_FLAGS, &message, sizeof(message), NULL, 0);
++	}
++
++
++	// the fun can start: push the target and init the rest
++	push_target(sHaikuTarget);
++
++	haiku_init_thread_list(&sTeamDebugInfo);
++	haiku_init_image_list(&sTeamDebugInfo);
++
++	disable_breakpoints_in_shlibs ();
++
++//	child_clear_solibs ();
++		// TODO: Implement? Do we need this?
++
++	clear_proceed_status (0);
++	init_wait_for_inferior ();
++
++	target_terminal::init ();
++	target_terminal::inferior ();
++}
++
++
++static void
++haiku_continue_thread(team_debug_info *teamDebugInfo, thread_id threadID,
++	uint32 handleEvent, bool step)
++{
++	debug_nub_continue_thread message;
++	status_t err;
++
++	message.thread = threadID;
++	message.handle_event = handleEvent;
++	message.single_step = step;
++
++	err = haiku_send_debugger_message(teamDebugInfo,
++		B_DEBUG_MESSAGE_CONTINUE_THREAD, &message, sizeof(message), NULL, 0);
++	if (err != B_OK) {
++		printf_unfiltered ("Failed to resume thread %ld: %s\n", threadID,
++			strerror(err));
++	}
++}
++
++
++static status_t
++haiku_stop_thread(team_debug_info *teamDebugInfo, thread_id threadID)
++{
++	// check whether we know the thread
++	status_t err;
++	thread_event_closure threadEventClosure;
++
++	thread_debug_info *threadInfo = haiku_find_thread(teamDebugInfo, threadID);
++	if (!threadInfo)
++		return B_BAD_THREAD_ID;
++
++	// already stopped?
++	if (threadInfo->stopped)
++		return B_OK;
++
++	// debug the thread
++	err = debug_thread(threadID);
++	if (err != B_OK) {
++		TRACE(("haiku_stop_thread(): failed to debug thread %ld: %s\n",
++			threadID, strerror(err)));
++		return err;
++	}
++
++	// wait for the event to hit our port
++
++	// TODO: debug_thread() doesn't guarantee that the thread will enter the
++	// debug loop any time soon. E.g. a wait_for_thread() is (at the moment)
++	// not interruptable, so we block here forever, if we already debug the
++	// thread that is being waited for. We should probably limit the time
++	// we're waiting, and return the info to the caller, which can then try
++	// to deal with the situation in an appropriate way.
++
++	// prepare closure for finding interesting events
++	threadEventClosure.context = teamDebugInfo;
++	threadEventClosure.thread = threadID;
++	threadEventClosure.event = NULL;
++
++	// find the first interesting queued event
++	threadEventClosure.event = haiku_find_next_debug_event(
++		&teamDebugInfo->events, haiku_thread_event_predicate,
++		&threadEventClosure);
++
++	// read all events pending on the port
++	haiku_read_pending_debug_events(teamDebugInfo,
++		(threadEventClosure.event == NULL), haiku_thread_event_predicate,
++		&threadEventClosure);
++
++	// We should check, whether we really got an event for the thread in
++	// question, but the only possible other event is that the team has
++	// been delete, which ends the game anyway.
++
++	// TODO: That's actually not true. We also get messages when an add-on
++	// has been loaded/unloaded, a signal arrives, or a thread calls the
++	// debugger.
++
++	return B_OK;
++}
++
++
++static status_t
++haiku_get_cpu_state(team_debug_info *teamDebugInfo,
++	debug_nub_get_cpu_state_reply *reply)
++{
++	status_t err;
++	thread_id threadID = ptid_get_tid(inferior_ptid);
++	debug_nub_get_cpu_state message;
++
++	// make sure the thread is stopped
++	err = haiku_stop_thread(teamDebugInfo, threadID);
++	if (err != B_OK) {
++		printf_unfiltered ("Failed to stop thread %ld: %s\n",
++			threadID, strerror(err));
++		return err;
++	}
++
++	message.reply_port = teamDebugInfo->context.reply_port;
++	message.thread = threadID;
++
++	err = haiku_send_debugger_message(teamDebugInfo,
++		B_DEBUG_MESSAGE_GET_CPU_STATE, &message, sizeof(message), reply,
++		sizeof(*reply));
++	if (err == B_OK)
++		err = reply->error;
++	if (err != B_OK) {
++		printf_unfiltered ("Failed to get status of thread %ld: %s\n",
++			threadID, strerror(err));
++	}
++
++	return err;
++}
++
++
++// #pragma mark -
++
++static void
++haiku_child_open (const char *arg, int from_tty)
++{
++	error ("Use the \"run\" command to start a child process.");
++}
++
++static void
++haiku_child_close (target_ops* ops)
++{
++	printf_unfiltered ("gdb: child_close, inferior_ptid=%d\n",
++		ptid_get_pid (inferior_ptid));
++}
++
++
++static void
++haiku_child_attach (target_ops* ops, const char *args, int from_tty)
++{
++	extern int stop_after_trap;
++	thread_id threadID;
++	haiku_thread_info threadInfo;
++	status_t result;
++
++	TRACE(("haiku_child_attach(`%s', %d)\n", args, from_tty));
++
++	if (!args)
++		error_no_arg ("thread-id to attach");
++
++	// get the thread ID
++	threadID = strtoul (args, 0, 0);
++	if (threadID <= 0)
++		error("The given thread-id %ld is invalid.", threadID);
++
++	haiku_init_child_debugging(threadID, true);
++
++	TRACE(("haiku_child_attach() done\n"));
++}
++
++
++static void
++haiku_child_detach (target_ops* ops, const char *args, int from_tty)
++{
++	int detached = 1;
++	status_t result;
++
++	TRACE(("haiku_child_detach(`%s', %d)\n", args, from_tty));
++
++	result = remove_team_debugger(sTeamDebugInfo.team);
++	if (result != B_OK) {
++		error("Failed to detach process %ld: %s\n", sTeamDebugInfo.team,
++			strerror(result));
++	}
++
++	//delete_command (NULL, 0);
++
++	if (from_tty) {
++		char *exec_file = get_exec_file (0);
++		if (exec_file == 0)
++			exec_file = "";
++		printf_unfiltered ("Detaching from program: %s, Pid %ld\n", exec_file,
++			sTeamDebugInfo.team);
++		gdb_flush (gdb_stdout);
++	}
++
++	haiku_cleanup_team_debug_info();
++
++	inferior_ptid = null_ptid;
++	unpush_target (sHaikuTarget);
++}
++
++
++static void
++haiku_resume_thread(team_debug_info *teamDebugInfo, thread_debug_info *thread,
++	int step, enum gdb_signal sig)
++{
++	thread_id threadID = (thread ? thread->thread : -1);
++	int pendingSignal = -1;
++	int signalToSend = target_to_haiku_signal(sig);
++	uint32 handleEvent = B_THREAD_DEBUG_HANDLE_EVENT;
++
++	if (!thread || !thread->stopped) {
++		TRACE(("haiku_resume_thread(): thread %ld not stopped\n",
++			threadID));
++		return;
++	}
++
++	if (thread->reprocess_event > 0) {
++		TRACE(("haiku_resume_thread(): thread %ld is expected to "
++			"reprocess its current event\n", threadID));
++		return;
++	}
++
++	// get the pending signal
++	if (thread->last_event)
++		pendingSignal = thread->signal;
++
++	// Decide what to do with the event and the pending and passed signal.
++	// We simply adjust signalToSend, pendingSignal and handleEvent.
++	// If signalToSend is set afterwards, we need to send it. pendingSignal we
++	// need to ignore. handleEvent specifies whether to handle/ignore the event.
++	if (signalToSend > 0) {
++		if (pendingSignal > 0) {
++			if (signalToSend == pendingSignal) {
++				// signal to send is the pending signal
++				// we don't need to send it
++				signalToSend = -1;
++				if (thread->signal_status != SIGNAL_WILL_ARRIVE) {
++					// the signal has not yet been sent, so we need to ignore
++					// it only in this case, but not in the other ones
++					pendingSignal = -1;
++				}
++			} else {
++				// signal to send is not the pending signal
++				// If the signal has been sent or will be sent, we need to
++				// ignore the event.
++				if (thread->signal_status != SIGNAL_FAKED)
++					handleEvent = B_THREAD_DEBUG_IGNORE_EVENT;
++				// At any rate we don't need to ignore the signal.
++				pendingSignal = -1;
++				// send the signal
++			}
++		} else {
++			// there's a signal to send, but no pending signal
++			// handle the event
++			// ignore the signal
++			// send the signal
++		}
++	} else {
++		if (pendingSignal > 0) {
++			// there's a pending signal, but no signal to send
++			// Ignore the event, if the signal has been sent or will be sent.
++			if (thread->signal_status != SIGNAL_FAKED)
++				handleEvent = B_THREAD_DEBUG_IGNORE_EVENT;
++		} else {
++			// there're neither signal to send nor pending signal
++			// handle the event
++		}
++	}
++
++	// ignore the pending signal, if necessary
++	if (pendingSignal > 0) {
++		debug_nub_set_signal_masks message;
++		status_t err;
++
++		message.thread = threadID;
++		message.ignore_mask = 0;
++		message.ignore_once_mask = B_DEBUG_SIGNAL_TO_MASK(pendingSignal);
++		message.ignore_op = B_DEBUG_SIGNAL_MASK_OR;
++		message.ignore_once_op = B_DEBUG_SIGNAL_MASK_OR;
++
++		err = haiku_send_debugger_message(teamDebugInfo,
++			B_DEBUG_MESSAGE_SET_SIGNAL_MASKS, &message, sizeof(message),
++			NULL, 0);
++		if (err != B_OK) {
++			printf_unfiltered ("Set signal ignore masks for thread %ld: %s\n",
++				threadID, strerror(err));
++		}
++	}
++
++	// send the signal
++	if (signalToSend > 0) {
++		if (send_signal(threadID, signalToSend) < 0) {
++			printf_unfiltered ("Failed to send signal %d to thread %ld: %s\n",
++				signalToSend, threadID, strerror(errno));
++		}
++	}
++
++	// resume thread
++	haiku_continue_thread(teamDebugInfo, threadID, handleEvent, step);
++	thread->stopped = false;
++}
++
++
++static void
++haiku_child_resume (target_ops* ops, ptid_t ptid, int step, enum gdb_signal sig)
++{
++	team_id teamID = ptid_get_pid(ptid);
++	thread_id threadID = ptid_get_tid(ptid);
++	thread_debug_info *thread;
++
++	TRACE(("haiku_child_resume(`%s', step: %d, signal: %d)\n",
++		haiku_pid_to_str(NULL, ptid), step, sig));
++
++	if (teamID < 0) {
++		// resume all stopped threads (at least all haiku_wait_child() has
++		// reported to be stopped)
++		for (thread_debug_info *thread : sTeamDebugInfo.threads) {
++			if (thread->stopped)
++				haiku_resume_thread(&sTeamDebugInfo, thread, step, sig);
++		}
++	} else {
++		// resume the thread in question
++		thread = haiku_find_thread(&sTeamDebugInfo, threadID);
++		if (thread) {
++			haiku_resume_thread(&sTeamDebugInfo, thread, step, sig);
++		} else {
++			printf_unfiltered ("haiku_child_resume(): unknown thread %ld\n",
++				threadID);
++		}
++	}
++
++}
++
++
++static ptid_t
++haiku_child_wait_internal (team_debug_info *teamDebugInfo, ptid_t ptid,
++	struct target_waitstatus *ourstatus, bool *ignore, bool *selectThread)
++{
++	team_id teamID = ptid_get_pid(ptid);
++	team_id threadID = ptid_get_tid(ptid);
++	debug_event *event = NULL;
++	ptid_t retval = pid_to_ptid(-1);
++	struct thread_debug_info *thread = NULL;
++	int pendingSignal = -1;
++	pending_signal_status pendingSignalStatus = SIGNAL_FAKED;
++	int reprocessEvent = -1;
++
++	*selectThread = false;
++
++	if (teamID < 0 || threadID == 0)
++		threadID = -1;
++
++	// if we're waiting for any thread, search the thread list for already
++	// stopped threads (needed for reprocessing events)
++	if (threadID < 0) {
++		for (thread_debug_info *thread : teamDebugInfo->threads) {
++			if (thread->stopped) {
++				threadID = thread->thread;
++				break;
++			}
++		}
++	}
++
++	// check, if the thread exists and is already stopped
++	if (threadID >= 0
++		&& (thread = haiku_find_thread(teamDebugInfo, threadID)) != NULL
++		&& thread->stopped) {
++		// remove the event that stopped the thread from the thread (we will
++		// add it again, if it shall not be ignored)
++		event = thread->last_event;
++		thread->last_event = NULL;
++		thread->stopped = false;
++		reprocessEvent = thread->reprocess_event;
++
++		TRACE(("haiku_child_wait_internal(): thread %ld already stopped. "
++			"re-digesting the last event (%p).\n", threadID, event));
++	} else {
++		// prepare closure for finding interesting events
++		thread_event_closure threadEventClosure;
++		threadEventClosure.context = teamDebugInfo;
++		threadEventClosure.thread = threadID;
++		threadEventClosure.event = NULL;
++
++		// find the first interesting queued event
++		threadEventClosure.event = haiku_find_next_debug_event(
++			&teamDebugInfo->events, haiku_thread_event_predicate,
++			&threadEventClosure);
++
++		// read all events pending on the port
++		haiku_read_pending_debug_events(teamDebugInfo,
++			(threadEventClosure.event == NULL), haiku_thread_event_predicate,
++			&threadEventClosure);
++
++		// get the event of interest
++		event = haiku_remove_debug_event(&teamDebugInfo->events,
++			threadEventClosure.event);
++
++		if (!event) {
++			TRACE(("haiku_child_wait_internal(): got no event!\n"));
++			return retval;
++		}
++
++		TRACE(("haiku_child_wait_internal(): got event: %u, thread: %ld, "
++			"team: %ld, nub port: %ld\n", event->message,
++			event->data.origin.thread, event->data.origin.team,
++			event->data.origin.nub_port));
++	}
++
++	if (event && event->data.origin.team != teamDebugInfo->team) {
++		// Spurious debug message. Doesn't concern our team. Ignore.
++		delete event;
++		return retval;
++	}
++
++	retval = ptid_build(event->data.origin.team, 0, event->data.origin.thread);
++
++	*ignore = false;
++
++	switch (event->message) {
++		case B_DEBUGGER_MESSAGE_DEBUGGER_CALL:
++		{
++			// print the debugger message
++			char debuggerMessage[1024];
++			ssize_t bytesRead = debug_read_string(&teamDebugInfo->context,
++				event->data.debugger_call.message, debuggerMessage,
++				sizeof(debuggerMessage));
++			if (bytesRead > 0) {
++				printf_unfiltered ("Thread %ld called debugger(): %s\n",
++					event->data.origin.thread, debuggerMessage);
++			} else {
++				printf_unfiltered ("Thread %ld called debugger(), but failed"
++					"to get the debugger message.\n",
++					event->data.origin.thread);
++			}
++
++			// fall through...
++		}
++		case B_DEBUGGER_MESSAGE_THREAD_DEBUGGED:
++		case B_DEBUGGER_MESSAGE_BREAKPOINT_HIT:
++		case B_DEBUGGER_MESSAGE_WATCHPOINT_HIT:
++		case B_DEBUGGER_MESSAGE_SINGLE_STEP:
++			ourstatus->kind = TARGET_WAITKIND_STOPPED;
++			ourstatus->value.sig = GDB_SIGNAL_TRAP;
++			pendingSignal = SIGTRAP;
++			pendingSignalStatus = SIGNAL_FAKED;
++			break;
++
++		case B_DEBUGGER_MESSAGE_PRE_SYSCALL:
++			ourstatus->kind = TARGET_WAITKIND_SYSCALL_ENTRY;
++			ourstatus->value.syscall_number = event->data.pre_syscall.syscall;
++			break;
++
++		case B_DEBUGGER_MESSAGE_POST_SYSCALL:
++			ourstatus->kind = TARGET_WAITKIND_SYSCALL_RETURN;
++			ourstatus->value.syscall_number = event->data.post_syscall.syscall;
++			break;
++
++		case B_DEBUGGER_MESSAGE_SIGNAL_RECEIVED:
++			pendingSignal = event->data.signal_received.signal;
++			pendingSignalStatus = SIGNAL_ARRIVED;
++			ourstatus->kind = TARGET_WAITKIND_STOPPED;
++			ourstatus->value.sig = haiku_to_target_signal(pendingSignal);
++			break;
++
++		case B_DEBUGGER_MESSAGE_EXCEPTION_OCCURRED:
++		{
++			// print the exception message
++			char exception[1024];
++			get_debug_exception_string(event->data.exception_occurred.exception,
++				exception, sizeof(exception));
++			printf_unfiltered ("Thread %ld caused an exception: %s\n",
++				event->data.origin.thread, exception);
++
++			pendingSignal = event->data.exception_occurred.signal;
++			pendingSignalStatus = SIGNAL_WILL_ARRIVE;
++			ourstatus->kind = TARGET_WAITKIND_STOPPED;
++			ourstatus->value.sig = haiku_to_target_signal(pendingSignal);
++			break;
++		}
++
++		case B_DEBUGGER_MESSAGE_TEAM_CREATED:
++			// ignore
++			*ignore = true;
++			break;
++
++		case B_DEBUGGER_MESSAGE_TEAM_DELETED:
++			ourstatus->kind = TARGET_WAITKIND_EXITED;
++			ourstatus->value.integer = 0;
++				// TODO: Extend the debugger interface?
++			break;
++
++		case B_DEBUGGER_MESSAGE_THREAD_CREATED:
++		{
++			// internal bookkeeping only
++			thread_id newThread = event->data.thread_created.new_thread;
++			if (newThread != teamDebugInfo->nub_thread)
++				haiku_add_thread(teamDebugInfo, newThread);
++			*ignore = true;
++			break;
++		}
++
++		case B_DEBUGGER_MESSAGE_THREAD_DELETED:
++			// internal bookkeeping
++			haiku_remove_thread(teamDebugInfo,
++				event->data.thread_deleted.origin.thread);
++			*ignore = true;
++
++			// TODO: What if this is the current thread?
++			break;
++
++		case B_DEBUGGER_MESSAGE_IMAGE_CREATED:
++			if (reprocessEvent < 0) {
++				// first time we see the event: update our image list
++//				haiku_add_image(teamDebugInfo,
++//					&event->data.image_created.info);
++haiku_cleanup_image_list(teamDebugInfo);
++haiku_init_image_list(teamDebugInfo);
++// TODO: We don't get events when images have been removed in preparation of
++// an exec*() yet.
++			}
++
++			ourstatus->kind = TARGET_WAITKIND_LOADED;
++			ourstatus->value.integer = 0;
++			if (event->data.image_created.info.type == B_APP_IMAGE) {
++				// An app image has been loaded, i.e. the application is now
++				// fully loaded. We need to send a TARGET_WAITKIND_LOADED
++				// first, so that GDB's shared object list is updated correctly.
++				// But we also need to send an TARGET_WAITKIND_EXECD event.
++				// We use the reprocessEvent mechanism here.
++
++				if (reprocessEvent < 0) {
++TRACE(("haiku_child_wait_internal(): B_APP_IMAGE created, reprocess < 0\n"));
++					// the first time the event is processed: send the
++					// `loaded' event
++					reprocessEvent = 2;
++				} else if (reprocessEvent == 2) {
++TRACE(("haiku_child_wait_internal(): B_APP_IMAGE created, reprocess -> exec\n"));
++					// the second time the event is processed: send the `exec'
++					// event
++					ourstatus->kind = TARGET_WAITKIND_EXECD;
++					ourstatus->value.execd_pathname
++						= event->data.image_created.info.name;
++
++					reprocessEvent = 1;
++				} else if (reprocessEvent <= 1) {
++					// the third time the event is processed: send the `trap'
++					// event
++					ourstatus->kind = TARGET_WAITKIND_STOPPED;
++					ourstatus->value.sig = GDB_SIGNAL_TRAP;
++					pendingSignal = SIGTRAP;
++					pendingSignalStatus = SIGNAL_FAKED;
++
++					reprocessEvent = 0;
++				}
++			}
++
++			// re_enable_breakpoints_in_shlibs ();
++				// TODO: Needed?
++			break;
++
++		case B_DEBUGGER_MESSAGE_IMAGE_DELETED:
++			haiku_remove_image(teamDebugInfo,
++				event->data.image_deleted.info.id);
++
++			// send TARGET_WAITKIND_LOADED here too, it causes the shared
++			// object list to be updated
++			ourstatus->kind = TARGET_WAITKIND_LOADED;
++			ourstatus->value.integer = 0;
++			break;
++
++		case B_DEBUGGER_MESSAGE_HANDED_OVER:
++		{
++TRACE(("haiku_child_wait_internal(): B_DEBUGGER_MESSAGE_HANDED_OVER: causing "
++"thread: %ld\n", event->data.handed_over.causing_thread));
++			// The debugged team has been handed over to us by another debugger
++			// (likely the debug server). This event also tells us, which
++			// thread has caused the original debugger to be installed (if any).
++			// So, if we're not looking for any particular thread, select that
++			// thread.
++			if (threadID < 0 && event->data.handed_over.causing_thread >= 0) {
++				*selectThread = true;
++				retval = ptid_build(event->data.origin.team, 0,
++					event->data.handed_over.causing_thread);
++			}
++			*ignore = true;
++		}
++
++		default:
++			// unknown message, ignore
++			*ignore = true;
++			break;
++	}
++
++	// make the event the thread's last event or delete it
++	if (!*ignore && event->data.origin.thread >= 0) {
++		struct thread_debug_info *thread = haiku_find_thread(teamDebugInfo,
++			event->data.origin.thread);
++		if (thread->last_event)
++			delete thread->last_event;
++		thread->last_event = event;
++		thread->stopped = true;
++		thread->signal = pendingSignal;
++		thread->signal_status = pendingSignalStatus;
++		thread->reprocess_event
++			= (reprocessEvent >= 0 ? reprocessEvent : 0);
++	} else {
++		thread_id originThread = event->data.origin.thread;
++		delete event;
++
++		// continue the thread
++		if (originThread >= 0) {
++			haiku_continue_thread(teamDebugInfo, originThread,
++				B_THREAD_DEBUG_HANDLE_EVENT, false);
++		}
++
++//		*ignore = true;
++// TODO: This should indeed not be needed. It definitely eats the
++// `team deleted' events.
++	}
++
++	return retval;
++}
++
++
++static ptid_t
++haiku_child_wait (target_ops* ops, ptid_t ptid, struct target_waitstatus *ourstatus,
++	int target_options)
++{
++	ptid_t retval;
++	bool ignore = true;
++	bool selectThread = false;
++
++	TRACE(("haiku_child_wait(`%s', %p)\n",
++		haiku_pid_to_str(NULL, ptid), ourstatus));
++
++	do {
++		retval = haiku_child_wait_internal(&sTeamDebugInfo, ptid, ourstatus,
++			&ignore, &selectThread);
++		if (selectThread)
++			ptid = retval;
++	} while (ignore);
++
++	TRACE(("haiku_child_wait() done: `%s'\n", haiku_pid_to_str(NULL, retval)));
++
++	return retval;
++}
++
++
++static void
++haiku_child_fetch_inferior_registers (target_ops* ops, struct regcache *regcache,
++	int reg)
++{
++	debug_nub_get_cpu_state_reply reply;
++
++	TRACE(("haiku_child_fetch_inferior_registers(%d)\n", reg));
++
++	// get the CPU state
++	haiku_get_cpu_state(&sTeamDebugInfo, &reply);
++
++// printf("haiku_child_fetch_inferior_registers(): eip: %p, ebp: %p\n",
++// (void*)reply.cpu_state.eip, (void*)reply.cpu_state.ebp);
++
++	// supply the registers (architecture specific)
++	haiku_supply_registers(reg, regcache, &reply.cpu_state);
++}
++
++
++static void
++haiku_child_store_inferior_registers (target_ops* ops, struct regcache *regcache,
++	int reg)
++{
++	status_t err;
++	thread_id threadID = ptid_get_tid(regcache_get_ptid (regcache));
++	debug_nub_get_cpu_state_reply reply;
++	debug_nub_set_cpu_state message;
++
++	TRACE(("haiku_child_store_inferior_registers(%d)\n", reg));
++
++	// get the current CPU state
++	haiku_get_cpu_state(&sTeamDebugInfo, &reply);
++
++	// collect the registers (architecture specific)
++	haiku_collect_registers(reg, regcache, &reply.cpu_state);
++
++	// set the new CPU state
++	message.thread = threadID;
++	memcpy(&message.cpu_state, &reply.cpu_state, sizeof(debug_cpu_state));
++	err = haiku_send_debugger_message(&sTeamDebugInfo,
++		B_DEBUG_MESSAGE_SET_CPU_STATE, &message, sizeof(message), NULL, 0);
++	if (err != B_OK) {
++		printf_unfiltered ("Failed to set status of thread %ld: %s\n",
++			threadID, strerror(err));
++	}
++}
++
++static void
++haiku_child_prepare_to_store (target_ops* ops, struct regcache *regcache)
++{
++	// Since we always fetching the current state in
++	// haiku_child_store_inferior_registers(), this should be a no-op.
++}
++
++static int
++haiku_child_deprecated_xfer_memory (CORE_ADDR memaddr, char *myaddr, int len,
++	int write, struct mem_attrib *attrib, struct target_ops *target)
++{
++	TRACE(("haiku_child_deprecated_xfer_memory(0x%8lx, %p, %d, %d, %p, %p)\n",
++		(uint32)memaddr, myaddr, len, write, attrib, target));
++
++	if (len <= 0)
++		return 0;
++
++	if (write) {
++		// write
++		debug_nub_write_memory message;
++		debug_nub_write_memory_reply reply;
++		status_t err;
++
++		if (len > B_MAX_READ_WRITE_MEMORY_SIZE)
++			len = B_MAX_READ_WRITE_MEMORY_SIZE;
++
++		message.reply_port = sTeamDebugInfo.context.reply_port;
++		message.address = (void*)memaddr;
++		message.size = len;
++		memcpy(message.data, myaddr, len);
++
++		err = haiku_send_debugger_message(&sTeamDebugInfo,
++			B_DEBUG_MESSAGE_WRITE_MEMORY, &message, sizeof(message), &reply,
++			sizeof(reply));
++		if (err != B_OK || reply.error != B_OK)
++{
++TRACE(("haiku_child_deprecated_xfer_memory() failed: %lx\n",
++(err != B_OK ? err : reply.error)));
++			return 0;
++}
++
++TRACE(("haiku_child_deprecated_xfer_memory(): -> %ld\n", reply.size));
++		return reply.size;
++	} else {
++		// read
++		ssize_t bytesRead = debug_read_memory_partial(&sTeamDebugInfo.context,
++			(const void *)memaddr, myaddr, len);
++		return (bytesRead < 0 ? 0 : bytesRead);
++	}
++
++	return -1;
++}
++
++enum target_xfer_status
++haiku_child_xfer_partial (struct target_ops *ops, enum target_object object,
++	const char *annex, gdb_byte *readbuf, const gdb_byte *writebuf, ULONGEST offset,
++	ULONGEST len, ULONGEST* xfered_len)
++{
++	if (!readbuf && !writebuf)
++		return TARGET_XFER_E_IO;
++
++	switch (object) {
++		case TARGET_OBJECT_MEMORY:
++		{
++			int write = !readbuf;
++			*xfered_len = haiku_child_deprecated_xfer_memory (offset,
++				(write ? (char*)writebuf : (char*)readbuf), len, write, NULL, ops);
++			return (*xfered_len < 1) ? TARGET_XFER_E_IO : TARGET_XFER_OK;
++		}
++	}
++
++	return TARGET_XFER_E_IO;
++}
++
++static void
++haiku_child_files_info (struct target_ops *ignore)
++{
++  printf_unfiltered ("\tUsing the running image of %s %s.\n",
++      current_inferior ()->attach_flag ? "attached" : "child", target_pid_to_str (inferior_ptid));
++}
++
++static void
++haiku_child_kill_inferior (target_ops* ops)
++{
++	status_t err;
++	thread_id teamID = ptid_get_pid(inferior_ptid);
++
++	TRACE(("haiku_child_kill_inferior()\n"));
++
++	err = kill_team(teamID);
++	if (err != B_OK) {
++		printf_unfiltered ("Failed to kill team %ld: %s\n", teamID,
++			strerror(err));
++		return;
++	}
++
++	target_mourn_inferior(inferior_ptid);
++}
++
++static void
++haiku_child_stop_inferior (target_ops* ops, ptid_t ptid)
++{
++	status_t err;
++	thread_id threadID = ptid_get_tid(ptid);
++
++	TRACE(("haiku_child_stop_inferior()\n"));
++
++	err = debug_thread(threadID);
++	if (err != B_OK) {
++		printf_unfiltered ("Failed to stop thread %ld: %s\n", threadID,
++			strerror(err));
++		return;
++	}
++}
++
++static void
++haiku_init_debug_create_inferior(int pid)
++{
++	extern int stop_after_trap;
++
++	// fix inferior_ptid -- fork_inferior() sets the process ID only
++	inferior_ptid = ptid_build (pid, 0, pid);
++		// team ID == team main thread ID under Haiku
++
++	haiku_init_child_debugging(pid, false);
++
++	// eat the initial `debugged' event caused by wait_for_inferior()
++// TODO: Maybe we should just dequeue the event and continue the thread instead
++// of using gdb's mechanism, since I don't know what undesired side-effects
++// they may have.
++	clear_proceed_status (0);
++
++	while (true) {
++		thread_debug_info *thread;
++		thread_info* curr_thread = inferior_thread ();
++
++		// stop_soon = STOP_QUIETLY;
++		wait_for_inferior();
++
++		if (curr_thread->suspend.stop_signal == GDB_SIGNAL_TRAP) {
++			thread = haiku_find_thread(&sTeamDebugInfo, pid);
++
++			if (thread && thread->stopped
++				&& thread->last_event->message
++					== B_DEBUGGER_MESSAGE_IMAGE_CREATED
++				&& thread->last_event->data.image_created.info.type
++					== B_APP_IMAGE
++				&& thread->reprocess_event == 0) {
++				// This is the trap for the last (second, if started via shell)
++				// `load app image' event. Be done.
++				break;
++			}
++		}
++
++		resume(curr_thread->suspend.stop_signal);
++	}
++	//stop_soon = NO_STOP_QUIETLY;
++
++	// load shared library symbols
++	target_terminal::ours_for_output ();
++	solib_add (NULL, 0, auto_solib_add);
++	target_terminal::inferior ();
++
++	gdb_startup_inferior (pid, START_INFERIOR_TRAPS_EXPECTED);
++
++	/* On some targets, there must be some explicit actions taken after
++	 the inferior has been started up.  */
++	target_post_startup_inferior (inferior_ptid);
++
++//while (1) {
++//	stop_after_trap = 1;
++//	wait_for_inferior ();
++//	if (debugThread && stop_signal != GDB_SIGNAL_TRAP)
++//		resume (0, stop_signal);
++//	else
++//		break;
++//}
++//stop_after_trap = 0;
++
++
++
++//	while (1) {
++//		thread_debug_info *thread;
++//
++//		stop_after_trap = 1;
++//		wait_for_inferior ();
++//// TODO: Catch deadly events, so that we won't block here.
++//
++//		thread = haiku_find_thread(&sTeamDebugInfo, pid);
++//TRACE(("haiku_init_debug_create_inferior(): wait_for_inferior() returned: "
++//"thread: %p (%ld)\n", thread, (thread ? thread->thread : -1)));
++//		if (thread && thread->stopped
++//			&& thread->last_event->message
++//				== B_DEBUGGER_MESSAGE_IMAGE_CREATED
++//			&& thread->last_event->data.image_created.info.type
++//				== B_APP_IMAGE) {
++//TRACE(("haiku_init_debug_create_inferior(): Got an `app image created' "
++//"message\n"));
++//			break;
++//		}
++//
++//		resume (0, stop_signal);
++//	}
++}
++
++static void
++haiku_child_create_inferior (target_ops* ops, const char *exec_file,
++	const std::string& allargs, char **env, int from_tty)
++{
++	TRACE(("haiku_child_create_inferior(`%s', `%s', %p, %d)\n", exec_file,
++		allargs, env, from_tty));
++
++	/* Do not change either targets above or the same target if already present.
++	 The reason is the target stack is shared across multiple inferiors.  */
++	int ops_already_pushed = target_is_pushed (ops);
++	struct cleanup *back_to = make_cleanup (null_cleanup, NULL);
++
++	if (! ops_already_pushed) {
++		/* Clear possible core file with its process_stratum.  */
++		push_target (ops);
++		make_cleanup_unpush_target (ops);
++	}
++
++	pid_t pid = fork_inferior (exec_file, allargs, env, wait_for_debugger,
++		haiku_init_debug_create_inferior, NULL, NULL, NULL);
++
++	discard_cleanups (back_to);
++}
++
++static void
++haiku_child_mourn_inferior (target_ops* ops)
++{
++	TRACE(("haiku_child_mourn_inferior()\n"));
++
++	haiku_cleanup_team_debug_info();
++	unpush_target (sHaikuTarget);
++	generic_mourn_inferior ();
++}
++
++static int
++haiku_child_thread_alive (target_ops* ops, ptid_t ptid)
++{
++	haiku_thread_info info;
++
++	TRACE(("haiku_child_thread_alive(`%s')\n", haiku_pid_to_str(NULL, ptid)));
++
++	return (get_thread_info(ptid_get_tid(ptid), &info) == B_OK);
++}
++
++static const char *
++haiku_pid_to_str (target_ops* ops, ptid_t ptid)
++{
++	static char buffer[B_OS_NAME_LENGTH + 64 + 64];
++	team_info teamInfo;
++	haiku_thread_info threadInfo;
++	status_t error;
++
++	// get the team info for the target team
++	error = get_team_info(ptid_get_pid(ptid), &teamInfo);
++	if (error != B_OK) {
++		sprintf(buffer, "invalid team ID %d", ptid_get_pid(ptid));
++		return buffer;
++	}
++
++	// get the thread info for the target thread
++	error = get_thread_info(ptid_get_tid(ptid), &threadInfo);
++	if (error != B_OK) {
++		sprintf(buffer, "team %.*s (%ld) invalid thread ID %ld",
++			(int)sizeof(teamInfo.args), teamInfo.args, teamInfo.team,
++			ptid_get_tid(ptid));
++		return buffer;
++	}
++
++	sprintf(buffer, "team %.*s (%ld) thread %s (%ld)",
++		(int)sizeof(teamInfo.args), teamInfo.args, teamInfo.team,
++		threadInfo.name, threadInfo.thread);
++
++	return buffer;
++}
++
++char *
++haiku_child_pid_to_exec_file (target_ops* ops, int pid)
++{
++	static char buffer[B_PATH_NAME_LENGTH];
++
++	// The only way to get the path to the application's executable seems to
++	// be to get an image_info of its image, which also contains a path.
++	// Several images may belong to the team (libraries, add-ons), but only
++	// the one in question should be typed B_APP_IMAGE.
++	image_info info;
++	int32 cookie = 0;
++
++	while (get_next_image_info(0, &cookie, &info) == B_OK) {
++		if (info.type == B_APP_IMAGE) {
++			strncpy(buffer, info.name, B_PATH_NAME_LENGTH - 1);
++			buffer[B_PATH_NAME_LENGTH - 1] = 0;
++			return buffer;
++		}
++	}
++
++	return NULL;
++}
++
++
++static int
++haiku_return_one (struct target_ops *ops)
++{
++	return 1;
++}
++
++
++void
++_initialize_haiku_nat (void)
++{
++	// child operations
++	struct target_ops *t = XCNEW (struct target_ops);
++	t->to_shortname = "child";
++	t->to_longname = "Haiku child process";
++	t->to_doc = "Haiku child process (started by the \"run\" command).";
++	t->to_open = haiku_child_open;
++	t->to_close = haiku_child_close;
++	t->to_attach = haiku_child_attach;
++	t->to_detach = haiku_child_detach;
++	t->to_resume = haiku_child_resume;
++	t->to_wait = haiku_child_wait;
++	t->to_fetch_registers = haiku_child_fetch_inferior_registers;
++	t->to_store_registers = haiku_child_store_inferior_registers;
++	t->to_prepare_to_store = haiku_child_prepare_to_store;
++	t->to_xfer_partial = haiku_child_xfer_partial;
++	t->to_files_info = haiku_child_files_info;
++
++	t->to_insert_breakpoint = memory_insert_breakpoint;
++	t->to_remove_breakpoint = memory_remove_breakpoint;
++		// TODO: We can do better. If we wanted to.
++
++	t->to_kill = haiku_child_kill_inferior;
++	t->to_stop = haiku_child_stop_inferior;
++	t->to_create_inferior = haiku_child_create_inferior;
++	t->to_mourn_inferior = haiku_child_mourn_inferior;
++	t->to_can_run = haiku_return_one;
++	t->to_supports_non_stop = haiku_return_one;
++	t->to_can_async_p = haiku_return_one;
++	t->to_thread_alive = haiku_child_thread_alive;
++// How about to_find_new_threads? Perhaps not necessary, as we could be informed
++// about thread creation/deletion.
++	t->to_pid_to_str = haiku_pid_to_str;
++	t->to_pid_to_exec_file = haiku_child_pid_to_exec_file;
++
++	t->to_stratum = process_stratum;
++	t->to_has_memory = haiku_return_one;
++	t->to_has_stack = haiku_return_one;
++	t->to_has_registers = haiku_return_one;
++	t->to_magic = OPS_MAGIC;
++
++	sHaikuTarget = t;
++
++	add_target (t);
++}
+diff --git a/gdb/haiku-nat.h b/gdb/haiku-nat.h
+new file mode 100644
+index 0000000..11d4896
+--- /dev/null
++++ b/gdb/haiku-nat.h
+@@ -0,0 +1,53 @@
++/* Haiku native-dependent definitions.
++
++   Copyright 2005 Ingo Weinhold <bonefish@cs.tu-berlin.de>.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 2 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place - Suite 330,
++   Boston, MA 02111-1307, USA.  */
++
++#ifndef HAIKU_NAT_H
++#define HAIKU_NAT_H
++
++// These types conflict with GDB ones, so we have to hack around that.
++#define thread_info haiku_thread_info
++#define thread_state haiku_thread_state
++#define type_code haiku_type_code
++#define debug_printf haiku_debug_printf
++#define debug_vprintf haiku_debug_vprintf
++#include <debugger.h>
++#undef type_code
++#undef thread_info
++#undef thread_state
++#undef debug_printf
++#undef debug_vprintf
++
++/* Required by haiku-nat.c, implemented in <arch>-haiku-nat.c. */
++
++void haiku_supply_registers(int reg, struct regcache *regcache, const debug_cpu_state *cpuState);
++void haiku_collect_registers(int reg, struct regcache *regcache, debug_cpu_state *cpuState);
++
++
++struct haiku_image_info;
++
++/* Function used by solib-haiku.c to iterate through the list of images of
++   the inferior.
++   TODO: This must go, since it works only in a native debugger. We can
++   probably tunnel these data through the xfer_memory() function.
++*/
++struct haiku_image_info *haiku_get_next_image_info(int lastID);
++
++#endif	/* HAIKU_NAT_H */
+diff --git a/gdb/haiku-tdep.c b/gdb/haiku-tdep.c
+new file mode 100644
+index 0000000..d95255d
+--- /dev/null
++++ b/gdb/haiku-tdep.c
+@@ -0,0 +1,22 @@
++/* Haiku target-dependent common to multiple platforms.
++
++   Copyright 2005 Ingo Weinhold <bonefish@cs.tu-berlin.de>.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 2 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place - Suite 330,
++   Boston, MA 02111-1307, USA.  */
++
++#include "defs.h"
+diff --git a/gdb/i386-haiku-nat.c b/gdb/i386-haiku-nat.c
+new file mode 100644
+index 0000000..87ef19e
+--- /dev/null
++++ b/gdb/i386-haiku-nat.c
+@@ -0,0 +1,87 @@
++/* Native-dependent code for Haiku i386.
++
++   Copyright 2005 Ingo Weinhold <bonefish@cs.tu-berlin.de>.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 2 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place - Suite 330,
++   Boston, MA 02111-1307, USA.  */
++
++#include "defs.h"
++#include "haiku-nat.h"
++#include "i386-tdep.h"
++#include "i387-tdep.h"
++#include "inferior.h"
++#include "regcache.h"
++#include "target.h"
++
++/* Offset in `struct debug_cpu_state' where MEMBER is stored.  */
++#define REG_OFFSET(member) offsetof (struct x86_debug_cpu_state, member)
++
++/* At kHaikuI386RegOffset[REGNUM] you'll find the offset in `struct
++   debug_cpu_state' where the GDB register REGNUM is stored. */
++static int kHaikuI386RegOffset[] = {
++	REG_OFFSET (eax),
++	REG_OFFSET (ecx),
++	REG_OFFSET (edx),
++	REG_OFFSET (ebx),
++	REG_OFFSET (user_esp),
++	REG_OFFSET (ebp),
++	REG_OFFSET (esi),
++	REG_OFFSET (edi),
++	REG_OFFSET (eip),
++	REG_OFFSET (eflags),
++	REG_OFFSET (cs),
++	REG_OFFSET (user_ss),
++	REG_OFFSET (ds),
++	REG_OFFSET (es),
++	REG_OFFSET (fs),
++	REG_OFFSET (gs)
++};
++
++
++void
++haiku_supply_registers(int reg, const debug_cpu_state *cpuState)
++{
++	if (reg == -1) {
++		int i;
++		for (i = 0; i < NUM_REGS; i++)
++			haiku_supply_registers(i, cpuState);
++	} else if (reg < I386_ST0_REGNUM) {
++		int offset = kHaikuI386RegOffset[reg];
++		regcache_raw_supply (current_regcache, reg, (char*)cpuState + offset);
++	} else {
++		i387_supply_fxsave (current_regcache, -1,
++			&cpuState->extended_registers);
++	}
++}
++
++
++void
++haiku_collect_registers(int reg, debug_cpu_state *cpuState)
++{
++	if (reg == -1) {
++		int i;
++		for (i = 0; i < NUM_REGS; i++)
++			haiku_collect_registers(i, cpuState);
++	} else if (reg < I386_ST0_REGNUM) {
++		int offset = kHaikuI386RegOffset[reg];
++		regcache_raw_collect (current_regcache, reg, (char*)cpuState + offset);
++	} else {
++		i387_collect_fxsave (current_regcache, -1,
++			&cpuState->extended_registers);
++	}
++}
++
+diff --git a/gdb/i386-haiku-tdep.c b/gdb/i386-haiku-tdep.c
+new file mode 100644
+index 0000000..eda144d
+--- /dev/null
++++ b/gdb/i386-haiku-tdep.c
+@@ -0,0 +1,77 @@
++/* Target-dependent code for Haiku i386.
++
++   Copyright 2005 Ingo Weinhold <bonefish@cs.tu-berlin.de>.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 2 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place - Suite 330,
++   Boston, MA 02111-1307, USA.  */
++
++#include "defs.h"
++#include "gdbarch.h"
++#include "i386-tdep.h"
++#include "osabi.h"
++
++//#define TRACE_I386_HAIKU_NAT
++#ifdef TRACE_I386_HAIKU_NAT
++	#define TRACE(x)	printf x
++#else
++	#define TRACE(x)	while (false) {}
++#endif
++
++static void
++i386_haiku_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
++{
++	struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
++
++	// Haiku uses ELF.
++	i386_elf_init_abi (info, gdbarch);
++
++	// the offset of the PC in the jmp_buf structure (cf. setjmp(), longjmp())
++	tdep->jb_pc_offset = 20;
++
++// TODO: Signal support.
++//	tdep->sigtramp_p = i386_haiku_sigtramp_p;
++//	tdep->sigcontext_addr = i386_haiku_sigcontext_addr;
++//	tdep->sc_reg_offset = i386_haiku_sc_reg_offset;
++//	tdep->sc_num_regs = ARRAY_SIZE (i386_haiku_sc_reg_offset);
++
++// We don't need this at the moment. The Haiku runtime loader also relocates
++// R_386_JMP_SLOT entries. No lazy resolving is done.
++//	set_gdbarch_skip_solib_resolver (gdbarch, haiku_skip_solib_resolver);
++}
++
++
++static enum gdb_osabi
++i386_haiku_osabi_sniffer (bfd * abfd)
++{ 
++	char *targetName = bfd_get_target (abfd);
++
++	if (strcmp (targetName, "elf32-i386") == 0)
++		return GDB_OSABI_HAIKU;
++
++	return GDB_OSABI_UNKNOWN;
++}
++
++
++void
++_initialize_i386_haiku_tdep (void)
++{
++	gdbarch_register_osabi_sniffer (bfd_arch_i386, bfd_target_elf_flavour,
++		i386_haiku_osabi_sniffer);
++
++	gdbarch_register_osabi (bfd_arch_i386, 0, GDB_OSABI_HAIKU,
++		i386_haiku_init_abi);
++}
+diff --git a/gdb/osabi.c b/gdb/osabi.c
+index 129164f..627038d 100644
+--- a/gdb/osabi.c
++++ b/gdb/osabi.c
+@@ -67,6 +67,7 @@ static const struct osabi_names gdb_osabi_names[] =
+   { "FreeBSD", NULL },
+   { "NetBSD", NULL },
+   { "OpenBSD", NULL },
++  { "Haiku", NULL },
+   { "WindowsCE", NULL },
+   { "DJGPP", NULL },
+   { "QNX-Neutrino", NULL },
+@@ -198,7 +199,7 @@ gdbarch_register_osabi (enum bfd_architecture arch, unsigned long machine,
+   *name_ptr++ = gdbarch_osabi_name (osabi);
+   *name_ptr = NULL;
+ }
+-
++
+ 
+ /* Sniffer to find the OS ABI for a given file's architecture and flavour.
+    It is legal to have multiple sniffers for each arch/flavour pair, to
+@@ -230,7 +231,7 @@ gdbarch_register_osabi_sniffer (enum bfd_architecture arch,
+   sniffer->next = gdb_osabi_sniffer_list;
+   gdb_osabi_sniffer_list = sniffer;
+ }
+-
++
+ 
+ enum gdb_osabi
+ gdbarch_lookup_osabi (bfd *abfd)
+@@ -381,7 +382,7 @@ gdbarch_init_osabi (struct gdbarch_info info, struct gdbarch *gdbarch)
+      gdbarch_osabi_name (info.osabi),
+      info.bfd_arch_info->printable_name);
+ }
+-
++
+ /* Limit on the amount of data to be read.  */
+ #define MAX_NOTESZ	128
+ 
+@@ -590,7 +591,7 @@ generic_elf_osabi_sniffer (bfd *abfd)
+ 
+   return osabi;
+ }
+-
++
+ static void
+ set_osabi (const char *args, int from_tty, struct cmd_list_element *c)
+ {
+diff --git a/gdb/solib-haiku.c b/gdb/solib-haiku.c
+new file mode 100644
+index 0000000..28945a7
+--- /dev/null
++++ b/gdb/solib-haiku.c
+@@ -0,0 +1,446 @@
++/* Shared library support for Haiku.
++
++   Copyright 2005 Ingo Weinhold <bonefish@cs.tu-berlin.de>.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 2 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place - Suite 330,
++   Boston, MA 02111-1307, USA.  */
++
++#define _GL_ALREADY_INCLUDING_STRING_H
++#include <string.h>
++
++#include "defs.h"
++#include "haiku-nat.h"	// TODO: Needs to be removed. See there!
++#include "inferior.h"
++#include "objfiles.h"
++#include "solib-haiku.h"
++#include "solist.h"
++#include "symfile.h"
++#include "symtab.h"
++#include "target.h"
++#include "elf/common.h"
++#include "elf/internal.h"
++
++//#define TRACE_SOLIB_HAIKU
++#ifdef TRACE_SOLIB_HAIKU
++	#define TRACE(x)	printf x
++#else
++	#define TRACE(x)	while (false) {}
++#endif
++
++
++struct lm_info_haiku : public lm_info_base {
++	CORE_ADDR	text_address;
++	CORE_ADDR	unrelocated_text_address;
++	bool		unrelocated_text_address_initialized;
++};
++
++
++static haiku_image_info *
++haiku_get_app_image()
++{
++	haiku_image_info *image;
++	int lastID = -1;
++
++	while ((image = haiku_get_next_image_info(lastID)) != NULL) {
++		if (image->is_app_image)
++			return image;
++
++		lastID = image->id;
++	}
++
++	return NULL;
++}
++
++
++static Elf_Internal_Phdr *
++read_phdrs(bfd *abfd, int *_count)
++{
++	long size;
++	int count;
++	Elf_Internal_Phdr *phdrs;
++
++	// get the phdrs size
++	size = bfd_get_elf_phdr_upper_bound(abfd);
++	if (size <= 0)
++		return NULL;
++
++	// alloc memory
++	phdrs = (Elf_Internal_Phdr *)xmalloc(size);
++	if (!phdrs)
++		return NULL;
++
++	// read the phdrs
++	count = bfd_get_elf_phdrs(abfd, phdrs);
++	if (count < 0) {
++		xfree(phdrs);
++		return NULL;
++	}
++
++	*_count = count;
++	return phdrs;
++}
++
++
++static CORE_ADDR
++get_bfd_vma(bfd *abfd)
++{
++	int count;
++	Elf_Internal_Phdr *phdrs;
++	int i;
++	CORE_ADDR result = 0;
++
++	// get the phdrs array
++	phdrs = read_phdrs(abfd, &count);
++	if (!phdrs)
++		return 0;
++
++	// iterate through phdrs array and find the first one to load
++	for (i = 0; i < count; i++) {
++		Elf_Internal_Phdr *phdr = phdrs + i;
++		if (phdr->p_type != PT_LOAD)
++			continue;
++
++		// found the first segment to load
++		result = phdr->p_vaddr & ~(B_PAGE_SIZE - 1);
++TRACE(("get_bfd_vma(): found first segment: %p\n", (void*)result));
++		break;
++	}
++
++	xfree(phdrs);
++
++	return result;
++}
++
++
++static CORE_ADDR
++get_unrelocated_text_address(struct so_list *so)
++{
++	lm_info_haiku* lm = static_cast<lm_info_haiku*>(so->lm_info);
++	if (!lm->unrelocated_text_address_initialized) {
++		lm->unrelocated_text_address = get_bfd_vma(so->abfd);
++		lm->unrelocated_text_address_initialized = true;
++	}
++
++	return lm->unrelocated_text_address;
++}
++
++
++static void
++relocate_main_executable (void)
++{
++	haiku_image_info *appImageInfo = haiku_get_app_image();
++
++	TRACE(("relocate_main_executable()\n"));
++
++TRACE(("relocate_main_executable(): symfile_objfile: %p\n",
++symfile_objfile));
++TRACE(("relocate_main_executable(): symfile_objfile->obfd: %p\n",
++(symfile_objfile ? symfile_objfile->obfd : NULL)));
++TRACE(("relocate_main_executable(): app image: %p\n", appImageInfo));
++
++	// Relocate the executable here.
++	if (symfile_objfile && symfile_objfile->obfd && appImageInfo) {
++		CORE_ADDR unrelocatedAddress = get_bfd_vma(symfile_objfile->obfd);
++		CORE_ADDR displacement = (CORE_ADDR)appImageInfo->text_address
++			- unrelocatedAddress;
++
++TRACE(("relocate_main_executable(): image text address: %p, "
++"unrelocated address: %p\n", (void*)appImageInfo->text_address,
++(void*)unrelocatedAddress));
++
++		if (displacement != 0) {
++			struct cleanup *old_chain;
++			struct section_offsets *new_offsets;
++			int i, changed;
++
++			changed = 0;
++
++			new_offsets
++				= XCNEWVEC (struct section_offsets, symfile_objfile->num_sections);
++			old_chain = make_cleanup (xfree, new_offsets);
++
++			for (i = 0; i < symfile_objfile->num_sections; i++) {
++				if (displacement
++					!= ANOFFSET (symfile_objfile->section_offsets, i)) {
++					changed = 1;
++				}
++				new_offsets->offsets[i] = displacement;
++			}
++
++			if (changed)
++				objfile_relocate (symfile_objfile, new_offsets);
++
++			do_cleanups (old_chain);
++		}
++	}
++}
++
++
++// #pragma mark -
++
++
++/* Copied from the AIX implementation. */
++static gdb_bfd_ref_ptr
++solib_haiku_bfd_open (char *pathname)
++{
++  /* The pathname is actually a synthetic filename with the following
++     form: "/path/to/sharedlib(member.o)" (double-quotes excluded).
++     split this into archive name and member name.
++
++     FIXME: This is a little hacky.  Perhaps we should provide access
++     to the solib's lm_info here?  */
++  const int path_len = strlen (pathname);
++  char *sep;
++  int filename_len;
++  int found_file;
++  char *found_pathname;
++
++  if (pathname[path_len - 1] != ')')
++    return solib_bfd_open (pathname);
++
++  /* Search for the associated parens.  */
++  sep = strrchr (pathname, '(');
++  if (sep == NULL)
++    {
++      /* Should never happen, but recover as best as we can (trying
++	 to open pathname without decoding, possibly leading to
++	 a failure), rather than triggering an assert failure).  */
++      warning (_("missing '(' in shared object pathname: %s"), pathname);
++      return solib_bfd_open (pathname);
++    }
++  filename_len = sep - pathname;
++
++  std::string filename (string_printf ("%.*s", filename_len, pathname));
++  std::string member_name (string_printf ("%.*s", path_len - filename_len - 2,
++					  sep + 1));
++
++  /* Calling solib_find makes certain that sysroot path is set properly
++     if program has a dependency on .a archive and sysroot is set via
++     set sysroot command.  */
++  found_pathname = solib_find (filename.c_str (), &found_file);
++  if (found_pathname == NULL)
++      perror_with_name (pathname);
++  gdb_bfd_ref_ptr archive_bfd (solib_bfd_fopen (found_pathname, found_file));
++  if (archive_bfd == NULL)
++    {
++      warning (_("Could not open `%s' as an executable file: %s"),
++	       filename.c_str (), bfd_errmsg (bfd_get_error ()));
++      return NULL;
++    }
++
++  if (bfd_check_format (archive_bfd.get (), bfd_object))
++    return archive_bfd;
++
++  if (! bfd_check_format (archive_bfd.get (), bfd_archive))
++    {
++      warning (_("\"%s\": not in executable format: %s."),
++	       filename.c_str (), bfd_errmsg (bfd_get_error ()));
++      return NULL;
++    }
++
++  gdb_bfd_ref_ptr object_bfd
++    (gdb_bfd_openr_next_archived_file (archive_bfd.get (), NULL));
++  while (object_bfd != NULL)
++    {
++      if (member_name == object_bfd->filename)
++	break;
++
++      object_bfd = gdb_bfd_openr_next_archived_file (archive_bfd.get (),
++						     object_bfd.get ());
++    }
++
++  if (object_bfd == NULL)
++    {
++      warning (_("\"%s\": member \"%s\" missing."), filename.c_str (),
++	       member_name.c_str ());
++      return NULL;
++    }
++
++  if (! bfd_check_format (object_bfd.get (), bfd_object))
++    {
++      warning (_("%s(%s): not in object format: %s."),
++	       filename.c_str (), member_name.c_str (),
++	       bfd_errmsg (bfd_get_error ()));
++      return NULL;
++    }
++
++  /* Override the returned bfd's name with the name returned from solib_find
++     along with appended parenthesized member name in order to allow commands
++     listing all shared libraries to display.  Otherwise, we would only be
++     displaying the name of the archive member object.  */
++  xfree (bfd_get_filename (object_bfd.get ()));
++  object_bfd->filename = xstrprintf ("%s%s",
++                                     bfd_get_filename (archive_bfd.get ()),
++				     sep);
++
++  return object_bfd;
++}
++
++
++static void
++haiku_relocate_section_addresses (struct so_list *so, struct target_section *sec)
++{
++	CORE_ADDR unrelocatedAddress = get_unrelocated_text_address(so);
++	long relocation = static_cast<lm_info_haiku*>(so->lm_info)->text_address
++		- unrelocatedAddress;
++
++//	TRACE(("haiku_relocate_section_addresses()\n"));
++
++	sec->addr += relocation;
++	sec->endaddr += relocation;
++}
++
++
++static void
++haiku_free_so (struct so_list *so)
++{
++	delete static_cast<lm_info_haiku*>(so->lm_info);
++}
++
++
++static void
++haiku_clear_solib (void)
++{
++}
++
++
++static void
++haiku_solib_create_inferior_hook (int from_tty)
++{
++	relocate_main_executable();
++}
++
++
++static struct so_list *
++haiku_current_sos (void)
++{
++	int lastID = -1;
++	haiku_image_info *image;
++	struct so_list *head = 0;
++	struct so_list **link_ptr = &head;
++
++	TRACE(("haiku_current_sos()\n"));
++
++	while ((image = haiku_get_next_image_info(lastID)) != NULL) {
++		struct so_list *object = XCNEW (struct so_list);
++		struct cleanup *old_chain = make_cleanup (xfree, object);
++
++		lastID = image->id;
++
++		memset (object, 0, sizeof (*object));
++
++		lm_info_haiku *li = new lm_info_haiku;
++
++		li->text_address = image->text_address;
++		li->unrelocated_text_address = 0;
++		li->unrelocated_text_address_initialized = false;
++
++		object->lm_info = li;
++
++		// Note: I don't know why, but the other solib implementations seem
++		// to ignore the executable's shared object. We'll just do the same
++		// here.
++		if (image->is_app_image) {
++			free_so (object);
++
++			// Others don't do that, but it helps a lot to relocate the
++			// executable here. Otherwise, when attaching gdb to a running
++			// process it would never be done.
++			relocate_main_executable();
++		} else {
++			strncpy (object->so_name, image->path, SO_NAME_MAX_PATH_SIZE);
++			object->so_name[SO_NAME_MAX_PATH_SIZE - 1] = '\0';
++			strncpy (object->so_original_name, image->name,
++				SO_NAME_MAX_PATH_SIZE);
++			object->so_original_name[SO_NAME_MAX_PATH_SIZE - 1] = '\0';
++
++			object->next = 0;
++			*link_ptr = object;
++			link_ptr = &object->next;
++		}
++
++		discard_cleanups (old_chain);
++	}
++
++	return head;
++}
++
++
++/* Adapter for symbol_file_add_main that translates 'from_tty' to a
++   symfile_add_flags. (Copied from main.c)  */
++
++static void
++symbol_file_add_main_adapter (const char *arg, int from_tty)
++{
++  symfile_add_flags add_flags = 0;
++
++  if (from_tty)
++    add_flags |= SYMFILE_VERBOSE;
++
++  symbol_file_add_main (arg, add_flags);
++}
++
++
++static int
++haiku_open_symbol_file_object (int from_tty)
++{
++	// Note: I have never seen this function being called. Many of the other
++	// implementations are no-ops.
++	haiku_image_info *appImage = haiku_get_app_image();
++
++	TRACE(("haiku_open_symbol_file_object(%p)\n", from_tty));
++
++	if (!appImage) {
++		TRACE(("haiku_open_symbol_file_object(): No app image!\n"));
++		return 0;
++	}
++
++	symbol_file_add_main_adapter (appImage->path, from_tty);
++
++	return 1;
++}
++
++
++static int
++haiku_in_dynsym_resolve_code (CORE_ADDR pc)
++{
++	// No dynamic resolving implemented in Haiku yet.
++	return 0;
++}
++
++
++// #pragma mark -
++
++static struct target_so_ops haiku_so_ops;
++
++extern initialize_file_ftype _initialize_haiku_solib;
++
++void
++_initialize_haiku_solib (void)
++{
++	haiku_so_ops.relocate_section_addresses = haiku_relocate_section_addresses;
++	haiku_so_ops.free_so = haiku_free_so;
++	haiku_so_ops.clear_solib = haiku_clear_solib;
++	haiku_so_ops.solib_create_inferior_hook = haiku_solib_create_inferior_hook;
++	haiku_so_ops.current_sos = haiku_current_sos;
++	haiku_so_ops.open_symbol_file_object = haiku_open_symbol_file_object;
++	haiku_so_ops.in_dynsym_resolve_code = haiku_in_dynsym_resolve_code;
++	haiku_so_ops.bfd_open = solib_haiku_bfd_open;
++
++	/* FIXME: Don't do this here.  *_gdbarch_init() should set so_ops. */
++	current_target_so_ops = &haiku_so_ops;
++}
+diff --git a/gdb/solib-haiku.h b/gdb/solib-haiku.h
+new file mode 100644
+index 0000000..64ff80f
+--- /dev/null
++++ b/gdb/solib-haiku.h
+@@ -0,0 +1,34 @@
++/* Shared library support for Haiku.
++
++   Copyright 2005 Ingo Weinhold <bonefish@cs.tu-berlin.de>.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 2 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place - Suite 330,
++   Boston, MA 02111-1307, USA.  */
++
++#include "defs.h"
++
++typedef struct haiku_image_info {
++	int			id;
++	char		name[256];
++	char		path[1024];
++	CORE_ADDR	text_address;
++	int			text_size;
++	CORE_ADDR	data_address;
++	int			data_size;
++	bool		is_app_image;
++} haiku_image_info;
++
+diff --git a/readline/histfile.c b/readline/histfile.c
+index fffeb3f..bbd4f1b 100644
+--- a/readline/histfile.c
++++ b/readline/histfile.c
+@@ -409,7 +409,7 @@ history_truncate_file (fname, lines)
+     {
+       write (file, bp, chars_read - (bp - buffer));
+ 
+-#if defined (__BEOS__)
++#if (defined(__BEOS__) || defined(__HAIKU__))
+       /* BeOS ignores O_TRUNC. */
+       ftruncate (file, chars_read - (bp - buffer));
+ #endif
+diff --git a/readline/input.c b/readline/input.c
+index c00bce7..0a7d9f4 100644
+--- a/readline/input.c
++++ b/readline/input.c
+@@ -511,7 +511,7 @@ rl_getc (stream)
+       if (result == 0)
+ 	return (EOF);
+ 
+-#if defined (__BEOS__)
++#if (defined(__BEOS__) || defined(__HAIKU__))
+       if (errno == EINTR)
+ 	continue;
+ #endif
+-- 
+2.16.4
+
+diff --git a/gdb/Makefile.in.orig b/gdb/Makefile.in
+index 13627e0..50b7454 100644
+--- a/gdb/Makefile.in.orig
++++ b/gdb/Makefile.in
+@@ -659,6 +659,7 @@ ALL_64_TARGET_OBS = \
+ 	amd64-linux-tdep.o \
+ 	amd64-nbsd-tdep.o \
+ 	amd64-obsd-tdep.o \
++	amd64-haiku-tdep.o \
+ 	amd64-sol2-tdep.o \
+ 	amd64-tdep.o \
+ 	amd64-windows-tdep.o \
+@@ -705,6 +706,7 @@ ALL_TARGET_OBS = \
+ 	ft32-tdep.o \
+ 	glibc-tdep.o \
+ 	h8300-tdep.o \
++	haiku-tdep.o \
+ 	hppa-bsd-tdep.o \
+ 	hppa-linux-tdep.o \
+ 	hppa-nbsd-tdep.o \
+@@ -721,6 +723,7 @@ ALL_TARGET_OBS = \
+ 	i386-nbsd-tdep.o \
+ 	i386-nto-tdep.o \
+ 	i386-obsd-tdep.o \
++	i386-haiku-tdep.o \
+ 	i386-sol2-tdep.o \
+ 	i386-tdep.o \
+ 	i387-tdep.o \
+@@ -781,6 +784,7 @@ ALL_TARGET_OBS = \
+ 	solib-frv.o \
+ 	solib-spu.o \
+ 	solib-svr4.o \
++	solib-haiku.o \
+ 	sparc-linux-tdep.o \
+ 	sparc-nbsd-tdep.o \
+ 	sparc-obsd-tdep.o \
+@@ -1320,6 +1324,7 @@ HFILES_NO_SRCDIR = \
+ 	objfiles.h \
+ 	obsd-nat.h \
+ 	obsd-tdep.h \
++	haiku-nat.h \
+ 	osabi.h \
+ 	osdata.h \
+ 	p-lang.h \
+@@ -1370,6 +1375,7 @@ HFILES_NO_SRCDIR = \
+ 	solib-darwin.h \
+ 	solib-spu.h \
+ 	solib-svr4.h \
++	solib-haiku.h \
+ 	solib-target.h \
+ 	solist.h \
+ 	source.h \
+@@ -2209,6 +2215,8 @@ ALLDEPFILES = \
+ 	amd64-nbsd-tdep.c \
+ 	amd64-obsd-nat.c \
+ 	amd64-obsd-tdep.c \
++	amd64-haiku-nat.c \
++	amd64-haiku-tdep.c \
+ 	amd64-sol2-tdep.c \
+ 	amd64-tdep.c \
+ 	arc-tdep.c \
+@@ -2264,6 +2272,8 @@ ALLDEPFILES = \
+ 	i386-nbsd-tdep.c \
+ 	i386-obsd-nat.c \
+ 	i386-obsd-tdep.c \
++	i386-haiku-nat.c \
++	i386-haiku-tdep.c \
+ 	i386-sol2-nat.c \
+ 	i386-sol2-tdep.c \
+ 	i386-tdep.c \
+@@ -2309,6 +2319,8 @@ ALLDEPFILES = \
+ 	nios2-tdep.c \
+ 	obsd-nat.c \
+ 	obsd-tdep.c \
++	haiku-nat.c \
++	haiku-tdep.c \
+ 	posix-hdep.c \
+ 	ppc-fbsd-nat.c \
+ 	ppc-fbsd-tdep.c \
+@@ -2345,6 +2357,7 @@ ALLDEPFILES = \
+ 	solib-aix.c \
+ 	solib-spu.c \
+ 	solib-svr4.c \
++	solib-haiku.c \
+ 	sparc-linux-nat.c \
+ 	sparc-linux-tdep.c \
+ 	sparc-nat.c \
+diff --git a/bfd/config.bfd.orig b/bfd/config.bfd
+index f8ca72b..29ebd1b 100644
+--- a/bfd/config.bfd.orig
++++ b/bfd/config.bfd
+@@ -686,6 +686,11 @@ case "${targ}" in
+     targ_selvecs="i386_elf32_vec iamcu_elf32_vec i386_coff_vec i386_pei_vec x86_64_pei_vec l1om_elf64_vec k1om_elf64_vec"
+     want64=true
+     ;;
++  x86_64-*-haiku*)
++    targ_defvec=x86_64_elf64_vec
++    targ_selvecs="i386_elf32_vec i386_coff_vec i386_pei_vec x86_64_pei_vec"
++    want64=true
++    ;;
+   x86_64-*-linux-*)
+     targ_defvec=x86_64_elf64_vec
+     targ_selvecs="i386_elf32_vec iamcu_elf32_vec x86_64_elf32_vec i386_pei_vec x86_64_pei_vec l1om_elf64_vec k1om_elf64_vec"
+@@ -737,6 +742,10 @@ case "${targ}" in
+     targ_defvec=i386_elf32_vec
+     targ_selvecs="iamcu_elf32_vec i386_pe_vec i386_pei_vec"
+     ;;
++  i[3-7]86-*-haiku*)
++    targ_defvec=i386_elf32_vec
++    targ_selvecs="i386_pe_vec i386_pei_vec"
++    ;;
+   i[3-7]86-*-interix*)
+     targ_defvec=i386_pei_vec
+     targ_selvecs="i386_pe_vec"
