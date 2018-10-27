@@ -18,40 +18,94 @@ SOURCE_URI="https://files.pythonhosted.org/packages/source/h/html5-parser/html5-
 CHECKSUM_SHA256="a903ef8b93b51788a6d1604b3833303e9f2f8db488306ee4241436d2f518bd06"
 SOURCE_DIR="html5-parser-$portVersion"
 
-ARCHITECTURES="any"
+ARCHITECTURES="!x86_gcc2 x86 x86_64"
+SECONDARY_ARCHITECTURES="x86"
 
 PROVIDES="
-	html5_parser = $portVersion
+	html5_parser$secondaryArchSuffix = $portVersion
 	"
 REQUIRES="
-	haiku
-	"
-BUILD_REQUIRES="
-	haiku_devel
+	haiku$secondaryArchSuffix
 	"
 
-PYTHON_PACKAGES=(python python3)
-PYTHON_VERSIONS=(2.7 3.6)
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel
+	devel:libxml2$secondaryArchSuffix
+	"
+BUILD_PREREQUIRES="
+	cmd:gcc$secondaryArchSuffix
+	cmd:pkg_config$secondaryArchSuffix
+	"
+
+PYTHON_PACKAGES=()
+PYTHON_VERSIONS=()
+PYTHON_LIBSUFFIXES=()
+# We don't have python2 for secondaryArch
+if [ -z "$secondaryArchSuffix" ]; then
+	PYTHON_PACKAGES+=(python)
+	PYTHON_VERSIONS+=(2.7)
+	PYTHON_LIBSUFFIXES+=("")
+	BUILD_REQUIRES+="
+		setuptools_python
+		"
+	BUILD_PREREQUIRES+="
+		cmd:python2
+		"
+fi
+# gcc2 does not support the flags passed by python3
+if [ "$effectiveTargetArchitecture" != x86_gcc2 ]; then
+	PYTHON_PACKAGES+=(python3)
+	PYTHON_VERSIONS+=(3.6)
+	PYTHON_LIBSUFFIXES+=(m)
+	BUILD_REQUIRES+="
+		setuptools_python3
+		"
+	BUILD_PREREQUIRES+="
+		cmd:python3
+		"
+fi
 for i in "${!PYTHON_PACKAGES[@]}"; do
-pythonPackage=${PYTHON_PACKAGES[i]}
-pythonVersions=${PYTHON_VERSIONS[$i]}
-eval "PROVIDES_${pythonPackage}=\"\
-	html5_parser_$pythonPackage = $portVersion\
-	\"; \
-REQUIRES_$pythonPackage=\"\
-	chardet_$pythonPackage\n\
-	haiku\n\
-	lxml_$pythonPackage\n\
-	cmd:python$pythonVersion\
-	\""
-BUILD_REQUIRES="$BUILD_REQUIRES
-	devel:libxml2
-	setuptools_$pythonPackage"
-BUILD_PREREQUIRES="$BUILD_PREREQUIRES
-	cmd:gcc
-	cmd:pkg_config
-	cmd:python$pythonVersion"
+	pythonPackage=${PYTHON_PACKAGES[i]}
+	pythonVersion=${PYTHON_VERSIONS[$i]}
+	pythonLibSuffix=${PYTHON_LIBSUFFIXES[$i]}
+
+	eval "PROVIDES_$pythonPackage=\"
+		${portName}_$pythonPackage = $portVersion
+		\""
+	eval "REQUIRES_$pythonPackage=\"
+		haiku$secondaryArchSuffix
+		chardet_$pythonPackage
+		lxml${secondaryArchSuffix}_$pythonPackage
+		lib:libpython$pythonVersion$pythonLibSuffix$secondaryArchSuffix
+		\""
+
+	TEST_REQUIRES+="
+		${portName}_$pythonPackage
+		beautifulsoup_$pythonPackage
+		chardet_$pythonPackage
+		lxml${secondaryArchSuffix}_$pythonPackage
+		"
 done
+if [ "$targetArchitecture" = x86_gcc2 -a -n "$secondaryArchSuffix" ]; then
+	PROVIDES_python3+="
+		html5_parser_python3 = $portVersion
+		"
+fi
+
+BUILD()
+{
+	for i in "${!PYTHON_PACKAGES[@]}"; do
+		pythonPackage=${PYTHON_PACKAGES[i]}
+		pythonVersion=${PYTHON_VERSIONS[$i]}
+
+		rm -rf "$sourceDir"-$pythonPackage
+		cp -a "$sourceDir" "$sourceDir"-$pythonPackage
+		cd "$sourceDir"-$pythonPackage
+
+		python=python$pythonVersion
+		$python setup.py build
+	done
+}
 
 INSTALL()
 {
@@ -59,15 +113,33 @@ INSTALL()
 		pythonPackage=${PYTHON_PACKAGES[i]}
 		pythonVersion=${PYTHON_VERSIONS[$i]}
 
+		cd "$sourceDir"-$pythonPackage
+
 		python=python$pythonVersion
 		installLocation=$prefix/lib/$python/vendor-packages
-		export PYTHONPATH=$installLocation:$PYTHONPATH
-		mkdir -p $installLocation
-		rm -rf build
-		$python setup.py build install \
-			--root=/ --prefix=$prefix
+		export PYTHONPATH=$installLocation
+		mkdir -p "$installLocation"
+		$python setup.py install \
+			--root=/ --prefix="$prefix"
 
-		packageEntries  $pythonPackage \
-			$prefix/lib/python*
+		packageEntries $pythonPackage \
+			"$prefix"/lib/$python
+	done
+
+	cd "$sourceDir"
+	install -m 755 -d "$docDir"
+	install -m 644 -t "$docDir" README.rst
+}
+
+TEST()
+{
+	for i in "${!PYTHON_PACKAGES[@]}"; do
+		pythonPackage=${PYTHON_PACKAGES[i]}
+		pythonVersion=${PYTHON_VERSIONS[$i]}
+
+		cd "$sourceDir"-$pythonPackage
+
+		python=python$pythonVersion
+		$python run_tests.py
 	done
 }
