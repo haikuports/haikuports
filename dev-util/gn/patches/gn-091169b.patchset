@@ -1,0 +1,404 @@
+From cf5a429ded2385ee8ece327e3d690c2117288a3e Mon Sep 17 00:00:00 2001
+From: Calvin Hill <calvin@hakobaito.co.uk>
+Date: Wed, 26 Sep 2018 20:48:23 +0100
+Subject: gn: Haiku support
+
+
+diff --git a/base/files/file.h b/base/files/file.h
+index 61239ad..e5cb6a1 100644
+--- a/base/files/file.h
++++ b/base/files/file.h
+@@ -22,10 +22,10 @@
+ 
+ namespace base {
+ 
+-#if defined(OS_BSD) || defined(OS_MACOSX) || defined(OS_NACL) || \
++#if defined(OS_BSD) || defined(OS_MACOSX) || defined(OS_NACL) || defined(OS_HAIKU) || \
+     defined(OS_ANDROID) && __ANDROID_API__ < 21
+ typedef struct stat stat_wrapper_t;
+-#elif defined(OS_POSIX) || defined(OS_FUCHSIA)
++#elif defined(OS_POSIX) && !defined(OS_HAIKU) || defined(OS_FUCHSIA)
+ typedef struct stat64 stat_wrapper_t;
+ #endif
+ 
+diff --git a/base/files/file_posix.cc b/base/files/file_posix.cc
+index 4faf77b..62bb322 100644
+--- a/base/files/file_posix.cc
++++ b/base/files/file_posix.cc
+@@ -24,7 +24,7 @@ static_assert(File::FROM_BEGIN == SEEK_SET && File::FROM_CURRENT == SEEK_CUR &&
+ 
+ namespace {
+ 
+-#if defined(OS_BSD) || defined(OS_MACOSX) || defined(OS_NACL) || \
++#if defined(OS_BSD) || defined(OS_MACOSX) || defined(OS_NACL) || defined(OS_HAIKU) || \
+     defined(OS_ANDROID) && __ANDROID_API__ < 21
+ int CallFstat(int fd, stat_wrapper_t* sb) {
+   return fstat(fd, sb);
+@@ -100,7 +100,7 @@ void File::Info::FromStat(const stat_wrapper_t& stat_info) {
+   int64_t last_accessed_nsec = stat_info.st_atimespec.tv_nsec;
+   time_t creation_time_sec = stat_info.st_ctimespec.tv_sec;
+   int64_t creation_time_nsec = stat_info.st_ctimespec.tv_nsec;
+-#elif defined(OS_AIX)
++#elif defined(OS_AIX) ||  defined(OS_HAIKU)
+   time_t last_modified_sec = stat_info.st_mtime;
+   int64_t last_modified_nsec = 0;
+   time_t last_accessed_sec = stat_info.st_atime;
+diff --git a/base/files/file_util_posix.cc b/base/files/file_util_posix.cc
+index 23c7cb4..49b4f31 100644
+--- a/base/files/file_util_posix.cc
++++ b/base/files/file_util_posix.cc
+@@ -57,7 +57,7 @@ namespace base {
+ 
+ namespace {
+ 
+-#if defined(OS_BSD) || defined(OS_MACOSX) || defined(OS_NACL) || \
++#if defined(OS_BSD) || defined(OS_MACOSX) || defined(OS_NACL) || defined(OS_HAIKU) || \
+     defined(OS_ANDROID) && __ANDROID_API__ < 21
+ int CallStat(const char* path, stat_wrapper_t* sb) {
+   return stat(path, sb);
+diff --git a/base/strings/sys_string_conversions_posix.cc b/base/strings/sys_string_conversions_posix.cc
+index 0e14428..893ba2b 100644
+--- a/base/strings/sys_string_conversions_posix.cc
++++ b/base/strings/sys_string_conversions_posix.cc
+@@ -26,7 +26,7 @@ std::wstring SysUTF8ToWide(StringPiece utf8) {
+   return out;
+ }
+ 
+-#if defined(SYSTEM_NATIVE_UTF8) || defined(OS_ANDROID)
++#if defined(SYSTEM_NATIVE_UTF8) && !defined(OS_HAIKU) || defined(OS_ANDROID)
+ // TODO(port): Consider reverting the OS_ANDROID when we have wcrtomb()
+ // support and a better understanding of what calls these routines.
+ 
+@@ -158,6 +158,6 @@ std::wstring SysNativeMBToWide(StringPiece native_mb) {
+   return out;
+ }
+ 
+-#endif  // defined(SYSTEM_NATIVE_UTF8) || defined(OS_ANDROID)
++#endif  // defined(SYSTEM_NATIVE_UTF8) && !defined(OS_HAIKU) || defined(OS_ANDROID)
+ 
+ }  // namespace base
+diff --git a/build/build_haiku.ninja.template b/build/build_haiku.ninja.template
+new file mode 100644
+index 0000000..e59854b
+--- /dev/null
++++ b/build/build_haiku.ninja.template
+@@ -0,0 +1,19 @@
++rule cc
++  command = $cc -MMD -MF $out.d $defines $includes $cflags $cflags_c -c $in -o $out
++  description = CC $out
++  depfile = $out.d
++  deps = gcc
++
++rule cxx
++  command = $cxx -MMD -MF $out.d $defines $includes $cflags $cflags_cc -c $in -o $out
++  description = CXX $out
++  depfile = $out.d
++  deps = gcc
++
++rule alink_thin
++  command = rm -f $out && $ar rcsT $out $in
++  description = AR $out
++
++rule link
++  command = $ld $ldflags -o $out -Wl,--start-group $in $libs -Wl,--end-group $solibs
++  description = LINK $out
+diff --git a/build/gen.py b/build/gen.py
+index 11c9246..84c9a6a 100755
+--- a/build/gen.py
++++ b/build/gen.py
+@@ -41,10 +41,12 @@ class Platform(object):
+       self._platform = 'aix'
+     elif self._platform.startswith('fuchsia'):
+       self._platform = 'fuchsia'
++    elif self._platform.startswith('haiku'):
++      self._platform = 'haiku'
+ 
+   @staticmethod
+   def known_platforms():
+-    return ['linux', 'darwin', 'msvc', 'aix', 'fuchsia']
++    return ['linux', 'darwin', 'msvc', 'aix', 'fuchsia', 'haiku']
+ 
+   def platform(self):
+     return self._platform
+@@ -66,9 +68,12 @@ class Platform(object):
+ 
+   def is_aix(self):
+     return self._platform == 'aix'
++  
++  def is_haiku(self):
++    return self._platform == 'haiku'
+ 
+   def is_posix(self):
+-    return self._platform in ['linux', 'darwin', 'aix']
++    return self._platform in ['linux', 'darwin', 'aix', 'haiku']
+ 
+ 
+ def main(argv):
+@@ -120,24 +125,15 @@ def main(argv):
+ 
+ 
+ def GenerateLastCommitPosition(host, header):
+-  ROOT_TAG = 'initial-commit'
+-  describe_output = subprocess.check_output(
+-      ['git', 'describe', 'HEAD', '--match', ROOT_TAG], shell=host.is_windows(),
+-      cwd=REPO_ROOT)
+-  mo = re.match(ROOT_TAG + '-(\d+)-g([0-9a-f]+)', describe_output)
+-  if not mo:
+-    raise ValueError(
+-        'Unexpected output from git describe when generating version header')
+-
+   contents = '''// Generated by build/gen.py.
+ 
+-#ifndef OUT_LAST_COMMIT_POSITION_H_
+-#define OUT_LAST_COMMIT_POSITION_H_
+-
+-#define LAST_COMMIT_POSITION "%s (%s)"
+-
+-#endif  // OUT_LAST_COMMIT_POSITION_H_
+-''' % (mo.group(1), mo.group(2))
++	#ifndef OUT_LAST_COMMIT_POSITION_H_
++	#define OUT_LAST_COMMIT_POSITION_H_
++	
++	#define LAST_COMMIT_POSITION "%s (%s)"
++	
++	#endif  // OUT_LAST_COMMIT_POSITION_H_
++	''' % (999999, "091169b")
+ 
+   # Only write/touch this file if the commit position has changed.
+   old_contents = ''
+@@ -221,6 +217,7 @@ def WriteGenericNinja(path, static_libraries, executables,
+       'darwin': 'build_mac.ninja.template',
+       'linux': 'build_linux.ninja.template',
+       'aix': 'build_aix.ninja.template',
++      'haiku': 'build_haiku.ninja.template',
+   }[platform.platform()])
+ 
+   with open(template_filename) as f:
+@@ -355,7 +352,7 @@ def WriteGNNinja(path, platform, host, options, linux_sysroot):
+     cflags.extend([
+         '-D_FILE_OFFSET_BITS=64',
+         '-D__STDC_CONSTANT_MACROS', '-D__STDC_FORMAT_MACROS',
+-        '-pthread',
++        '-pthread' if not platform.is_haiku() else '',
+         '-pipe',
+         '-fno-exceptions',
+         '-fno-rtti',
+@@ -384,6 +381,9 @@ def WriteGNNinja(path, platform, host, options, linux_sysroot):
+     elif platform.is_aix():
+       cflags_cc.append('-maix64')
+       ldflags.extend(['-maix64', '-pthread'])
++    if platform.is_haiku():
++      cflags_cc.append('-fPIC')
++      cflags_cc.extend(['-D_BSD_SOURCE', '-D__USE_XOPEN2K8'])
+ 
+     if options.use_lto:
+       cflags.extend(['-flto', '-fwhole-program-vtables'])
+@@ -424,6 +424,14 @@ def WriteGNNinja(path, platform, host, options, linux_sysroot):
+ 
+     ldflags.extend(['/DEBUG', '/MACHINE:x64'])
+ 
++      # static_libraries['libevent']['include_dirs'].extend([
++      #   os.path.join(SRC_ROOT, 'base', 'third_party', 'libevent', 'haiku')
++      # ])
++      # static_libraries['libevent']['include_dirs'].extend([
++      #   os.path.join(SRC_ROOT, 'base', 'third_party', 'libevent', 'compat')
++      # ])
++
++
+   static_libraries = {
+       'base': {'sources': [
+         'base/callback_internal.cc',
+@@ -675,7 +683,7 @@ def WriteGNNinja(path, platform, host, options, linux_sysroot):
+         'base/strings/string16.cc',
+     ])
+ 
+-  if platform.is_linux() or platform.is_aix():
++  if platform.is_linux() or platform.is_aix() or platform.is_haiku():
+     static_libraries['base']['sources'].extend([
+         'base/strings/sys_string_conversions_posix.cc',
+     ])
+@@ -720,6 +728,7 @@ def WriteGNNinja(path, platform, host, options, linux_sysroot):
+         'Shlwapi.lib',
+     ])
+ 
++
+   # we just build static libraries that GN needs
+   executables['gn']['libs'].extend(static_libraries.keys())
+   executables['gn_unittests']['libs'].extend(static_libraries.keys())
+diff --git a/tools/gn/args.cc b/tools/gn/args.cc
+index aa42ff3..84b2e45 100644
+--- a/tools/gn/args.cc
++++ b/tools/gn/args.cc
+@@ -296,6 +296,8 @@ void Args::SetSystemVarsLocked(Scope* dest) const {
+   os = "linux";
+ #elif defined(OS_AIX)
+   os = "aix";
++#elif defined(OS_HAIKU)
++  os = "haiku";
+ #else
+ #error Unknown OS type.
+ #endif
+@@ -316,7 +318,7 @@ void Args::SetSystemVarsLocked(Scope* dest) const {
+   // Set the host CPU architecture based on the underlying OS, not
+   // whatever the current bit-tedness of the GN binary is.
+   std::string os_arch = OperatingSystemArchitecture();
+-  if (os_arch == "x86")
++  if (os_arch == "x86" || os_arch == "BePC")
+     arch = kX86;
+   else if (os_arch == "x86_64")
+     arch = kX64;
+diff --git a/tools/gn/function_write_file_unittest.cc b/tools/gn/function_write_file_unittest.cc
+index 035faba..9858e7e 100644
+--- a/tools/gn/function_write_file_unittest.cc
++++ b/tools/gn/function_write_file_unittest.cc
+@@ -13,7 +13,7 @@
+ #include "tools/gn/test_with_scope.h"
+ #include "util/test/test.h"
+ 
+-#if defined(OS_LINUX) || defined(OS_MACOSX)
++#if defined(OS_LINUX) || defined(OS_MACOSX) || defined(OS_HAIKU)
+ #include <sys/time.h>
+ #endif
+ 
+@@ -85,7 +85,7 @@ TEST_F(WriteFileTest, WithData) {
+   FILETIME last_modified_filetime = {};
+   ASSERT_TRUE(::SetFileTime(foo_file.GetPlatformFile(), nullptr,
+                             &last_access_filetime, &last_modified_filetime));
+-#elif defined(OS_AIX)
++#elif defined(OS_AIX) || defined(OS_HAIKU)
+   struct timeval times[2] = {};
+   ASSERT_EQ(utimes(foo_name.AsUTF8Unsafe().c_str(), times), 0);
+ #else
+diff --git a/util/build_config.h b/util/build_config.h
+index addd7cf..74029bd 100644
+--- a/util/build_config.h
++++ b/util/build_config.h
+@@ -65,6 +65,8 @@
+ #define OS_AIX 1
+ #elif defined(__asmjs__)
+ #define OS_ASMJS
++#elif defined(__HAIKU__)
++#define OS_HAIKU 1
+ #else
+ #error Please add support for your platform in build_config.h
+ #endif
+@@ -82,7 +84,7 @@
+ #if defined(OS_AIX) || defined(OS_ANDROID) || defined(OS_ASMJS) ||    \
+     defined(OS_FREEBSD) || defined(OS_LINUX) || defined(OS_MACOSX) || \
+     defined(OS_NACL) || defined(OS_NETBSD) || defined(OS_OPENBSD) ||  \
+-    defined(OS_QNX) || defined(OS_SOLARIS)
++    defined(OS_QNX) || defined(OS_SOLARIS) || defined(OS_HAIKU)
+ #define OS_POSIX 1
+ #endif
+ 
+diff --git a/util/exe_path.cc b/util/exe_path.cc
+index f2adab5..ed55758 100644
+--- a/util/exe_path.cc
++++ b/util/exe_path.cc
+@@ -13,6 +13,9 @@
+ #include <mach-o/dyld.h>
+ #elif defined(OS_WIN)
+ #include <windows.h>
++#elif defined(OS_HAIKU)
++#include <OS.h>
++#include <image.h>
+ #endif
+ 
+ #if defined(OS_MACOSX)
+@@ -46,6 +49,18 @@ base::FilePath GetExePath() {
+   return base::FilePath(system_buffer);
+ }
+ 
++#elif defined(OS_HAIKU)
++base::FilePath GetExePath() {
++  image_info i_info;
++  int32 image_cookie = 0;
++  while(get_next_image_info(B_CURRENT_TEAM, &image_cookie, &i_info) == B_OK) {
++    if(i_info.type == B_APP_IMAGE) {
++      break;
++    }
++  }
++  std::string system_buffer(i_info.name);
++  return base::FilePath(system_buffer);
++}
+ #else
+ 
+ base::FilePath GetExePath() {
+diff --git a/util/semaphore.cc b/util/semaphore.cc
+index 2ae7b7b..a1f6888 100644
+--- a/util/semaphore.cc
++++ b/util/semaphore.cc
+@@ -36,7 +36,7 @@ void Semaphore::Wait() {
+   }
+ }
+ 
+-#elif defined(OS_LINUX) || defined(OS_AIX)
++#elif defined(OS_LINUX) || defined(OS_AIX) || defined(OS_HAIKU)
+ 
+ Semaphore::Semaphore(int count) {
+   DCHECK_GE(count, 0);
+diff --git a/util/semaphore.h b/util/semaphore.h
+index 2de2759..0d5b068 100644
+--- a/util/semaphore.h
++++ b/util/semaphore.h
+@@ -15,7 +15,7 @@
+ #include <windows.h>
+ #elif defined(OS_MACOSX)
+ #include <mach/mach.h>
+-#elif defined(OS_LINUX) || defined(OS_AIX)
++#elif defined(OS_LINUX) || defined(OS_AIX) || defined(OS_HAIKU)
+ #include <semaphore.h>
+ #else
+ #error Port.
+@@ -35,7 +35,7 @@ class Semaphore {
+ 
+ #if defined(OS_MACOSX)
+   typedef semaphore_t NativeHandle;
+-#elif defined(OS_LINUX) || defined(OS_AIX)
++#elif defined(OS_LINUX) || defined(OS_AIX) || defined(OS_HAIKU)
+   typedef sem_t NativeHandle;
+ #elif defined(OS_WIN)
+   typedef HANDLE NativeHandle;
+diff --git a/util/ticks.cc b/util/ticks.cc
+index 2a90c90..f372b54 100644
+--- a/util/ticks.cc
++++ b/util/ticks.cc
+@@ -11,7 +11,7 @@
+ #include <windows.h>
+ #elif defined(OS_MACOSX)
+ #include <mach/mach_time.h>
+-#elif defined(OS_LINUX) || defined(OS_AIX)
++#elif defined(OS_LINUX) || defined(OS_AIX) || defined(OS_HAIKU)
+ #include <time.h>
+ #else
+ #error Port.
+@@ -27,7 +27,7 @@ LARGE_INTEGER g_start;
+ #elif defined(OS_MACOSX)
+ mach_timebase_info_data_t g_timebase;
+ uint64_t g_start;
+-#elif defined(OS_LINUX) || defined(OS_AIX)
++#elif defined(OS_LINUX) || defined(OS_AIX) || defined(OS_HAIKU)
+ uint64_t g_start;
+ #else
+ #error Port.
+@@ -44,7 +44,7 @@ void Init() {
+ #elif defined(OS_MACOSX)
+   mach_timebase_info(&g_timebase);
+   g_start = (mach_absolute_time() * g_timebase.numer) / g_timebase.denom;
+-#elif defined(OS_LINUX) || defined(OS_AIX)
++#elif defined(OS_LINUX) || defined(OS_AIX) || defined(OS_HAIKU)
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   g_start = static_cast<uint64_t>(ts.tv_sec) * kNano +
+@@ -74,7 +74,7 @@ Ticks TicksNow() {
+ #elif defined(OS_MACOSX)
+   now =
+       ((mach_absolute_time() * g_timebase.numer) / g_timebase.denom) - g_start;
+-#elif defined(OS_LINUX) || defined(OS_AIX)
++#elif defined(OS_LINUX) || defined(OS_AIX) || defined(OS_HAIKU)
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   now = (static_cast<uint64_t>(ts.tv_sec) * kNano +
+-- 
+2.19.0
+
