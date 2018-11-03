@@ -1,4 +1,155 @@
-From c4926a7e0c8c778fa12d60522591d7bb7fbc5bc5 Mon Sep 17 00:00:00 2001
+From b7d6a1475bae4a52c7a12e4f8886c6ebdc69a67b Mon Sep 17 00:00:00 2001
+From: roland <none@none>
+Date: Fri, 27 Mar 2015 13:47:33 +0100
+Subject: 8075587: Compilation of constant array containing different sub
+ classes crashes the JVM Summary: meet of 2 constant arrays result in bottom
+ Reviewed-by: kvn
+
+
+diff --git a/src/share/vm/opto/type.cpp b/src/share/vm/opto/type.cpp
+index e877ae9..1029aa9 100644
+--- a/src/share/vm/opto/type.cpp
++++ b/src/share/vm/opto/type.cpp
+@@ -3950,7 +3950,9 @@ const Type *TypeAryPtr::xmeet_helper(const Type *t) const {
+            (tap->_klass_is_exact && !tap->klass()->is_subtype_of(klass())) ||
+            // 'this' is exact and super or unrelated:
+            (this->_klass_is_exact && !klass()->is_subtype_of(tap->klass())))) {
+-      tary = TypeAry::make(Type::BOTTOM, tary->_size, tary->_stable);
++      if (above_centerline(ptr)) {
++        tary = TypeAry::make(Type::BOTTOM, tary->_size, tary->_stable);
++      }
+       return make(NotNull, NULL, tary, lazy_klass, false, off, InstanceBot);
+     }
+ 
+diff --git a/test/compiler/types/TestMeetExactConstantArrays.java b/test/compiler/types/TestMeetExactConstantArrays.java
+new file mode 100644
+index 0000000..951288e
+--- /dev/null
++++ b/test/compiler/types/TestMeetExactConstantArrays.java
+@@ -0,0 +1,70 @@
++/*
++ * Copyright (c) 2015, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++
++/*
++ * @test
++ * @bug 8075587
++ * @summary meet of 2 constant arrays result in bottom
++ * @run main/othervm TestMeetExactConstantArrays
++ *
++ */
++
++public class TestMeetExactConstantArrays {
++    public abstract static class NumbersHolder {
++        public Number[] getNumbers() {
++            return null;
++        }
++    }
++
++    public static class IntegersHolder extends NumbersHolder {
++        private final static Integer integers[] = { new Integer(1) };
++
++        public Number[] getNumbers() {
++            return integers;
++        }
++    }
++
++    public static class LongsHolder extends NumbersHolder {
++        private final static Long longs[] = { new Long(1) };
++
++        public Number[] getNumbers() {
++            return longs;
++        }
++    }
++
++    public static final void loopNumbers(NumbersHolder numbersHolder) {
++        Number[] numbers = numbersHolder.getNumbers();
++        for (int i = 0; i < numbers.length; i++) {
++            numbers[i].longValue();
++        }
++    }
++
++    public static void main(String[] args) throws Exception {
++        for (int i = 0; i < 10000; i++) {
++            IntegersHolder integersHolder = new IntegersHolder();
++            LongsHolder longsHolder = new LongsHolder();
++            loopNumbers(integersHolder);
++            loopNumbers(longsHolder);
++        }
++    }
++}
+-- 
+2.19.0
+
+
+From 0e307bf0e4d8c714aaf2ed3b6353e1efc619ea2f Mon Sep 17 00:00:00 2001
+From: sgehwolf <none@none>
+Date: Wed, 29 Apr 2015 12:23:48 -0700
+Subject: 8078666: JVM fastdebug build compiled with GCC 5 asserts with "widen
+ increases" Summary: do the math on the unsigned type where overflows are well
+ defined Reviewed-by: kvn, aph
+
+
+diff --git a/src/share/vm/opto/type.cpp b/src/share/vm/opto/type.cpp
+index 1029aa9..e57e23b 100644
+--- a/src/share/vm/opto/type.cpp
++++ b/src/share/vm/opto/type.cpp
+@@ -1180,11 +1180,11 @@ static int normalize_int_widen( jint lo, jint hi, int w ) {
+   // Certain normalizations keep us sane when comparing types.
+   // The 'SMALLINT' covers constants and also CC and its relatives.
+   if (lo <= hi) {
+-    if ((juint)(hi - lo) <= SMALLINT)  w = Type::WidenMin;
+-    if ((juint)(hi - lo) >= max_juint) w = Type::WidenMax; // TypeInt::INT
++    if (((juint)hi - lo) <= SMALLINT)  w = Type::WidenMin;
++    if (((juint)hi - lo) >= max_juint) w = Type::WidenMax; // TypeInt::INT
+   } else {
+-    if ((juint)(lo - hi) <= SMALLINT)  w = Type::WidenMin;
+-    if ((juint)(lo - hi) >= max_juint) w = Type::WidenMin; // dual TypeInt::INT
++    if (((juint)lo - hi) <= SMALLINT)  w = Type::WidenMin;
++    if (((juint)lo - hi) >= max_juint) w = Type::WidenMin; // dual TypeInt::INT
+   }
+   return w;
+ }
+@@ -1438,11 +1438,11 @@ static int normalize_long_widen( jlong lo, jlong hi, int w ) {
+   // Certain normalizations keep us sane when comparing types.
+   // The 'SMALLINT' covers constants.
+   if (lo <= hi) {
+-    if ((julong)(hi - lo) <= SMALLINT)   w = Type::WidenMin;
+-    if ((julong)(hi - lo) >= max_julong) w = Type::WidenMax; // TypeLong::LONG
++    if (((julong)hi - lo) <= SMALLINT)   w = Type::WidenMin;
++    if (((julong)hi - lo) >= max_julong) w = Type::WidenMax; // TypeLong::LONG
+   } else {
+-    if ((julong)(lo - hi) <= SMALLINT)   w = Type::WidenMin;
+-    if ((julong)(lo - hi) >= max_julong) w = Type::WidenMin; // dual TypeLong::LONG
++    if (((julong)lo - hi) <= SMALLINT)   w = Type::WidenMin;
++    if (((julong)lo - hi) >= max_julong) w = Type::WidenMin; // dual TypeLong::LONG
+   }
+   return w;
+ }
+-- 
+2.19.0
+
+
+From dd1a1b3741bd0bf87a928c32b431d247b2eac680 Mon Sep 17 00:00:00 2001
 From: Adrien Destugues <pulkomandy@pulkomandy.tk>
 Date: Wed, 20 Dec 2017 18:20:29 +0100
 Subject: Fix out of memory error.
@@ -30,5 +181,5 @@ index cf2e698..1f94aba 100644
  }
  
 -- 
-2.15.0
+2.19.0
 
