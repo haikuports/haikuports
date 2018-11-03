@@ -1,0 +1,300 @@
+From 4bfe04b667ac9f15961d55291e88e85282b0fe51 Mon Sep 17 00:00:00 2001
+From: Calvin Hill <calvin@hakobaito.co.uk>
+Date: Tue, 12 Feb 2019 12:51:52 +0000
+Subject: Haiku platform support.
+
+
+diff --git a/BUILD.gn b/BUILD.gn
+index d52d806..92ec21c 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -603,7 +603,7 @@ config("toolchain") {
+     }
+   }
+ 
+-  if (is_clang) {
++  if (is_clang && !is_haiku) {
+     cflags += [
+       "-Wmissing-field-initializers",
+ 
+@@ -3228,6 +3228,11 @@ v8_component("v8_libbase") {
+       "src/base/debug/stack_trace_fuchsia.cc",
+       "src/base/platform/platform-fuchsia.cc",
+     ]
++  } else if (is_haiku) {
++    sources += [
++      "src/base/debug/stack_trace_posix.cc",
++      "src/base/platform/platform-haiku.cc",
++    ]
+   } else if (is_mac) {
+     sources += [
+       "src/base/debug/stack_trace_posix.cc",
+@@ -3524,6 +3529,13 @@ if (is_fuchsia && !build_with_chromium) {
+ 
+ group("v8_fuzzers") {
+   testonly = true
++
++  if(host_os == "haiku"){
++    data_deps = []
++  }
++
++  if (host_os != "haiku") {
++
+   data_deps = [
+     ":v8_simple_json_fuzzer",
+     ":v8_simple_multi_return_fuzzer",
+@@ -3535,6 +3547,8 @@ group("v8_fuzzers") {
+     ":v8_simple_wasm_compile_fuzzer",
+     ":v8_simple_wasm_fuzzer",
+   ]
++  }
++
+ }
+ 
+ if (is_component_build) {
+diff --git a/include/v8config.h b/include/v8config.h
+index e30a582..9e65520 100644
+--- a/include/v8config.h
++++ b/include/v8config.h
+@@ -61,6 +61,7 @@
+ //  V8_OS_CYGWIN        - Cygwin
+ //  V8_OS_DRAGONFLYBSD  - DragonFlyBSD
+ //  V8_OS_FREEBSD       - FreeBSD
++//  V8_OS_HAIKU         - Haiku
+ //  V8_OS_FUCHSIA       - Fuchsia
+ //  V8_OS_LINUX         - Linux
+ //  V8_OS_MACOSX        - Mac OS X
+@@ -96,6 +97,9 @@
+ # define V8_OS_BSD 1
+ # define V8_OS_FREEBSD 1
+ # define V8_OS_POSIX 1
++#elif defined(__HAIKU__)
++# define V8_OS_HAIKU 1
++# define V8_OS_POSIX 1
+ #elif defined(__Fuchsia__)
+ # define V8_OS_FUCHSIA 1
+ # define V8_OS_POSIX 1
+diff --git a/src/base/debug/stack_trace_posix.cc b/src/base/debug/stack_trace_posix.cc
+index ed602af..58b3b5d 100644
+--- a/src/base/debug/stack_trace_posix.cc
++++ b/src/base/debug/stack_trace_posix.cc
+@@ -25,14 +25,15 @@
+ #include <string>
+ #include <vector>
+ 
+-#if V8_LIBC_GLIBC || V8_LIBC_BSD || V8_LIBC_UCLIBC || V8_OS_SOLARIS
++#if V8_LIBC_GLIBC || V8_LIBC_BSD || V8_LIBC_UCLIBC || V8_OS_SOLARIS || V8_OS_HAIKU
+ #define HAVE_EXECINFO_H 1
+ #endif
+ 
+-#if HAVE_EXECINFO_H
++#if defined(HAVE_EXECINFO_H)
+ #include <cxxabi.h>
+ #include <execinfo.h>
+ #endif
++
+ #if V8_OS_MACOSX
+ #include <AvailabilityMacros.h>
+ #endif
+diff --git a/src/base/platform/platform-haiku.cc b/src/base/platform/platform-haiku.cc
+new file mode 100644
+index 0000000..86bf945
+--- /dev/null
++++ b/src/base/platform/platform-haiku.cc
+@@ -0,0 +1,48 @@
++// Copyright 2012 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Platform-specific code for Haiku goes here. For the POSIX-compatible
++// parts, the implementation is in platform-posix.cc.
++
++#include <pthread.h>
++#include <semaphore.h>
++#include <signal.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <sys/resource.h>
++#include <sys/time.h>
++
++#include <errno.h>
++#include <fcntl.h>  // open
++#include <stdarg.h>
++#include <strings.h>    // index
++#include <sys/mman.h>   // mmap & munmap
++#include <sys/stat.h>   // open
++#include <sys/types.h>  // mmap & munmap
++#include <unistd.h>     // sysconf
++
++#include <cmath>
++
++#undef MAP_TYPE
++
++#include "src/base/macros.h"
++#include "src/base/platform/platform-posix-time.h"
++#include "src/base/platform/platform-posix.h"
++#include "src/base/platform/platform.h"
++
++namespace v8 {
++namespace base {
++
++TimezoneCache* OS::CreateTimezoneCache() {
++  return new PosixDefaultTimezoneCache();
++}
++
++std::vector<OS::SharedLibraryAddress> OS::GetSharedLibraryAddresses() {
++  return std::vector<SharedLibraryAddress>();
++}
++
++void OS::SignalCodeMovingGC() {}
++
++}  // namespace base
++}  // namespace v8
+diff --git a/src/base/platform/platform-posix.cc b/src/base/platform/platform-posix.cc
+index e7edbf5..387290c 100644
+--- a/src/base/platform/platform-posix.cc
++++ b/src/base/platform/platform-posix.cc
+@@ -60,7 +60,7 @@
+ #include <sys/resource.h>
+ #endif
+ 
+-#if !defined(_AIX) && !defined(V8_OS_FUCHSIA)
++#if !defined(_AIX) && !defined(V8_OS_FUCHSIA) && !defined(__HAIKU__)
+ #include <sys/syscall.h>
+ #endif
+ 
+@@ -76,6 +76,14 @@ extern int madvise(caddr_t, size_t, int);
+ #endif
+ #endif
+ 
++#if defined(__HAIKU__)
++extern "C" int posix_madvise(void*, size_t, int);
++#endif
++
++#if defined(__HAIKU__)
++#define MADV_FREE POSIX_MADV_DONTNEED
++#endif
++
+ #ifndef MADV_FREE
+ #define MADV_FREE MADV_DONTNEED
+ #endif
+@@ -127,7 +135,7 @@ int GetProtectionFromMemoryPermission(OS::MemoryPermission access) {
+ int GetFlagsForMemoryPermission(OS::MemoryPermission access) {
+   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+   if (access == OS::MemoryPermission::kNoAccess) {
+-#if !V8_OS_AIX && !V8_OS_FREEBSD && !V8_OS_QNX
++#if !V8_OS_AIX && !V8_OS_FREEBSD && !V8_OS_QNX && !V8_OS_HAIKU
+     flags |= MAP_NORESERVE;
+ #endif  // !V8_OS_AIX && !V8_OS_FREEBSD && !V8_OS_QNX
+ #if V8_OS_QNX
+@@ -356,6 +364,8 @@ bool OS::DiscardSystemPages(void* address, size_t size) {
+   int ret = madvise(address, size, MADV_FREE_REUSABLE);
+ #elif defined(_AIX) || defined(V8_OS_SOLARIS)
+   int ret = madvise(reinterpret_cast<caddr_t>(address), size, MADV_FREE);
++#elif defined(__HAIKU__)
++  int ret = posix_madvise(address, size, MADV_FREE);
+ #else
+   int ret = madvise(address, size, MADV_FREE);
+ #endif
+@@ -367,6 +377,8 @@ bool OS::DiscardSystemPages(void* address, size_t size) {
+ // imply runtime support.
+ #if defined(_AIX) || defined(V8_OS_SOLARIS)
+     ret = madvise(reinterpret_cast<caddr_t>(address), size, MADV_DONTNEED);
++#elif defined(__HAIKU__)
++    ret = posix_madvise(address, size, MADV_FREE);
+ #else
+     ret = madvise(address, size, MADV_DONTNEED);
+ #endif
+diff --git a/src/libsampler/sampler.cc b/src/libsampler/sampler.cc
+index eb804a7..cd3c2bb 100644
+--- a/src/libsampler/sampler.cc
++++ b/src/libsampler/sampler.cc
+@@ -12,7 +12,7 @@
+ #include <sys/time.h>
+ #include <atomic>
+ 
+-#if !V8_OS_QNX && !V8_OS_AIX
++#if !V8_OS_QNX && !V8_OS_AIX && !V8_OS_HAIKU
+ #include <sys/syscall.h>  // NOLINT
+ #endif
+ 
+@@ -20,7 +20,7 @@
+ #include <mach/mach.h>
+ // OpenBSD doesn't have <ucontext.h>. ucontext_t lives in <signal.h>
+ // and is a typedef for struct sigcontext. There is no uc_mcontext.
+-#elif !V8_OS_OPENBSD
++#elif !V8_OS_OPENBSD && !V8_OS_HAIKU
+ #include <ucontext.h>
+ #endif
+ 
+@@ -469,6 +469,16 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
+   state->sp = reinterpret_cast<void*>(mcontext.mc_r13);
+   state->fp = reinterpret_cast<void*>(mcontext.mc_r11);
+ #endif  // V8_HOST_ARCH_*
++#elif V8_OS_HAIKU
++#if V8_HOST_ARCH_IA32
++  state->pc = reinterpret_cast<void*>(mcontext.eip);
++  state->sp = reinterpret_cast<void*>(mcontext.esp);
++  state->fp = reinterpret_cast<void*>(mcontext.ebp);
++#elif V8_HOST_ARCH_X64
++  state->pc = reinterpret_cast<void*>(mcontext.rip);
++  state->sp = reinterpret_cast<void*>(mcontext.rsp);
++  state->fp = reinterpret_cast<void*>(mcontext.rbp);
++#endif  // V8_HOST_ARCH_*
+ #elif V8_OS_NETBSD
+ #if V8_HOST_ARCH_IA32
+   state->pc = reinterpret_cast<void*>(mcontext.__gregs[_REG_EIP]);
+diff --git a/test/BUILD.gn b/test/BUILD.gn
+index 70c8b51..073ff09 100644
+--- a/test/BUILD.gn
++++ b/test/BUILD.gn
+@@ -7,6 +7,16 @@ import("../gni/v8.gni")
+ group("gn_all") {
+   testonly = true
+ 
++ # Don't build tests for Haiku yet
++
++  if(host_os != "haiku"){
++    data_deps = []
++  }
++
++  deps = []
++
++  if (host_os != "haiku") {
++
+   data_deps = [
+     "benchmarks:v8_benchmarks",
+     "intl:v8_intl",
+@@ -34,6 +44,8 @@ group("gn_all") {
+       "unittests:unittests",
+     ]
+   }
++ }
++
+ }
+ 
+ ###############################################################################
+diff --git a/tools/mb/mb.py b/tools/mb/mb.py
+index cbb5b5d..3238a7a 100755
+--- a/tools/mb/mb.py
++++ b/tools/mb/mb.py
+@@ -832,12 +832,15 @@ class MetaBuildWrapper(object):
+       subdir, exe = 'linux64', 'gn'
+     elif self.platform == 'darwin':
+       subdir, exe = 'mac', 'gn'
++    elif self.platform == 'haiku1':
++      subdir, exe = 'haiku','gn'
++      gn_path = "/bin/gn"
+     else:
+       subdir, exe = 'win', 'gn.exe'
+ 
+     arch = platform.machine()
+     if (arch.startswith('s390') or arch.startswith('ppc') or
+-        self.platform.startswith('aix')):
++	  self.platform.startswith('aix') or self.platform.startswith('haiku')):
+       # use gn in PATH
+       gn_path = 'gn'
+     else:
+-- 
+2.19.1
+
