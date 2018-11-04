@@ -1,0 +1,423 @@
+From 57178d4c923eea458b1de36e6bac64bde9ab1630 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Thu, 7 Aug 2014 22:20:13 +0200
+Subject: Haiku: Fix physical address passing to oss_map_pci_mem()
+
+Avoids sign extension ending in General Protection Exception.
+
+diff --git a/kernel/OS/BeOS/os_beos.c b/kernel/OS/BeOS/os_beos.c
+index 08587c5..f29197c 100644
+--- a/kernel/OS/BeOS/os_beos.c
++++ b/kernel/OS/BeOS/os_beos.c
+@@ -598,17 +598,17 @@ oss_untimeout (timeout_id_t id)
+ 
+ 
+ caddr_t
+-oss_map_pci_mem (oss_device_t * osdev, int nr, int phaddr, int size)
++oss_map_pci_mem (oss_device_t * osdev, int nr, phys_addr_t phaddr, int size)
+ {
+   status_t err;
+   void *va = NULL;
+-  FENTRYA("%p,%d,%u,%d", osdev, nr, phaddr, size);
++  FENTRYA("%p,%d,%Lx,%d", osdev, nr, (uint64)phaddr, size);
+   //XXX:align phaddr ?
+   /* round up to page size */
+   size += B_PAGE_SIZE - 1;
+   size &= ~(B_PAGE_SIZE - 1);
+   
+-  err = map_physical_memory(OSS_PCI_AREA_NAME, (void *)phaddr, size, 
++  err = map_physical_memory(OSS_PCI_AREA_NAME, phaddr, size,
+                             B_ANY_KERNEL_BLOCK_ADDRESS, 0, &va);
+   if (err < B_OK)
+     va = NULL;
+diff --git a/kernel/OS/BeOS/os_beos.h b/kernel/OS/BeOS/os_beos.h
+index 1e8f0b5..f4621e1 100644
+--- a/kernel/OS/BeOS/os_beos.h
++++ b/kernel/OS/BeOS/os_beos.h
+@@ -101,6 +101,9 @@ typedef uint32 oss_native_word;	/* Same as the address and status register size
+ typedef int64 oss_int64_t;		/* Signed 64 bit integer */
+ typedef uint64 oss_uint64_t;	/* Unsigned 64 bit integer */
+ typedef unsigned long offset_t;
++#ifndef __HAIKU__
++typedef uint32 phys_addr_t;
++#endif
+ 
+ 
+ extern void oss_cmn_err (int level, char *format, ...);
+@@ -408,8 +411,8 @@ typedef struct _oss_poll_event_t oss_poll_event_t;
+ extern int detect_trace;
+ #define DDB(x) if (detect_trace) x
+ 
+-extern caddr_t oss_map_pci_mem (oss_device_t * osdev, int nr, int phaddr,
+-				int size);
++extern caddr_t oss_map_pci_mem (oss_device_t * osdev, int nr,
++				phys_addr_t phaddr, int size);
+ extern void oss_unmap_pci_mem (void *addr);
+ #define MAP_PCI_IOADDR(osdev, nr, io) (oss_native_word)io
+ #define MAP_PCI_MEM(osdev, ix, phaddr, size) 	oss_map_pci_mem(osdev, ix, phaddr, size)
+-- 
+2.16.2
+
+
+From 015debfcc7034eb39fc2479724303a0f36dc7f12 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Tue, 21 Nov 2017 08:52:04 +0100
+Subject: Haiku: Fix mutex initialization
+
+Haiku has been defining spinlocks as structs for a while now, unlike BeOS.
+
+diff --git a/kernel/OS/BeOS/os_beos.h b/kernel/OS/BeOS/os_beos.h
+index f4621e1..057948e 100644
+--- a/kernel/OS/BeOS/os_beos.h
++++ b/kernel/OS/BeOS/os_beos.h
+@@ -201,7 +201,13 @@ extern void debug_mutex_exit (oss_mutex_t * mutex, char *file, int line, oss_nat
+ #define MUTEX_EXIT(mutex, flags)			debug_mutex_exit(&mutex, __FILE__, __LINE__, NULL)
+ #else
+ typedef spinlock oss_mutex_t;
+-#define MUTEX_INIT(osdev, mutex, hier)			{ mutex = 0; }
++#ifndef __HAIKU__
++/* Haiku defines a specific initializer now, BeOS just used 0. */
++#define B_SPINLOCK_INITIALIZER 0
++#endif
++/* gcc2 does not like this:
++#define MUTEX_INIT(osdev, mutex, hier)			{ mutex = B_SPINLOCK_INITIALIZER; }*/
++#define MUTEX_INIT(osdev, mutex, hier)			{ const spinlock s = B_SPINLOCK_INITIALIZER; mutex = s; }
+ #define MUTEX_CLEANUP(mutex)			
+ #define MUTEX_ENTER_IRQDISABLE(mutex, flags)	\
+ { \
+-- 
+2.16.2
+
+
+From 077d9a2184caa55ef942d14272261c9c14a0f8d9 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Tue, 21 Nov 2017 09:48:20 +0100
+Subject: Haiku: Fix "decimal constant is so large that it is unsigned" warning
+
+Because Haiku error constants are already negative, and ENOMEM is actually
+INT32_MIN, the compiler complains about it.
+
+We force the constants to be unsigned before negating them to shut it up.
+
+Tested in both Linux and Haiku, after configuring the resulting values
+are the expected ones:
+
+printf("%s: %d\n", #e, OSS_##e)
+int main() {
+	GEN_ERRNO(E2BIG);
+	...
+}
+
+diff --git a/setup/srcconf.c b/setup/srcconf.c
+index 967aed3..300a168 100644
+--- a/setup/srcconf.c
++++ b/setup/srcconf.c
+@@ -1370,7 +1370,7 @@ produce_errno_h(void)
+ 		   exit(-1);
+ 	   }
+ #define GEN_ERRNO(e) \
+-	fprintf (f, "#define OSS_"#e"\t\t%d\n", (e<=0) ? e : -(e));
++	fprintf (f, "#define OSS_"#e"\t\t%du\n", (e<=0) ? e : -(e));
+ 
+ 	fprintf (f, "#ifndef OSS_ERRNO_H\n");
+ 	fprintf (f, "#define OSS_ERRNO_H\n");
+-- 
+2.16.2
+
+
+From 5f9f8313d77b37741b4a8ceb4ae84389d2091fcb Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Tue, 21 Nov 2017 10:21:08 +0100
+Subject: Haiku: Fix new type for atomics
+
+
+diff --git a/kernel/OS/BeOS/os_beos.c b/kernel/OS/BeOS/os_beos.c
+index f29197c..3f1366b 100644
+--- a/kernel/OS/BeOS/os_beos.c
++++ b/kernel/OS/BeOS/os_beos.c
+@@ -70,8 +70,12 @@ benaphore osscore_benaphore;
+ 
+ #define DEBUG_IRQ 1
+ #if DEBUG_IRQ
++#ifdef __HAIKU__
++int32 irq_count = 0;
++#else
+ vint32 irq_count = 0;
+ #endif
++#endif
+ 
+ volatile int oss_open_devices = 0;
+ #define MAX_CARDS	16
+-- 
+2.16.2
+
+
+From 800f45ef2802907058bf8641c5466acebf58eb1c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Tue, 21 Nov 2017 10:22:36 +0100
+Subject: Haiku: Work around PCI->ram_address limitation
+
+Historically it takes a pointer, while it should use a phys_addr_t.
+It should be fixed but until then we test for overflow and return directly.
+On x86 it's a noop anyway.
+
+diff --git a/kernel/OS/BeOS/os_beos.c b/kernel/OS/BeOS/os_beos.c
+index 3f1366b..0f9f3f6 100644
+--- a/kernel/OS/BeOS/os_beos.c
++++ b/kernel/OS/BeOS/os_beos.c
+@@ -245,7 +245,11 @@ oss_virt_to_bus (void *addr)
+     }
+   //XXX:which???
+   //return (oss_native_word)pent[0].address;
+-  return (oss_native_word)(gPCI->ram_address(pent[0].address));
++  //XXX: ram_address historically takes a void* which isn't the same size...
++  // check for overflow, then we just return it, on x86 it's a noop anyway
++  if (sizeof(const void *) < sizeof(phys_addr_t) && ((addr_t)pent[0].address != pent[0].address))
++    return (oss_native_word)pent[0].address;
++  return (oss_native_word)(gPCI->ram_address((const void *)(addr_t)pent[0].address));
+ }
+ 
+ 
+-- 
+2.16.2
+
+
+From 42e88b3bb5c071561e87f1d67f5ee81ab3d35616 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Tue, 21 Nov 2017 11:21:20 +0100
+Subject: Haiku: build.sh: Fix and make more flexible for packaging
+
+Haiku introduced subtle differences from BeOS...
+
+Actually some of this was already fixed in 2014...
+
+diff --git a/setup/BeOS/build.sh b/setup/BeOS/build.sh
+index 045a599..31ae894 100644
+--- a/setup/BeOS/build.sh
++++ b/setup/BeOS/build.sh
+@@ -2,10 +2,20 @@
+ 
+ . ./.directories
+ 
+-#BEOS_SYSTEM=beos/system
+-# to install as user addons
+-BEOS_SYSTEM=home/config
++# default is to install as user addons
++BEOS_SYSTEM="${BEOS_SYSTEM:-home/config}"
++DRIVER_SETTINGS="${DRIVER_SETTINGS:-home/config/settings/kernel/drivers}"
++
++# the path to the kernel binary we can link to
++if [ $OSTYPE = "haiku" ]; then
++# x86/ would be for secondary arch here
++KERNEL=/system/develop/lib/_KERNEL_
++else
++# BeOS has x86/ and ppc/
++KERNEL=/boot/develop/lib/x86/_KERNEL_
++fi
+ 
++# prefix of driver settings files
+ DRVPREFIX=oss_
+ 
+ rm -rf prototype
+@@ -36,16 +46,18 @@ mkdir -p prototype/$BEOS_SYSTEM/add-ons/kernel/media
+ #hack for now
+ #mkdir -p prototype/$BEOS_SYSTEM/add-ons/kernel/media/oss
+ mkdir -p prototype/$BEOS_SYSTEM/add-ons/kernel/drivers/bin
+-mkdir -p prototype/$BEOS_SYSTEM/add-ons/kernel/drivers/dev/audio/multi
++#mkdir -p prototype/$BEOS_SYSTEM/add-ons/kernel/drivers/dev/audio/multi
+ mkdir -p prototype/$BEOS_SYSTEM/add-ons/kernel/drivers/dev/audio/oss
+ #hack for now
+ mkdir -p prototype/$BEOS_SYSTEM/add-ons/kernel/drivers/dev/oss
+ ln -s ../../bin/${DRVPREFIX}loader prototype/$BEOS_SYSTEM/add-ons/kernel/drivers/dev/oss/
+-ln -s ../bin/${DRVPREFIX}loader prototype/$BEOS_SYSTEM/add-ons/kernel/drivers/dev/
++# Avoid loading OSS too early at boot,
++# the media addon will probe /dev/audio/oss anyway
++#ln -s ../bin/${DRVPREFIX}loader prototype/$BEOS_SYSTEM/add-ons/kernel/drivers/dev/
+ #hack: install bins for now
+-mkdir -p prototype/home/config/bin
+-mkdir -p prototype/home/config/settings/kernel/drivers
+-mkdir -p prototype/home/Desktop
++mkdir -p prototype/$BEOS_SYSTEM/bin
++mkdir -p prototype/$DRIVER_SETTINGS
++#mkdir -p prototype/home/Desktop
+ 
+ #cp $SRCDIR/include/soundcard.h prototype/usr/include/sys
+ 
+@@ -55,8 +67,8 @@ mkdir -p prototype/home/Desktop
+ #cp $SRCDIR/kernel/framework/include/midiparser.h prototype/$OSSLIBDIR/include/
+ 
+ (cd target/bin; rm -f ossrecord; ln -s ossplay ossrecord)
+-cp -f target/bin/* prototype/home/config/bin
+-cp -f target/sbin/* prototype/home/config/bin
++cp -f target/bin/* prototype/$BEOS_SYSTEM/bin
++cp -f target/sbin/* prototype/$BEOS_SYSTEM/bin
+ 
+ #cp -R $SRCDIR/oss/* prototype/$OSSLIBDIR
+ 
+@@ -85,7 +97,7 @@ function setvermime () {
+ #core=prototype/$BEOS_SYSTEM/add-ons/kernel/media/oss/${DRVPREFIX}core
+ #must match internal module name...
+ core=prototype/$BEOS_SYSTEM/add-ons/kernel/media/oss
+-#gcc -o $drv target/objects/*.o -nostdlib /boot/develop/lib/x86/_KERNEL_ || exit 1
++#gcc -o $drv target/objects/*.o -nostdlib $KERNEL || exit 1
+ 
+ # no midi yet
+ rm target/modules/oss_midiloop.o
+@@ -93,19 +105,19 @@ rm target/modules/oss_midiloop.o
+ # try to build all in a single bin for now...
+ # driver_beos.o shouldn' be in, oh well...
+ # R5 has symbols like __ucmpdi2 but not Haiku, so use libgcc
+-gcc -o $core target/objects/*.o target/modules/*.o -nostdlib -lgcc /boot/develop/lib/x86/_KERNEL_ || exit 1
++gcc -o $core target/objects/*.o target/modules/*.o -nostdlib -lgcc $KERNEL || exit 1
+ setvermime $core
+ 
+ # except the loader driver...
+ # using the same bin works in BeOS but not in Haiku.
+ drv=prototype/$BEOS_SYSTEM/add-ons/kernel/drivers/bin/${DRVPREFIX}loader
+-gcc -o $drv target/objects/driver_beos.o -nostdlib /boot/develop/lib/x86/_KERNEL_ || exit 1
++gcc -o $drv target/objects/driver_beos.o -nostdlib $KERNEL || exit 1
+ setvermime $drv
+ 
+ rm -f devlist.txt
+ 
+ # generate driver settings
+-settingspath=prototype/home/config/settings/kernel/drivers
++settingspath=prototype/$DRIVER_SETTINGS
+ gensettings < kernel/framework/ac97/.params > $settingspath/oss_core
+ gensettings < kernel/drv/osscore/.params >> $settingspath/oss_core
+ for n in target/modules/*.o
+@@ -142,7 +154,7 @@ do
+ 	#ld -r -o prototype/$OSSLIBDIR/modules/$N/Driver.o $n
+ 
+ 	#drv=prototype/$BEOS_SYSTEM/add-ons/kernel/drivers/bin/${DRVPREFIX}$N
+-	#gcc -o $drv $n -nostdlib /boot/develop/lib/x86/_KERNEL_ || exit 1
++	#gcc -o $drv $n -nostdlib $KERNEL || exit 1
+ 	#longver="`cat .version`"
+ 	#shortver="${longver%% *}"
+ 	#appver="${shortver:0:1} ${shortver:0:1} 0 b ${shortver##*[a-z]}"
+-- 
+2.16.2
+
+
+From 14ae5b90629b7a78ea91dc00f5b4f6cfa37ba53a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Tue, 21 Nov 2017 12:00:47 +0100
+Subject: Haiku: Fix installing paths
+
+When creating a package, we expect stuff outside of /boot...
+
+diff --git a/setup/BeOS/build.sh b/setup/BeOS/build.sh
+index 31ae894..dba8bf5 100644
+--- a/setup/BeOS/build.sh
++++ b/setup/BeOS/build.sh
+@@ -3,8 +3,8 @@
+ . ./.directories
+ 
+ # default is to install as user addons
+-BEOS_SYSTEM="${BEOS_SYSTEM:-home/config}"
+-DRIVER_SETTINGS="${DRIVER_SETTINGS:-home/config/settings/kernel/drivers}"
++BEOS_SYSTEM="${BEOS_SYSTEM:-boot/home/config}"
++DRIVER_SETTINGS="${DRIVER_SETTINGS:-boot/home/config/settings/kernel/drivers}"
+ 
+ # the path to the kernel binary we can link to
+ if [ $OSTYPE = "haiku" ]; then
+-- 
+2.16.2
+
+
+From e46475382c96de68f4fb9f87b8913f1178721ea2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Tue, 21 Nov 2017 13:11:13 +0100
+Subject: Haiku: make sure we preserve symlinks on installing
+
+
+diff --git a/setup/BeOS/make.local b/setup/BeOS/make.local
+index ca403e9..8b8a101 100644
+--- a/setup/BeOS/make.local
++++ b/setup/BeOS/make.local
+@@ -2,7 +2,10 @@ build: 	kernel/framework/include/buildid.h all
+ 	sh build.sh
+ 
+ copy:	build
+-	cp -R prototype/* /boot/
++	(cd prototype; find -P . -type d | xargs -i{} mkdir -p ${DESTDIR}/{})
++	(cd prototype; find -P . -type f | xargs -i{} cp {} ${DESTDIR}/{})
++	(cd prototype; find -P . -type l | xargs -i{} cp -d {} ${DESTDIR}/{})
++
+ 
+ package:	build
+ 		sh setup/BeOS/mkpkg.sh
+-- 
+2.16.2
+
+
+From 15819cfa56d4cab058caebbb6824f8536e608217 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Tue, 21 Nov 2017 15:58:22 +0100
+Subject: Haiku: only make an osdev available when pci reservation worked
+
+This was fixed in 2014 in f60489 then undone in 58f453 for some reason...
+
+Added a comment to make it more obvious.
+
+diff --git a/kernel/OS/BeOS/os_beos.c b/kernel/OS/BeOS/os_beos.c
+index 0f9f3f6..f7e9883 100644
+--- a/kernel/OS/BeOS/os_beos.c
++++ b/kernel/OS/BeOS/os_beos.c
+@@ -1065,7 +1065,8 @@ osdev_create (dev_info_t * dip, int dev_type, int instance, const char *nick,
+   osdev->dip = dip;
+   //osdev->osid = dip;
+   osdev->unloaded = 0;
+-  osdev->available = 1;
++  // not until we're sure the device reservation worked!!!
++  //osdev->available = 1;
+   osdev->first_mixer = -1;
+   osdev->instance = instance;
+   osdev->dev_type = dev_type;
+@@ -1104,6 +1105,8 @@ osdev_create (dev_info_t * dip, int dev_type, int instance, const char *nick,
+       return NULL;
+     }
+ 
++  osdev->available = 1;
++
+ /*
+  * Create the device handle
+  */
+-- 
+2.16.2
+
+
+From 9d19eba7771f2f751f37b54b0c53a8c65bcdc79c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Zolt=C3=A1n=20Mizsei?= <zmizsei@extrowerk.com>
+Date: Fri, 20 Apr 2018 21:51:17 +0200
+Subject: Haiku: x86_64 support
+
+
+diff --git a/setup/srcconf_beos.inc b/setup/srcconf_beos.inc
+index 8083e50..2189b95 100644
+--- a/setup/srcconf_beos.inc
++++ b/setup/srcconf_beos.inc
+@@ -25,10 +25,19 @@ check_sysdep (conf_t * conf, struct utsname *un)
+       strcpy (conf->arch, "ppc");
+       strcpy (conf->platform, "ppc");
+     }
++  if (strcmp (un->machine, "x86_64") == 0)
++    {
++      strcpy (conf->arch, "x86_64");
++      strcpy (conf->platform, "i86pc");
++    }
+ }
+ 
+ static void
+ add_kernel_flags (FILE * f)
+ {
+-  fprintf (f, "CFLAGS=-O2 -D_KERNEL -D_KERNEL_MODE=1 -no-fpic\n");
++  #ifdef __i386__
++    fprintf (f, "CFLAGS=-O2 -D_KERNEL -D_KERNEL_MODE=1 -no-fpic\n");
++  #else
++    fprintf (f, "CFLAGS=-O2 -D_KERNEL -D_KERNEL_MODE=1\n");
++  #endif
+ }
+-- 
+2.16.2
+
