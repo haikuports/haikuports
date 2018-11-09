@@ -105,7 +105,7 @@ LOCAL_INCLUDE_PATHS = \
 	 santa/NewStrings  \
 	 santa/PrefilledBitmap \
 	 santa/ScrollViewCorner  \
-	 santa  \	
+	 santa  \
 
 #	Specify the level of optimization that you want. Specify either NONE (O0),
 #	SOME (O1), FULL (O2), or leave blank (for the default optimization level).
