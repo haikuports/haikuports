@@ -1,0 +1,153 @@
+From 2a8b46973804241e3871cc5bd3d6c89dba3eb598 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Zolt=C3=A1n=20Mizsei?= <zmizsei@extrowerk.com>
+Date: Sun, 9 Dec 2018 11:23:46 +0100
+Subject: Wormux: preliminary patches, based on AUR
+
+
+diff --git a/configure.ac b/configure.ac
+index a799477..8f03e6f 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -43,8 +43,6 @@ if test "x$cxx_present" != "xyes"; then
+   AC_MSG_ERROR([*** No C++ compiler can be found!])
+ fi
+ 
+-AX_CFLAGS_WARN_ALL([CXXFLAGS])
+-
+ # ==========================================================================
+ # == Set flags for various environments                                    =
+ # ==========================================================================
+@@ -306,6 +304,10 @@ dnl === Check for curl =====================================================
+ 
+ LIBCURL_CHECK_CONFIG([yes],[7.0],[check_curl=yes],[check_curl=no])
+ 
++dnl === Check for socket ===================================================
++
++AC_CHECK_LIB(network, socket)
++
+ dnl === Check for libosso ==================================================
+ 
+ AC_ARG_ENABLE(maemo, AC_HELP_STRING([--enable-maemo], [enable Maemo support]) )
+diff --git a/lib/warmux/action/action.cpp b/lib/warmux/action/action.cpp
+index 657a893..c94a521 100644
+--- a/lib/warmux/action/action.cpp
++++ b/lib/warmux/action/action.cpp
+@@ -81,7 +81,7 @@ Action::~Action()
+ }
+ 
+ // Build an action from a network packet
+-Action::Action(const char *buffer, DistantComputer* _creator)
++Action::Action(char *buffer, DistantComputer* _creator)
+ {
+   m_creator = _creator;
+ 
+diff --git a/lib/warmux/include/WARMUX_action.h b/lib/warmux/include/WARMUX_action.h
+index 2206429..3bd4f1d 100644
+--- a/lib/warmux/include/WARMUX_action.h
++++ b/lib/warmux/include/WARMUX_action.h
+@@ -168,7 +168,7 @@ public:
+   Action(Action_t type, Double value1, Double value2);
+ 
+   // Build an action from a network packet
+-  Action(const char* buffer, DistantComputer* _creator);
++  Action(char* buffer, DistantComputer* _creator);
+ 
+   ~Action();
+ 
+diff --git a/lib/warmux/net/download.cpp b/lib/warmux/net/download.cpp
+index bd36d3b..5ffd05d 100644
+--- a/lib/warmux/net/download.cpp
++++ b/lib/warmux/net/download.cpp
+@@ -47,24 +47,24 @@ Downloader::Downloader()
+ #endif
+ 
+   curl = curl_easy_init();
+-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, download_callback);
++  curl_easy_setopt((CURL*)curl, CURLOPT_WRITEFUNCTION, download_callback);
+   curl_error_buf = new char[CURL_ERROR_SIZE];
+-  curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, curl_error_buf);
+-  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1);
++  curl_easy_setopt((CURL*)curl, CURLOPT_ERRORBUFFER, curl_error_buf);
++  curl_easy_setopt((CURL*)curl, CURLOPT_FOLLOWLOCATION, 1);
+ }
+ 
+ Downloader::~Downloader()
+ {
+-  curl_easy_cleanup(curl);
++  curl_easy_cleanup((CURL*)curl);
+   curl_global_cleanup();
+   delete[] curl_error_buf;
+ }
+ 
+ bool Downloader::Get(const char* url, FILE* file)
+ {
+-  curl_easy_setopt(curl, CURLOPT_FILE, file);
+-  curl_easy_setopt(curl, CURLOPT_URL, url);
+-  CURLcode r = curl_easy_perform(curl);
++  curl_easy_setopt((CURL*)curl, CURLOPT_FILE, file);
++  curl_easy_setopt((CURL*)curl, CURLOPT_URL, url);
++  CURLcode r = curl_easy_perform((CURL*)curl);
+   fflush(file);
+ 
+   if (r == CURLE_OK)
+diff --git a/lib/warmux/tools/file_tools.cpp b/lib/warmux/tools/file_tools.cpp
+index 9b9062e..50961b3 100644
+--- a/lib/warmux/tools/file_tools.cpp
++++ b/lib/warmux/tools/file_tools.cpp
+@@ -298,6 +298,7 @@ FolderSearch* OpenFolder(const std::string& dirname)
+ 
+ const char* FolderSearchNext(FolderSearch *f, bool& file)
+ {
++#ifndef __HAIKU__
+   while ((f->file = readdir(f->dir)) != NULL) {
+ 
+ #ifdef __SYMBIAN32__
+@@ -328,6 +329,7 @@ const char* FolderSearchNext(FolderSearch *f, bool& file)
+     // Not something we like, so skip it
+   }
+   return NULL;
++#endif
+ }
+ 
+ void CloseFolder(FolderSearch *f)
+diff --git a/src/graphic/surface.cpp b/src/graphic/surface.cpp
+index 3452665..9d86b90 100644
+--- a/src/graphic/surface.cpp
++++ b/src/graphic/surface.cpp
+@@ -29,6 +29,10 @@
+ #include "graphic/surface.h"
+ #include "tool/math_tools.h"
+ 
++#ifndef Z_BEST_COMPRESSION
++#  include <zlib.h>
++#endif
++
+ /* texturedPolygon import from SDL_gfx v2.0.15 */
+ #if (SDL_GFXPRIMITIVES_MAJOR == 2) && (SDL_GFXPRIMITIVES_MINOR == 0) && (SDL_GFXPRIMITIVES_MICRO < 14)
+ #include "graphic/textured_polygon.h"
+diff --git a/src/interface/weapon_menu.cpp b/src/interface/weapon_menu.cpp
+index 8487f52..c852588 100644
+--- a/src/interface/weapon_menu.cpp
++++ b/src/interface/weapon_menu.cpp
+@@ -391,7 +391,7 @@ void WeaponsMenu::Draw()
+ Weapon * WeaponsMenu::UpdateCurrentOverflyItem(const Polygon * poly)
+ {
+   if (!show)
+-    return false;
++    return NULL;
+   const std::vector<PolygonItem *>& items = poly->GetItem();
+   WeaponMenuItem * tmp;
+   Interface::GetInstance()->SetCurrentOverflyWeapon(NULL);
+diff --git a/tools/list_games/main.cpp b/tools/list_games/main.cpp
+index 46496aa..aee5c08 100644
+--- a/tools/list_games/main.cpp
++++ b/tools/list_games/main.cpp
+@@ -1,5 +1,6 @@
+ #include <stdio.h>
+ #include <getopt.h>
++#include <unistd.h>
+ #include <WARMUX_types.h>
+ #include <WARMUX_network.h>
+ #include <WARMUX_index_server.h>
+-- 
+2.19.1
