@@ -1,0 +1,603 @@
+From 0a6f6a4449906a71fc1e1a80be4248e2126f4583 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Zolt=C3=A1n=20Mizsei?= <zmizsei@extrowerk.com>
+Date: Mon, 24 Dec 2018 17:42:35 +0100
+Subject: Applied patches
+
+
+diff --git a/configure.in b/configure.in
+index c1bc8ca..b19e7d7 100644
+--- a/configure.in
++++ b/configure.in
+@@ -64,6 +64,7 @@ case $host_os in
+ dragonfly*) template=netbsd ;;
+  freebsd*) template=freebsd ;;
+     hpux*) template=hpux ;;
++    haiku*) template=haiku ;;
+  linux*|gnu*|k*bsd*-gnu)
+            template=linux ;;
+    mingw*) template=win32 ;;
+@@ -1126,8 +1127,8 @@ AC_SUBST(PTHREAD_LIBS)
+ 
+ AC_CHECK_LIB(m, main)
+ AC_SEARCH_LIBS(setproctitle, util)
+-AC_SEARCH_LIBS(dlopen, dl)
+-AC_SEARCH_LIBS(socket, [socket ws2_32])
++AC_SEARCH_LIBS(dlopen, [rt root])
++AC_SEARCH_LIBS(socket, [socket ws2_32 network])
+ AC_SEARCH_LIBS(shl_load, dld)
+ # We only use libld in port/dynloader/aix.c
+ case $host_os in
+@@ -1137,16 +1138,16 @@ case $host_os in
+ esac
+ AC_SEARCH_LIBS(getopt_long, [getopt gnugetopt])
+ AC_SEARCH_LIBS(crypt, crypt)
+-AC_SEARCH_LIBS(shm_open, rt)
+-AC_SEARCH_LIBS(shm_unlink, rt)
+-AC_SEARCH_LIBS(clock_gettime, [rt posix4])
++AC_SEARCH_LIBS(shm_open, [rt root])
++AC_SEARCH_LIBS(shm_unlink, [rt root])
++AC_SEARCH_LIBS(clock_gettime, [rt posix4 root])
+ # Solaris:
+ AC_SEARCH_LIBS(fdatasync, [rt posix4])
+ # Required for thread_test.c on Solaris
+ AC_SEARCH_LIBS(sched_yield, rt)
+ # Required for thread_test.c on Solaris 2.5:
+ # Other ports use it too (HP-UX) so test unconditionally
+-AC_SEARCH_LIBS(gethostbyname_r, nsl)
++AC_SEARCH_LIBS(gethostbyname_r, [nsl network])
+ # Cygwin:
+ AC_SEARCH_LIBS(shmget, cygipc)
+ 
+@@ -1963,7 +1964,10 @@ AC_DEFINE_UNQUOTED(MAXIMUM_ALIGNOF, $MAX_ALIGNOF, [Define as the maximum alignme
+ # Some platforms predefine the types int8, int16, etc.  Only check
+ # a (hopefully) representative subset.
+ AC_CHECK_TYPES([int8, uint8, int64, uint64], [], [],
+-[#include <stdio.h>])
++[#include <stdio.h>
++#ifdef __HAIKU__
++#include <SupportDefs.h>
++#endif])
+ 
+ # Some compilers offer a 128-bit integer scalar type.
+ PGAC_TYPE_128BIT_INT
+diff --git a/src/Makefile.global.in b/src/Makefile.global.in
+index bc78186..a5ae322 100644
+--- a/src/Makefile.global.in
++++ b/src/Makefile.global.in
+@@ -698,6 +698,20 @@ endif
+ # Not really standard libc functions, used by the backend.
+ TAS         = @TAS@
+ 
++##########################################################################
++#
++# Packaging on Haiku puts everything in a postgresql directory
++# Force the override into postgresql directory
++
++ifndef PGXS
++ifeq ($(PORTNAME), haiku)
++override datadir := $(datadir)/postgresql
++override sysconfdir := $(sysconfdir)/postgresql
++override pkglibdir := $(pkglibdir)/postgresql
++override pkgincludedir := $(pkgincludedir)/postgresql
++override docdir := $(docdir)/postgresql
++endif
++endif
+ 
+ ##########################################################################
+ #
+diff --git a/src/Makefile.shlib b/src/Makefile.shlib
+index 63d5d9e..5c39d89 100644
+--- a/src/Makefile.shlib
++++ b/src/Makefile.shlib
+@@ -268,6 +268,12 @@ ifeq ($(PORTNAME), win32)
+   haslibarule   = yes
+ endif
+ 
++ifeq ($(PORTNAME), haiku)
++  ifdef SO_MAJOR_VERSION
++    shlib		= lib$(NAME)$(DLSUFFIX)
++  endif
++  LINK.shared = $(CC) -shared
++endif
+ 
+ 
+ ##
+@@ -296,6 +302,7 @@ endif #haslibarule
+ 
+ 
+ ifeq (,$(filter cygwin win32,$(PORTNAME)))
++ifneq ($(PORTNAME), haiku)
+ ifneq ($(PORTNAME), aix)
+ 
+ # Normal case
+@@ -346,6 +353,14 @@ $(shlib): $(OBJS) | $(SHLIB_PREREQS)
+ 
+ endif # PORTNAME == aix
+ 
++else # PORTNAME == haiku
++
++# Haiku case
++$(shlib): $(OBJS)
++	$(LINK.shared) $(LDFLAGS_SL) -o $@ $(OBJS) $(SHLIB_LINK)
++
++endif # PORTNAME == haiku
++
+ else # PORTNAME == cygwin || PORTNAME == win32
+ 
+ ifeq ($(PORTNAME), cygwin)
+diff --git a/src/backend/catalog/dependency.c b/src/backend/catalog/dependency.c
+index 4f1d365..2ec386f 100644
+--- a/src/backend/catalog/dependency.c
++++ b/src/backend/catalog/dependency.c
+@@ -1005,7 +1005,7 @@ reportDependentObjects(const ObjectAddresses *targetObjects,
+  * *depRel is the already-open pg_depend relation.
+  */
+ static void
+-deleteOneObject(const ObjectAddress *object, Relation *depRel, int flags)
++deleteOneObject(const ObjectAddress *object, Relation *depRel, int32 flags)
+ {
+ 	ScanKeyData key[3];
+ 	int			nkeys;
+diff --git a/src/backend/executor/nodeMergeAppend.c b/src/backend/executor/nodeMergeAppend.c
+index 8dd05c1..29ce264 100644
+--- a/src/backend/executor/nodeMergeAppend.c
++++ b/src/backend/executor/nodeMergeAppend.c
+@@ -51,7 +51,7 @@
+ typedef int32 SlotNumber;
+ 
+ static TupleTableSlot *ExecMergeAppend(PlanState *pstate);
+-static int	heap_compare_slots(Datum a, Datum b, void *arg);
++static int32	heap_compare_slots(Datum a, Datum b, void *arg);
+ 
+ 
+ /* ----------------------------------------------------------------
+diff --git a/src/backend/main/main.c b/src/backend/main/main.c
+index 38853e3..b505e2a 100644
+--- a/src/backend/main/main.c
++++ b/src/backend/main/main.c
+@@ -385,7 +385,7 @@ help(const char *progname)
+ static void
+ check_root(const char *progname)
+ {
+-#ifndef WIN32
++#if !defined(WIN32) && !defined(__HAIKU__)
+ 	if (geteuid() == 0)
+ 	{
+ 		write_stderr("\"root\" execution of the PostgreSQL server is not permitted.\n"
+@@ -409,7 +409,7 @@ check_root(const char *progname)
+ 					 progname);
+ 		exit(1);
+ 	}
+-#else							/* WIN32 */
++#else							/* WIN32 or HAIKU */
+ 	if (pgwin32_is_admin())
+ 	{
+ 		write_stderr("Execution of PostgreSQL by a user with administrative permissions is not\n"
+@@ -419,5 +419,5 @@ check_root(const char *progname)
+ 					 "more information on how to properly start the server.\n");
+ 		exit(1);
+ 	}
+-#endif							/* WIN32 */
++#endif							/* WIN32 or HAIKU */
+ }
+diff --git a/src/backend/port/Makefile b/src/backend/port/Makefile
+index aba1e92..51536e1 100644
+--- a/src/backend/port/Makefile
++++ b/src/backend/port/Makefile
+@@ -27,6 +27,10 @@ ifeq ($(PORTNAME), win32)
+ SUBDIRS += win32
+ endif
+ 
++ifeq ($(PORTNAME), haiku)
++SUBDIRS += haiku
++endif
++
+ include $(top_srcdir)/src/backend/common.mk
+ 
+ tas.o: tas.s
+diff --git a/src/backend/port/dynloader/haiku.c b/src/backend/port/dynloader/haiku.c
+new file mode 100644
+index 0000000..db24966
+--- /dev/null
++++ b/src/backend/port/dynloader/haiku.c
+@@ -0,0 +1,6 @@
++/* src/backend/port/dynloader/haiku.c */
++
++/* Dummy file used for nothing at this point
++ *
++ * see haiku.h
++ */
+diff --git a/src/backend/port/dynloader/haiku.h b/src/backend/port/dynloader/haiku.h
+new file mode 100644
+index 0000000..61ffb51
+--- /dev/null
++++ b/src/backend/port/dynloader/haiku.h
+@@ -0,0 +1,33 @@
++/*-------------------------------------------------------------------------
++ *
++ * haiku.h
++ *	  port-specific prototypes for Haiku
++ *
++ *
++ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
++ * Portions Copyright (c) 1994, Regents of the University of California
++ *
++ * src/backend/port/dynloader/haiku.h
++ *
++ *-------------------------------------------------------------------------
++ */
++#ifndef PORT_PROTOS_H
++#define PORT_PROTOS_H
++
++#include <dlfcn.h>
++#include "utils/dynamic_loader.h"		/* pgrminclude ignore */
++
++/*
++ * Dynamic Loader on Haiku.
++ *
++ * this dynamic loader uses the system dynamic loading interface for shared
++ * libraries (ie. dlopen/dlsym/dlclose). The user must specify a shared
++ * library as the file to be dynamically loaded.
++ */
++
++#define pg_dlopen(f)	dlopen((f), RTLD_NOW | RTLD_GLOBAL)
++#define pg_dlsym		dlsym
++#define pg_dlclose		dlclose
++#define pg_dlerror		dlerror
++
++#endif   /* PORT_PROTOS_H */
+diff --git a/src/backend/port/haiku/Makefile b/src/backend/port/haiku/Makefile
+new file mode 100644
+index 0000000..f0664c0
+--- /dev/null
++++ b/src/backend/port/haiku/Makefile
+@@ -0,0 +1,14 @@
++#-------------------------------------------------------------------------
++#
++# Makefile--
++#    Makefile for port/haiku
++#
++#-------------------------------------------------------------------------
++
++subdir = src/backend/port/haiku
++top_builddir = ../../../..
++include $(top_builddir)/src/Makefile.global
++
++OBJS = shm.o
++
++include $(top_srcdir)/src/backend/common.mk
+diff --git a/src/backend/port/haiku/shm.c b/src/backend/port/haiku/shm.c
+new file mode 100644
+index 0000000..55a9dc7
+--- /dev/null
++++ b/src/backend/port/haiku/shm.c
+@@ -0,0 +1,144 @@
++/*-------------------------------------------------------------------------
++ *
++ * shm.c
++ *	  Haiku System V Shared Memory Emulation
++ *
++ * Copyright (c) 1999-2001, Cyril VELTER
++ *
++ *-------------------------------------------------------------------------
++ */
++
++#include <OS.h>
++#include "postgres.h"
++#include <errno.h>
++#include <sys/ipc.h>
++
++/* Emulating SYS shared memory with beos areas. WARNING : fork clone
++areas in copy on write mode */
++
++/* Detach from a shared mem area based on its address */
++int
++shmdt(char *shmaddr)
++{
++	/* Find area id for this address */
++	area_id		s;
++
++	s = area_for(shmaddr);
++
++	/* Delete area */
++	return delete_area(s);
++}
++
++/* Attach to an existing area */
++int *
++shmat(int memId, int m1, int m2)
++{
++	/* Get our team id */
++	thread_info thinfo;
++	team_info	teinfo;
++	area_info	ainfo;
++
++	get_thread_info(find_thread(NULL), &thinfo);
++	get_team_info(thinfo.team, &teinfo);
++
++	/* Get area teamid */
++	if (get_area_info(memId, &ainfo) != B_OK)
++		printf("AREA %d Invalide\n", memId);
++
++	if (ainfo.team == teinfo.team)
++	{
++		/*
++		 * the area is already in our address space, just return the address
++		 */
++		return (int *) ainfo.address;
++	}
++	else
++	{
++		/*
++		 * the area is not in our address space, clone it before and return
++		 * the address
++		 */
++		area_id		narea;
++
++		narea = clone_area(ainfo.name, &(ainfo.address), B_CLONE_ADDRESS, B_READ_AREA | B_WRITE_AREA, memId);
++		get_area_info(narea, &ainfo);
++		return (int *) ainfo.address;
++	}
++}
++
++/* Control a shared mem area */
++int
++shmctl(int shmid, int flag, struct shmid_ds * dummy)
++{
++	if (flag == IPC_RMID)
++	{
++		/* Delete the area */
++		delete_area(shmid);
++		return 0;
++	}
++	if (flag == IPC_STAT)
++	{
++		/* Find any SYSV area with the shmid in its name */
++
++		area_info	inf;
++		team_info	infteam;
++		int32		cookteam = 0;
++		char		name[50];
++
++		sprintf(name, "SYSV_IPC %d", shmid);
++
++		dummy->shm_nattch = 0;
++
++		while (get_next_team_info(&cookteam, &infteam) == B_OK)
++		{
++			int32		cook = 0;
++
++			while (get_next_area_info(infteam.team, &cook, &inf) == B_OK)
++			{
++				if (strcmp(name, inf.name) == 0)
++					dummy->shm_nattch++;
++			}
++		}
++
++		errno = 0;
++		return 0;
++	}
++	errno = EINVAL;
++	return -1;
++}
++
++/* Get an area based on the IPC key */
++int
++shmget(int memKey, int size, int flag)
++{
++	char		nom[50];
++	void	   *Address;
++	area_id		parea;
++	area_id     original;
++	area_id     clone;
++
++	/* Area name */
++	sprintf(nom, "SYSV_IPC_SHM : %d", memKey);
++
++	/* Find area */
++	parea = find_area(nom);
++
++	/* area exist, just return its id */
++	if (parea != B_NAME_NOT_FOUND)
++		return parea;
++
++	/* area does not exist and no creation is requested : error */
++	if (flag == 0)
++		return -1;
++
++	/*
++	 * area does not exist and its creation is requested, create it (be sure
++	 * to have a 4ko multiple size
++	 */
++	original = create_area(nom, &Address, B_ANY_ADDRESS, ((size / 4096) + 1) * 4096, B_NO_LOCK, B_READ_AREA | B_WRITE_AREA);
++
++	clone = clone_area(nom, &Address, B_CLONE_ADDRESS, B_READ_AREA | B_WRITE_AREA, original);
++
++	return original;
++
++}
+diff --git a/src/backend/tcop/postgres.c b/src/backend/tcop/postgres.c
+index 015d712..3c08b83 100644
+--- a/src/backend/tcop/postgres.c
++++ b/src/backend/tcop/postgres.c
+@@ -4533,7 +4533,7 @@ ShowUsage(const char *title)
+ 					 (long) user.tv_usec,
+ 					 (long) sys.tv_sec,
+ 					 (long) sys.tv_usec);
+-#if defined(HAVE_GETRUSAGE)
++#if defined(HAVE_GETRUSAGE) && !defined(__HAIKU__)
+ 	appendStringInfo(&str,
+ 					 "!\t%ld kB max resident size\n",
+ #if defined(__darwin__)
+diff --git a/src/backend/tsearch/ts_parse.c b/src/backend/tsearch/ts_parse.c
+index 7b69ef5..0cbf354 100644
+--- a/src/backend/tsearch/ts_parse.c
++++ b/src/backend/tsearch/ts_parse.c
+@@ -355,7 +355,7 @@ LexizeExec(LexizeData *ld, ParsedLex **correspondLexem)
+  * prs will be filled in.
+  */
+ void
+-parsetext(Oid cfgId, ParsedText *prs, char *buf, int buflen)
++parsetext(Oid cfgId, ParsedText *prs, char *buf, int32 buflen)
+ {
+ 	int			type,
+ 				lenlemm;
+@@ -530,7 +530,7 @@ addHLParsedLex(HeadlineParsedText *prs, TSQuery query, ParsedLex *lexs, TSLexeme
+ }
+ 
+ void
+-hlparsetext(Oid cfgId, HeadlineParsedText *prs, TSQuery query, char *buf, int buflen)
++hlparsetext(Oid cfgId, HeadlineParsedText *prs, TSQuery query, char *buf, int32 buflen)
+ {
+ 	int			type,
+ 				lenlemm;
+diff --git a/src/backend/utils/adt/tsquery_cleanup.c b/src/backend/utils/adt/tsquery_cleanup.c
+index c146376..e6e5569 100644
+--- a/src/backend/utils/adt/tsquery_cleanup.c
++++ b/src/backend/utils/adt/tsquery_cleanup.c
+@@ -186,7 +186,7 @@ clean_NOT_intree(NODE *node)
+ }
+ 
+ QueryItem *
+-clean_NOT(QueryItem *ptr, int *len)
++clean_NOT(QueryItem *ptr, int32 *len)
+ {
+ 	NODE	   *root = maketree(ptr);
+ 
+diff --git a/src/bin/initdb/initdb.c b/src/bin/initdb/initdb.c
+index a9bbc89..42d198c 100644
+--- a/src/bin/initdb/initdb.c
++++ b/src/bin/initdb/initdb.c
+@@ -660,7 +660,7 @@ get_id(void)
+ {
+ 	const char *username;
+ 
+-#ifndef WIN32
++#if !defined(WIN32) && !defined(__HAIKU__)
+ 	if (geteuid() == 0)			/* 0 is root's uid */
+ 	{
+ 		fprintf(stderr,
+diff --git a/src/bin/pg_ctl/pg_ctl.c b/src/bin/pg_ctl/pg_ctl.c
+index ed2396a..9cc65ae 100644
+--- a/src/bin/pg_ctl/pg_ctl.c
++++ b/src/bin/pg_ctl/pg_ctl.c
+@@ -2193,7 +2193,7 @@ main(int argc, char **argv)
+ 	/*
+ 	 * Disallow running as root, to forestall any possible security holes.
+ 	 */
+-#ifndef WIN32
++#if !defined(WIN32) && !defined(__HAIKU__)
+ 	if (geteuid() == 0)
+ 	{
+ 		write_stderr(_("%s: cannot be run as root\n"
+diff --git a/src/include/c.h b/src/include/c.h
+index 6b5e717..702087d 100644
+--- a/src/include/c.h
++++ b/src/include/c.h
+@@ -55,6 +55,11 @@
+ #include "pg_config_manual.h"	/* must be after pg_config.h */
+ #include "pg_config_os.h"		/* must be before any system header files */
+ 
++#if defined(__HAIKU__)
++// Haiku defines int (int8, int64, etc) types in SupportDefs.h
++#include <SupportDefs.h>
++#endif
++
+ /* System header files that should be available everywhere in Postgres */
+ #include <stdio.h>
+ #include <stdlib.h>
+diff --git a/src/include/pg_config_manual.h b/src/include/pg_config_manual.h
+index 14336ac..bbae921 100644
+--- a/src/include/pg_config_manual.h
++++ b/src/include/pg_config_manual.h
+@@ -119,7 +119,7 @@
+ /*
+  * Define this if your operating system supports link()
+  */
+-#if !defined(WIN32) && !defined(__CYGWIN__)
++#if !defined(WIN32) && !defined(__CYGWIN__) && !defined(__HAIKU__)
+ #define HAVE_WORKING_LINK 1
+ #endif
+ 
+diff --git a/src/include/port/haiku.h b/src/include/port/haiku.h
+new file mode 100644
+index 0000000..772a3fe
+--- /dev/null
++++ b/src/include/port/haiku.h
+@@ -0,0 +1,16 @@
++/* src/include/port/haiku.h */
++
++/* Haiku doesn't have all the required getrusage fields */
++//#undef HAVE_GETRUSAGE
++
++/* Haiku doesn't implement shared memory as needed*/
++struct shmid_ds
++{
++	int			dummy;
++	int			shm_nattch;
++};
++
++int			shmdt(char *shmaddr);
++int		   *shmat(int memId, int m1, int m2);
++int			shmctl(int shmid, int flag, struct shmid_ds * dummy);
++int			shmget(int memKey, int size, int flag);
+diff --git a/src/include/storage/dsm_impl.h b/src/include/storage/dsm_impl.h
+index 0e5730f..9d2018e 100644
+--- a/src/include/storage/dsm_impl.h
++++ b/src/include/storage/dsm_impl.h
+@@ -32,10 +32,12 @@
+ #define USE_DSM_POSIX
+ #define DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE		DSM_IMPL_POSIX
+ #endif
++#ifndef __HAIKU__
+ #define USE_DSM_SYSV
+ #ifndef DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE
+ #define DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE		DSM_IMPL_SYSV
+ #endif
++#endif
+ #define USE_DSM_MMAP
+ #endif
+ 
+diff --git a/src/makefiles/Makefile.haiku b/src/makefiles/Makefile.haiku
+new file mode 100644
+index 0000000..249d6c3
+--- /dev/null
++++ b/src/makefiles/Makefile.haiku
+@@ -0,0 +1,7 @@
++AROPT = crs
++
++DLSUFFIX = .so
++
++# Rule for building a shared library from a single .o file
++%.so: %.o
++	$(CC) $(CFLAGS) $(LDFLAGS) $(LDFLAGS_SL) -shared -o $@ $<
+diff --git a/src/template/haiku b/src/template/haiku
+new file mode 100644
+index 0000000..e69de29
+-- 
+2.19.1
+
+
+From 1f594356d989fcee542518915b01029d8a3b469c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Zolt=C3=A1n=20Mizsei?= <zmizsei@extrowerk.com>
+Date: Mon, 24 Dec 2018 18:19:05 +0100
+Subject: Build fix
+
+
+diff --git a/src/backend/main/main.c b/src/backend/main/main.c
+index b505e2a..f782c33 100644
+--- a/src/backend/main/main.c
++++ b/src/backend/main/main.c
+@@ -409,6 +409,9 @@ check_root(const char *progname)
+ 					 progname);
+ 		exit(1);
+ 	}
++#elif defined(__HAIKU__)
++	{
++	}
+ #else							/* WIN32 or HAIKU */
+ 	if (pgwin32_is_admin())
+ 	{
+-- 
+2.19.1
+
