@@ -1,0 +1,301 @@
+From 42e2e54e9cfc5dd3f2007256ff679278a97a1847 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 24 Feb 2019 14:47:42 +1000
+Subject: Fix build for Haiku
+
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index d635aee..e9a0268 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -904,6 +904,14 @@ optional_source(WIN32
+     ${CMAKE_SOURCE_DIR}/3rdparty/tinysvcmdns
+ )
+ 
++# Platform specific - Haiku
++optional_source(HAIKU
++  SOURCES
++    widgets/osd_win.cpp
++  INCLUDE_DIRECTORIES
++    ${CMAKE_SOURCE_DIR}/3rdparty/tinysvcmdns
++)
++
+ # Platform specific - X11
+ optional_source(HAVE_X11 SOURCES widgets/osd_x11.cpp)
+ 
+@@ -1357,7 +1365,7 @@ if (WIN32)
+   )
+ endif (WIN32)
+ 
+-if (UNIX AND NOT APPLE)
++if (UNIX AND NOT APPLE AND NOT HAIKU)
+   # Hack: the Gold linker pays attention to the order that libraries are
+   # specified on the link line.  -lX11 and -ldl are provided earlier in the link
+   # command but they're actually used by libraries that appear after them, so
+diff --git a/src/core/qxtglobalshortcutbackend.cpp b/src/core/qxtglobalshortcutbackend.cpp
+index c04e41d..485a286 100644
+--- a/src/core/qxtglobalshortcutbackend.cpp
++++ b/src/core/qxtglobalshortcutbackend.cpp
+@@ -19,7 +19,9 @@
+ 
+ #include "globalshortcuts.h"
+ #include "qxtglobalshortcutbackend.h"
++#ifndef Q_OS_HAIKU
+ #include "qxtglobalshortcut.h"
++#endif
+ #include "core/logging.h"
+ 
+ #include <QAction>
+@@ -29,24 +31,29 @@ QxtGlobalShortcutBackend::QxtGlobalShortcutBackend(GlobalShortcuts* parent)
+     : GlobalShortcutBackend(parent) {}
+ 
+ bool QxtGlobalShortcutBackend::DoRegister() {
++#ifndef Q_OS_HAIKU
+   qLog(Debug) << "registering";
+   for (const GlobalShortcuts::Shortcut& shortcut :
+        manager_->shortcuts().values()) {
+     AddShortcut(shortcut.action);
+   }
+-
++#endif
+   return true;
+ }
+ 
+ void QxtGlobalShortcutBackend::AddShortcut(QAction* action) {
++#ifndef Q_OS_HAIKU
+   if (action->shortcut().isEmpty()) return;
+   QxtGlobalShortcut* shortcut = new QxtGlobalShortcut(action->shortcut(), this);
+   connect(shortcut, SIGNAL(activated()), action, SLOT(trigger()));
+   shortcuts_ << shortcut;
++#endif
+ }
+ 
+ void QxtGlobalShortcutBackend::DoUnregister() {
++#ifndef Q_OS_HAIKU
+   qLog(Debug) << "unregistering";
+   qDeleteAll(shortcuts_);
+   shortcuts_.clear();
++#endif
+ }
+diff --git a/src/main.cpp b/src/main.cpp
+index 0ee7a8f..88e6f7c 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -488,5 +488,9 @@ int main(int argc, char* argv[]) {
+   }
+ #endif
+ 
++#ifdef Q_OS_HAIKU
++  kill(::getpid(), SIGKILL);
++#endif
++
+   return ret;
+ }
+-- 
+2.19.1
+
+
+From 207f5027997897cda2b0c1eba92e71f2c9899a87 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 24 Feb 2019 15:11:18 +1000
+Subject: Disable qxt and x11
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 657efdb..abda86b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -46,7 +46,7 @@ find_package(PkgConfig REQUIRED)
+ find_package(Protobuf REQUIRED)
+ find_package(FFTW3)
+ find_package(ALSA)
+-if (NOT APPLE)
++if (NOT APPLE AND NOT HAIKU)
+   find_package(X11)
+ endif()
+ if(X11_FOUND)
+@@ -395,6 +395,7 @@ if(NOT QTIOCOMPRESSOR_INCLUDE_DIRS OR NOT QTIOCOMPRESSOR_LIBRARIES)
+   set(QTIOCOMPRESSOR_LIBRARIES qtiocompressor)
+ endif(NOT QTIOCOMPRESSOR_INCLUDE_DIRS OR NOT QTIOCOMPRESSOR_LIBRARIES)
+ 
++if (NOT HAIKU)
+ # When/if upstream accepts our or reimplement our patches then these options can be
+ # used to link to system installed qxt instead.
+ option(USE_SYSTEM_QXT "Don't set this option unless your system Qxt library has been compiled with the Clementine patches in 3rdparty" OFF)
+@@ -412,6 +413,7 @@ else (USE_SYSTEM_QXT)
+     add_subdirectory(3rdparty/qxt)
+   endif (NOT APPLE)
+ endif (USE_SYSTEM_QXT)
++endif (NOT HAIKU)
+ 
+ # Use system gmock if it's available
+ # We need to look for both gmock and gtest
+-- 
+2.19.1
+
+
+From edd7d6fdc02d45a998cafd84a8a0927df1e6d47a Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 24 Feb 2019 16:01:04 +1000
+Subject: disable backtrace_symbols for haiku
+
+
+diff --git a/ext/libclementine-common/core/logging.cpp b/ext/libclementine-common/core/logging.cpp
+index 9aa1319..e148298 100644
+--- a/ext/libclementine-common/core/logging.cpp
++++ b/ext/libclementine-common/core/logging.cpp
+@@ -254,7 +254,7 @@ QString DemangleSymbol(const QString& symbol) {
+ }
+ 
+ void DumpStackTrace() {
+-#ifdef Q_OS_UNIX
++#if defined(Q_OS_UNIX) && !defined(Q_OS_HAIKU)
+   void* callstack[128];
+   int callstack_size =
+       backtrace(reinterpret_cast<void**>(&callstack), sizeof(callstack));
+-- 
+2.19.1
+
+
+From 137ec8ac22ca7a7a6c5797fddd4c8a9b36bba95f Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 24 Feb 2019 16:36:40 +1000
+Subject: Fix settings paths
+
+
+diff --git a/src/core/utilities.cpp b/src/core/utilities.cpp
+index fe106e2..58a80b9 100644
+--- a/src/core/utilities.cpp
++++ b/src/core/utilities.cpp
+@@ -346,6 +346,9 @@ QString GetConfigPath(ConfigPath config) {
+ #ifdef Q_OS_DARWIN
+       return mac::GetApplicationSupportPath() + "/" +
+              QCoreApplication::organizationName();
++#elif defined(Q_OS_HAIKU)
++      return QString("%1/config/settings/%2")
++          .arg(QDir::homePath(), QCoreApplication::organizationName());
+ #else
+       return QString("%1/.config/%2")
+           .arg(QDir::homePath(), QCoreApplication::organizationName());
+@@ -356,7 +359,7 @@ QString GetConfigPath(ConfigPath config) {
+       if (Application::kIsPortable) {
+         return GetConfigPath(Path_Root) + "/cache";
+       }
+-#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN)
++#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_HAIKU)
+       char* xdg = getenv("XDG_CACHE_HOME");
+       if (!xdg || !*xdg) {
+         return QString("%1/.cache/%2")
+-- 
+2.19.1
+
+
+From a5588095c9fc11c4d67606c9817bcaaad1aee6e3 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 24 Feb 2019 17:39:21 +1000
+Subject: Tune default settings for Haiku
+
+
+diff --git a/src/library/librarysettingspage.cpp b/src/library/librarysettingspage.cpp
+index afb73df..763fb11 100644
+--- a/src/library/librarysettingspage.cpp
++++ b/src/library/librarysettingspage.cpp
+@@ -132,7 +132,7 @@ void LibrarySettingsPage::Load() {
+ 
+   s.beginGroup(LibraryWatcher::kSettingsGroup);
+   ui_->startup_scan->setChecked(s.value("startup_scan", true).toBool());
+-  ui_->monitor->setChecked(s.value("monitor", true).toBool());
++  ui_->monitor->setChecked(s.value("monitor", false).toBool());
+ 
+   QStringList filters =
+       s.value("cover_art_patterns", QStringList() << "front"
+diff --git a/src/ui/appearancesettingspage.cpp b/src/ui/appearancesettingspage.cpp
+index 8cffb45..befbbca 100644
+--- a/src/ui/appearancesettingspage.cpp
++++ b/src/ui/appearancesettingspage.cpp
+@@ -108,7 +108,11 @@ void AppearanceSettingsPage::Load() {
+   current_background_color_ = original_background_color_;
+ 
+   InitColorSelectorsColors();
++#ifdef Q_OS_HAIKU
++  ui_->b_use_sys_icons->setChecked(s.value("b_use_sys_icons", true).toBool());
++#else
+   ui_->b_use_sys_icons->setChecked(s.value("b_use_sys_icons", false).toBool());
++#endif
+   ui_->b_hide_filter_toolbar->setChecked(s.value("b_hide_filter_toolbar",false).toBool());
+   s.endGroup();
+ 
+diff --git a/src/ui/iconloader.cpp b/src/ui/iconloader.cpp
+index f691504..857af19 100644
+--- a/src/ui/iconloader.cpp
++++ b/src/ui/iconloader.cpp
+@@ -38,7 +38,11 @@ void IconLoader::Init() {
+   icon_sub_path_ << "/icons" << "/providers" << "/last.fm" << "";
+   QSettings settings;
+   settings.beginGroup(Appearance::kSettingsGroup);
++#ifdef Q_OS_HAIKU
++  use_sys_icons_ = settings.value("b_use_sys_icons", true).toBool();
++#else
+   use_sys_icons_ = settings.value("b_use_sys_icons", false).toBool();
++#endif
+ }
+ 
+ QIcon IconLoader::Load(const QString& name, const IconType& icontype) {
+diff --git a/src/ui/notificationssettingspage.cpp b/src/ui/notificationssettingspage.cpp
+index a00eede..27d63b9 100644
+--- a/src/ui/notificationssettingspage.cpp
++++ b/src/ui/notificationssettingspage.cpp
+@@ -98,7 +98,9 @@ NotificationsSettingsPage::NotificationsSettingsPage(SettingsDialog* dialog)
+   if (!OSD::SupportsNativeNotifications())
+     ui_->notifications_native->setEnabled(false);
+   if (!OSD::SupportsTrayPopups()) ui_->notifications_tray->setEnabled(false);
+-
++#ifdef Q_OS_HAIKU
++  ui_->notifications_pretty->setEnabled(false);
++#endif
+   connect(ui_->notifications_pretty, SIGNAL(toggled(bool)),
+           SLOT(UpdatePopupVisible()));
+ 
+@@ -126,7 +128,11 @@ void NotificationsSettingsPage::Load() {
+ 
+   s.beginGroup(OSD::kSettingsGroup);
+   OSD::Behaviour osd_behaviour =
++#ifdef Q_OS_HAIKU
++      OSD::Behaviour(s.value("Behaviour", OSD::TrayPopup).toInt());
++#else
+       OSD::Behaviour(s.value("Behaviour", OSD::Native).toInt());
++#endif
+   switch (osd_behaviour) {
+     case OSD::Native:
+       if (OSD::SupportsNativeNotifications()) {
+@@ -171,6 +177,11 @@ void NotificationsSettingsPage::Load() {
+       ui_->notifications_pretty->isChecked());
+ #endif
+ 
++#ifdef Q_OS_HAIKU
++  ui_->notifications_options->setEnabled(
++      ui_->notifications_tray->isChecked());
++#endif
++
+   // Pretty OSD
+   pretty_popup_->ReloadSettings();
+   ui_->notifications_opacity->setValue(pretty_popup_->background_opacity() *
+diff --git a/src/widgets/osd.cpp b/src/widgets/osd.cpp
+index 77178a1..f5ec09c 100644
+--- a/src/widgets/osd.cpp
++++ b/src/widgets/osd.cpp
+@@ -64,7 +64,11 @@ OSD::~OSD() { delete pretty_popup_; }
+ void OSD::ReloadSettings() {
+   QSettings s;
+   s.beginGroup(kSettingsGroup);
++#ifdef Q_OS_HAIKU
++  behaviour_ = OSD::Behaviour(s.value("Behaviour", TrayPopup).toInt());
++#else
+   behaviour_ = OSD::Behaviour(s.value("Behaviour", Native).toInt());
++#endif
+   timeout_msec_ = s.value("Timeout", 5000).toInt();
+   show_on_volume_change_ = s.value("ShowOnVolumeChange", false).toBool();
+   show_art_ = s.value("ShowArt", true).toBool();
+-- 
+2.19.1
+
