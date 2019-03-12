@@ -1,0 +1,149 @@
+From c24f478eb03546f50db77bddd2ae522489df192f Mon Sep 17 00:00:00 2001
+From: Augustin Cavalier <waddlesplash@gmail.com>
+Date: Sat, 16 Sep 2017 12:25:48 +0200
+Subject: Add minimal Haiku support; based on Adrien's patch.
+
+
+diff --git a/configure.py b/configure.py
+index 78cd1de..febf5aa 100755
+--- a/configure.py
++++ b/configure.py
+@@ -56,6 +56,8 @@ class Platform(object):
+             self._platform = 'msvc'
+         elif self._platform.startswith('bitrig'):
+             self._platform = 'bitrig'
++        elif self._platform.startswith('haiku'):
++            self._platform = 'haiku'
+         elif self._platform.startswith('netbsd'):
+             self._platform = 'netbsd'
+         elif self._platform.startswith('aix'):
+@@ -67,7 +69,7 @@ class Platform(object):
+     def known_platforms():
+       return ['linux', 'darwin', 'freebsd', 'openbsd', 'solaris', 'sunos5',
+               'mingw', 'msvc', 'gnukfreebsd', 'bitrig', 'netbsd', 'aix',
+-              'dragonfly']
++              'dragonfly', 'haiku']
+ 
+     def platform(self):
+         return self._platform
+@@ -94,6 +96,9 @@ class Platform(object):
+     def is_solaris(self):
+         return self._platform == 'solaris'
+ 
++    def is_haiku(self):
++        return self._platform == 'is_haiku'
++
+     def is_aix(self):
+         return self._platform == 'aix'
+ 
+@@ -467,11 +472,7 @@ if platform.supports_ninja_browse():
+ 
+ n.comment('the depfile parser and ninja lexers are generated using re2c.')
+ def has_re2c():
+-    try:
+-        proc = subprocess.Popen(['re2c', '-V'], stdout=subprocess.PIPE)
+-        return int(proc.communicate()[0], 10) >= 1103
+-    except OSError:
+-        return False
++    return False
+ if has_re2c():
+     n.rule('re2c',
+            command='re2c -b -i --no-generation-date -o $out $in',
+diff --git a/src/util.cc b/src/util.cc
+index 47a5de2..792fd77 100644
+--- a/src/util.cc
++++ b/src/util.cc
+@@ -489,7 +489,7 @@ int GetProcessorCount() {
+ #endif
+ }
+ 
+-#if defined(_WIN32) || defined(__CYGWIN__)
++#if defined(_WIN32) || defined(__CYGWIN__) || defined(__HAIKU__)
+ static double CalculateProcessorLoad(uint64_t idle_ticks, uint64_t total_ticks)
+ {
+   static uint64_t previous_idle_ticks = 0;
+-- 
+2.19.1
+
+
+From 4b00ba24550aebb13dc4b1c472f4d5a9afd2eb32 Mon Sep 17 00:00:00 2001
+From: Michael Lotz <mmlr@mlotz.ch>
+Date: Sat, 16 Sep 2017 12:27:48 +0200
+Subject: Add include of sys/select.h to get FD_* definitions.
+
+Apparently these are pulled in by one of the already present headers
+on other platforms. A cursory look at the POSIX specs did not reveal
+a requirement to expose these types with the given headers though.
+
+diff --git a/src/subprocess-posix.cc b/src/subprocess-posix.cc
+index fc5543e..6fc9944 100644
+--- a/src/subprocess-posix.cc
++++ b/src/subprocess-posix.cc
+@@ -22,6 +22,7 @@
+ #include <unistd.h>
+ #include <stdio.h>
+ #include <string.h>
++#include <sys/select.h>
+ #include <sys/wait.h>
+ #include <spawn.h>
+ 
+-- 
+2.19.1
+
+
+From 14308098888664b2b423d336ff0bc423f1daf07a Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 16 Sep 2017 12:48:42 +0200
+Subject: GetLoadAvg to be implemented for Haiku
+
+
+diff --git a/src/util.cc b/src/util.cc
+index 792fd77..c2710d9 100644
+--- a/src/util.cc
++++ b/src/util.cc
+@@ -489,7 +489,7 @@ int GetProcessorCount() {
+ #endif
+ }
+ 
+-#if defined(_WIN32) || defined(__CYGWIN__) || defined(__HAIKU__)
++#if defined(_WIN32) || defined(__CYGWIN__)
+ static double CalculateProcessorLoad(uint64_t idle_ticks, uint64_t total_ticks)
+ {
+   static uint64_t previous_idle_ticks = 0;
+@@ -572,6 +572,10 @@ double GetLoadAverage() {
+     return -0.0f;
+   return 1.0 / (1 << SI_LOAD_SHIFT) * si.loads[0];
+ }
++#elif defined(__HAIKU__)
++double GetLoadAverage() {
++    return -0.0f;
++}
+ #else
+ double GetLoadAverage() {
+   double loadavg[3] = { 0.0f, 0.0f, 0.0f };
+-- 
+2.19.1
+
+
+From 45182e179ee1cd0de033b77b44a9589792c6efac Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 9 Mar 2019 17:29:05 +0100
+Subject: Haiku has st_mtim.
+
+
+diff --git a/src/disk_interface.cc b/src/disk_interface.cc
+index d4c2fb0..e9e727d 100644
+--- a/src/disk_interface.cc
++++ b/src/disk_interface.cc
+@@ -206,7 +206,7 @@ TimeStamp RealDiskInterface::Stat(const string& path, string* err) const {
+   return ((int64_t)st.st_mtimespec.tv_sec * 1000000000LL +
+           st.st_mtimespec.tv_nsec);
+ #elif (_POSIX_C_SOURCE >= 200809L || _XOPEN_SOURCE >= 700 || defined(_BSD_SOURCE) || defined(_SVID_SOURCE) || \
+-       defined(__BIONIC__) || (defined (__SVR4) && defined (__sun)) || defined(__FreeBSD__))
++       defined(__BIONIC__) || (defined (__SVR4) && defined (__sun)) || defined(__FreeBSD__) || defined(__HAIKU__))
+   // For glibc, see "Timestamp files" in the Notes of http://www.kernel.org/doc/man-pages/online/pages/man2/stat.2.html
+   // newlib, uClibc and musl follow the kernel (or Cygwin) headers and define the right macro values above.
+   // For bsd, see https://github.com/freebsd/freebsd/blob/master/sys/sys/stat.h and similar
+-- 
+2.19.1
+
