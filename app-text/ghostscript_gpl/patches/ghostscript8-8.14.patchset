@@ -1,4 +1,4 @@
-From e75e1d2f4bb9623cc7bd1c5d49521e7c0554d5be Mon Sep 17 00:00:00 2001
+From 54854058708ca5ce832673657d11740e438d1c06 Mon Sep 17 00:00:00 2001
 From: Adrien Destugues <pulkomandy@pulkomandy.tk>
 Date: Fri, 15 Mar 2019 08:17:45 +0100
 Subject: Fix build on Haiku using Unix makefiles.
@@ -45,6 +45,2710 @@ index 2570d69..8626ba4 100644
  	$(INSTALL_PROGRAM) $(BINDIR)/$(SOBINRELDIR)/$(GS_SONAME_MAJOR_MINOR) $(libdir)/$(GS_SONAME_MAJOR_MINOR)
  	$(RM_) $(libdir)/$(GS_SONAME)
  	ln -s $(GS_SONAME_MAJOR_MINOR) $(libdir)/$(GS_SONAME)
+-- 
+2.19.1
+
+
+From 5bd1c298bc8323529c3b4643a476985ae50e2f2a Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Fri, 15 Mar 2019 10:16:42 +0100
+Subject: Import the BeOS patches.
+
+
+diff --git a/src/contrib.mak b/src/contrib.mak
+index 2e868e3..bc889fb 100644
+--- a/src/contrib.mak
++++ b/src/contrib.mak
+@@ -122,6 +122,12 @@ CONTRIB_MAK=$(GLSRC)contrib.mak
+ #	mgr8	8-bit color MGR devices
+ #	sgirgb	SGI RGB pixmap format
+ #	sunhmono  Harlequin variant of 1-bit Sun raster file
++# BeOS:
++#	beos			BeOS standard non-anti-aliasing
++#	bealpha2		BeOS anti-aliasing device (2 bits for alpha channel)
++#	bealpha4		BeOS anti-aliasing device (4 bits for alpha channel)
++#	bealpht2		BeOS text only anti-aliasing device (2 bits for alpha channel)
++#	bealpht4		BeOS text only anti-aliasing device (4 bits for alpha channel)
+ 
+ # If you add drivers, it would be nice if you kept each list
+ # in alphabetical order.
+@@ -850,3 +856,27 @@ $(DD)sunhmono.dev : $(sunr_) $(DD)page.dev
+ $(GLOBJ)gdevsunr.$(OBJ) : $(GLSRC)gdevsunr.c $(PDEVH)
+ 	$(GLCC) $(GLO_)gdevsunr.$(OBJ) $(C_) $(GLSRC)gdevsunr.c
+ 
++### ------------------------ The BeOS devices ------------------------- ###
++### Note: these drivers are maintained by users:                        ###
++###       Original BeOS device by Jake Hamby, ported to GS 6.01         ###
++###       by Sander Stoks <sanders@sumware.demon.nl>, ported to GS 8.14 ### 
++###       by Michael Pfeiffer <michael.pfeiffer@utanet.at>;             ###
++###       anti-aliasing drivers by Michael Pfeiffer.                    ###
++
++$(DD)beos.dev: $(GLOBJ)gdevbe.$(OBJ)
++	$(SETDEV) $(DD)beos $(GLOBJ)gdevbe.$(OBJ)
++
++$(DD)bealpha2.dev: $(GLOBJ)gdevbe.$(OBJ)
++	$(SETDEV) $(DD)bealpha2 $(GLOBJ)gdevbe.$(OBJ)
++
++$(DD)bealpha4.dev: $(GLOBJ)gdevbe.$(OBJ)
++	$(SETDEV) $(DD)bealpha4 $(GLOBJ)gdevbe.$(OBJ)
++ 
++$(DD)bealpht2.dev: $(GLOBJ)gdevbe.$(OBJ)
++	$(SETDEV) $(DD)bealpht2 $(GLOBJ)gdevbe.$(OBJ)
++
++$(DD)bealpht4.dev: $(GLOBJ)gdevbe.$(OBJ)
++	$(SETDEV) $(DD)bealpht4 $(GLOBJ)gdevbe.$(OBJ)
++
++ $(GLOBJ)gdevbe.$(OBJ): $(GLSRC)gdevbe.cpp $(GLSRC)gdevbe.h $(GDEV)
++	$(GLCC) $(GLO_)gdevbe.$(OBJ) $(C_) $(GLSRC)gdevbe.cpp
+diff --git a/src/gdevbe.cpp b/src/gdevbe.cpp
+new file mode 100644
+index 0000000..3aff1ff
+--- /dev/null
++++ b/src/gdevbe.cpp
+@@ -0,0 +1,1435 @@
++/* BeOS driver for Ghostscript using a BBitmap for buffering.
++ * This driver has been heavily rewritten from the previous version.
++ *
++ * Copyright 1998, Jake Hamby
++ * Send all comments, bug fixes, etc. to:  jehamby@lightside.com
++ *
++ * Anti-Aliasing drivers: bealpha2, bealpht2, bealpha4 and bealpht4 
++ * Copyright 2000, Michael Pfeiffer
++ * Email: laplace@users.sourceforge.net
++ *
++ * Description: bealpha2 and bealpha4 anti-alias text and graphic. 
++ * bealpht2 and bealpht4 anti-alias text only.
++ * 
++ * History
++ * 1998 initial port by Jake Hamby
++ * 2000 ported version 7 by Sander Stoks 
++ *      anti-aliasing driver by Michael Pfeiffer
++ * 2004 ported version 8, by Michael Pfeiffer
++ *		documented, refactored and improved AA device
++ *      (about 50% faster for certain kind of PS files e.g. tiger.eps) 
++ *      
++ *
++ * To do (eventually): 
++ * -  Creating and deleting BBitmap object is an inefficient operation!
++ *    If BE_ALPHA_BITMAP_CACHE then
++ *    - check if temporary list is faster on SMP then _cached_bitmap
++ *    - on cache overflow try to reuse a large enough bitmap instead
++ *      of deleting bitmaps from cache and creating a new one
++ *    - on cache overflow delete large bitmaps first
++ * -  Find optimal values for (see gdevbe.h):
++ *    - BE_ALPHA_HASHTABLE_SIZE
++ *    - BE_ALPHA_MAX_BITMAPS
++ *    - BE_ALPHA_REMOVE_BITMAPS
++ *    - BE_ALPHA_MAX_SIZE
++ *    and an optimal hash function HASH_FUNC in this file.
++ * -  Set the bits per pixel for the internal bitmap with a 
++ *    parameter (e.g. gs -dBitsPerPixel={8,16,32}).
++ * -  Limit the number of bitmaps in the mono bitmap cache.
++ * -  Let the GS interpreter be interruptible (return a negative number
++ *    in the device-callback functions).
++ */
++
++// set PROFILE to 1 to enable profiling
++#define PROFILE 0
++// set TRACE_COPY_CALLS to 1 to enable tracing of copy mono and alpha function calls
++#define TRACE_COPY_CALLS 0
++
++// define macro if certain functions should be inlined
++//#define INLINE inline
++// define macro if inlining should be disabled
++#define INLINE 
++
++#include <View.h>
++#include <Window.h>
++#include <Bitmap.h>
++
++typedef void* HWND;       // For old DLL interface
++
++extern "C" {
++	void gsdll_draw(unsigned char *device, BView *view, BRect dest, BRect src);
++
++	#define __PROTOTYPES__    // C++ needs prototypes, of course
++	#include "gx.h"			  // for gx_bitmap; includes std.h 
++	#include "math_.h"
++	#include "memory_.h"
++	#include "gserrors.h"
++	#include "gsparam.h"
++	#include "gsstruct.h"
++	#include "gxdevice.h"
++	#include "gsdevice.h"
++	#include "gdevbe.h"
++	#include "gsdll.h"
++
++	// Intel does name mangling on variables, so define these here.
++	extern gx_device_be gs_bealpha2_device;	
++	extern gx_device_be gs_bealpha4_device;	
++	extern gx_device_be gs_bealpht2_device;	
++	extern gx_device_be gs_bealpht4_device;	
++	extern gx_device_be gs_beos_device;	
++	extern HWND hwndtext;		        
++} // extern "C"
++
++// Macros
++#if 0
++#pragma mark *********** Macros ***************
++#endif
++// The hash function
++#define BE_ALPHA_HASH(key) ((key) % BE_ALPHA_HASHTABLE_SIZE)
++// Color compare function
++#define SAME_COLOR(c1, c2) (*((uint32*)&(c1)) == *((uint32*)&(c2)))
++
++
++// Types
++#if 0
++#pragma mark *********** Types ***************
++#endif
++// type to convert values between rgb_color and gx_color_index
++typedef union {
++	rgb_color rgb;
++	gx_color_index index;
++} colorcast_t;
++
++// The BBitmap cache entry
++// The bitmaps are stored in a linked list
++typedef struct bmapcache_s {
++	gx_bitmap_id id;          // the id of the bitmap
++	struct bmapcache_s *next; // the next entry in the linked list
++	BBitmap bitmap;           // the BBitmap
++	
++	// constructor
++	bmapcache_s(
++		gx_bitmap_id id, 
++		BRect bounds, 
++		color_space mode) 
++	: 
++		id(id), 
++		next(NULL), 
++		bitmap(bounds, mode) // construct the BBitmap
++	{ 
++		// nothing to do
++	}
++} bmapcache;
++
++
++// The BBitmap alpha cache struct 
++typedef struct bmap_alpha_cache_s {
++	gx_bitmap_id id; // the id of the bitmap stored in this entry
++	rgb_color color; // the color of this bitmap
++	long size;       // the size of this bitmap in 4 bytes
++	struct bmap_alpha_cache_s *of_next;   // the next entry in the overflow list
++	struct bmap_alpha_cache_s *of_prev;   // the previous entry in the overflow list
++	struct bmap_alpha_cache_s *mru_next;  // the next entry in the MRU list (most recently used)
++	struct bmap_alpha_cache_s *mru_prev;  // the previous entry in the MRU list
++	struct bmap_alpha_cache_s **ht_entry; // the hashtable entry with this bitmap 	
++	BBitmap bitmap;
++
++	// constructor	
++	bmap_alpha_cache_s(
++		struct bmap_alpha_cache_s **ht_entry, 
++		gx_bitmap_id id, 
++		rgb_color color, 
++		int w, int h, 
++		color_space mode) 
++	:
++		id(id), 
++		color(color), 
++		size(w*h), 
++		of_next(NULL), 
++		of_prev(NULL), 
++		mru_next(NULL), 
++		mru_prev(NULL), 
++		ht_entry(ht_entry),
++		bitmap(BRect(0, 0, w-1, h-1), mode) // construct BBitmap
++	{ 
++		// nothing to do
++	}
++} bmap_alpha_cache;
++
++// Global variables
++HWND hwndtext;               /* currently unused */
++
++// alpha conversion table
++// 2 bit alpha -> 8 bit alpha (= 255/((1 << 2) - 1) * alpha)
++static unsigned char g_alpha2[4] = {0, 85, 170, 255};
++// 4 bit alpha -> 8 bit alpha (= 255/((1 << 4) - 1) * alpha)
++static unsigned char g_alpha4[16] = {0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255};
++
++
++
++// Procedures for non anti-aliased device (named beos)
++#if 0
++#pragma mark *********** GS Procedures ***************
++#endif
++
++private dev_proc_open_device(be_open);
++private dev_proc_sync_output(be_sync);
++private dev_proc_output_page(be_output_page);
++private dev_proc_close_device(be_close);
++private dev_proc_map_rgb_color(be_map_rgb_color);
++private dev_proc_map_color_rgb(be_map_color_rgb);
++private dev_proc_fill_rectangle(be_fill_rectangle);
++private dev_proc_copy_mono(be_copy_mono);
++#if 0
++private dev_proc_copy_color(be_copy_color);
++#endif
++private dev_proc_draw_line(be_draw_line);
++
++#if 0
++// Not Implemented
++private dev_proc_strip_tile_rectangle(be_strip_tile_rectangle);
++
++private dev_proc_get_params(be_get_params);
++private dev_proc_put_params(be_put_params);
++#endif
++
++// Procedures for anti-aliased devices (bealpha2, bealpha4, bealpht2, bealpht4)
++private dev_proc_map_color_rgb(be_alpha_map_color_rgb);
++private dev_proc_map_rgb_alpha_color(be_alpha_map_rgb_alpha_color);
++private dev_proc_copy_alpha(be_alpha_copy_alpha);
++
++
++#if 0
++#pragma mark *********** Device Descriptors & Devices ***************
++#endif
++#if 0
++#pragma mark ** beos **
++#endif
++// The device descriptor used by gs_beos_device
++private gx_device_procs be_procs = {
++	be_open,
++	gx_default_get_initial_matrix,
++	be_sync,
++	be_output_page,
++	be_close,
++	be_map_rgb_color,
++	be_map_color_rgb,
++	be_fill_rectangle,
++	NULL,			/* tile_rectangle */
++	be_copy_mono,
++	NULL,			/* copy_color */
++	be_draw_line,
++	NULL,			/* get_bits */
++	NULL, // be_get_params,			/* get_params */
++	NULL, // be_put_params,			/* put_params */
++	NULL,			/* map_cmyk_color */
++	NULL,			/* get_xfont_procs */
++	NULL,			/* get_xfont_device */
++	NULL,			/* map_rgb_alpha_color */
++	gx_page_device_get_page_device,
++	NULL,			/* get_alpha_bits */
++	NULL,			/* copy_alpha */
++	NULL,			/* get_band */
++	NULL,			/* copy_rop */
++	NULL,			/* fill_path */
++	NULL,			/* stroke_path */
++	NULL,			/* fill_mask */
++	NULL,			/* fill_trapezoid */
++	NULL,			/* fill_parallelogram */
++	NULL,			/* fill_triangle */
++	NULL,			/* draw_thin_line */
++	NULL,			/* begin_image */
++	NULL,			/* image_data */
++	NULL,			/* end_image */
++	NULL			/* be_strip_tile_rectangle */
++};
++
++/* The instance is public. */
++gx_device_be gs_beos_device = {
++	std_device_color_body(gx_device_be, &be_procs, "beos",
++	  INITIAL_WIDTH, INITIAL_HEIGHT,
++	  INITIAL_RESOLUTION, INITIAL_RESOLUTION,
++	  24, 255, 256),
++	{ 0 },			/* std_procs */
++	-1,				/* mutex */
++	NULL,			/* main bitmap */
++	NULL,			/* offscreen view */
++	NULL,			/* bmapcache ptr */
++	0,				/* next bitmap to use */
++};
++
++/* ---------------------------------- */
++/* ------------ bealpha2 ------------ */
++/* ---------------------------------- */
++#if 0
++#pragma mark ** bealpha2 **
++#endif
++
++/* The device descriptor */
++private gx_device_procs be_alpha2_procs = {
++	be_open,
++	gx_default_get_initial_matrix,
++	be_sync,
++	be_output_page,
++	be_close,
++	be_map_rgb_color,
++	be_alpha_map_color_rgb, // be_map_color_rgb,
++	be_fill_rectangle,
++	NULL,			/* tile_rectangle */
++	be_copy_mono,
++	NULL,			/* copy_color */
++	be_draw_line,
++	NULL,			/* get_bits */
++	NULL,			/* get_params */
++	NULL,			/* put_params */
++	NULL,			/* map_cmyk_color */
++	NULL,			/* get_xfont_procs */
++	NULL,			/* get_xfont_device */
++	be_alpha_map_rgb_alpha_color,			/* map_rgb_alpha_color */
++	gx_page_device_get_page_device,
++	NULL,           /* get_alpha_bits */
++	be_alpha_copy_alpha,			/* copy_alpha */
++	NULL,			/* get_band */
++	NULL,			/* copy_rop */
++	NULL,			/* fill_path */
++	NULL,			/* stroke_path */
++	NULL,			/* fill_mask */
++	NULL,			/* fill_trapezoid */
++	NULL,			/* fill_parallelogram */
++	NULL,			/* fill_triangle */
++	NULL,			/* draw_thin_line */
++	NULL,			/* begin_image */
++	NULL,			/* image_data */
++	NULL,			/* end_image */
++	NULL			/* be_strip_tile_rectangle */
++};
++
++/* The instance is public. */
++gx_device_be gs_bealpha2_device = {
++    std_device_dci_alpha_type_body(gx_device_be, &be_alpha2_procs,
++	"bealpha2", NULL,
++	  INITIAL_WIDTH, INITIAL_HEIGHT,
++	  INITIAL_RESOLUTION, INITIAL_RESOLUTION,
++	3, 32, 255, 255, 256, 256, 2, 2),
++	{ 0 },			/* std_procs */
++	-1,				/* mutex */
++	NULL,			/* main bitmap */
++	NULL,			/* offscreen view */
++	NULL,			/* bmapcache ptr */
++	0,				/* next bitmap to use */
++};
++
++
++/* ---------------------------------- */
++/* ------------ bealpha4 ------------ */
++/* ---------------------------------- */
++#if 0
++#pragma mark ** bealpha4 **
++#endif
++
++/* The device descriptor */
++private gx_device_procs be_alpha4_procs = {
++	be_open,
++	gx_default_get_initial_matrix,
++	be_sync,
++	be_output_page,
++	be_close,
++	be_map_rgb_color,
++	be_alpha_map_color_rgb, // be_map_color_rgb,
++	be_fill_rectangle,
++	NULL,			/* tile_rectangle */
++	be_copy_mono,
++	NULL,			/* copy_color */
++	be_draw_line,
++	NULL,			/* get_bits */
++	NULL,			/* get_params */
++	NULL,			/* put_params */
++	NULL,			/* map_cmyk_color */
++	NULL,			/* get_xfont_procs */
++	NULL,			/* get_xfont_device */
++	be_alpha_map_rgb_alpha_color,			/* map_rgb_alpha_color */
++	gx_page_device_get_page_device,
++	NULL, // be_alpha4_get_alpha_bits,			/* get_alpha_bits */
++	be_alpha_copy_alpha,			/* copy_alpha */
++	NULL,			/* get_band */
++	NULL,			/* copy_rop */
++	NULL,			/* fill_path */
++	NULL,			/* stroke_path */
++	NULL,			/* fill_mask */
++	NULL,			/* fill_trapezoid */
++	NULL,			/* fill_parallelogram */
++	NULL,			/* fill_triangle */
++	NULL,			/* draw_thin_line */
++	NULL,			/* begin_image */
++	NULL,			/* image_data */
++	NULL,			/* end_image */
++	NULL			/* be_strip_tile_rectangle */
++};
++
++/* The instance is public. */
++gx_device_be gs_bealpha4_device = {
++    std_device_dci_alpha_type_body(gx_device_be, &be_alpha4_procs,
++	"bealpha4", NULL,
++	  INITIAL_WIDTH, INITIAL_HEIGHT,
++	  INITIAL_RESOLUTION, INITIAL_RESOLUTION,
++	3, 32, 255, 255, 256, 256, 4, 4),
++	{ 0 },			/* std_procs */
++	-1,				/* mutex */
++	NULL,			/* main bitmap */
++	NULL,			/* offscreen view */
++	NULL,			/* bmapcache ptr */
++	0,				/* next bitmap to use */
++};
++
++/* ---------------------------------- */
++/* ------------ bealpht2 ------------ */
++/* ---------------------------------- */
++#if 0
++#pragma mark ** bealpht2 **
++#endif
++
++/* The device descriptor */
++private gx_device_procs be_alpht2_procs = {
++	be_open,
++	gx_default_get_initial_matrix,
++	be_sync,
++	be_output_page,
++	be_close,
++	be_map_rgb_color,
++	be_alpha_map_color_rgb, // be_map_color_rgb,
++	be_fill_rectangle,
++	NULL,			/* tile_rectangle */
++	be_copy_mono,
++	NULL,			/* copy_color */
++	be_draw_line,
++	NULL,			/* get_bits */
++	NULL,			/* get_params */
++	NULL,			/* put_params */
++	NULL,			/* map_cmyk_color */
++	NULL,			/* get_xfont_procs */
++	NULL,			/* get_xfont_device */
++	be_alpha_map_rgb_alpha_color,			/* map_rgb_alpha_color */
++	gx_page_device_get_page_device,
++	NULL,			/* get_alpha_bits */
++	be_alpha_copy_alpha,			/* copy_alpha */
++	NULL,			/* get_band */
++	NULL,			/* copy_rop */
++	NULL,			/* fill_path */
++	NULL,			/* stroke_path */
++	NULL,			/* fill_mask */
++	NULL,			/* fill_trapezoid */
++	NULL,			/* fill_parallelogram */
++	NULL,			/* fill_triangle */
++	NULL,			/* draw_thin_line */
++	NULL,			/* begin_image */
++	NULL,			/* image_data */
++	NULL,			/* end_image */
++	NULL			/* be_strip_tile_rectangle */
++};
++
++/* The instance is public. */
++gx_device_be gs_bealpht2_device = {
++    std_device_dci_alpha_type_body(gx_device_be, &be_alpht2_procs,
++	"bealpht2", NULL,
++	  INITIAL_WIDTH, INITIAL_HEIGHT,
++	  INITIAL_RESOLUTION, INITIAL_RESOLUTION,
++	3, 32, 255, 255, 256, 256, 2, 1),
++	{ 0 },			/* std_procs */
++	-1,				/* mutex */
++	NULL,			/* main bitmap */
++	NULL,			/* offscreen view */
++	NULL,			/* bmapcache ptr */
++	0,				/* next bitmap to use */
++};
++
++/* ---------------------------------- */
++/* ------------ bealpht4 ------------ */
++/* ---------------------------------- */
++#if 0
++#pragma mark ** bealphat4 **
++#endif
++
++/* The device descriptor */
++private gx_device_procs be_alpht4_procs = {
++	be_open,
++	gx_default_get_initial_matrix,
++	be_sync,
++	be_output_page,
++	be_close,
++	be_map_rgb_color,
++	be_alpha_map_color_rgb, // be_map_color_rgb,
++	be_fill_rectangle,
++	NULL,			/* tile_rectangle */
++	be_copy_mono,
++	NULL,			/* copy_color */
++	be_draw_line,
++	NULL,			/* get_bits */
++	NULL,			/* get_params */
++	NULL,			/* put_params */
++	NULL,			/* map_cmyk_color */
++	NULL,			/* get_xfont_procs */
++	NULL,			/* get_xfont_device */
++	be_alpha_map_rgb_alpha_color,			/* map_rgb_alpha_color */
++	gx_page_device_get_page_device,
++	NULL, 			/* get_alpha_bits */
++	be_alpha_copy_alpha,			/* copy_alpha */
++	NULL,			/* get_band */
++	NULL,			/* copy_rop */
++	NULL,			/* fill_path */
++	NULL,			/* stroke_path */
++	NULL,			/* fill_mask */
++	NULL,			/* fill_trapezoid */
++	NULL,			/* fill_parallelogram */
++	NULL,			/* fill_triangle */
++	NULL,			/* draw_thin_line */
++	NULL,			/* begin_image */
++	NULL,			/* image_data */
++	NULL,			/* end_image */
++	NULL			/* be_strip_tile_rectangle */
++};
++
++/* The instance is public. */
++gx_device_be gs_bealpht4_device = {
++    std_device_dci_alpha_type_body(gx_device_be, &be_alpht4_procs,
++	"bealpht4", NULL,
++	  INITIAL_WIDTH, INITIAL_HEIGHT,
++	  INITIAL_RESOLUTION, INITIAL_RESOLUTION,
++	3, 32, 255, 255, 256, 256, 4, 1),
++	{ 0 },			/* std_procs */
++	-1,				/* mutex */
++	NULL,			/* main bitmap */
++	NULL,			/* offscreen view */
++	NULL,			/* bmapcache ptr */
++	0,				/* next bitmap to use */
++};
++
++
++// -----------------------------------------------------------------------------
++// Bitmap Cache Functions
++// -----------------------------------------------------------------------------
++
++// Initialize the bitmap cache
++private void
++initialize_bitmap_cache(gx_device_be* bdev)
++{
++	bdev->_bmapcache_current = &(bdev->_bmapcache);
++}
++
++// flush
++private void
++flush_bitmap_cache(gx_device_be* bdev) 
++{
++	bmapcache_s *cur = bdev->_bmapcache;
++	while(cur) {
++		bmapcache_s *next = cur->next;
++		delete cur;
++		cur = next;
++	}
++	bdev->_bmapcache = NULL;
++	bdev->_bmapcache_current = &(bdev->_bmapcache);
++}
++
++// store bitmap in bitmap cache
++private void
++add_to_bitmap_cache(gx_device_be* bdev, bmapcache_s* bmapc)
++{
++	*(bdev->_bmapcache_current) = bmapc;
++	bdev->_bmapcache_current = &(bmapc->next);
++}
++
++// find bitmap in bitmap cache
++private BBitmap*
++find_bitmap(gx_device_be* bdev, gx_bitmap_id id)
++{
++	if(id != gx_no_bitmap_id) {
++		bmapcache_s *current = bdev->_bmapcache;
++		while(current) {
++		    if(current->id == id) {
++		    	return &(current->bitmap);
++		    }
++			current = current->next;
++		}
++	}
++	return NULL;
++}
++
++
++// -----------------------------------------------------------------------------
++// Alpha Bitmap Cache Functions
++// -----------------------------------------------------------------------------
++
++// Initialize cache
++private void
++be_alpha_initialize(gx_device_be* bdev)
++{
++	// initialize hash table
++	for (int i = 0; i < BE_ALPHA_HASHTABLE_SIZE; i++) {
++		bdev->_alpha_hashtable[i] = NULL;
++	}
++	// initialize MRU list
++	bdev->_alpha_mru_first = NULL;
++	bdev->_alpha_mru_last = NULL;
++	// initialize run time statistics
++	bdev->_alpha_num_bmaps = 0;
++	bdev->_alpha_size = 0;
++}
++
++// Uninitialize cache
++private void
++be_alpha_uninitialize(gx_device_be* bdev)
++{
++	// remove bitmaps from hash table
++	bmap_alpha_cache *current, *old;
++	for (int i = 0; i < BE_ALPHA_HASHTABLE_SIZE; i++) {
++		current = bdev->_alpha_hashtable[i];
++		while (current) {
++			old = current;
++			current = current->of_next;
++			delete old;
++		}
++		bdev->_alpha_hashtable[i] = NULL;
++	}
++		
++	bdev->_alpha_mru_first = NULL;
++	bdev->_alpha_mru_last  = NULL;
++	bdev->_alpha_num_bmaps = 0;
++	bdev->_alpha_size      = 0;
++}
++
++// Find bmapc in hash table
++// Returns entry in hash table and bmapc if it is in overflow list
++private INLINE bmap_alpha_cache **
++be_alpha_find_bmap(
++	gx_device_be *bdev, 
++	gx_bitmap_id id, 
++	rgb_color color, 
++	bmap_alpha_cache **bmapc) 
++{
++	bmap_alpha_cache **ht_entry = &bdev->_alpha_hashtable[BE_ALPHA_HASH(id)];
++	bmap_alpha_cache *current = *ht_entry;
++	// find bitmap in overflow list
++	while (current) {
++	 	if ((current->id == id) && SAME_COLOR(current->color, color)) {
++	 		break; // found
++	 	}
++		current = current->of_next;
++	}
++	*bmapc = current;
++	return ht_entry;
++}
++
++// Insert bmapc at top of overflow list of hashtable entry ht_entry
++private INLINE void 
++be_alpha_ht_insert(
++	gx_device_be *bdev, 
++	bmap_alpha_cache **ht_entry, 
++	bmap_alpha_cache *bmapc) 
++{
++	bmapc->of_next = *ht_entry;
++	bmapc->of_prev = NULL;
++	if (*ht_entry) {
++		(*ht_entry)->of_prev = bmapc;
++	}
++	*ht_entry = bmapc;
++}
++
++// Remove bmapc from overflow list of hasttable entry ht_entry
++private INLINE void 
++be_alpha_ht_remove(
++	gx_device_be *bdev, 
++	bmap_alpha_cache **ht_entry, 
++	bmap_alpha_cache *bmapc) 
++{
++	// is bmapc on top of overflow list?
++	if (*ht_entry == bmapc) {
++		*ht_entry = bmapc->of_next;
++	}
++	// update doubly linked overflow list
++	if (bmapc->of_next) {
++		bmapc->of_next->of_prev = bmapc->of_prev;
++	}
++	if (bmapc->of_prev) {
++		bmapc->of_prev->of_next = bmapc->of_next;
++	}
++}
++
++// Insert bmapc at top of MRU list. bmpac must not be in list already!
++private INLINE void 
++be_alpha_mru_insert(
++	gx_device_be *bdev, 
++	bmap_alpha_cache *bmapc) 
++{
++	// update doubly linked list
++	bmapc->mru_next = bdev->_alpha_mru_first;
++	bmapc->mru_prev = NULL;
++	if (bdev->_alpha_mru_first) {
++		// MRU list was not empty
++		bdev->_alpha_mru_first->mru_prev = bmapc;
++	} else { 
++		// bmapc is first element in MRU list
++		bdev->_alpha_mru_last = bmapc; 
++	}
++	// bmapc becomes top of MRU list	
++	bdev->_alpha_mru_first = bmapc;
++}
++
++// Remove bmapc from MRU list
++private INLINE void 
++be_alpha_mru_remove(
++	gx_device_be *bdev, 
++	bmap_alpha_cache *bmapc) 
++{
++	if (bdev->_alpha_mru_first == bmapc) { 
++		bdev->_alpha_mru_first = bmapc->mru_next;
++	}
++	if (bdev->_alpha_mru_last == bmapc) {
++		bdev->_alpha_mru_last = bmapc->mru_prev;
++	}
++	if (bmapc->mru_next) {
++		bmapc->mru_next->mru_prev = bmapc->mru_prev;
++	}
++	if (bmapc->mru_prev) {
++		bmapc->mru_prev->mru_next = bmapc->mru_next;
++	}
++}
++
++// Move bmapc on top of overflow list of hashtable entry ht_entry
++private INLINE void 
++be_alpha_update_of_list(
++	gx_device_be *bdev, 
++	bmap_alpha_cache **ht_entry, 
++	bmap_alpha_cache *bmapc) 
++{
++	if (*ht_entry != bmapc) {
++		be_alpha_ht_remove(bdev, ht_entry, bmapc);
++		be_alpha_ht_insert(bdev, ht_entry, bmapc);
++	}
++}
++
++// Move bmapc in front of mru list
++private INLINE void 
++be_alpha_update_mru_list(
++	gx_device_be *bdev, 
++	bmap_alpha_cache *bmapc) 
++{
++	if (bdev->_alpha_mru_first != bmapc) {
++		be_alpha_mru_remove(bdev, bmapc);
++		be_alpha_mru_insert(bdev, bmapc);
++	}
++}
++
++// Move bmapc on top of overflow list and MRU list
++private INLINE void 
++be_alpha_move_to_top(
++	gx_device_be *bdev, 
++	bmap_alpha_cache **ht_entry, 
++	bmap_alpha_cache *bmapc) 
++{
++	be_alpha_update_of_list(bdev, ht_entry, bmapc);
++	be_alpha_update_mru_list(bdev, bmapc);
++}
++
++// Add bmapc to overflow list and MRU list
++private INLINE void 
++be_alpha_insert_bmap(
++	gx_device_be *bdev, 
++	bmap_alpha_cache **ht_entry, 
++	bmap_alpha_cache *bmapc) 
++{
++	be_alpha_ht_insert(bdev, ht_entry, bmapc);
++	be_alpha_mru_insert(bdev, bmapc);
++	bdev->_alpha_num_bmaps ++;
++	bdev->_alpha_size += bmapc->size;
++}
++
++// Remove bmapc from overflow list and MRU list
++private INLINE void 
++be_alpha_remove_bmap(
++	gx_device_be *bdev, 
++	bmap_alpha_cache **ht_entry, 
++	bmap_alpha_cache *bmapc) 
++{
++	be_alpha_ht_remove(bdev, ht_entry, bmapc);
++	be_alpha_mru_remove(bdev, bmapc);
++	bdev->_alpha_num_bmaps --;
++	bdev->_alpha_size -= bmapc->size;
++}
++
++
++// -----------------------------------------------------------------------------
++// Device functions
++// -----------------------------------------------------------------------------
++
++/* Open the device. */
++private int
++be_open(gx_device *dev)
++{
++	// gx_device_be has been created for us
++    gx_device_be *bdev = (gx_device_be *)dev;
++    initialize_bitmap_cache(bdev);
++	// create semaphore for locking
++	bdev->_mutex = create_sem(1, "gsdll sem");
++	
++	if (dev->width == INITIAL_WIDTH)
++		dev->width = (int)(8.5 * dev->x_pixels_per_inch);
++	if (dev->height == INITIAL_HEIGHT)
++		dev->height = (int)(11.0 * dev->y_pixels_per_inch);
++
++	// initialize cached bitmap
++	bdev->_cached_bitmap = NULL;
++	bdev->_cached_width  = 0;
++	bdev->_cached_height = 0;
++
++	// setup BBitmap and BView
++	BRect frame(0.0, 0.0, dev->width-1, dev->height-1);
++	bdev->_bitmap = new BBitmap(frame, B_RGB_32_BIT, true);
++	bdev->_view = new BView(frame, "bitmap view", B_FOLLOW_NONE, B_WILL_DRAW);
++	bdev->_bitmap->AddChild(bdev->_view);
++	bdev->_view->Window()->Lock();
++	bdev->_view->SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
++
++	be_alpha_initialize(bdev);
++
++#if PROFILE
++	// initialize profiler statistics
++	bdev->_fillrect  = 0;
++	bdev->_copymono  = 0;
++	bdev->_drawline  = 0;
++	bdev->_copyalpha = 0;
++	bdev->_size      = 0; 
++	bdev->_bitmaps   = 0;
++#endif
++
++	// Notify caller about new device
++	(*pgsdll_callback)(GSDLL_DEVICE, (char *)dev, 1);
++	// Notify caller about the page size
++	(*pgsdll_callback)(GSDLL_SIZE, (char *)dev,
++			(dev->width & 0xffff) +
++			((ulong)(dev->height & 0xffff) << 16));
++    return 0;
++}
++
++#if PROFILE
++private void
++print_profile_statistics(gx_device_be* bdev)
++{
++    fprintf(stderr, "fillrect=%d copymono=%d drawline=%d copyalpha=%d "
++    	"bitmaps=%ld size=%ld\n",
++    	bdev->_fillrect, 
++    	bdev->_copymono, 
++    	bdev->_drawline, 
++    	bdev->_copyalpha,
++   		bdev->_bitmaps, 
++   		bdev->_size);
++
++    fprintf(stderr, "alpha_num_bmaps=%d alpha_size=%ld\n",
++   		bdev->_alpha_num_bmaps, 
++   		bdev->_alpha_size);
++
++}
++#endif
++
++/* Close the device. */
++private int
++be_close(gx_device *dev)
++{
++    gx_device_be *bdev = (gx_device_be *)dev;
++
++    // wait until bitmap is not being used by caller
++    gsdll_lock_device((unsigned char*)dev, 1);
++
++    // notify caller that device has been closed
++	(*pgsdll_callback)(GSDLL_DEVICE, (char *)dev, 0);
++	gsdll_lock_device((unsigned char*)dev, 0);
++
++
++	// complete all drawing operations
++	bdev->_view->Sync();
++	
++	// delete bitmap; deletes view too
++	delete bdev->_bitmap;
++	
++	// delete cached bitmap
++	delete bdev->_cached_bitmap;
++	
++	// delete monochrome bitmap cache
++	flush_bitmap_cache(bdev);
++
++	be_alpha_uninitialize(bdev);
++
++	delete_sem(bdev->_mutex);
++
++#if PROFILE
++	print_profile_statistics(bdev);
++#endif
++
++    return 0;
++}
++
++/* Map a color to index.  */
++private gx_color_index
++be_map_rgb_color(
++	register gx_device *dev,
++	const gx_color_value rgb[])
++{
++    colorcast_t colorcast;
++	colorcast.rgb.red   = rgb[0] >> 8;
++	colorcast.rgb.green = rgb[1] >> 8;
++	colorcast.rgb.blue  = rgb[2] >> 8;
++	colorcast.rgb.alpha = 0;
++	return colorcast.index;
++}
++
++
++/* Map a "device color" back to r-g-b. */
++private int
++be_map_color_rgb(
++	register gx_device *dev, 
++	gx_color_index color,
++	gx_color_value prgb[3])
++{
++	colorcast_t colorcast;
++	
++	colorcast.index = color;
++	prgb[0] = colorcast.rgb.red << 8;
++	prgb[1] = colorcast.rgb.green << 8;
++	prgb[2] = colorcast.rgb.blue << 8;
++	return 0;
++}
++
++// Synchronize the display with the commands already given 
++private int
++be_sync(register gx_device *dev)
++{
++    gx_device_be *bdev = (gx_device_be *)dev;
++    
++    bdev->_view->Sync();
++    
++    return (*pgsdll_callback)(GSDLL_SYNC, (char *)dev, 0);
++}
++
++// Display the output.
++int
++be_output_page(gx_device *dev, int copies, int flush)
++{
++    gx_device_be *bdev = (gx_device_be *)dev;
++    
++    bdev->_view->Sync();
++    
++	int ret = (*pgsdll_callback)(GSDLL_PAGE, (char *)dev, 0);
++
++#if PROFILE
++	print_profile_statistics(bdev);
++#endif
++
++    return ret;
++}
++
++// Fill a rectangle with a color.
++private int
++be_fill_rectangle(register gx_device *dev,
++		 int x, int y, int w, int h, gx_color_index color)
++{
++#if PROFILE
++    bigtime_t start = system_time();
++#endif
++
++    gx_device_be *bdev = (gx_device_be *)dev;
++    
++	colorcast_t colorcast;
++	colorcast.index = color;
++	bdev->_view->SetDrawingMode(B_OP_COPY);
++	bdev->_view->SetHighColor(colorcast.rgb);
++	bdev->_view->FillRect(BRect(x, y, w+x-1, y+h-1));
++
++	if(x <= 0 && y <= 0 && w >= bdev->width && h >= bdev->height) {
++		bdev->_view->Sync();
++		// Just cleared the screen so clear the bitmap cache 
++		flush_bitmap_cache(bdev);
++	}
++
++#if PROFILE
++	bdev->_fillrect += (int)(system_time() - start);
++#endif
++
++	return 0;
++}
++
++/* Copy a monochrome bitmap. */
++private int
++be_copy_mono(register gx_device *dev,
++	    const byte *base, int sourcex, int raster, gx_bitmap_id id,
++	    int x, int y, int w, int h,
++	    gx_color_index zero, gx_color_index one)
++{
++#if TRACE_COPY_CALLS
++	fprintf(stderr, "*+-m\t%d\t%d\t%d\t%ld\t%ld\n",
++		(int)id,
++		w, h,
++		(unsigned long)zero,
++		(unsigned long)one);
++#endif
++
++#if PROFILE
++    bigtime_t start = system_time();
++#endif
++
++    gx_device_be *bdev = (gx_device_be *)dev;
++
++    if(raster > 0) {
++		colorcast_t colorcast;
++		
++		// set high color
++		colorcast.index = one;
++		bdev->_view->SetHighColor(colorcast.rgb);
++		
++		// set low color
++		if(zero == gx_no_color_index) {
++			// transparent pixels
++			bdev->_view->SetDrawingMode(B_OP_OVER);
++		} else {
++			colorcast.index = zero;
++			bdev->_view->SetLowColor(colorcast.rgb);
++			bdev->_view->SetDrawingMode(B_OP_COPY);
++		}
++	
++		BBitmap *bitmap = NULL;
++		bitmap = find_bitmap(bdev, id);
++		bool bitmapInCache = bitmap != NULL;
++		
++		BRect from(sourcex, 0, sourcex + w - 1, h - 1);
++		BRect to(x, y, x + w - 1, y + h - 1);
++		
++		bmapcache_s *bmapc = NULL;
++		if(!bitmapInCache) {
++			// create new bitmap
++			bmapc = new bmapcache_s(id, BRect(0.0, 0.0, (raster << 3) - 1, h - 1), B_MONOCHROME_1_BIT);
++		    bmapc->bitmap.SetBits(base, raster * h, 0, B_MONOCHROME_1_BIT);
++			bitmap = &(bmapc->bitmap);
++			
++		    if (id != gx_no_bitmap_id) {
++		    	// store bitmap in cache
++		    	add_to_bitmap_cache(bdev, bmapc);
++				bdev->_view->DrawBitmapAsync(bitmap, from, to);
++				bitmapInCache = true;
++			}
++		}
++		
++		if (bitmapInCache) {
++			bdev->_view->DrawBitmapAsync(bitmap, from, to);
++		} else {
++			bdev->_view->DrawBitmap(bitmap, from, to);
++			delete bmapc;
++		}
++    }
++    
++#if PROFILE
++	bdev->_copymono += (int)(system_time() - start);
++#endif
++
++    return 0;
++}
++
++/* Copy a color bitmap. */
++/* Note:  I couldn't find any PS file which uses this function, so I left
++ * it unimplemented for now.  -jeh
++ */
++#if 0
++private int
++be_copy_color(register gx_device *dev,
++	     const byte *base, int sourcex, int raster, gx_bitmap_id id,
++	     int x, int y, int w, int h)
++{
++    fprintf(stderr, "copy color!\n");
++    return 0;
++}
++#endif
++
++/* Draw a line */
++private int
++be_draw_line(register gx_device *dev,
++  	     int x0, int y0, int x1, int y1, 
++  	     gx_color_index color)
++{
++#if PROFILE
++    bigtime_t start = system_time();
++#endif
++
++    gx_device_be *bdev = (gx_device_be *)dev;
++	colorcast_t colorcast;
++	colorcast.index = color;
++	bdev->_view->SetDrawingMode(B_OP_COPY);
++	bdev->_view->SetHighColor(colorcast.rgb);
++	bdev->_view->StrokeLine(BPoint(x0, y0), BPoint(x1, y1));
++
++#if PROFILE
++	bdev->_drawline += (int)(system_time() - start);
++#endif
++
++    return 0;
++}
++
++/* Tile a rectangle. */
++/* Note:  Because the Be GUI always has at least 256 colors, and because
++ *   this function is only used for halftoning, I left it unimplemented for
++ *   now.  -jeh
++ */
++#if 0
++private int
++be_strip_tile_rectangle(register gx_device *dev, const gx_strip_bitmap *tiles,
++		       int x, int y, int w, int h,
++		       gx_color_index zero, gx_color_index one,
++		       int px, int py)
++{
++    fprintf(stderr, "Striptile rectangle\n");
++    return 0;
++}
++#endif
++
++// Lock to make DLL threadsafe
++#if defined(__POWERPC__)
++__declspec(export)
++#endif
++int gsdll_lock_device(unsigned char *dev, int flag) {
++	gx_device_be *bdev = (gx_device_be *)dev;
++	
++    if (flag) {
++    	acquire_sem(bdev->_mutex);
++    	return 1;
++    }
++    
++    release_sem(bdev->_mutex);
++    return 0;
++}
++
++// Draw to on-screen BView 
++#if defined(__POWERPC__)
++__declspec(export)
++#endif
++void gsdll_draw(unsigned char *dev, BView *view, BRect dest, BRect src) {
++	gx_device_be *bdev = (gx_device_be *)dev;
++	view->SetDrawingMode(B_OP_COPY);
++	view->DrawBitmapAsync(bdev->_bitmap, src, dest);
++}
++
++#if 0
++// TODO Use an argument to specify whether to use anti-aliasing or not
++// and the the bit depth of the alpha channel.
++int be_get_params(gx_device *dev, gs_param_list *plist) {
++	if (plist) {
++		gs_param_enumerator_t iterator;
++		gs_param_key_t key;
++		param_init_enumerator(&iterator);
++		while (0 == param_get_next_key(plist, &iterator, &key)) {
++			if (key.data) {
++				fprintf(stderr, "%*.*s %d\n", (int)key.size, (int)key.size, key.data);
++			}
++		}
++	}
++	return 0;
++}
++
++int be_put_params(gx_device *dev, gs_param_list *plist) {	
++	if (plist) {
++		gs_param_enumerator_t iterator;
++		gs_param_key_t key;
++		param_init_enumerator(&iterator);
++		while (0 == param_get_next_key(plist, &iterator, &key)) {
++			if (key.data) {
++				fprintf(stderr, "%*.*s %d\n", (int)key.size, (int)key.size, key.data);
++			}
++		}
++	
++		int bpp;
++		param_read_int(plist, "BitsPerPixel", &bpp);
++		long l;
++		param_read_long(plist, "BitsPerPixel", &l);
++	}
++	return 0;
++}
++#endif
++
++
++/* Anti-aliasing Devices: bealpha2, bealpha4, bealpht2, bealpht4 */
++
++// Color conversion from gx_color_index to gx_color_value
++private int
++be_alpha_map_color_rgb(
++	gx_device * dev, 
++	gx_color_index color,
++	gx_color_value prgb[3])
++{
++    colorcast_t colorcast;
++	colorcast.index = color;
++	prgb[0] = colorcast.rgb.red   << 8;
++	prgb[1] = colorcast.rgb.green << 8;
++	prgb[2] = colorcast.rgb.blue  << 8;
++	return 0;	
++}
++
++// Color conversion from gx_color_values to index
++private gx_color_index
++be_alpha_map_rgb_alpha_color(
++	gx_device * dev,
++	gx_color_value r, 
++	gx_color_value g, 
++	gx_color_value b, 
++	gx_color_value alpha)
++{
++    colorcast_t colorcast;
++	colorcast.rgb.red   = r >> 8;
++	colorcast.rgb.green = g >> 8;
++	colorcast.rgb.blue  = b >> 8;
++	colorcast.rgb.alpha = alpha >> 8;
++	return colorcast.index;
++}
++
++
++private void
++make_room_in_alpha_cache(gx_device_be* bdev)
++{
++	bmap_alpha_cache *bmapc;
++	// Remove bitmaps from cache if required
++	if ((bdev->_alpha_num_bmaps >= BE_ALPHA_MAX_BITMAPS) || (bdev->_alpha_size >= BE_ALPHA_MAX_SIZE)) {
++		bdev->_view->Sync();
++		// Do we need to remove more bitmaps?
++		bmapc = bdev->_alpha_mru_last;
++		if (bmapc && 
++			((bdev->_alpha_num_bmaps >= BE_ALPHA_MAX_BITMAPS) || (bdev->_alpha_size >= BE_ALPHA_MAX_SIZE))) {
++			// Remove the least recently used bitmaps
++			do {
++				be_alpha_remove_bmap(bdev, bmapc->ht_entry, bmapc);
++				delete bmapc;
++				bmapc = bdev->_alpha_mru_last;
++			} while (bmapc && 
++				((bdev->_alpha_num_bmaps >= (BE_ALPHA_MAX_BITMAPS - BE_ALPHA_REMOVE_BITMAPS)) || 
++				(bdev->_alpha_size >= BE_ALPHA_MAX_SIZE)));
++		}
++	}
++} 
++
++// 2 alpha bits per pixel  (4 alpha values per byte in base)
++private void
++alpha2_to_bitmap(const unsigned char *base, int raster, int w, int h, BBitmap* bitmap, colorcast_t colorcast)
++{
++	unsigned char *bmp = (unsigned char*)bitmap->Bits();
++	int32 bpr = bitmap->BytesPerRow();
++	const unsigned char *data = base;
++	int32 w4 = w/4;
++	int32 rest = w & 3;
++	
++	for (int32 line = h; line; line --) {
++		// start of line
++		const unsigned char *src = data; 
++		rgb_color *dst = (rgb_color*)bmp; 
++		
++		// next line
++		data += raster;
++		bmp += bpr;
++		
++		// fill bitmap
++		for (int32 column = w4; column; column --) {
++			colorcast.rgb.alpha = g_alpha2[(*src) >> 6];
++			*dst = colorcast.rgb;
++			dst++;
++			
++			colorcast.rgb.alpha = g_alpha2[((*src) >> 4) & 0x03];
++			*dst = colorcast.rgb;
++			dst++;
++			
++			colorcast.rgb.alpha = g_alpha2[((*src) >> 2) & 0x03];
++			*dst = colorcast.rgb;
++			dst++;
++			
++			colorcast.rgb.alpha = g_alpha2[(*src) & 0x03];
++			*dst = colorcast.rgb;
++			dst++; src++;
++		}
++		
++		switch (rest) {
++			case 1:
++				colorcast.rgb.alpha = g_alpha2[(*src) >> 6];
++				*dst = colorcast.rgb;
++				break;
++
++			case 2:
++				colorcast.rgb.alpha = g_alpha2[(*src) >> 6];
++				*dst = colorcast.rgb;
++				dst++;
++				
++				colorcast.rgb.alpha = g_alpha2[((*src) >> 4) & 0x03];
++				*dst = colorcast.rgb;
++				break;
++				
++			case 3:
++				colorcast.rgb.alpha = g_alpha2[(*src) >> 6];
++				*dst = colorcast.rgb;
++				dst++;
++				
++				colorcast.rgb.alpha = g_alpha2[((*src) >> 4) & 0x03];
++				*dst = colorcast.rgb;
++				dst++;
++				
++				colorcast.rgb.alpha = g_alpha2[((*src) >> 2) & 0x03];
++				*dst = colorcast.rgb;
++				break;
++		}
++	}
++}
++
++
++// 4 alpha bits per pixel (2 alpha values per byte in base)
++private void
++alpha4_to_bitmap(const unsigned char *base, int raster, int w, int h, BBitmap* bitmap, colorcast_t colorcast)
++{
++	unsigned char *bmp = (unsigned char*)bitmap->Bits();
++	int32 bpr = bitmap->BytesPerRow();
++	const unsigned char *data = base;
++	int32 w2 = w/2;
++	bool rest = (w & 1) > 0;
++	
++	for (int32 line = h; line; line --) {
++		// start of line
++		const unsigned char *src = data; 
++		rgb_color *dst = (rgb_color*)bmp;
++		
++		// next line
++		data += raster;
++		bmp += bpr;
++		
++		// fill bitmap
++		for (int32 column = w2; column; column --) {
++			colorcast.rgb.alpha = g_alpha4[(*src) >> 4];
++			*dst = colorcast.rgb;
++			dst++;
++			
++			colorcast.rgb.alpha = g_alpha4[(*src) & 0x0F];
++			*dst = colorcast.rgb;
++			src++; dst++;
++		}
++	
++		if (rest) {
++			colorcast.rgb.alpha = g_alpha4[(*src) >> 4];
++			*dst = colorcast.rgb;
++		}
++	}
++}
++
++// return a bitmap that is large enough (if necessary delete the cached bitmap
++// and create a new one)
++private BBitmap*
++get_cached_bitmap(gx_device_be* bdev, int w, int h)
++{
++	BBitmap* bitmap = bdev->_cached_bitmap;
++	if (bitmap == NULL || (bdev->_cached_width < w) || (bdev->_cached_height < h)) {
++		delete bitmap;
++		bitmap = new BBitmap(BRect(0.0, 0.0, w-1, h-1), B_RGBA32);
++		bdev->_cached_bitmap = bitmap;
++		bdev->_cached_width = w;
++		bdev->_cached_height = h;
++	}
++	return bitmap;
++}
++
++// Copy alpha mask
++private int
++be_alpha_copy_alpha(
++	gx_device * dev, 
++	const unsigned char *base, 
++	int sourcex,
++	int raster, 
++	gx_bitmap_id id, 
++	int x, int y, int w, int h,
++	gx_color_index color, 
++	int depth)
++{
++#if TRACE_COPY_CALLS
++	fprintf(stderr, "*+-a\t%d\t%d\t%d\t%ld\t%d\n",
++		(int)id,
++		w, h,
++		(unsigned long)color,
++		depth);
++#endif
++
++#if PROFILE
++    bigtime_t start = system_time();
++#endif
++
++    gx_device_be *bdev = (gx_device_be *)dev;
++
++    if(raster > 0) {
++		colorcast_t colorcast;
++		colorcast.index = color;
++	
++		// We have to swap red and blue values, so we can use colorcast.rgb to write directly to memory
++		unsigned char swap = colorcast.rgb.red; 
++		colorcast.rgb.red = colorcast.rgb.blue; 
++		colorcast.rgb.blue = swap;
++	
++		BBitmap *bitmap = NULL;
++	
++		bmap_alpha_cache **ht_entry = NULL;
++		bmap_alpha_cache *bmapc;
++		
++		
++		// look in alpha cache
++		if (id != gx_no_bitmap_id) {
++			ht_entry = be_alpha_find_bmap(bdev, id, colorcast.rgb, &bmapc);
++			if (bmapc != NULL) { 
++				// cache hit 
++				bitmap = &(bmapc->bitmap);
++				be_alpha_move_to_top(bdev, ht_entry, bmapc);
++			}
++		}
++	
++		if(bitmap == NULL) {
++			// Create a bitmap in the color 'color'; take alpha channel from 'base'
++			if (ht_entry) {
++			#if 0
++				// if cache is full
++				//   if cache has reuseable bitmap
++				//      take bitmap, move to top, sync
++				//   else
++				//      delete some bitmaps from cache
++				// else
++				//   create a new bitmap
++			#else
++				make_room_in_alpha_cache(bdev);
++				bmapc = new bmap_alpha_cache_s(ht_entry, id, colorcast.rgb, w, h, B_RGBA32);
++				bitmap = &(bmapc->bitmap); 
++				be_alpha_insert_bmap(bdev, ht_entry, bmapc);
++			#endif
++			} else {
++				// Because bitmaps are drawn asynchronously wait for completion
++				// otherwise we could delete or overwrite a currently being drawn bitmap!
++				bdev->_view->Sync();
++				bitmap = get_cached_bitmap(bdev, w, h);
++			}
++
++			// convert the alpha mask to BBitmap
++			if (depth == 2) { 
++				alpha2_to_bitmap(base, raster, w, h, bitmap, colorcast);
++			} else if (depth == 4) { 
++				alpha4_to_bitmap(base, raster, w, h, bitmap, colorcast);
++			} else { 
++				// should not reach here!
++			}
++		} // bitmap == NULL
++
++		bdev->_view->SetDrawingMode(B_OP_ALPHA);
++
++		if (bitmap != NULL) {		
++			BRect from(sourcex, 0, sourcex + w - 1, h - 1);
++			BRect to(x, y, x + w - 1, y + h - 1);
++			bdev->_view->DrawBitmapAsync(bitmap, from, to);
++		} // bitmap != NULL
++    } // raster > 0
++    
++#if PROFILE
++	bdev->_copyalpha += (int)(system_time() - start);
++	bdev->_bitmaps++; bdev->_size += w * h;
++#endif
++    
++    return 0;
++}
++
+diff --git a/src/gdevbe.h b/src/gdevbe.h
+new file mode 100644
+index 0000000..fd3d61d
+--- /dev/null
++++ b/src/gdevbe.h
+@@ -0,0 +1,65 @@
++/* BeOS driver for Ghostscript using a BBitmap for buffering.
++ * This driver has been heavily rewritten from the previous version.
++ *
++ * Copyright 1998, Jake Hamby
++ * Send all comments, bug fixes, etc. to:  jehamby@lightside.com
++ * 
++ * Anti-Aliasing drivers: bealpha2, bealpht2, bealpha4 and bealpht4 
++ * Copyright 2000-2004, Michael Pfeiffer
++ */
++
++/* Size of the hashtable */
++#define BE_ALPHA_HASHTABLE_SIZE 255
++/* Max number of bitmaps in cache */
++#define BE_ALPHA_MAX_BITMAPS 500
++/* On overflow remove this number of bitmaps */
++#define BE_ALPHA_REMOVE_BITMAPS 100 
++/* Max size */
++/* 4 MBytes (divide by 4, because bitmaps have 4 bytes per pixel) */
++#define BE_ALPHA_MAX_SIZE 4*1024*1024/4 
++
++/* Contains a BBitmap, so can't define from C */
++struct bmapcache_s;         /* the cache entry for a monochrome bitmap */
++struct bmap_alpha_cache_s;  /* the cache entry for a color bitmap with an alpha channel */
++
++/* Define the BeOS device */
++typedef struct gx_device_be_s {
++	gx_device_common;
++	sem_id _mutex;      /* for gsdll_lock_device */
++	BBitmap *_bitmap; /* the bitmap for buffering */
++	BView *_view;     /* offscreen view for drawing into the bitmap */
++	struct bmapcache_s *_bmapcache;          /* the monochrome bitmap cache */
++	struct bmapcache_s **_bmapcache_current; /* the most recently used bitmap in monochrome bitmap cache */
++
++	/* The hash table of the color bitmap cache */
++	struct bmap_alpha_cache_s *_alpha_hashtable[BE_ALPHA_HASHTABLE_SIZE];
++	/* The MRU list */ 
++	/* used to delete the least recently used bitmaps */	
++	struct bmap_alpha_cache_s *_alpha_mru_first;
++	struct bmap_alpha_cache_s *_alpha_mru_last;
++	/* Number of bitmaps in cache */
++	int _alpha_num_bmaps;
++	/* The size of all bitmaps in hashtable list in units of 4 bytes */
++	long _alpha_size; 
++
++	/* Single bitmap used to convert from alpha mask to BBitmap */
++	BBitmap* _cached_bitmap;
++	int      _cached_width;
++	int      _cached_height;
++
++#if PROFILE
++	/* Statistics */
++	int  _fillrect;
++	int  _copymono;
++	int  _drawline;
++	int  _copyalpha;
++	long _size;
++	long _bitmaps;
++#endif
++} gx_device_be;
++
++/* Default dots-per-inch (be sure to choose an even number!) */
++/* Macros are duplicated in gsfront.cpp; synchronize them if necessary! */
++#define INITIAL_RESOLUTION ((int)96.0)
++#define INITIAL_WIDTH ((int)(INITIAL_RESOLUTION * 85 / 10 + 1))
++#define INITIAL_HEIGHT ((int)(INITIAL_RESOLUTION * 11 + 1))
+diff --git a/src/gsdll.c b/src/gsdll.c
+index ea9b0ce..3ceb6cb 100644
+--- a/src/gsdll.c
++++ b/src/gsdll.c
+@@ -52,6 +52,10 @@
+ extern HWND hwndtext;
+ #endif
+ 
++#ifdef __BEOS__
++#define HWND void *
++#endif
++
+ /****** SINGLE-INSTANCE HACK ******/
+ /* GLOBAL WARNING */
+ GSDLL_CALLBACK pgsdll_callback = NULL;	/* callback for messages and stdio to caller */
+diff --git a/src/gsdll.h b/src/gsdll.h
+index 4316937..98b8dec 100644
+--- a/src/gsdll.h
++++ b/src/gsdll.h
+@@ -44,6 +44,10 @@
+ #define GSDLLCALLLINK
+ #endif
+ 
++#ifdef __BEOS__
++#define HWND void *
++#endif
++
+ /* global pointer to callback */
+ typedef int (* GSDLLCALLLINK GSDLL_CALLBACK) (int, char *, unsigned long);
+ extern GSDLL_CALLBACK pgsdll_callback;
+diff --git a/src/gsfcmap.c b/src/gsfcmap.c
+index 4436a6c..e82ab0c 100644
+--- a/src/gsfcmap.c
++++ b/src/gsfcmap.c
+@@ -219,7 +219,7 @@ gs_cmap_create_char_identity(gs_cmap_t **ppcmap, int num_bytes, int wmode,
+ /*
+  * Check for identity CMap. Uses a fast check for special cases.
+  */
+-int
++bool
+ gs_cmap_is_identity(const gs_cmap_t *pcmap, int font_index_only)
+ {
+     return pcmap->procs->is_identity(pcmap, font_index_only);
+diff --git a/src/gsfront.cpp b/src/gsfront.cpp
+new file mode 100644
+index 0000000..db03cd6
+--- /dev/null
++++ b/src/gsfront.cpp
+@@ -0,0 +1,775 @@
++/* Copyright (C) 1998, Jake Hamby.  All rights reserved.
++
++  This file is part of Aladdin Ghostscript.
++
++  Aladdin Ghostscript is distributed with NO WARRANTY OF ANY KIND.  No author
++  or distributor accepts any responsibility for the consequences of using it,
++  or for whether it serves any particular purpose or works at all, unless he
++  or she says so in writing.  Refer to the Aladdin Ghostscript Free Public
++  License (the "License") for full details.
++
++  Every copy of Aladdin Ghostscript must include a copy of the License,
++  normally in a plain ASCII text file named PUBLIC.  The License grants you
++  the right to copy, modify and redistribute Aladdin Ghostscript, but only
++  under certain conditions described in the License.  Among other things, the
++  License requires that the copyright notice and this notice be preserved on
++  all copies.
++  
++
++  gsfront.cpp
++
++  Shared library front-end to Ghostscript.  Simulates traditional "gs"
++  executable, but opens a window for the native BeOS GUI driver
++
++  History
++  1998 Initial port by Jake Hamby
++  2000 Ported version 7 by Sander Stoks (see comment below)
++  2004 Ported version 8 by Michael Pfeiffer (laplace@users.sourceforge.net)
++
++  Note by Sander Stoks:
++  This is mostly Jake Hamby's work.  All I did was modify it to use
++  ArgvReceived() and RefsReceived() properly, so you can set this front-end
++  to be the preferred app for application/postscript files and have it
++  launch with the file opened when you double-click a PS file. 
++  This is only of limited use since I left the "next page" stuff
++  unimplemented.  A "proper" front end would open a small window with
++  backward/forward buttons.  Maybe I'll write one on a rainy Sunday afternoon
++  (and although I have plenty of those here in London, don't hold your breath :-) 
++*/
++
++// set VERBOSE to 1 to print debugging output
++#define VERBOSE 0
++
++#include <stdio.h>
++#include <string.h>
++
++#include <Alert.h>
++#include <Application.h>
++#include <Autolock.h>
++#include <Beep.h>
++#include <Entry.h>
++#include <File.h>
++#include <FindDirectory.h>
++#include <MenuItem.h>
++#include <Path.h>
++#include <PopUpMenu.h>
++#include <Screen.h>
++#include <ScrollView.h>
++
++typedef void *HWND;
++
++extern "C" {
++#include "gsdll.h"
++void gsdll_draw(unsigned char *device, BView *view, BRect dest, BRect src);
++}
++
++#if VERBOSE
++	#define OUT(args) fprintf args
++#else
++	#define OUT(args)
++#endif
++
++// Constants
++
++// Default dots-per-inch (be sure to choose an even number!)
++// Copied from gdevbe.h
++#define INITIAL_RESOLUTION ((int)96.0)
++#define INITIAL_WIDTH ((int)(INITIAL_RESOLUTION * 85 / 10 + 1))
++#define INITIAL_HEIGHT ((int)(INITIAL_RESOLUTION * 11 + 1))
++
++// Preferences
++static const char* kPreferencesFile = "ghostscript_settings";
++static const char* kWindowLeft = "window_left";
++static const char* kWindowTop  = "window_top";
++
++// TODO query these from the system:
++static const int kWindowTabHeight = 24;
++static const int kWindowBorderSize = 4;
++
++// Prototypes
++long gsloop(void *foo);
++
++// Local class declarations
++
++
++class Preferences {
++public:
++	Preferences();
++	virtual ~Preferences();
++	bool GetPath(BPath* path);
++
++	BPoint GetWindowPosition()              { return fWindowPosition; }
++	void SetWindowPosition(BPoint position) { fWindowPosition = position; }
++	
++private:
++	BPoint fWindowPosition;
++};
++
++
++class PSView : public BView {
++public:
++	PSView(BRect area);
++	void Draw(BRect area);
++	void Pulse();
++	void UpdateScrollbar(orientation direction, float viewSize, float pageSize);
++	void UpdateScrollbars();
++	void SetPageSize(int width, int height);
++	
++	void ScrollTo(BPoint point);
++
++	BPoint GetMouseScreenPosition();
++
++	void ShowPopUpMenu(BPoint point);
++	void MouseDown(BPoint point);
++	void MouseMoved(BPoint point, uint32 transit, const BMessage *msg);
++	void MouseUp(BPoint point);
++	
++	void MouseWheelChanged(BMessage* msg);
++
++	void MessageReceived(BMessage* msg);
++	
++	
++private:
++	int         fPageWidth;
++	int         fPageHeight;
++	// fields used for dragging support
++	bool        fDragView;
++	BPoint      fLastMousePosition;
++};
++
++class PSWindow : public BWindow {
++public:
++	PSWindow(BRect frame, const char *title, window_type type, ulong flags, Preferences* prefs);
++	bool QuitRequested();
++	void MessageReceived(BMessage* msg);
++	
++	void GsDllSync();
++	void GsDllPage();
++	void GsDllSetPageSize(int width, int height);
++	void GsStopUpdate();
++	
++	void FrameMoved(BPoint position);
++	void FrameResized(float width, float height);	
++
++	PSView* GetView() { return fPSView; }
++	
++	
++private:
++	PSView      *fPSView;
++	BScrollView *fScrollView;
++	Preferences* fPreferences;
++};
++
++class PSApplication : public BApplication {
++public:
++    PSApplication(const char *sig);
++	virtual ~PSApplication();
++	
++    void AboutRequested();
++    void MessageReceived(BMessage *message);
++    bool QuitRequested();
++    void RefsReceived(BMessage *message);
++    void ReadyToRun();
++
++
++	PSWindow* GetWindow() { return fWindow; }
++	Preferences* GetPreferences() { return fPreferences; }
++
++private:
++	Preferences *fPreferences;
++    PSWindow    *fWindow;
++	thread_id   fGhostscriptThread;
++};
++
++// Private message types
++#define SHOW_FILE_PANEL	'SPNL'
++#define NEXT_PAGE		'NXPG'
++
++// The BeOS device to draw
++unsigned char *gBeDevice = NULL;
++
++// more global variables
++PSApplication *gApplication;
++int           gArgc;
++char          **gArgv;
++bool          gRunInTerminal;
++
++
++// Implementation of Preferences
++Preferences::Preferences()
++	: fWindowPosition(15, kWindowTabHeight)
++{
++	BPath path;
++	if (GetPath(&path)) {
++		BFile file(path.Path(), B_READ_ONLY);
++		BMessage data;
++		if (file.InitCheck() == B_OK &&
++			data.Unflatten(&file) == B_OK) {
++			
++			// read preferences
++			data.FindFloat(kWindowLeft, &fWindowPosition.x);
++			data.FindFloat(kWindowTop, &fWindowPosition.y);
++		}
++	}
++}
++
++Preferences::~Preferences()
++{
++	BPath path;
++	if (GetPath(&path)) {
++		// write preferences
++		BMessage data;
++		data.AddFloat(kWindowLeft, fWindowPosition.x);
++		data.AddFloat(kWindowTop, fWindowPosition.y);
++		
++		BFile file(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
++		if (file.InitCheck() == B_OK) {
++			data.Flatten(&file);
++		}
++	}
++}
++
++bool Preferences::GetPath(BPath* path)
++{
++	return find_directory(B_COMMON_SETTINGS_DIRECTORY, path) == B_OK &&
++		path->Append(kPreferencesFile) == B_OK;
++}
++
++
++// Implementation of PSWindow
++
++PSWindow::PSWindow(BRect frame, const char *title, window_type type, ulong flags, Preferences* prefs) 
++	: BWindow(frame, title, type, flags)
++	, fPreferences(prefs)
++{
++	AddShortcut('a', B_COMMAND_KEY, new BMessage(B_ABOUT_REQUESTED));
++	
++	frame.OffsetTo(B_ORIGIN);
++	frame.right -= B_V_SCROLL_BAR_WIDTH;
++	frame.bottom -= B_H_SCROLL_BAR_HEIGHT;
++	fPSView = new PSView(frame);
++	
++	fScrollView = new BScrollView("Scroll View", fPSView, B_FOLLOW_ALL,
++			0, true, true, B_FANCY_BORDER);
++	fScrollView->ScrollBar(B_HORIZONTAL)->SetRange(0, 611);
++	fScrollView->ScrollBar(B_VERTICAL)->SetRange(0, 791);
++
++	AddChild(fScrollView);
++	fPSView->UpdateScrollbars();
++	fPSView->MakeFocus();
++}
++
++bool PSWindow::QuitRequested() 
++{
++	be_app_messenger.SendMessage(B_QUIT_REQUESTED);
++	return true;
++}
++
++void PSWindow::MessageReceived(BMessage* msg)
++{
++	if (msg->what == B_ABOUT_REQUESTED) {
++		be_app_messenger.SendMessage(B_ABOUT_REQUESTED);
++	}
++}
++
++void PSWindow::GsDllSync()
++{
++	BAutolock autoLock(this);
++	if (!autoLock.IsLocked()) return;
++	// Use pulse to update the view while the page is being rendered
++	fPSView->Invalidate();
++	SetPulseRate(1000000/10);
++}
++
++void PSWindow::GsDllPage()
++{
++	BAutolock autoLock(this);
++	if (!autoLock.IsLocked()) return;
++	// Stop pulse
++	SetPulseRate(0);
++	fPSView->Invalidate();
++}
++
++void PSWindow::GsStopUpdate()
++{
++	BAutolock autoLock(this);
++	if (autoLock.IsLocked()) {
++		SetPulseRate(0);
++	}
++}
++
++// Resize window but stay inside screen bounds
++void PSWindow::GsDllSetPageSize(int width, int height)
++{
++	BAutolock autoLock(this);
++	
++	fPSView->SetPageSize(width, height);
++	
++	BRect screensize;
++	BScreen screen;
++	if (screen.IsValid()) {
++		screensize = screen.Frame();
++	} else {
++		screensize = BRect(0, 0, 640, 480);
++	}
++	
++	// scroll bars should not overlap page
++	width += (int)B_V_SCROLL_BAR_WIDTH;
++	height += (int)B_H_SCROLL_BAR_HEIGHT;
++	
++	BRect frame(Frame());
++	// stay inside screen
++	if (frame.left + width - kWindowBorderSize > screensize.right) {
++		width = (int)(screensize.right - frame.left - kWindowBorderSize);
++	}
++	if (frame.top + height - kWindowBorderSize > screensize.bottom) {
++		height = (int)(screensize.bottom - frame.top - kWindowBorderSize);
++	}
++	ResizeTo(width, height);
++}
++
++void PSWindow::FrameMoved(BPoint position)
++{
++	if (fPreferences != NULL) {
++		fPreferences->SetWindowPosition(position);
++	}
++}
++
++void PSWindow::FrameResized(float width, float height)
++{
++	fPSView->UpdateScrollbars();
++}
++
++// Implementation of PSView
++
++PSView::PSView(BRect frame) 
++	: BView(frame, "PSView", B_FOLLOW_ALL_SIDES, B_WILL_DRAW | B_PULSE_NEEDED) 
++	, fPageWidth(INITIAL_WIDTH)
++	, fPageHeight(INITIAL_HEIGHT)
++{
++	SetViewColor(B_TRANSPARENT_COLOR);
++}
++
++void PSView::Draw(BRect area) 
++{
++	const rgb_color kWhite = {255, 255, 255, 0};
++	SetDrawingMode(B_OP_COPY);
++	SetHighColor(kWhite);
++
++	if(gBeDevice) {
++		// fill space around page with white color
++		if (area.left < 0) {
++			FillRect(BRect(area.left, area.top, -1, area.bottom));
++		}
++		if (fPageWidth <= area.right) {
++			FillRect(BRect(fPageWidth, area.top, area.right, area.bottom));
++		}
++		if (area.top < 0) {
++			FillRect(BRect(area.left, area.top, area.right, -1));
++		}
++		if (fPageHeight <= area.bottom) {
++			FillRect(BRect(area.left, fPageHeight, area.right, area.bottom));			
++		}
++		// paint page
++		gsdll_lock_device(gBeDevice, 1);
++		gsdll_draw(gBeDevice, this, area, area);
++		gsdll_lock_device(gBeDevice, 0);
++	} else {
++		FillRect(area);
++	}
++}
++
++void PSView::Pulse()
++{
++	Invalidate();
++}
++
++void PSView::SetPageSize(int width, int height)
++{
++	fPageWidth = width;
++	fPageHeight = height;
++}
++
++void PSView::UpdateScrollbar(orientation direction, float viewSize, float pageSize) 
++{
++	BScrollBar* scrollBar = ScrollBar(direction);
++	if (scrollBar != NULL) {
++		float outsideSize = pageSize - viewSize;
++		if (outsideSize < 0.0) {
++			outsideSize = 0.0;
++		}
++		
++		scrollBar->SetRange(0, outsideSize);
++		scrollBar->SetProportion(viewSize / pageSize);
++		scrollBar->SetSteps(viewSize / 10.0, viewSize);
++	}
++}
++
++void PSView::UpdateScrollbars() 
++{
++	BRect bounds(Bounds());
++	UpdateScrollbar(B_HORIZONTAL, bounds.Width(), fPageWidth);
++	UpdateScrollbar(B_VERTICAL, bounds.Height(), fPageHeight);
++}
++
++// scroll restricted within page size
++void PSView::ScrollTo(BPoint point) 
++{
++	BRect bounds(Bounds());
++	float xMax = fPageWidth - bounds.Width();
++	float yMax = fPageHeight - bounds.Height();
++	
++	if (xMax < 0) xMax = 0;	
++	if (yMax < 0) yMax = 0;
++	
++	if (point.x < 0) {
++		point.x = 0;
++	} else if (point.x > xMax) {
++		point.x = xMax;
++	}
++	
++	if (point.y < 0) {
++		point.y = 0;
++	} else if (point.y > yMax)  {
++		point.y = yMax;
++	}
++		
++	BView::ScrollTo(point); 
++}
++
++BPoint PSView::GetMouseScreenPosition()
++{
++	uint32 buttons;
++	BPoint position;
++	GetMouse(&position, &buttons, false);
++	ConvertToScreen(&position);
++	return position;
++}
++
++void PSView::ShowPopUpMenu(BPoint point)
++{
++	BPopUpMenu* menu = new BPopUpMenu("PopUpMenu");
++	menu->SetAsyncAutoDestruct(true);
++
++	BMessage* msg;
++	BMenuItem* i;
++
++	// About menu item
++	msg = new BMessage(B_ABOUT_REQUESTED);
++	i = new BMenuItem("About", msg);
++	i->SetTarget(this);
++	menu->AddItem(i);
++
++	point -= BPoint(10, 10);
++	menu->Go(point, true, false, false);	
++}
++
++void PSView::MouseDown(BPoint point)
++{
++	// 
++	if (modifiers() != 0) return;
++	
++	uint32 buttons;
++	GetMouse(&point, &buttons);
++	if (buttons & B_PRIMARY_MOUSE_BUTTON) {
++		MakeFocus();
++		SetMouseEventMask(B_POINTER_EVENTS);
++		fLastMousePosition = GetMouseScreenPosition();
++		fDragView = true;	
++	} else if (buttons & B_SECONDARY_MOUSE_BUTTON) {
++		ShowPopUpMenu(GetMouseScreenPosition());
++	}
++}
++
++void PSView::MouseMoved(BPoint point, uint32 transit, const BMessage *msg)
++{
++	if (fDragView) {
++		BPoint position(GetMouseScreenPosition());
++		BPoint delta(fLastMousePosition - position);
++		ScrollBy(delta.x, delta.y);
++		fLastMousePosition = position;
++	}
++}
++
++void PSView::MouseUp(BPoint point)
++{
++	if (fDragView) {
++		MouseMoved(point, 0, NULL);
++		fDragView = false;
++	}
++}
++
++void PSView::MouseWheelChanged(BMessage* msg)
++{
++	float scrollDistance = 25;
++	
++	// set scroll distance to 20% of the minimum of screen width and height
++	BScreen screen;
++	if (screen.IsValid()) {
++		BRect frame(screen.Frame());
++		if (frame.right < frame.bottom) {
++			scrollDistance = frame.right;
++		} else {
++			scrollDistance = frame.bottom;
++		}
++		scrollDistance *= 0.20;
++	}
++	
++	float dy, dx;
++	if (msg->FindFloat("be:wheel_delta_y", &dy) == B_OK && dy != 0.0) {
++		bool down = dy > 0;
++		// intelliMouse driver uses command key to simulate wheel_detla_x!
++		if ((modifiers() & (B_COMMAND_KEY | B_OPTION_KEY))) {
++			// Zoom(!down); // zoom in / out	
++		} else if ((modifiers() & (B_SHIFT_KEY | B_CONTROL_KEY))) {
++			// next/previous page
++			// MoveToPage(mCurrentPage + (down ? 1 : -1));
++		} else {
++			ScrollBy(0, scrollDistance * (down ? 1 : -1));
++		}
++	}
++	if (msg->FindFloat("be:wheel_delta_x", &dx) == B_OK && dx != 0.0) {
++		bool right = dx > 0;
++		ScrollBy(scrollDistance * (right ? 1 : -1), 0);
++	}
++}
++
++void PSView::MessageReceived(BMessage* msg)
++{
++//	if (msg->what == B_MOUSE_WHEEL_CHANGED) {
++		// MouseWheelChanged(msg);
++//	} else {
++		BView::MessageReceived(msg);
++//	}
++}
++
++// Implementation of PSApplication
++
++PSApplication::PSApplication(const char *sig) : BApplication(sig) 
++{
++	fPreferences = new Preferences();
++	
++	BScreen myscreen;
++	BRect screensize;
++	if (myscreen.IsValid()) {
++		screensize = myscreen.Frame();
++	} else {
++		screensize = BRect(0,0,640,480);
++	}
++	
++	BPoint position(15, kWindowTabHeight);
++	if (fPreferences != NULL) {
++		position = fPreferences->GetWindowPosition();
++	}
++	BRect frame(position.x, position.y, 
++		screensize.right - kWindowBorderSize, screensize.bottom - kWindowBorderSize);
++		
++    fWindow = new PSWindow(frame, "Ghostscript", B_DOCUMENT_WINDOW, 0, fPreferences);
++        		
++	fWindow->Run();
++}
++
++PSApplication::~PSApplication() {
++	delete fPreferences;
++	fPreferences = NULL;
++}
++
++void PSApplication::ReadyToRun ()
++{
++	fGhostscriptThread = spawn_thread(gsloop, "GS Loop", B_NORMAL_PRIORITY, (void *)GetWindow()->GetView());
++	resume_thread(fGhostscriptThread);
++}
++
++void PSApplication::AboutRequested() {
++   BAlert *alert;
++
++   alert = new BAlert("", "AFPL Ghostscript 8.14 (2004-02-20)\n\n"
++	"Copyright (C) 2004 artofcode LLC, Benicia, CA.  All rights reserved.\n"
++	"This software comes with NO WARRANTY: see the file PUBLIC for details.\n\n"
++	"BeOS port by Jake Hamby, Sander Stoks and Michael Pfeiffer.\n\n"
++	"Please send all comments to:\n"
++	"    laplace@users.sourceforge.net",
++   	"OK", NULL, NULL, B_WIDTH_AS_USUAL, B_INFO_ALERT);
++   alert->Go();
++}
++
++void PSApplication::MessageReceived(BMessage *message)
++{
++	switch (message->what) {
++		case SHOW_FILE_PANEL:
++//			RunFilePanel();         // Use default values
++			OUT((stderr, "Open file...\n"));
++			break;
++        case NEXT_PAGE:
++			OUT((stderr, "Next page...\n"));
++			break;
++		default:
++			BApplication::MessageReceived(message);
++            break;
++	}
++}
++
++bool PSApplication::QuitRequested() {
++	kill_thread(fGhostscriptThread);  // Kill Ghostscript thread if still running
++	return true;                      // and exit app
++}
++
++void PSApplication::RefsReceived(BMessage *message)
++{
++	gRunInTerminal = false;
++	BPath path;
++	entry_ref ref;
++	if (message->FindRef ("refs", &ref) == B_OK) {
++		gArgc = 2;
++		gArgv[0] = new char[16];
++		strcpy (gArgv[0], "gs");
++		path.SetTo (&ref);
++		gArgv[1] = new char[strlen(path.Path()) + 1];
++		strcpy (gArgv[1], path.Path());
++	}
++}
++
++// Only used to open and close BWindow
++int
++gsdll_callback(int message, char *str, unsigned long data)
++{
++	static bool child_added = 0;
++    char *p;
++    switch (message) {
++	    case GSDLL_STDIN:
++	    	OUT((stderr, "GSDLL_STDIN called\n"));
++	        p = fgets(str, data, stdin);
++	        if (p)
++	           return strlen(str);
++	        else
++	           return 0; 
++	    case GSDLL_STDOUT:
++	    	OUT((stderr, "GSDLL_STDOUT called\n"));
++	        if (str != (char *)NULL)
++				fwrite(str, 1, data, stderr);
++	        return data;
++	    case GSDLL_DEVICE:
++			OUT((stderr, "GSDLL_DEVICE called\n"));
++			gBeDevice = (unsigned char *)str;
++			if (data && !child_added) {	// open window
++				child_added = 1;
++				gApplication->GetWindow()->Lock();
++				gApplication->GetWindow()->Show();
++				gApplication->GetWindow()->Unlock();
++			} else {	// close window
++				// do nothing right now
++			}
++			break;
++	    case GSDLL_SYNC:
++	        OUT((stderr,"Callback: SYNC %p %ld\n", str, data));
++	        gApplication->GetWindow()->GsDllSync();
++	        break;
++	    case GSDLL_PAGE:
++	        OUT((stderr,"Callback: PAGE %p %ld\n", str, data));
++	        gApplication->GetWindow()->GsDllPage();
++	        break;
++	    case GSDLL_SIZE:
++	        OUT((stderr,"Callback: SIZE %p width=%d height=%d\n", str,
++	            (int)(data & 0xffff), (int)((data>>16) & 0xffff) ));
++			{
++				int width = (int)(data & 0xffff);
++				int height = (int)((data>>16) & 0xffff);
++				gApplication->GetWindow()->GsDllSetPageSize(width, height);
++			}
++	        break;
++	    case GSDLL_POLL:
++	        OUT((stderr,"Callback: POLL %p\n", str));
++	        return 0; /* no error */
++	    default:
++	        OUT((stderr,"Callback: Unknown message=%d\n",message));
++	        break;
++    }
++    return 0;
++}
++
++void stop_automatic_invalidation()
++{
++	if (gBeDevice != NULL) {
++		gApplication->GetWindow()->GsStopUpdate();
++	}
++}
++
++void prompt()
++{
++	fprintf(stdout, "GS> ");
++	fflush(stdout);
++}
++
++bool isBatchProcessing() {
++	for (int i = 1; i < gArgc; i ++) {
++		if (strcmp(gArgv[i], "-dBATCH") == 0) {
++			return true;
++		}
++	}
++	return false;
++}
++
++long gsloop(void *psview)
++{    
++    int code;
++    code = gsdll_init(gsdll_callback, NULL, gArgc, gArgv);
++	OUT((stderr, "gsdll_init returns %d\n", code));
++
++	if (code == GSDLL_INIT_QUIT) {
++		goto done;
++	}
++
++	if (code == 0) {
++    	code = gsdll_execute_begin();
++    }
++
++	OUT((stderr, "gsdll_execute_begin returns %d\n", code));
++    if (code == 0) {
++    	if (!isBatchProcessing()) { 
++			stop_automatic_invalidation();
++			prompt();
++			while(1)
++			{
++				char input[256];
++
++			    if(!fgets(input, sizeof(input)-1, stdin))
++					break;
++	
++				code = gsdll_execute_cont(input, strlen(input));
++				OUT((stderr, "gsdll_execute returns %d\n", code));
++	
++				if (code < 0)
++			    	break;
++				
++				stop_automatic_invalidation();
++				prompt();
++			}
++		}
++		
++		if (code < 0) {
++			code = gsdll_execute_end();
++			OUT((stderr, "gsdll_execute_end returns %d\n", code));
++		}
++		
++		code = gsdll_exit();
++		OUT((stderr, "gsdll_exit returns %d\n", code));
++	}
++
++done:
++	be_app_messenger.SendMessage(B_QUIT_REQUESTED);
++    return 0;
++}
++
++int main (int32 argc, char *argv[])
++{
++	gArgc = argc;
++	gArgv = argv;
++    PSApplication app("application/x-vnd.jehamby.gs");
++    gApplication = &app; // so global functions can find the app
++    
++    gRunInTerminal = true;
++    
++    app.Run();
++    return 0;
++}
++
+diff --git a/src/gsovrc.c b/src/gsovrc.c
+index 3eeaff9..24a8c47 100644
+--- a/src/gsovrc.c
++++ b/src/gsovrc.c
+@@ -263,7 +263,7 @@ gs_create_overprint(
+  * This is used by the gs_pdf1.4_device (and eventually the PDFWrite
+  * device), which implements overprint and overprint mode directly.
+  */
+-int
++bool
+ gs_is_overprint_compositor(const gs_composite_t * pct)
+ {
+     return pct->type == &gs_composite_overprint_type;
+diff --git a/src/gximag3x.c b/src/gximag3x.c
+index b09b9cd..2fb6b79 100644
+--- a/src/gximag3x.c
++++ b/src/gximag3x.c
+@@ -374,7 +374,7 @@ check_image3x_extent(floatp mask_coeff, floatp data_coeff)
+  * pmcs->{InterleaveType,width,height,full_height,depth,data,y,skip}.
+  * If the mask is omitted, sets pmcs->depth = 0 and returns normally.
+  */
+-private bool
++private int
+ check_image3x_mask(const gs_image3x_t *pim, const gs_image3x_mask_t *pimm,
+ 		   const image3x_channel_values_t *ppcv,
+ 		   image3x_channel_values_t *pmcv,
+diff --git a/src/gxwts.c b/src/gxwts.c
+index f1effcf..71d4b4a 100644
+--- a/src/gxwts.c
++++ b/src/gxwts.c
+@@ -493,7 +493,7 @@ gx_dc_wts_fill_rectangle(const gx_device_color *pdevc,
+ }
+ 
+ /* Compare two wts colors for equality. */
+-private int
++private bool
+ gx_dc_wts_equal(const gx_device_color *pdevc1,
+ 		const gx_device_color *pdevc2)
+ {
+diff --git a/src/unix-aux.mak b/src/unix-aux.mak
+index 76ab802..6aded32 100644
+--- a/src/unix-aux.mak
++++ b/src/unix-aux.mak
+@@ -30,10 +30,32 @@ UNIX_AUX_MAK=$(GLSRC)unix-aux.mak
+ 
+ # Unix platforms other than System V, and also System V Release 4
+ # (SVR4) platforms.
+-unix__=$(GLOBJ)gp_getnv.$(OBJ) $(GLOBJ)gp_unix.$(OBJ) $(GLOBJ)gp_unifs.$(OBJ) $(GLOBJ)gp_unifn.$(OBJ) $(GLOBJ)gp_stdia.$(OBJ)
++unix__=$(GLOBJ)gp_getnv.$(OBJ) $(GLOBJ)gp_unix.$(OBJ) $(GLOBJ)gp_unifs.$(OBJ) $(GLOBJ)gp_unifn.$(OBJ) $(GLOBJ)gp_stdia.$(OBJ) $(GLOBJ)gsdll.$(OBJ)
+ $(GLGEN)unix_.dev: $(unix__) $(GLD)nosync.dev
+ 	$(SETMOD) $(GLGEN)unix_ $(unix__) -include $(GLD)nosync
+ 
++bealpha2__=$(GLOBJ)gp_getnv.$(OBJ) $(GLOBJ)gp_unix.$(OBJ) $(GLOBJ)gp_unifs.$(OBJ) $(GLOBJ)gp_unifn.$(OBJ) $(GLOBJ)gp_stdia.$(OBJ) $(GLOBJ)gsdll.$(OBJ)
++$(GLGEN)bealpha2_.dev: $(bealpha2__) $(GLD)nosync.dev
++	$(SETMOD) $(GLGEN)bealpha2_ $(bealpha2__) -include $(GLD)nosync
++#	$(ADDMOD) $(GLGEN)bealpha2_ -iodev wstdio
++
++bealpha4__=$(GLOBJ)gp_getnv.$(OBJ) $(GLOBJ)gp_unix.$(OBJ) $(GLOBJ)gp_unifs.$(OBJ) $(GLOBJ)gp_unifn.$(OBJ) $(GLOBJ)gp_stdia.$(OBJ) $(GLOBJ)gsdll.$(OBJ)
++$(GLGEN)bealpha4_.dev: $(bealpha4__) $(GLD)nosync.dev
++	$(SETMOD) $(GLGEN)bealpha4_ $(bealpha4__) -include $(GLD)nosync
++#	$(ADDMOD) $(GLGEN)bealpha4_ -iodev wstdio
++
++bealpht2__=$(GLOBJ)gp_getnv.$(OBJ) $(GLOBJ)gp_unix.$(OBJ) $(GLOBJ)gp_unifs.$(OBJ) $(GLOBJ)gp_unifn.$(OBJ) $(GLOBJ)gp_stdia.$(OBJ) $(GLOBJ)gsdll.$(OBJ)
++$(GLGEN)bealpht2_.dev: $(bealpht2__) $(GLD)nosync.dev
++	$(SETMOD) $(GLGEN)bealpht2_ $(bealpht2__) -include $(GLD)nosync
++#	$(ADDMOD) $(GLGEN)bealpht2_ -iodev wstdio
++
++bealpht4__=$(GLOBJ)gp_getnv.$(OBJ) $(GLOBJ)gp_unix.$(OBJ) $(GLOBJ)gp_unifs.$(OBJ) $(GLOBJ)gp_unifn.$(OBJ) $(GLOBJ)gp_stdia.$(OBJ) $(GLOBJ)gsdll.$(OBJ)
++$(GLGEN)bealpht4_.dev: $(bealpht4__) $(GLD)nosync.dev
++	$(SETMOD) $(GLGEN)bealpht4_ $(bealpht4__) -include $(GLD)nosync
++#	$(ADDMOD) $(GLGEN)bealpht4_ -iodev wstdio
++
++
++
+ $(GLOBJ)gp_unix.$(OBJ): $(GLSRC)gp_unix.c $(AK)\
+  $(pipe__h) $(string__h) $(time__h)\
+  $(gx_h) $(gsexit_h) $(gp_h)
+diff --git a/src/unix-dll.mak b/src/unix-dll.mak
+index 8626ba4..ab84c1b 100644
+--- a/src/unix-dll.mak
++++ b/src/unix-dll.mak
+@@ -44,6 +44,11 @@ GSSOX_XENAME=$(GS)x$(XE)
+ GSSOX_XE=$(BINDIR)/$(GSSOX_XENAME)
+ GSSOX=$(BINDIR)/$(SOBINRELDIR)/$(GSSOX_XENAME)
+ 
++# loader suporting display device using BeOS
++GSSOBE_XENAME=$(GS)be$(XE)
++GSSOBE_XE=$(BINDIR)/$(GSSOBE_XENAME)
++GSSOBE=$(BINDIR)/$(SOBINRELDIR)/$(GSSOBE_XENAME)
++
+ # shared library
+ GS_SONAME=lib$(GS).so
+ GS_SONAME_MAJOR=$(GS_SONAME).$(GS_VERSION_MAJOR)
+@@ -72,6 +77,9 @@ $(GSSOX_XE): $(GS_SO) $(GLSRC)dxmain.c
+ $(GSSOC_XE): $(GS_SO) $(GLSRC)dxmainc.c
+ 	$(GLCC) -g -o $(GSSOC_XE) $(GLSRC)dxmainc.c -L$(BINDIR) -l$(GS)
+ 
++$(GSSOBE_XE): $(GS_SO) $(GLSRC)gsfront.cpp
++	$(GLCC) -g -o $(GSSOBE_XE) $(GLSRC)gsfront.cpp -L$(BINDIR) -l$(GS) -lbe
++
+ # ------------------------- Recursive make targets ------------------------- #
+ 
+ SODEFS=LDFLAGS='$(LDFLAGS) $(CFLAGS_SO) -shared -Wl,-soname=$(GS_SONAME_MAJOR)'\
+@@ -87,13 +95,13 @@ SODEFS=LDFLAGS='$(LDFLAGS) $(CFLAGS_SO) -shared -Wl,-soname=$(GS_SONAME_MAJOR)'\
+ 
+ # Normal shared object
+ so: SODIRS
+-	$(MAKE) $(SODEFS) CFLAGS='$(CFLAGS_STANDARD) $(CFLAGS_SO) $(GCFLAGS) $(XCFLAGS)' prefix=$(prefix) $(GSSOC)
++	$(MAKE) $(SODEFS) CFLAGS='$(CFLAGS_STANDARD) $(CFLAGS_SO) $(GCFLAGS) $(XCFLAGS)' prefix=$(prefix) $(GSSOC) $(GSSOBE)
+ 
+ # Debug shared object
+ # Note that this is in the same directory as the normal shared
+ # object, so you will need to use 'make soclean', 'make sodebug'
+ sodebug: SODIRS
+-	$(MAKE) $(SODEFS) GENOPT='-DDEBUG' CFLAGS='$(CFLAGS_DEBUG) $(CFLAGS_SO) $(GCFLAGS) $(XCFLAGS)' $(GSSOC)
++	$(MAKE) $(SODEFS) GENOPT='-DDEBUG' CFLAGS='$(CFLAGS_DEBUG) $(CFLAGS_SO) $(GCFLAGS) $(XCFLAGS)' $(GSSOC) $(GSSOBE)
+ 
+ install-so: so
+ 	-mkdir -p $(prefix)
+@@ -103,6 +111,7 @@ install-so: so
+ 	-mkdir -p $(bindir)
+ 	-mkdir -p $(libdir)
+ 	$(INSTALL_PROGRAM) $(GSSOC) $(bindir)/$(GSSOC_XENAME)
++	$(INSTALL_PROGRAM) $(GSSOBE) $(bindir)/$(GSSOBE_XENAME)
+ 	$(INSTALL_PROGRAM) $(BINDIR)/$(SOBINRELDIR)/$(GS_SONAME_MAJOR_MINOR) $(libdir)/$(GS_SONAME_MAJOR_MINOR)
+ 	$(RM_) $(libdir)/$(GS_SONAME)
+ 	ln -s $(GS_SONAME_MAJOR_MINOR) $(libdir)/$(GS_SONAME)
+@@ -126,5 +135,6 @@ soclean: SODIRS
+ 	$(RM_) $(BINDIR)/$(SOBINRELDIR)/$(GS_SONAME_MAJOR)
+ 	$(RM_) $(GSSOC)
+ 	$(RM_) $(GSSOX)
++	$(RM_) $(GSSOBE)
+ 
+ # End of unix-dll.mak
+diff --git a/src/unix-gcc.mak b/src/unix-gcc.mak
+index f0d4944..e4e3113 100644
+--- a/src/unix-gcc.mak
++++ b/src/unix-gcc.mak
+@@ -256,7 +256,7 @@ LDFLAGS=$(XLDFLAGS)
+ # Solaris may need -lnsl -lsocket -lposix4.
+ # (Libraries required by individual drivers are handled automatically.)
+ 
+-EXTRALIBS=
++EXTRALIBS=-lbe
+ 
+ # Define the standard libraries to search at the end of linking.
+ # Most platforms require -lpthread for the POSIX threads library;
+@@ -367,7 +367,8 @@ EXTEND_NAMES=0
+ # Choose the device(s) to include.  See devs.mak for details,
+ # devs.mak and contrib.mak for the list of available devices.
+ 
+-DEVICE_DEVS=$(DISPLAY_DEV) $(DD)x11.dev $(DD)x11alpha.dev $(DD)x11cmyk.dev $(DD)x11gray2.dev $(DD)x11gray4.dev $(DD)x11mono.dev
++DEVICE_DEVS=$(DISPLAY_DEV) $(DD)beos.dev $(DD)bealpha2.dev $(DD)bealpha4.dev $(DD)bealpht2.dev $(DD)bealpht4.dev
++#DEVICE_DEVS=$(DISPLAY_DEV) $(DD)x11.dev $(DD)x11alpha.dev $(DD)x11cmyk.dev $(DD)x11gray2.dev $(DD)x11gray4.dev $(DD)x11mono.dev
+ 
+ #DEVICE_DEVS1=
+ #DEVICE_DEVS2=
+-- 
+2.19.1
+
+
+From 19af04b33eb441990280602f1939d05455cbb8ff Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Fri, 15 Mar 2019 19:30:01 +0100
+Subject: Fix the build.
+
+Not in the cleanest way...
+
+diff --git a/src/contrib.mak b/src/contrib.mak
+index bc889fb..1a9069a 100644
+--- a/src/contrib.mak
++++ b/src/contrib.mak
+@@ -863,20 +863,20 @@ $(GLOBJ)gdevsunr.$(OBJ) : $(GLSRC)gdevsunr.c $(PDEVH)
+ ###       by Michael Pfeiffer <michael.pfeiffer@utanet.at>;             ###
+ ###       anti-aliasing drivers by Michael Pfeiffer.                    ###
+ 
+-$(DD)beos.dev: $(GLOBJ)gdevbe.$(OBJ)
+-	$(SETDEV) $(DD)beos $(GLOBJ)gdevbe.$(OBJ)
++$(DD)unix.dev: $(GLOBJ)gdevbe.$(OBJ)
++	$(SETDEV) $(DD)unix $(GLOBJ)gdevbe.$(OBJ)
+ 
+ $(DD)bealpha2.dev: $(GLOBJ)gdevbe.$(OBJ)
+ 	$(SETDEV) $(DD)bealpha2 $(GLOBJ)gdevbe.$(OBJ)
+ 
+ $(DD)bealpha4.dev: $(GLOBJ)gdevbe.$(OBJ)
+ 	$(SETDEV) $(DD)bealpha4 $(GLOBJ)gdevbe.$(OBJ)
+- 
++
+ $(DD)bealpht2.dev: $(GLOBJ)gdevbe.$(OBJ)
+ 	$(SETDEV) $(DD)bealpht2 $(GLOBJ)gdevbe.$(OBJ)
+ 
+ $(DD)bealpht4.dev: $(GLOBJ)gdevbe.$(OBJ)
+ 	$(SETDEV) $(DD)bealpht4 $(GLOBJ)gdevbe.$(OBJ)
+ 
+- $(GLOBJ)gdevbe.$(OBJ): $(GLSRC)gdevbe.cpp $(GLSRC)gdevbe.h $(GDEV)
++$(GLOBJ)gdevbe.$(OBJ): $(GLSRC)gdevbe.cpp $(GLSRC)gdevbe.h $(GDEV)
+ 	$(GLCC) $(GLO_)gdevbe.$(OBJ) $(C_) $(GLSRC)gdevbe.cpp
+diff --git a/src/gsdll.h b/src/gsdll.h
+index 98b8dec..5bc09e4 100644
+--- a/src/gsdll.h
++++ b/src/gsdll.h
+@@ -44,7 +44,7 @@
+ #define GSDLLCALLLINK
+ #endif
+ 
+-#ifdef __BEOS__
++#if defined(__BEOS__) || defined(__HAIKU__)
+ #define HWND void *
+ #endif
+ 
+diff --git a/src/gsfront.cpp b/src/gsfront.cpp
+index db03cd6..ee3848a 100644
+--- a/src/gsfront.cpp
++++ b/src/gsfront.cpp
+@@ -231,7 +231,7 @@ Preferences::~Preferences()
+ 
+ bool Preferences::GetPath(BPath* path)
+ {
+-	return find_directory(B_COMMON_SETTINGS_DIRECTORY, path) == B_OK &&
++	return find_directory(B_USER_SETTINGS_DIRECTORY, path) == B_OK &&
+ 		path->Append(kPreferencesFile) == B_OK;
+ }
+ 
+diff --git a/src/ugcclib.mak b/src/ugcclib.mak
+index faca15d..1d5e256 100644
+--- a/src/ugcclib.mak
++++ b/src/ugcclib.mak
+@@ -93,7 +93,7 @@ CFLAGS_PROFILE=-pg -O2
+ CFLAGS=$(CFLAGS_DEBUG) $(GCFLAGS) $(XCFLAGS)
+ LDFLAGS=$(XLDFLAGS)
+ STDLIBS=-lm
+-EXTRALIBS=
++EXTRALIBS=-lbe
+ XINCLUDE=-I/usr/X11R6/include
+ XLIBDIRS=-L/usr/X11R6/lib
+ XLIBDIR=
+diff --git a/src/unix-aux.mak b/src/unix-aux.mak
+index 6aded32..29c585d 100644
+--- a/src/unix-aux.mak
++++ b/src/unix-aux.mak
+@@ -30,7 +30,7 @@ UNIX_AUX_MAK=$(GLSRC)unix-aux.mak
+ 
+ # Unix platforms other than System V, and also System V Release 4
+ # (SVR4) platforms.
+-unix__=$(GLOBJ)gp_getnv.$(OBJ) $(GLOBJ)gp_unix.$(OBJ) $(GLOBJ)gp_unifs.$(OBJ) $(GLOBJ)gp_unifn.$(OBJ) $(GLOBJ)gp_stdia.$(OBJ) $(GLOBJ)gsdll.$(OBJ)
++unix__=$(GLOBJ)gp_getnv.$(OBJ) $(GLOBJ)gp_unix.$(OBJ) $(GLOBJ)gp_unifs.$(OBJ) $(GLOBJ)gp_unifn.$(OBJ) $(GLOBJ)gp_stdia.$(OBJ) $(GLOBJ)gsdll.$(OBJ) $(GLOBJ)gdevbe.$(OBJ)
+ $(GLGEN)unix_.dev: $(unix__) $(GLD)nosync.dev
+ 	$(SETMOD) $(GLGEN)unix_ $(unix__) -include $(GLD)nosync
+ 
+@@ -61,6 +61,11 @@ $(GLOBJ)gp_unix.$(OBJ): $(GLSRC)gp_unix.c $(AK)\
+  $(gx_h) $(gsexit_h) $(gp_h)
+ 	$(GLCC) $(GLO_)gp_unix.$(OBJ) $(C_) $(GLSRC)gp_unix.c
+ 
++$(GLOBJ)gsdll.$(OBJ): $(GLSRC)gsdll.c $(gconfigv_h) $(AK)\
++ $(stdio__h) $(time__h) $(unistd__h) $(gx_h) $(gp_h)
++	$(GLCC) $(GLO_)gsdll.$(OBJ) $(C_) $(GLSRC)gsdll.c
++
++
+ # assume all Unix platforms support unbuffered read
+ $(GLOBJ)gp_stdia.$(OBJ): $(GLSRC)gp_stdia.c $(AK)\
+   $(stdio__h) $(time__h) $(unistd__h) $(gx_h) $(gp_h)
+diff --git a/src/unix-dll.mak b/src/unix-dll.mak
+index ab84c1b..0c9c04a 100644
+--- a/src/unix-dll.mak
++++ b/src/unix-dll.mak
+@@ -78,7 +78,7 @@ $(GSSOC_XE): $(GS_SO) $(GLSRC)dxmainc.c
+ 	$(GLCC) -g -o $(GSSOC_XE) $(GLSRC)dxmainc.c -L$(BINDIR) -l$(GS)
+ 
+ $(GSSOBE_XE): $(GS_SO) $(GLSRC)gsfront.cpp
+-	$(GLCC) -g -o $(GSSOBE_XE) $(GLSRC)gsfront.cpp -L$(BINDIR) -l$(GS) -lbe
++	$(GLCC) -g -o $(GSSOBE_XE) $(GLSRC)gsfront.cpp -L$(BINDIR) -l$(GS) -lbe -lstdc++
+ 
+ # ------------------------- Recursive make targets ------------------------- #
+ 
+diff --git a/src/unix-gcc.mak b/src/unix-gcc.mak
+index e4e3113..943c5af 100644
+--- a/src/unix-gcc.mak
++++ b/src/unix-gcc.mak
+@@ -367,7 +367,7 @@ EXTEND_NAMES=0
+ # Choose the device(s) to include.  See devs.mak for details,
+ # devs.mak and contrib.mak for the list of available devices.
+ 
+-DEVICE_DEVS=$(DISPLAY_DEV) $(DD)beos.dev $(DD)bealpha2.dev $(DD)bealpha4.dev $(DD)bealpht2.dev $(DD)bealpht4.dev
++DEVICE_DEVS=$(DISPLAY_DEV) $(DD)unix.dev $(DD)bealpha2.dev $(DD)bealpha4.dev $(DD)bealpht2.dev $(DD)bealpht4.dev
+ #DEVICE_DEVS=$(DISPLAY_DEV) $(DD)x11.dev $(DD)x11alpha.dev $(DD)x11cmyk.dev $(DD)x11gray2.dev $(DD)x11gray4.dev $(DD)x11mono.dev
+ 
+ #DEVICE_DEVS1=
+diff --git a/src/unixansi.mak b/src/unixansi.mak
+index 3425785..cc7a8a7 100644
+--- a/src/unixansi.mak
++++ b/src/unixansi.mak
+@@ -237,7 +237,7 @@ LDFLAGS=$(XLDFLAGS)
+ # Solaris may need -lnsl -lsocket -lposix4.
+ # (Libraries required by individual drivers are handled automatically.)
+ 
+-EXTRALIBS=
++EXTRALIBS=-lbe
+ 
+ # Define the standard libraries to search at the end of linking.
+ # Most platforms require -lpthread for the POSIX threads library;
+diff --git a/src/unixlink.mak b/src/unixlink.mak
+index e8b122e..bcaf1a8 100644
+--- a/src/unixlink.mak
++++ b/src/unixlink.mak
+@@ -56,7 +56,7 @@ $(GS_XE): $(ld_tr) $(ECHOGS_XE) $(XE_ALL)
+ 	$(ECHOGS_XE) -w $(ldt_tr) -n - $(CCLD) $(LDFLAGS) -o $(GS_XE)
+ 	$(ECHOGS_XE) -a $(ldt_tr) -n -s $(PSOBJ)gs.$(OBJ) -s
+ 	cat $(ld_tr) >>$(ldt_tr)
+-	$(ECHOGS_XE) -a $(ldt_tr) -s - $(EXTRALIBS) $(STDLIBS)
++	$(ECHOGS_XE) -a $(ldt_tr) -s - $(EXTRALIBS) -lbe -lstdc++ $(STDLIBS)
+ 	if [ x$(XLIBDIR) != x ]; then LD_RUN_PATH=$(XLIBDIR); export LD_RUN_PATH; fi; \
+ 	XCFLAGS= XINCLUDE= XLDFLAGS= XLIBDIRS= XLIBS= \
+ 	FEATURE_DEVS= DEVICE_DEVS= DEVICE_DEVS1= DEVICE_DEVS2= DEVICE_DEVS3= \
 -- 
 2.19.1
 
