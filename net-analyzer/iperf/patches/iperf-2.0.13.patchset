@@ -1,14 +1,115 @@
-From 581b00aecd082f8b7bc8f13536cd7e8a781ebfa6 Mon Sep 17 00:00:00 2001
+From 0c6d5b283f65ebfa15186177e3d813f014d227d6 Mon Sep 17 00:00:00 2001
 From: Jerome Duval <jerome.duval@gmail.com>
 Date: Tue, 2 Oct 2018 16:31:18 +0200
 Subject: gcc2 patch
 
 
+diff --git a/include/Settings.hpp b/include/Settings.hpp
+index 00a0ebb..e6dc7e1 100644
+--- a/include/Settings.hpp
++++ b/include/Settings.hpp
+@@ -452,7 +452,6 @@ typedef enum MsgType {
+  * and must be packed by the compilers
+  * Align on 32 bits (4 bytes)
+  */
+-#pragma pack(push,4)
+ typedef struct UDP_datagram {
+ // used to reference the 4 byte ID number we place in UDP datagrams
+ // Support 64 bit seqno on machines that support them
+@@ -664,7 +663,6 @@ typedef struct server_hdr {
+     server_hdr_extension2 extend2;
+ } server_hdr;
+ 
+-#pragma pack(pop)
+ 
+ #define SIZEOF_UDPCLIENTMSG (sizeof(client_hdr) + sizeof(UDP_datagram))
+ #define SIZEOF_TCPHDRMSG (int) ((sizeof(client_hdr) > sizeof(server_hdr)) ? (int) sizeof(client_hdr) : (int) sizeof(server_hdr))
+diff --git a/src/ReportDefault.c b/src/ReportDefault.c
+index 4f9f7a5..ccccd9a 100644
+--- a/src/ReportDefault.c
++++ b/src/ReportDefault.c
+@@ -483,9 +483,6 @@ void reporter_reportsettings( ReporterData *data ) {
+  */
+ void *reporter_reportpeer( Connection_Info *stats, int ID ) {
+     if ( ID > 0 ) {
+-	if (stats->epochStartTime.tv_sec) {
+-	    printf(client_report_epoch_start, ID,stats->epochStartTime.tv_sec, stats->epochStartTime.tv_usec);
+-	}
+         // copy the inet_ntop into temp buffers, to avoid overwriting
+         char local_addr[ REPORT_ADDRLEN ];
+         char remote_addr[ REPORT_ADDRLEN ];
+@@ -493,9 +490,12 @@ void *reporter_reportpeer( Connection_Info *stats, int ID ) {
+         struct sockaddr *peer = ((struct sockaddr*)&stats->peer);
+ 
+ 	char extbuf[2*PEERBUFSIZE];
+-	extbuf[(2*PEERBUFSIZE)-1] = '\0';
+ 	char *b = &extbuf[0];
++	extbuf[(2*PEERBUFSIZE)-1] = '\0';
+ 	extbuf[0]= '\0';
++	if (stats->epochStartTime.tv_sec) {
++	    printf(client_report_epoch_start, ID,stats->epochStartTime.tv_sec, stats->epochStartTime.tv_usec);
++	}
+ 	if (stats->l2mode) {
+ 	    snprintf(b, PEERBUFSIZE, " (%s=0x%X)", "l2mode", stats->l2mode);
+ 	    b += strlen(b);
+diff --git a/src/Reporter.c b/src/Reporter.c
+index 80891aa..06f08c4 100644
+--- a/src/Reporter.c
++++ b/src/Reporter.c
+@@ -242,6 +242,7 @@ void BarrierClient( ReportHeader *agent ) {
+  * synchronize on compeleting their connect()
+  */
+ void InitReport(thread_Settings *mSettings) {
++	ReportHeader *reporthdr;
+     // Note, this must be called in order as
+     // the data report structures need to be
+     // initialized first
+@@ -251,7 +252,7 @@ void InitReport(thread_Settings *mSettings) {
+     if (isConnectionReport(mSettings)) {
+ 	InitConnectionReport(mSettings);
+     }
+-    ReportHeader *reporthdr = mSettings->reporthdr;
++    reporthdr = mSettings->reporthdr;
+     if (reporthdr && (isDataReport(mSettings) || isConnectionReport(mSettings))) {
+ 	//
+ 	// Set the report start times and next report times
+diff --git a/src/histogram.c b/src/histogram.c
+index 5950278..a9116a4 100644
+--- a/src/histogram.c
++++ b/src/histogram.c
+@@ -122,15 +122,16 @@ void histogram_add(histogram_t *to, histogram_t *from) {
+ }
+ 
+ void histogram_print(histogram_t *h, double start, double end, int final) {
++    int n = 0, ix, delta, lowerci, upperci, outliercnt, fence_lower, fence_upper;
++    int running=0;
++    int intervalpopulation, oob_u, oob_l;
++    int outside3fences = 0;
+     if (final && h->prev) {
+ 	histogram_clear(h->prev);
+     }
+     if (!h->prev) {
+ 	h->prev = histogram_init(h->bincount, h->binwidth, h->offset, h->units, h->ci_lower, h->ci_upper, h->id, h->myname);
+     }
+-    int n = 0, ix, delta, lowerci, upperci, outliercnt, fence_lower, fence_upper;
+-    int running=0;
+-    int intervalpopulation, oob_u, oob_l;
+     intervalpopulation = h->populationcnt - h->prev->populationcnt;
+     strcpy(h->outbuf, h->myname);
+     sprintf(h->outbuf, "[%3d] " IPERFTimeFrmt " sec %s%s%s bin(w=%d%s):cnt(%d)=", h->id, start, end, h->myname, (final ? "(f)" : ""), "-PDF:",h->binwidth, ((h->units == 1e3) ? "ms" : "us"), intervalpopulation);
+@@ -140,7 +141,6 @@ void histogram_print(histogram_t *h, double start, double end, int final) {
+     outliercnt=0;
+     fence_lower = 0;
+     fence_upper = 0;
+-    int outside3fences = 0;
+     h->prev->populationcnt = h->populationcnt;
+     oob_l = h->cntloweroutofbounds - h->prev->cntloweroutofbounds;
+     h->prev->cntloweroutofbounds = h->cntloweroutofbounds;
 diff --git a/src/sockets.c b/src/sockets.c
-index ca4640f..204e725 100644
+index e0f4800..f628e27 100644
 --- a/src/sockets.c
 +++ b/src/sockets.c
-@@ -206,10 +206,12 @@ bool setsock_blocking (int fd, bool blocking) {
+@@ -244,10 +244,12 @@ bool setsock_blocking (int fd, bool blocking) {
     unsigned long mode = blocking ? 0 : 1;
     return (ioctlsocket(fd, FIONBIO, &mode) == 0) ? TRUE : FALSE;
  #else
@@ -22,5 +123,5 @@ index ca4640f..204e725 100644
  }
  
 -- 
-2.19.0
+2.19.1
 
