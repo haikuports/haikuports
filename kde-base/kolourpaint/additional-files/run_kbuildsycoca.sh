@@ -1,3 +1,3 @@
 #/bin/sh
 
-kbuildsycoca --global
+kbuildsycoca5 --global
