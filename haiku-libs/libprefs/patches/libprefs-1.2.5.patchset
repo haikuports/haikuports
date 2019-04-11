@@ -1,0 +1,286 @@
+From d5fffbd5720365ac8d7e24ab2f52d0d8de44eaf9 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sun, 10 Mar 2019 16:47:58 +0100
+Subject: applying patch libprefs-1.2.5.patch
+
+
+diff --git a/src/libprefs.cpp b/src/libprefs.cpp
+index da58013..90d0aa4 100644
+--- a/src/libprefs.cpp
++++ b/src/libprefs.cpp
+@@ -71,6 +71,7 @@
+ #include <image.h>
+ #endif
+ 
++#include <Entry.h>
+ 
+ /*	identifier for this implementation of the prefs library	*/
+ #define	PREF_VERSION_STRING		"simple libprefs.so version 1.2.4"
+@@ -435,7 +436,7 @@ _PREFMakePath(
+ {
+ 	status_t err = B_OK;
+ 	BPath bpath;
+-	err = find_directory(user_level ? B_USER_SETTINGS_DIRECTORY : B_COMMON_SETTINGS_DIRECTORY, &bpath, true, NULL);
++	err = find_directory(B_USER_SETTINGS_DIRECTORY, &bpath, true, NULL);
+ 	if (err < B_OK) return err;
+ 	strncpy(path, bpath.Path(), path_max);
+ 	path[path_max-1] = 0;
+@@ -894,9 +895,9 @@ PREFReloadSet(PREFData data)
+ #if DEBUG
+ 	printf("reload read %d\n", rd);
+ #endif
++	char * buffer = (char *)malloc(size);
+ 	if (rd < 0) { err = rd; goto cleanup; }
+ 	if (rd != sizeof(size)) { err = B_ERROR; goto cleanup; }
+-	char * buffer = (char *)malloc(size);
+ 	if (buffer == NULL) { err = B_NO_MEMORY; goto cleanup; }
+ 	rd = read(data->transaction->fd, buffer, size);
+ #if DEBUG
+@@ -1156,7 +1157,7 @@ typedef struct _PREFAppIterator {
+ 			curItem = 0;
+ 			item = new char*[block];
+ 			BPath bpath;
+-			if (!find_directory(user_level ? B_USER_SETTINGS_DIRECTORY : B_COMMON_SETTINGS_DIRECTORY, &bpath, true, NULL))
++			if (!find_directory(B_USER_SETTINGS_DIRECTORY, &bpath, true, NULL))
+ 			{
+ 				BDirectory dir(bpath.Path());
+ 				BEntry entry;
+@@ -1278,7 +1279,7 @@ typedef struct _PREFSetIterator
+ 			curItem = 0;
+ 			item = new char*[block];
+ 			BPath bpath;
+-			if (!find_directory(user_level ? B_USER_SETTINGS_DIRECTORY : B_COMMON_SETTINGS_DIRECTORY, &bpath, true, NULL))
++			if (!find_directory(B_USER_SETTINGS_DIRECTORY, &bpath, true, NULL))
+ 			{
+ 				char str[B_FILE_NAME_LENGTH+20];
+ 				strcpy(str, LP_MAGIC);
+-- 
+2.21.0
+
+
+From 249545927cd93facb562625f1a1306f08a9a270f Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sun, 10 Mar 2019 18:26:34 +0100
+Subject: Remove non-existant syscall.
+
+
+diff --git a/src/libprefs.cpp b/src/libprefs.cpp
+index 90d0aa4..50cd31d 100644
+--- a/src/libprefs.cpp
++++ b/src/libprefs.cpp
+@@ -83,11 +83,6 @@ long long	POLL_INTERVAL = 9000000;	/*	nine seconds	*/
+ /*	COMMON_DIRNAME is used to disambigue the case where user folder == common folder	*/
+ #define COMMON_DIRNAME	"(libprefs common)"
+ 
+-/*	some magic system calls	*/
+-extern "C" int _klock_node_(int fd);
+-extern "C" int _kunlock_node_(int fd);
+-
+-
+ /*	changes allowing hierarchical sets	*/
+ #define PRE_121 0
+ 
+@@ -1525,7 +1520,7 @@ PREFBeginTransaction(
+ 	release_sem(fTransSem);
+ 	/*	open and lock file	*/
+ open_again:
+-	int fd = open(data->prefs, O_RDWR | O_CREAT, 0666);
++	int fd = open(data->prefs, O_RDWR | O_CREAT | O_EXCL, 0666);
+ #if DEBUG
+ 	printf("open %s returns %d\n", data->prefs, fd);
+ #endif
+@@ -1534,16 +1529,6 @@ open_again:
+ 	if (fd < 0) printf("errno = %08x\n", errno);
+ #endif
+ 	if ((fd < 0) && (errno != EBUSY)) return fd;
+-	if ((fd < 0) || (_klock_node_(fd) < B_OK))
+-	{	/*	it is unfortunate that there is no atomic/blocking way to wait	*/
+-		/*	for exclusive access to a file - now we are forces to busy-wait	*/
+-		if (fd >= 0) close(fd);
+-#if DEBUG
+-		printf("can't lock - snoozing\n", fd);
+-#endif
+-		snooze((rand()&0x7fff)+(find_thread(NULL)&0x7fff)+10000);	//	random snooze time to break ties
+-		goto open_again;
+-	}
+ 	/*	acquire transaction semaphore - this will always work,							*/
+ 	/*	because the transaction semaphore is never held across blocking system calls	*/
+ 	acquire_sem(fTransSem);
+-- 
+2.21.0
+
+
+From 3b2506888224bf037de000e38fbff88dbb34e8f2 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sun, 7 Apr 2019 23:00:59 +0200
+Subject: x86_64 build fix
+
+open() fails with O_CREAT and O_EXCL when the file exists, handles by opening
+without O_CREAT.
+
+diff --git a/src/libprefs.cpp b/src/libprefs.cpp
+index 50cd31d..6556a94 100644
+--- a/src/libprefs.cpp
++++ b/src/libprefs.cpp
+@@ -178,15 +178,15 @@ struct _PREFCallbacks {
+ 	status_t (*PREFDelete)(PREFData data, const char * setting);
+ 	status_t (*PREFGetData)(PREFData data, const char * setting, const void ** out_data, ssize_t * out_size, uint32 * out_type);
+ 	BMessage * (*PREFGetMessage)(PREFData data);
+-	status_t (*PREFListApplications)(PREFHandle handle, bool user_level, uint32 * cookie, char * app_name, size_t size);
+-	status_t (*PREFDisposeApplicationCookie)(PREFHandle handle, uint32 cookie);
+-	status_t (*PREFListSets)(PREFHandle handle, bool user_level, uint32 * cookie, char * set_name, size_t size);
+-	status_t (*PREFDisposeSetCookie)(PREFHandle handle, uint32 cookie);
++	status_t (*PREFListApplications)(PREFHandle handle, bool user_level, uintptr_t * cookie, char * app_name, size_t size);
++	status_t (*PREFDisposeApplicationCookie)(PREFHandle handle, uintptr_t cookie);
++	status_t (*PREFListSets)(PREFHandle handle, bool user_level, uintptr_t * cookie, char * set_name, size_t size);
++	status_t (*PREFDisposeSetCookie)(PREFHandle handle, uintptr_t cookie);
+ 	status_t (*PREFBeginTransaction)(PREFData data, PREFTransaction * transaction);
+ 	status_t (*PREFEndTransaction)(PREFTransaction transaction);
+ 	status_t (*PREFListen)(PREFData data, void (*callback)(PREFData data, void * cookie), void * cookie);
+-	status_t (*PREFListData)(PREFData data, uint32 * cookie, char * name, size_t size, uint32 * type);
+-	status_t (*PREFDisposeDataCookie)(PREFData data, uint32 cookie);
++	status_t (*PREFListData)(PREFData data, uintptr_t * cookie, char * name, size_t size, uint32 * type);
++	status_t (*PREFDisposeDataCookie)(PREFData data, uintptr_t cookie);
+ 	status_t (*PREFRemoveSet)(PREFData data);
+ 	status_t (*PREFRemoveApp)(PREFHandle handle);
+ };
+@@ -1199,7 +1199,7 @@ typedef struct _PREFAppIterator {
+ 
+ 
+ status_t
+-PREFListApplications(PREFHandle handle, bool user_level, uint32 * cookie, char * app_name, size_t size)
++PREFListApplications(PREFHandle handle, bool user_level, uintptr_t * cookie, char * app_name, size_t size)
+ {
+ #if !PREF_SHARED_LIBRARY
+ 	if (!_PREFLoadCallbacks())
+@@ -1216,7 +1216,7 @@ PREFListApplications(PREFHandle handle, bool user_level, uint32 * cookie, char *
+ 	if (!ptr)
+ 	{
+ 		ptr = new _PREFAppIterator(user_level);
+-		*cookie = (uint32)ptr;
++		*cookie = (uintptr_t)ptr;
+ 	}
+ 	/*	get the Nth item out of the struct	*/
+ 	status_t ret = B_OK;
+@@ -1240,7 +1240,7 @@ PREFListApplications(PREFHandle handle, bool user_level, uint32 * cookie, char *
+ 
+ 
+ status_t
+-PREFDisposeApplicationCookie(PREFHandle handle, uint32 cookie)
++PREFDisposeApplicationCookie(PREFHandle handle, uintptr_t cookie)
+ {
+ #if !PREF_SHARED_LIBRARY
+ 	if (!_PREFLoadCallbacks())
+@@ -1346,7 +1346,7 @@ typedef struct _PREFSetIterator
+ 
+ 
+ status_t
+-PREFListSets(PREFHandle handle, bool user_level, uint32 * cookie, char * set_name, size_t size)
++PREFListSets(PREFHandle handle, bool user_level, uintptr_t * cookie, char * set_name, size_t size)
+ {
+ #if !PREF_SHARED_LIBRARY
+ 	if (!_PREFLoadCallbacks())
+@@ -1363,7 +1363,7 @@ PREFListSets(PREFHandle handle, bool user_level, uint32 * cookie, char * set_nam
+ 	if (!ptr)
+ 	{
+ 		ptr = new _PREFSetIterator(handle, user_level);
+-		*cookie = (uint32)ptr;
++		*cookie = (uintptr_t)ptr;
+ 	}
+ 	/*	get the Nth item out of the struct	*/
+ 	status_t ret = B_OK;
+@@ -1387,7 +1387,7 @@ PREFListSets(PREFHandle handle, bool user_level, uint32 * cookie, char * set_nam
+ 
+ 
+ status_t
+-PREFDisposeSetCookie(PREFHandle handle, uint32 cookie)
++PREFDisposeSetCookie(PREFHandle handle, uintptr_t cookie)
+ {
+ #if !PREF_SHARED_LIBRARY
+ 	if (!_PREFLoadCallbacks())
+@@ -1428,7 +1428,7 @@ typedef struct _PREFIterator
+ 
+ 
+ status_t
+-PREFListData(PREFData data, uint32 * cookie, char * set_name, size_t size, uint32 * type)
++PREFListData(PREFData data, uintptr_t * cookie, char * set_name, size_t size, uint32 * type)
+ {
+ #if !PREF_SHARED_LIBRARY
+ 	if (!_PREFLoadCallbacks())
+@@ -1445,7 +1445,7 @@ PREFListData(PREFData data, uint32 * cookie, char * set_name, size_t size, uint3
+ 	if (!ptr)
+ 	{
+ 		ptr = new _PREFIterator(data);
+-		*cookie = (uint32)ptr;
++		*cookie = (uintptr_t)ptr;
+ 	}
+ 	/*	get the Nth item out of the struct	*/
+ 	status_t ret = ptr->m_message ? B_OK : PREF_NOT_FOUND;
+@@ -1470,7 +1470,7 @@ PREFListData(PREFData data, uint32 * cookie, char * set_name, size_t size, uint3
+ 
+ 
+ status_t
+-PREFDisposeDataCookie(PREFData data, uint32 cookie)
++PREFDisposeDataCookie(PREFData data, uintptr_t cookie)
+ {
+ #if !PREF_SHARED_LIBRARY
+ 	if (!_PREFLoadCallbacks())
+@@ -1524,6 +1524,8 @@ open_again:
+ #if DEBUG
+ 	printf("open %s returns %d\n", data->prefs, fd);
+ #endif
++	if ((fd < 0) && (errno == EEXIST))
++		fd = open(data->prefs, O_RDWR | O_EXCL, 0666);
+ 	if ((fd < 0) && (errno == EINTR)) goto open_again;
+ #if DEBUG
+ 	if (fd < 0) printf("errno = %08x\n", errno);
+diff --git a/src/libprefs.h b/src/libprefs.h
+index a7e240e..d1a7bb9 100644
+--- a/src/libprefs.h
++++ b/src/libprefs.h
+@@ -23,6 +23,7 @@
+ #if !defined(_SUPPORT_DEFS_H)
+  #include <SupportDefs.h>
+ #endif
++#include <stdint.h>
+ 
+ 
+ typedef struct _PREFData * PREFData;
+@@ -119,28 +120,28 @@ EX_C P_IMPEXP BMessage * PREFGetMessage(PREFData data);
+ /*	cookie should start with a 0 value, and will be used by	*/
+ /*	the library to retain ordering in the iteration.			*/
+ /*	The handle is any handle you have successfully opened.	*/
+-EX_C P_IMPEXP status_t PREFListApplications(PREFHandle handle, bool user_level, uint32 * cookie, char * app_name, size_t size);
++EX_C P_IMPEXP status_t PREFListApplications(PREFHandle handle, bool user_level, uintptr_t * cookie, char * app_name, size_t size);
+ 
+ /*	Call PREFDisposeApplicationCookie to stop iterating	*/
+-EX_C P_IMPEXP status_t PREFDisposeApplicationCookie(PREFHandle handle, uint32 cookie);
++EX_C P_IMPEXP status_t PREFDisposeApplicationCookie(PREFHandle handle, uintptr_t cookie);
+ 
+ /*	Use this function to list the sets that have preferences	*/
+ /*	registered for a specific preference application instance.	*/
+ /*	Rules for cookie is as for PREFListApplications.		*/
+ /*	The handle is the application you want to find preferences	*/
+ /*	for. 											*/
+-EX_C P_IMPEXP status_t PREFListSets(PREFHandle handle, bool user_level, uint32 * cookie, char * set_name, size_t size);
++EX_C P_IMPEXP status_t PREFListSets(PREFHandle handle, bool user_level, uintptr_t * cookie, char * set_name, size_t size);
+ 
+ /*	Call PREFDisposeSetCookie to stop iterating	*/
+-EX_C P_IMPEXP status_t PREFDisposeSetCookie(PREFHandle handle, uint32 cookie);
++EX_C P_IMPEXP status_t PREFDisposeSetCookie(PREFHandle handle, uintptr_t cookie);
+ 
+ /*	Use this function to list the data items in a preference 	*/
+ /*	set.														*/
+ /*	Rules for cookie is as for PREFListApplications.			*/
+-EX_C P_IMPEXP status_t PREFListData(PREFData data, uint32 * cookie, char * data_name, size_t size, uint32 * data_type);
++EX_C P_IMPEXP status_t PREFListData(PREFData data, uintptr_t * cookie, char * data_name, size_t size, uint32 * data_type);
+ 
+ /*	Call PREFDisposeSetCookie to stop iterating	*/
+-EX_C P_IMPEXP status_t PREFDisposeDataCookie(PREFData data, uint32 cookie);
++EX_C P_IMPEXP status_t PREFDisposeDataCookie(PREFData data, uintptr_t cookie);
+ 
+ /*	While you are in a preferences transaction, nobody else	*/
+ /*	can modify the storage representation of the preferences.	*/
+-- 
+2.21.0
+

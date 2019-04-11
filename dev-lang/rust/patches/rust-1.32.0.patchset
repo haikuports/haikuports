@@ -1,0 +1,182 @@
+From 761416de96a80c7ee94d8d31dd307e3bdc657667 Mon Sep 17 00:00:00 2001
+From: Niels Sascha Reedijk <niels.reedijk@gmail.com>
+Date: Thu, 7 Jun 2018 21:13:17 +0200
+Subject: Haiku: Revert "std: Handle OS errors when joining threads"
+
+This reverts commit dc7c7ba0c9f401f5597a245e05ee9e8d760715d3.
+
+There is an issue with threading in cargo, where thread::join fails after completing a build. This prevents building Rust on Haiku (as the build system kills itself after failure).
+
+The problem is documented at rust-on-haiku.com issue #10
+
+diff --git a/src/libstd/sys/unix/thread.rs b/src/libstd/sys/unix/thread.rs
+index f3a45d2..c345bd6 100644
+--- a/src/libstd/sys/unix/thread.rs
++++ b/src/libstd/sys/unix/thread.rs
+@@ -176,8 +176,7 @@ impl Thread {
+         unsafe {
+             let ret = libc::pthread_join(self.id, ptr::null_mut());
+             mem::forget(self);
+-            assert!(ret == 0,
+-                    "failed to join thread: {}", io::Error::from_raw_os_error(ret));
++            debug_assert_eq!(ret, 0);
+         }
+     }
+ 
+diff --git a/src/libstd/sys/windows/c.rs b/src/libstd/sys/windows/c.rs
+index c84874a..1a75141 100644
+--- a/src/libstd/sys/windows/c.rs
++++ b/src/libstd/sys/windows/c.rs
+@@ -274,7 +274,6 @@ pub const FILE_END: DWORD = 2;
+ 
+ pub const WAIT_OBJECT_0: DWORD = 0x00000000;
+ pub const WAIT_TIMEOUT: DWORD = 258;
+-pub const WAIT_FAILED: DWORD = 0xFFFFFFFF;
+ 
+ #[cfg(target_env = "msvc")]
+ #[cfg(feature = "backtrace")]
+diff --git a/src/libstd/sys/windows/thread.rs b/src/libstd/sys/windows/thread.rs
+index 85588cc..1d3df78 100644
+--- a/src/libstd/sys/windows/thread.rs
++++ b/src/libstd/sys/windows/thread.rs
+@@ -67,11 +67,7 @@ impl Thread {
+     }
+ 
+     pub fn join(self) {
+-        let rc = unsafe { c::WaitForSingleObject(self.handle.raw(), c::INFINITE) };
+-        if rc == c::WAIT_FAILED {
+-            panic!("failed to join on thread: {}",
+-                   io::Error::last_os_error());
+-        }
++        unsafe { c::WaitForSingleObject(self.handle.raw(), c::INFINITE); }
+     }
+ 
+     pub fn yield_now() {
+diff --git a/src/libstd/thread/mod.rs b/src/libstd/thread/mod.rs
+index 3a9f3ec..39d3987 100644
+--- a/src/libstd/thread/mod.rs
++++ b/src/libstd/thread/mod.rs
+@@ -1409,11 +1409,6 @@ impl<T> JoinHandle<T> {
+     /// [`panic`]: ../../std/macro.panic.html
+     /// [atomic memory orderings]: ../../std/sync/atomic/index.html
+     ///
+-    /// # Panics
+-    ///
+-    /// This function may panic on some platforms if a thread attempts to join
+-    /// itself or otherwise may create a deadlock with joining threads.
+-    ///
+     /// # Examples
+     ///
+     /// ```
+-- 
+2.19.0
+
+
+From 077126354b05643a6b4bc148a2813b18bf08d4b8 Mon Sep 17 00:00:00 2001
+From: Niels Sascha Reedijk <niels.reedijk@gmail.com>
+Date: Fri, 18 Jan 2019 23:24:52 +0100
+Subject: Haiku: hotfix for libssh2-sys to build on Haiku
+
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 4831d03..00ae568 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1131,7 +1131,7 @@ dependencies = [
+  "cc 1.0.25 (registry+https://github.com/rust-lang/crates.io-index)",
+  "curl-sys 0.4.15 (registry+https://github.com/rust-lang/crates.io-index)",
+  "libc 0.2.45 (registry+https://github.com/rust-lang/crates.io-index)",
+- "libssh2-sys 0.2.11 (registry+https://github.com/rust-lang/crates.io-index)",
++ "libssh2-sys 0.2.11 (git+https://github.com/alexcrichton/ssh2-rs?rev=74d7f04)",
+  "libz-sys 1.0.24 (registry+https://github.com/rust-lang/crates.io-index)",
+  "openssl-sys 0.9.38 (registry+https://github.com/rust-lang/crates.io-index)",
+  "pkg-config 0.3.14 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -1148,7 +1148,7 @@ dependencies = [
+ [[package]]
+ name = "libssh2-sys"
+ version = "0.2.11"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
++source = "git+https://github.com/alexcrichton/ssh2-rs?rev=74d7f04#74d7f04dbee9997510bdad5608bb06970c6b4c8a"
+ dependencies = [
+  "cc 1.0.25 (registry+https://github.com/rust-lang/crates.io-index)",
+  "libc 0.2.45 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -3380,7 +3380,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ "checksum libc 0.2.45 (registry+https://github.com/rust-lang/crates.io-index)" = "2d2857ec59fadc0773853c664d2d18e7198e83883e7060b63c924cb077bd5c74"
+ "checksum libgit2-sys 0.7.10 (registry+https://github.com/rust-lang/crates.io-index)" = "4916b5addc78ec36cc309acfcdf0b9f9d97ab7b84083118b248709c5b7029356"
+ "checksum libnghttp2-sys 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = "4ffbfb81475cc9f625e44f3a8f8b9cf7173815ae1c7cc2fa91853ec009e38198"
+-"checksum libssh2-sys 0.2.11 (registry+https://github.com/rust-lang/crates.io-index)" = "126a1f4078368b163bfdee65fbab072af08a1b374a5551b21e87ade27b1fbf9d"
++"checksum libssh2-sys 0.2.11 (git+https://github.com/alexcrichton/ssh2-rs?rev=74d7f04)" = "<none>"
+ "checksum libz-sys 1.0.24 (registry+https://github.com/rust-lang/crates.io-index)" = "4401fe74560a0d46fce3464625ac8aa7a79d291dd28cee021d18852d5191c280"
+ "checksum lock_api 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)" = "949826a5ccf18c1b3a7c3d57692778d21768b79e46eb9dd07bfc4c2160036c54"
+ "checksum log 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)" = "e19e8d5c34a3e0e2223db8e060f9e8264aeeb5c5fc64a4ee9965c062211c024b"
+diff --git a/Cargo.toml b/Cargo.toml
+index b763caa..4eff14f 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -60,6 +60,7 @@ cargo = { path = "src/tools/cargo" }
+ # that we're shipping as well (to ensure that the rustfmt in RLS and the
+ # `rustfmt` executable are the same exact version).
+ rustfmt-nightly = { path = "src/tools/rustfmt" }
++libssh2-sys = { git = "https://github.com/alexcrichton/ssh2-rs", rev = "74d7f04" }
+ 
+ # See comments in `src/tools/rustc-workspace-hack/README.md` for what's going on
+ # here
+-- 
+2.19.0
+
+
+From ec3dde3335e77fa5474f5438d1afe3885785125f Mon Sep 17 00:00:00 2001
+From: Niels Sascha Reedijk <niels.reedijk@gmail.com>
+Date: Sun, 27 Jan 2019 09:25:25 +0100
+Subject: Haiku: the maximum stack size is 16 MB, so keep it there on that
+ platform.
+
+
+diff --git a/src/librustc_driver/lib.rs b/src/librustc_driver/lib.rs
+index 061c19e..3940750 100644
+--- a/src/librustc_driver/lib.rs
++++ b/src/librustc_driver/lib.rs
+@@ -1469,9 +1469,14 @@ fn parse_crate_attrs<'a>(sess: &'a Session, input: &Input) -> PResult<'a, Vec<as
+ }
+ 
+ // Temporarily have stack size set to 32MB to deal with various crates with long method
+-// chains or deep syntax trees.
++// chains or deep syntax trees, except when on Haiku
+ // FIXME(oli-obk): get https://github.com/rust-lang/rust/pull/55617 the finish line
+-const STACK_SIZE: usize = 32 * 1024 * 1024; // 32MB
++
++#[cfg(not(target_os = "haiku"))]
++const STACK_SIZE: usize = 32 * 1024 * 1024;
++
++#[cfg(target_os = "haiku")]
++const STACK_SIZE: usize = 16 * 1024 * 1024;
+ 
+ /// Runs `f` in a suitable thread for running `rustc`; returns a `Result` with either the return
+ /// value of `f` or -- if a panic occurs -- the panic value.
+-- 
+2.19.0
+
+
+From 54db645f7a0e814eb1b885f486a19ee809ae1565 Mon Sep 17 00:00:00 2001
+From: Niels Sascha Reedijk <niels.reedijk@gmail.com>
+Date: Sat, 16 Feb 2019 09:33:19 +0100
+Subject: Fix llvm; add bsd source
+
+
+diff --git a/src/llvm/lib/Support/Unix/Signals.inc b/src/llvm/lib/Support/Unix/Signals.inc
+index ad88d5e..9d320b7 100644
+--- a/src/llvm/lib/Support/Unix/Signals.inc
++++ b/src/llvm/lib/Support/Unix/Signals.inc
+@@ -47,7 +47,9 @@
+ #include "llvm/Support/raw_ostream.h"
+ #include <algorithm>
+ #include <string>
++#define _BSD_SOURCE
+ #include <sysexits.h>
++#undef _BSD_SOURCE
+ #ifdef HAVE_BACKTRACE
+ # include BACKTRACE_HEADER         // For backtrace().
+ #endif
+-- 
+2.19.0
+
