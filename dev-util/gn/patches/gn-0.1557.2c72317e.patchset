@@ -1,0 +1,1224 @@
+From c8dde05fa65ceb976187a733ab2252eabab86bbf Mon Sep 17 00:00:00 2001
+From: Michal Klocek <michal.klocek@qt.io>
+Date: Mon, 9 Jan 2017 13:28:49 +0100
+Subject: Add support for creating pri link information
+
+Add variable create_pri_file for binary tagets, which
+generates <target_name>.pri. Instead of calling linker
+add timestamp file, this will be a dependency for
+qmake linking.
+
+Also adds sources for Qt Creator indexes.
+
+Change-Id: I91a41e5cab0a2db99a32e4d799d9664467b9cb18
+Reviewed-by: Allan Sandfeld Jensen <allan.jensen@qt.io>
+
+diff --git a/build/gen.py b/build/gen.py
+index d547a8f..40cfb90 100755
+--- a/build/gen.py
++++ b/build/gen.py
+@@ -507,6 +507,7 @@ def WriteGNNinja(path, platform, host, options):
+         'tools/gn/path_output.cc',
+         'tools/gn/pattern.cc',
+         'tools/gn/pool.cc',
++        'tools/gn/qmake_link_writer.cc',
+         'tools/gn/qt_creator_writer.cc',
+         'tools/gn/runtime_deps.cc',
+         'tools/gn/scheduler.cc',
+@@ -603,6 +604,7 @@ def WriteGNNinja(path, platform, host, options):
+         'tools/gn/parser_unittest.cc',
+         'tools/gn/path_output_unittest.cc',
+         'tools/gn/pattern_unittest.cc',
++        'tools/gn/qmake_link_writer_unittest.cc',
+         'tools/gn/runtime_deps_unittest.cc',
+         'tools/gn/scope_per_file_provider_unittest.cc',
+         'tools/gn/scope_unittest.cc',
+diff --git a/tools/gn/escape.cc b/tools/gn/escape.cc
+index 53c8d89..3150654 100644
+--- a/tools/gn/escape.cc
++++ b/tools/gn/escape.cc
+@@ -139,6 +139,47 @@ void EscapeStringToString_PosixNinjaFork(const base::StringPiece& str,
+   }
+ }
+ 
++void EscapeStringToString_Command(const base::StringPiece& str,
++                                  const EscapeOptions& options,
++                                  std::string* dest,
++                                  bool* needed_quoting) {
++  if (str.find_first_of(" \"") == std::string::npos) {
++    // Simple case, don't quote.
++    dest->append(str.data(), str.size());
++  } else {
++      if (!options.inhibit_quoting)
++        dest->push_back('"');
++      for (size_t i = 0; i < str.size(); i++) {
++        // Count backslashes in case they're followed by a quote.
++        size_t backslash_count = 0;
++        while (i < str.size() && str[i] == '\\') {
++          i++;
++          backslash_count++;
++        }
++        if (i == str.size()) {
++          // Backslashes at end of string. Backslash-escape all of them since
++          // they'll be followed by a quote.
++          dest->append(backslash_count * 2, '\\');
++        } else if (str[i] == '"') {
++          // 0 or more backslashes followed by a quote. Backslash-escape the
++          // backslashes, then backslash-escape the quote.
++          dest->append(backslash_count * 2 + 1, '\\');
++          dest->push_back('"');
++        } else {
++          // Non-special Windows character. Add any
++          // backslashes we read previously, these are literals.
++          dest->append(backslash_count, '\\');
++          dest->push_back(str[i]);
++        }
++      }
++
++      if (!options.inhibit_quoting)
++        dest->push_back('"');
++      if (needed_quoting)
++        *needed_quoting = true;
++  }
++}
++
+ void EscapeStringToString(const base::StringPiece& str,
+                           const EscapeOptions& options,
+                           std::string* dest,
+@@ -176,6 +217,9 @@ void EscapeStringToString(const base::StringPiece& str,
+     case ESCAPE_NINJA_PREFORMATTED_COMMAND:
+       EscapeStringToString_NinjaPreformatted(str, dest);
+       break;
++    case ESCAPE_COMMAND:
++      EscapeStringToString_Command(str, options, dest, needed_quoting);
++      break;
+     default:
+       NOTREACHED();
+   }
+diff --git a/tools/gn/escape.h b/tools/gn/escape.h
+index d59a8eb..a9e4030 100644
+--- a/tools/gn/escape.h
++++ b/tools/gn/escape.h
+@@ -26,6 +26,9 @@ enum EscapingMode {
+   // shell characters which we want to pass to the shell (like when writing
+   // tool commands). Only Ninja "$" are escaped.
+   ESCAPE_NINJA_PREFORMATTED_COMMAND,
++
++  // Like ESCAPE_NINJA_COMMAND but without ninja string escaping
++  ESCAPE_COMMAND,
+ };
+ 
+ enum EscapingPlatform {
+diff --git a/tools/gn/ninja_action_target_writer.cc b/tools/gn/ninja_action_target_writer.cc
+index c2016dc..7e945c0 100644
+--- a/tools/gn/ninja_action_target_writer.cc
++++ b/tools/gn/ninja_action_target_writer.cc
+@@ -103,7 +103,7 @@ std::string NinjaActionTargetWriter::WriteRuleDefinition() {
+   // there will be only one invocation so we can use a simple name.
+   std::string target_label = target_->label().GetUserVisibleName(true);
+   std::string custom_rule_name(target_label);
+-  base::ReplaceChars(custom_rule_name, ":/()", "_", &custom_rule_name);
++  base::ReplaceChars(custom_rule_name, "+:/()", "_", &custom_rule_name);
+   custom_rule_name.append("_rule");
+ 
+   const SubstitutionList& args = target_->action_values().args();
+diff --git a/tools/gn/ninja_binary_target_writer.cc b/tools/gn/ninja_binary_target_writer.cc
+index 9e5632e..4d4fef5 100644
+--- a/tools/gn/ninja_binary_target_writer.cc
++++ b/tools/gn/ninja_binary_target_writer.cc
+@@ -570,11 +570,18 @@ void NinjaBinaryTargetWriter::WriteLinkerStuff(
+       target_, tool_, tool_->outputs(), &output_files);
+ 
+   out_ << "build";
+-  path_output_.WriteFiles(out_, output_files);
+ 
+-  out_ << ": " << rule_prefix_
+-       << Toolchain::ToolTypeToName(
++  if (!target_->create_pri_file()) {
++    path_output_.WriteFiles(out_, output_files);
++    out_ << ": " << rule_prefix_;
++    out_ << Toolchain::ToolTypeToName(
+               target_->toolchain()->GetToolTypeForTargetFinalOutput(target_));
++  } else {
++    out_ << " ";
++    path_output_.WriteFile(out_, OutputFile(target_->label().name() + ".stamp"));
++    out_ << ": " << rule_prefix_;
++    out_ << Toolchain::ToolTypeToName(Toolchain::TYPE_STAMP) << " |";
++  }
+ 
+   UniqueVector<OutputFile> extra_object_files;
+   UniqueVector<const Target*> linkable_deps;
+@@ -635,7 +642,9 @@ void NinjaBinaryTargetWriter::WriteLinkerStuff(
+ 
+   // Append implicit dependencies collected above.
+   if (!implicit_deps.empty()) {
+-    out_ << " |";
++    if (!target_->create_pri_file()) {
++        out_ << " |";
++    }
+     path_output_.WriteFiles(out_, implicit_deps);
+   }
+ 
+diff --git a/tools/gn/ninja_binary_target_writer.h b/tools/gn/ninja_binary_target_writer.h
+index 5cb7ab5..3eb4d17 100644
+--- a/tools/gn/ninja_binary_target_writer.h
++++ b/tools/gn/ninja_binary_target_writer.h
+@@ -136,6 +136,7 @@ class NinjaBinaryTargetWriter : public NinjaTargetWriter {
+   std::string rule_prefix_;
+ 
+   DISALLOW_COPY_AND_ASSIGN(NinjaBinaryTargetWriter);
++  friend class QMakeLinkWriter;
+ };
+ 
+ #endif  // TOOLS_GN_NINJA_BINARY_TARGET_WRITER_H_
+diff --git a/tools/gn/ninja_target_writer.cc b/tools/gn/ninja_target_writer.cc
+index 253436b..f53bd68 100644
+--- a/tools/gn/ninja_target_writer.cc
++++ b/tools/gn/ninja_target_writer.cc
+@@ -26,6 +26,7 @@
+ #include "tools/gn/substitution_writer.h"
+ #include "tools/gn/target.h"
+ #include "tools/gn/trace.h"
++#include "tools/gn/qmake_link_writer.h"
+ 
+ NinjaTargetWriter::NinjaTargetWriter(const Target* target, std::ostream& out)
+     : settings_(target->settings()),
+@@ -91,6 +92,17 @@ std::string NinjaTargetWriter::RunAndWriteFile(const Target* target) {
+     needs_file_write = true;
+     NinjaBinaryTargetWriter writer(target, rules);
+     writer.Run();
++    if(target->create_pri_file()){
++        base::FilePath pri_file(settings->build_settings()->GetFullPath(
++        SourceFile(settings->build_settings()->build_dir().value() +
++                    target->label().name() + ".pri")));
++        std::stringstream file;
++        QMakeLinkWriter pri_writer(&writer,target, file);
++        pri_writer.Run();
++        if (g_scheduler->verbose_logging())
++          g_scheduler->Log("Writing", FilePathToUTF8(pri_file));
++        WriteFileIfChanged(pri_file, file.str(), nullptr);
++    }
+   } else {
+     CHECK(0) << "Output type of target not handled.";
+   }
+diff --git a/tools/gn/qmake_link_writer.cc b/tools/gn/qmake_link_writer.cc
+new file mode 100644
+index 0000000..f7036b8
+--- /dev/null
++++ b/tools/gn/qmake_link_writer.cc
+@@ -0,0 +1,252 @@
++/****************************************************************************
++**
++** Copyright (C) 2017 The Qt Company Ltd.
++** Contact: https://www.qt.io/licensing/
++**
++** This file is part of the QtWebEngine module of the Qt Toolkit.
++**
++** $QT_BEGIN_LICENSE:LGPL$
++** Commercial License Usage
++** Licensees holding valid commercial Qt licenses may use this file in
++** accordance with the commercial license agreement provided with the
++** Software or, alternatively, in accordance with the terms contained in
++** a written agreement between you and The Qt Company. For licensing terms
++** and conditions see https://www.qt.io/terms-conditions. For further
++** information use the contact form at https://www.qt.io/contact-us.
++**
++** GNU Lesser General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU Lesser
++** General Public License version 3 as published by the Free Software
++** Foundation and appearing in the file LICENSE.LGPL3 included in the
++** packaging of this file. Please review the following information to
++** ensure the GNU Lesser General Public License version 3 requirements
++** will be met: https://www.gnu.org/licenses/lgpl-3.0.html.
++**
++** GNU General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU
++** General Public License version 2.0 or (at your option) the GNU General
++** Public license version 3 or any later version approved by the KDE Free
++** Qt Foundation. The licenses are as published by the Free Software
++** Foundation and appearing in the file LICENSE.GPL2 and LICENSE.GPL3
++** included in the packaging of this file. Please review the following
++** information to ensure the GNU General Public License requirements will
++** be met: https://www.gnu.org/licenses/gpl-2.0.html and
++** https://www.gnu.org/licenses/gpl-3.0.html.
++**
++** $QT_END_LICENSE$
++**
++****************************************************************************/
++
++// Copyright (c) 2013 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "tools/gn/qmake_link_writer.h"
++#include "tools/gn/deps_iterator.h"
++#include "tools/gn/ninja_binary_target_writer.h"
++#include "tools/gn/output_file.h"
++#include "tools/gn/settings.h"
++#include "tools/gn/target.h"
++#include "tools/gn/config_values_extractors.h"
++#include "base/logging.h"
++#include "base/strings/string_util.h"
++
++QMakeLinkWriter::QMakeLinkWriter(const NinjaBinaryTargetWriter* writer, const Target* target, std::ostream& out)
++    : target_(target),
++      nwriter_(writer),
++      out_(out),
++      path_output_(target->settings()->build_settings()->build_dir(),
++                   target->settings()->build_settings()->root_path_utf8(),
++                   ESCAPE_NONE) {
++}
++
++QMakeLinkWriter::~QMakeLinkWriter() {
++}
++
++// Based on similar function in qt_creator_writer.cc
++void CollectDeps(std::set<const Target*> &deps, const Target* target) {
++  for (const auto& dep : target->GetDeps(Target::DEPS_ALL)) {
++    const Target* dep_target = dep.ptr;
++    if (deps.count(dep_target))
++      continue;
++    deps.insert(dep_target);
++    CollectDeps(deps, dep_target);
++  }
++}
++
++void PrintSourceFile(std::ostream& out, PathOutput& path_output, const SourceFile& file) {
++  out << " \\\n    \"";
++  if (file.is_source_absolute()) {
++    out << "$$PWD/";
++    path_output.WriteFile(out, file);
++  } else {
++    out << file.value();
++  }
++  out << "\"";
++}
++
++void QMakeLinkWriter::Run() {
++
++  CHECK(target_->output_type() == Target::SHARED_LIBRARY)
++         << "QMakeLinkWriter only supports SHARED_LIBRARY";
++
++  std::vector<SourceFile> object_files;
++  std::vector<SourceFile> other_files;
++  std::vector<OutputFile> tool_outputs;
++
++  const Settings* settings = target_->settings();
++  object_files.reserve(target_->sources().size());
++
++  for (const auto& source : target_->sources()) {
++      Toolchain::ToolType tool_type = Toolchain::TYPE_NONE;
++      if (!target_->GetOutputFilesForSource(source, &tool_type, &tool_outputs)) {
++        if (GetSourceFileType(source) == SOURCE_DEF)
++          other_files.push_back(source);
++        continue;  // No output for this source.
++      }
++      object_files.push_back(tool_outputs[0].AsSourceFile(settings->build_settings()));
++  }
++
++  UniqueVector<OutputFile> extra_object_files;
++  UniqueVector<const Target*> linkable_deps;
++  UniqueVector<const Target*> non_linkable_deps;
++  nwriter_->GetDeps(&extra_object_files, &linkable_deps, &non_linkable_deps);
++
++  std::set<const Target*> deps;
++  deps.insert(target_);
++  CollectDeps(deps, target_);
++
++  // sources files.
++  out_ << "NINJA_SOURCES =";
++  for (const auto& target : deps) {
++    for (const auto& file : target->sources()) {
++      PrintSourceFile(out_, path_output_, file);
++    }
++  }
++  out_ << std::endl;
++
++  // headers files.
++  out_ << "NINJA_HEADERS =";
++  for (const auto& target : deps) {
++    for (const auto& file : target->public_headers()) {
++      PrintSourceFile(out_, path_output_, file);
++    }
++  }
++  out_ << std::endl;
++
++  std::set<std::string> defines;
++  for (const auto& target : deps) {
++    for (ConfigValuesIterator it(target); !it.done(); it.Next()) {
++      for (std::string define : it.cur().defines()) {
++        defines.insert(define);
++      }
++    }
++  }
++  out_ << "NINJA_DEFINES =";
++  for (const auto& define : defines) {
++    out_ << " \\\n    " << define;
++  }
++  out_ << std::endl;
++
++  // object files.
++  out_ << "NINJA_OBJECTS =";
++  for (const auto& file : object_files) {
++    out_ << " \\\n    \"$$PWD/";
++    path_output_.WriteFile(out_, file);
++    out_ << "\"";
++  }
++  for (const auto& file : extra_object_files) {
++    out_ << " \\\n    \"$$PWD/";
++    path_output_.WriteFile(out_, file);
++    out_ << "\"";
++  }
++  out_ << std::endl;
++
++  // linker flags
++  out_ << "NINJA_LFLAGS =";
++  EscapeOptions opts;
++  opts.mode = ESCAPE_COMMAND;
++  // First the ldflags from the target and its config.
++  RecursiveTargetConfigStringsToStream(target_, &ConfigValues::ldflags,
++                                       opts, out_);
++  out_ << std::endl;
++
++  // archives
++  out_ << "NINJA_ARCHIVES =";
++
++  std::vector<OutputFile> solibs;
++  for (const Target* cur : linkable_deps) {
++    if (cur->dependency_output_file().value() !=
++        cur->link_output_file().value()) {
++        solibs.push_back(cur->link_output_file());
++    } else {
++      out_ << " \\\n    \"$$PWD/";
++      path_output_.WriteFile(out_, cur->link_output_file());
++      out_ << "\"";
++    }
++  }
++  out_ << std::endl;
++
++  // library dirs
++  const OrderedSet<SourceDir> all_lib_dirs = target_->all_lib_dirs();
++  const Tool* tool = target_->toolchain()->GetToolForTargetFinalOutput(target_);
++
++  if (!all_lib_dirs.empty()) {
++    out_ << "NINJA_LIB_DIRS =";
++    PathOutput lib_path_output(path_output_.current_dir(),
++                               settings->build_settings()->root_path_utf8(),
++                               ESCAPE_COMMAND);
++    for (size_t i = 0; i < all_lib_dirs.size(); i++) {
++      out_ << " " << tool->lib_dir_switch();
++      lib_path_output.WriteDir(out_, all_lib_dirs[i],
++                               PathOutput::DIR_NO_LAST_SLASH);
++    }
++  }
++  out_ << std::endl;
++
++  //libs
++  out_ << "NINJA_LIBS =";
++
++  EscapeOptions lib_escape_opts;
++  lib_escape_opts.mode = ESCAPE_COMMAND;
++
++  const OrderedSet<LibFile> all_libs = target_->all_libs();
++  const std::string framework_ending(".framework");
++  for (size_t i = 0; i < all_libs.size(); i++) {
++    const LibFile& lib_file = all_libs[i];
++    const std::string& lib_value = lib_file.value();
++    if (lib_file.is_source_file()) {
++      out_ << " ";
++      PathOutput lib_path_output(settings->build_settings()->build_dir(),
++                                 settings->build_settings()->root_path_utf8(),
++                                 ESCAPE_COMMAND);
++      lib_path_output.WriteFile(out_, lib_file.source_file());
++    } else if (base::EndsWith(lib_value, framework_ending,
++                              base::CompareCase::INSENSITIVE_ASCII)) {
++      out_ << " -framework ";
++      EscapeStringToStream(
++          out_, lib_value.substr(0, lib_value.size() - framework_ending.size()),
++          lib_escape_opts);
++    } else {
++      out_ << " " << tool->lib_switch();
++      EscapeStringToStream(out_, lib_value, lib_escape_opts);
++    }
++  }
++  out_ << std::endl;
++
++  // solibs
++  if (!solibs.empty()) {
++    out_ << "NINJA_SOLIBS =";
++    for (const auto& file : solibs) {
++      out_ << " \"$$PWD/";
++      path_output_.WriteFile(out_, file);
++      out_ << "\"";
++    }
++    out_ << std::endl;
++  }
++
++  //targetdeps
++  out_ << "NINJA_TARGETDEPS = ";
++  path_output_.WriteFile(out_, OutputFile("\"$$PWD/" + target_->label().name() + ".stamp\""));
++  out_ << std::endl;
++}
+diff --git a/tools/gn/qmake_link_writer.h b/tools/gn/qmake_link_writer.h
+new file mode 100644
+index 0000000..9415181
+--- /dev/null
++++ b/tools/gn/qmake_link_writer.h
+@@ -0,0 +1,63 @@
++/****************************************************************************
++**
++** Copyright (C) 2017 The Qt Company Ltd.
++** Contact: https://www.qt.io/licensing/
++**
++** This file is part of the QtWebEngine module of the Qt Toolkit.
++**
++** $QT_BEGIN_LICENSE:LGPL$
++** Commercial License Usage
++** Licensees holding valid commercial Qt licenses may use this file in
++** accordance with the commercial license agreement provided with the
++** Software or, alternatively, in accordance with the terms contained in
++** a written agreement between you and The Qt Company. For licensing terms
++** and conditions see https://www.qt.io/terms-conditions. For further
++** information use the contact form at https://www.qt.io/contact-us.
++**
++** GNU Lesser General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU Lesser
++** General Public License version 3 as published by the Free Software
++** Foundation and appearing in the file LICENSE.LGPL3 included in the
++** packaging of this file. Please review the following information to
++** ensure the GNU Lesser General Public License version 3 requirements
++** will be met: https://www.gnu.org/licenses/lgpl-3.0.html.
++**
++** GNU General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU
++** General Public License version 2.0 or (at your option) the GNU General
++** Public license version 3 or any later version approved by the KDE Free
++** Qt Foundation. The licenses are as published by the Free Software
++** Foundation and appearing in the file LICENSE.GPL2 and LICENSE.GPL3
++** included in the packaging of this file. Please review the following
++** information to ensure the GNU General Public License requirements will
++** be met: https://www.gnu.org/licenses/gpl-2.0.html and
++** https://www.gnu.org/licenses/gpl-3.0.html.
++**
++** $QT_END_LICENSE$
++**
++****************************************************************************/
++
++#ifndef TOOLS_GN_QMAKE_LINK_WRITER_H_
++#define TOOLS_GN_QMAKE_LINK_WRITER_H_
++
++#include <iosfwd>
++#include "tools/gn/path_output.h"
++
++class Target;
++class NinjaBinaryTargetWriter;
++
++class QMakeLinkWriter {
++
++ public:
++  QMakeLinkWriter(const NinjaBinaryTargetWriter* writer,const Target* target, std::ostream& out);
++  ~QMakeLinkWriter() ;
++  void Run();
++
++ private:
++  const Target* target_;
++  const NinjaBinaryTargetWriter* nwriter_;
++  std::ostream& out_;
++  PathOutput path_output_;
++};
++
++#endif  // TOOLS_GN_QMAKE_LINK_WRITER_H_
+diff --git a/tools/gn/qmake_link_writer_unittest.cc b/tools/gn/qmake_link_writer_unittest.cc
+new file mode 100644
+index 0000000..8883c21
+--- /dev/null
++++ b/tools/gn/qmake_link_writer_unittest.cc
+@@ -0,0 +1,141 @@
++/****************************************************************************
++**
++** Copyright (C) 2017 The Qt Company Ltd.
++** Contact: https://www.qt.io/licensing/
++**
++** This file is part of the QtWebEngine module of the Qt Toolkit.
++**
++** $QT_BEGIN_LICENSE:LGPL$
++** Commercial License Usage
++** Licensees holding valid commercial Qt licenses may use this file in
++** accordance with the commercial license agreement provided with the
++** Software or, alternatively, in accordance with the terms contained in
++** a written agreement between you and The Qt Company. For licensing terms
++** and conditions see https://www.qt.io/terms-conditions. For further
++** information use the contact form at https://www.qt.io/contact-us.
++**
++** GNU Lesser General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU Lesser
++** General Public License version 3 as published by the Free Software
++** Foundation and appearing in the file LICENSE.LGPL3 included in the
++** packaging of this file. Please review the following information to
++** ensure the GNU Lesser General Public License version 3 requirements
++** will be met: https://www.gnu.org/licenses/lgpl-3.0.html.
++**
++** GNU General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU
++** General Public License version 2.0 or (at your option) the GNU General
++** Public license version 3 or any later version approved by the KDE Free
++** Qt Foundation. The licenses are as published by the Free Software
++** Foundation and appearing in the file LICENSE.GPL2 and LICENSE.GPL3
++** included in the packaging of this file. Please review the following
++** information to ensure the GNU General Public License requirements will
++** be met: https://www.gnu.org/licenses/gpl-2.0.html and
++** https://www.gnu.org/licenses/gpl-3.0.html.
++**
++** $QT_END_LICENSE$
++**
++****************************************************************************/
++
++#include "testing/gtest/include/gtest/gtest.h"
++#include "tools/gn/qmake_link_writer.h"
++#include "ninja_binary_target_writer.h"
++#include "tools/gn/test_with_scope.h"
++
++TEST(QMakeLinkWriter, WriteLinkPri) {
++   TestWithScope setup;
++   Err err;
++
++   setup.build_settings()->SetBuildDir(SourceDir("//out/Debug/"));
++
++
++   Target source_set_target(setup.settings(), Label(SourceDir("//foo1/"), "foo1"));
++   source_set_target.set_output_type(Target::SOURCE_SET);
++   source_set_target.visibility().SetPublic();
++   source_set_target.sources().push_back(SourceFile("//foo1/input1.cc"));
++   source_set_target.sources().push_back(SourceFile("//foo1/input2.cc"));
++   source_set_target.SetToolchain(setup.toolchain());
++   ASSERT_TRUE(source_set_target.OnResolved(&err));
++
++   TestTarget static_lib_target(setup, "//foo5:bar", Target::STATIC_LIBRARY);
++   static_lib_target.sources().push_back(SourceFile("//foo5/input1.cc"));
++   static_lib_target.config_values().arflags().push_back("--bar");
++   static_lib_target.set_complete_static_lib(true);
++   ASSERT_TRUE(static_lib_target.OnResolved(&err));
++
++   TestTarget deps_shared_lib_target(setup, "//foo6:shlib", Target::SHARED_LIBRARY);
++   //this trigers solibs
++   deps_shared_lib_target.set_create_pri_file(true);
++   deps_shared_lib_target.sources().push_back(SourceFile("//foo6/input1.cc"));
++
++   ASSERT_TRUE(deps_shared_lib_target.OnResolved(&err));
++
++   Target shared_lib_target(setup.settings(), Label(SourceDir("//foo2/"), "foo2"));
++   shared_lib_target.set_create_pri_file(true);
++   shared_lib_target.set_output_type(Target::SHARED_LIBRARY);
++   shared_lib_target.set_output_extension(std::string("so.1"));
++   shared_lib_target.set_output_dir(SourceDir("//out/Debug/foo/"));
++   shared_lib_target.sources().push_back(SourceFile("//foo2/input1.cc"));
++   shared_lib_target.sources().push_back(SourceFile("//foo2/input 2.cc"));
++   shared_lib_target.sources().push_back(SourceFile("//foo 2/input 3.cc"));
++   shared_lib_target.config_values().libs().push_back(LibFile(SourceFile("//foo/libfoo3.a")));
++   shared_lib_target.config_values().libs().push_back(LibFile("foo4"));
++   shared_lib_target.config_values().lib_dirs().push_back(SourceDir("//foo/bar/"));
++   shared_lib_target.public_deps().push_back(LabelTargetPair(&source_set_target));
++   shared_lib_target.public_deps().push_back(LabelTargetPair(&static_lib_target));
++   shared_lib_target.public_deps().push_back(LabelTargetPair(&deps_shared_lib_target));
++   shared_lib_target.config_values().ldflags().push_back("-fooBAR");
++   shared_lib_target.config_values().ldflags().push_back("/INCREMENTAL:NO");
++   shared_lib_target.SetToolchain(setup.toolchain());
++   ASSERT_TRUE(shared_lib_target.OnResolved(&err));
++
++   std::ostringstream out1;
++   NinjaBinaryTargetWriter writer(&shared_lib_target, out1);
++   writer.Run();
++
++   const char expected1[] =
++       "defines =\n"
++       "include_dirs =\n"
++       "cflags =\n"
++       "cflags_cc =\n"
++       "root_out_dir = .\n"
++       "target_out_dir = obj/foo2\n"
++       "target_output_name = libfoo2\n"
++       "\n"
++       "build obj/foo2/libfoo2.input1.o: cxx ../../foo2/input1.cc\n"
++       "build obj/foo2/libfoo2.input$ 2.o: cxx ../../foo2/input$ 2.cc\n"
++       "build obj/foo$ 2/libfoo2.input$ 3.o: cxx ../../foo$ 2/input$ 3.cc\n"
++       "\n"
++       "build foo2.stamp: stamp | obj/foo2/libfoo2.input1.o obj/foo2/libfoo2.input$ 2.o"
++           " obj/foo$ 2/libfoo2.input$ 3.o"
++           " obj/foo1/foo1.input1.o obj/foo1/foo1.input2.o obj/foo5/libbar.a "
++           "shlib.stamp ../../foo/libfoo3.a || obj/foo1/foo1.stamp\n"
++       "  ldflags = -fooBAR /INCREMENTAL$:NO -L../../foo/bar\n"
++       "  libs = ../../foo/libfoo3.a -lfoo4\n"
++       "  output_extension = .so.1\n"
++       "  output_dir = foo\n"
++       "  solibs = ./libshlib.so\n";
++
++   EXPECT_EQ(expected1, out1.str());
++
++   std::ostringstream out2;
++   QMakeLinkWriter pri_writer(&writer, &shared_lib_target, out2);
++   pri_writer.Run();
++
++   const char expected2[] =
++       "NINJA_OBJECTS = \\\n"
++       "    \"$$PWD/obj/foo2/libfoo2.input1.o\" \\\n"
++       "    \"$$PWD/obj/foo2/libfoo2.input 2.o\" \\\n"
++       "    \"$$PWD/obj/foo 2/libfoo2.input 3.o\" \\\n"
++       "    \"$$PWD/obj/foo1/foo1.input1.o\" \\\n"
++       "    \"$$PWD/obj/foo1/foo1.input2.o\"\n"
++       "NINJA_LFLAGS = -fooBAR /INCREMENTAL:NO\n"
++       "NINJA_ARCHIVES = \\\n"
++       "    \"$$PWD/obj/foo5/libbar.a\"\n"
++       "NINJA_LIB_DIRS = -L../../foo/bar\n"
++       "NINJA_LIBS = ../../foo/libfoo3.a -lfoo4\n"
++       "NINJA_SOLIBS = \"$$PWD/./libshlib.so\"\n"
++       "NINJA_TARGETDEPS = \"$$PWD/foo2.stamp\"\n";
++   std::string out_str2 = out2.str();
++   EXPECT_EQ(expected2, out_str2);
++}
+diff --git a/tools/gn/target.cc b/tools/gn/target.cc
+index 94fb994..4dd4d0d 100644
+--- a/tools/gn/target.cc
++++ b/tools/gn/target.cc
+@@ -287,6 +287,7 @@ Target::Target(const Settings* settings,
+       check_includes_(true),
+       complete_static_lib_(false),
+       testonly_(false),
++      create_pri_file_(false),
+       toolchain_(nullptr) {}
+ 
+ Target::~Target() = default;
+@@ -706,6 +707,9 @@ bool Target::FillOutputFiles(Err* err) {
+         SubstitutionWriter::ApplyListToLinkerAsOutputFile(
+             this, tool, tool->runtime_outputs(), &runtime_outputs_);
+       }
++      if (create_pri_file()) {
++          dependency_output_file_ = OutputFile(label().name() + ".stamp");
++      }
+       break;
+     case UNKNOWN:
+     default:
+diff --git a/tools/gn/target.h b/tools/gn/target.h
+index b73ae57..2ebfc38 100644
+--- a/tools/gn/target.h
++++ b/tools/gn/target.h
+@@ -179,6 +179,10 @@ class Target : public Item {
+   bool testonly() const { return testonly_; }
+   void set_testonly(bool value) { testonly_ = value; }
+ 
++  // Wether to only create linking information for the target instead of linking
++  bool create_pri_file() const { return create_pri_file_; }
++  void set_create_pri_file(bool value) { create_pri_file_ = value; }
++
+   OutputFile write_runtime_deps_output() const {
+     return write_runtime_deps_output_;
+   }
+@@ -372,6 +376,7 @@ class Target : public Item {
+   bool check_includes_;
+   bool complete_static_lib_;
+   bool testonly_;
++  bool create_pri_file_;
+   std::vector<std::string> data_;
+   BundleData bundle_data_;
+   OutputFile write_runtime_deps_output_;
+diff --git a/tools/gn/target_generator.cc b/tools/gn/target_generator.cc
+index 9ad8969..f483055 100644
+--- a/tools/gn/target_generator.cc
++++ b/tools/gn/target_generator.cc
+@@ -58,6 +58,9 @@ void TargetGenerator::Run() {
+   if (!FillTestonly())
+     return;
+ 
++  if (!FillCreatePriFile())
++    return;
++
+   if (!FillAssertNoDeps())
+     return;
+ 
+@@ -303,6 +306,17 @@ bool TargetGenerator::FillTestonly() {
+   return true;
+ }
+ 
++bool TargetGenerator::FillCreatePriFile() {
++  const Value* value = scope_->GetValue(variables::kCreatePriFile, true);
++  if (value) {
++    if (!value->VerifyTypeIs(Value::BOOLEAN, err_))
++      return false;
++    target_->set_create_pri_file(value->boolean_value());
++  }
++  return true;
++}
++
++
+ bool TargetGenerator::FillAssertNoDeps() {
+   const Value* value = scope_->GetValue(variables::kAssertNoDeps, true);
+   if (value) {
+diff --git a/tools/gn/target_generator.h b/tools/gn/target_generator.h
+index 627505d..6a9d229 100644
+--- a/tools/gn/target_generator.h
++++ b/tools/gn/target_generator.h
+@@ -70,6 +70,7 @@ class TargetGenerator {
+   bool FillDependencies();  // Includes data dependencies.
+   bool FillMetadata();
+   bool FillTestonly();
++  bool FillCreatePriFile();
+   bool FillAssertNoDeps();
+   bool FillWriteRuntimeDeps();
+ 
+diff --git a/tools/gn/variables.cc b/tools/gn/variables.cc
+index a809a1c..aca47bd 100644
+--- a/tools/gn/variables.cc
++++ b/tools/gn/variables.cc
+@@ -1974,6 +1974,24 @@ Example
+   }
+ )";
+ 
++const char kCreatePriFile[] = "create_pri_file";
++const char kCreatePriFile_HelpShort[] =
++    "create_pri_file: [boolean] Declares a target that creates linking information file.";
++const char kCreatePriFile_Help[] =
++    "create_pri_file: Declares a target that instead of liking dumps the infomation.\n"
++    "\n"
++    "  Boolean. Defaults to false.\n"
++    "\n"
++    "  When a target is marked \"create_pri_file = true\" and is linkable, the linking step"
++    "  is skipped. Instead linking infomation is dumped as a pri file\n"
++    "\n"
++    "Example\n"
++    "\n"
++    "  static_library(\"test_support\") {\n"
++    "    create_pri_file = true\n"
++    "    ...\n"
++    "  }\n";
++
+ const char kVisibility[] = "visibility";
+ const char kVisibility_HelpShort[] =
+     "visibility: [label list] A list of labels that can depend on a target.";
+diff --git a/tools/gn/variables.h b/tools/gn/variables.h
+index 09f2c18..4241f1a 100644
+--- a/tools/gn/variables.h
++++ b/tools/gn/variables.h
+@@ -303,6 +303,10 @@ extern const char kTestonly[];
+ extern const char kTestonly_HelpShort[];
+ extern const char kTestonly_Help[];
+ 
++extern const char kCreatePriFile[];
++extern const char kCreatePriFile_HelpShort[];
++extern const char kCreatePriFile_Help[];
++
+ extern const char kVisibility[];
+ extern const char kVisibility_HelpShort[];
+ extern const char kVisibility_Help[];
+-- 
+2.21.0
+
+
+From 5b22748cfd2b5a3eb5b28894a3a50e93ca3aeaa1 Mon Sep 17 00:00:00 2001
+From: Allan Sandfeld Jensen <allan.jensen@qt.io>
+Date: Mon, 8 Oct 2018 17:23:50 +0200
+Subject: Add support for static-libraries to our GN integration
+
+Change-Id: Icebdcbadcc4b6d2959dbab775af3045dd76c5898
+Reviewed-by: Michal Klocek <michal.klocek@qt.io>
+
+diff --git a/tools/gn/qmake_link_writer.cc b/tools/gn/qmake_link_writer.cc
+index f7036b8..4e205e5 100644
+--- a/tools/gn/qmake_link_writer.cc
++++ b/tools/gn/qmake_link_writer.cc
+@@ -87,8 +87,8 @@ void PrintSourceFile(std::ostream& out, PathOutput& path_output, const SourceFil
+ 
+ void QMakeLinkWriter::Run() {
+ 
+-  CHECK(target_->output_type() == Target::SHARED_LIBRARY)
+-         << "QMakeLinkWriter only supports SHARED_LIBRARY";
++  CHECK(target_->output_type() == Target::SHARED_LIBRARY || target_->output_type() == Target::STATIC_LIBRARY)
++         << "QMakeLinkWriter only supports libraries";
+ 
+   std::vector<SourceFile> object_files;
+   std::vector<SourceFile> other_files;
+diff --git a/tools/gn/target.cc b/tools/gn/target.cc
+index 4dd4d0d..34e12c3 100644
+--- a/tools/gn/target.cc
++++ b/tools/gn/target.cc
+@@ -678,6 +678,9 @@ bool Target::FillOutputFiles(Err* err) {
+       link_output_file_ = dependency_output_file_ =
+           SubstitutionWriter::ApplyPatternToLinkerAsOutputFile(
+               this, tool, tool->outputs().list()[0]);
++      if (create_pri_file()) {
++          dependency_output_file_ = OutputFile(label().name() + ".stamp");
++      }
+       break;
+     case SHARED_LIBRARY:
+       CHECK(tool->outputs().list().size() >= 1);
+-- 
+2.21.0
+
+
+From e82d57c2edea76a7c9f8d460b6d48080a1d37f84 Mon Sep 17 00:00:00 2001
+From: Allan Sandfeld Jensen <allan.jensen@qt.io>
+Date: Mon, 8 Apr 2019 10:49:12 +0200
+Subject: Add precompiled object files to qmake link output
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Change-Id: I3fe0f6b43be59a29d366a81178de368643568e4a
+Reviewed-by: Michael Brüning <michael.bruning@qt.io>
+
+diff --git a/tools/gn/qmake_link_writer.cc b/tools/gn/qmake_link_writer.cc
+index 4e205e5..0569bcf 100644
+--- a/tools/gn/qmake_link_writer.cc
++++ b/tools/gn/qmake_link_writer.cc
+@@ -44,6 +44,7 @@
+ #include "tools/gn/qmake_link_writer.h"
+ #include "tools/gn/deps_iterator.h"
+ #include "tools/gn/ninja_binary_target_writer.h"
++#include "tools/gn/ninja_target_command_util.h"
+ #include "tools/gn/output_file.h"
+ #include "tools/gn/settings.h"
+ #include "tools/gn/target.h"
+@@ -98,13 +99,21 @@ void QMakeLinkWriter::Run() {
+   object_files.reserve(target_->sources().size());
+ 
+   for (const auto& source : target_->sources()) {
+-      Toolchain::ToolType tool_type = Toolchain::TYPE_NONE;
+-      if (!target_->GetOutputFilesForSource(source, &tool_type, &tool_outputs)) {
+-        if (GetSourceFileType(source) == SOURCE_DEF)
+-          other_files.push_back(source);
+-        continue;  // No output for this source.
+-      }
+-      object_files.push_back(tool_outputs[0].AsSourceFile(settings->build_settings()));
++    Toolchain::ToolType tool_type = Toolchain::TYPE_NONE;
++    if (!target_->GetOutputFilesForSource(source, &tool_type, &tool_outputs)) {
++      if (GetSourceFileType(source) == SOURCE_DEF)
++        other_files.push_back(source);
++      continue;  // No output for this source.
++    }
++    object_files.push_back(tool_outputs[0].AsSourceFile(settings->build_settings()));
++  }
++  if (target_->config_values().has_precompiled_headers()) {
++    const Tool* tool = target_->toolchain()->GetTool(Toolchain::TYPE_CXX);
++    if (tool && tool->precompiled_header_type() == Tool::PCH_MSVC) {
++      GetPCHOutputFiles(target_, Toolchain::TYPE_CXX, &tool_outputs);
++      if (!tool_outputs.empty())
++        object_files.push_back(tool_outputs[0].AsSourceFile(settings->build_settings()));
++    }
+   }
+ 
+   UniqueVector<OutputFile> extra_object_files;
+-- 
+2.21.0
+
+
+From 9441a4387b9a402914709ad30d1116326cd2dff2 Mon Sep 17 00:00:00 2001
+From: Kacper Kasper <kacperkasper@gmail.com>
+Date: Sun, 21 Apr 2019 00:05:13 +0200
+Subject: Haiku support
+
+Original patchset by Calvin Hill <calvin@hakobaito.co.uk>
+
+diff --git a/base/files/file.h b/base/files/file.h
+index 61239ad..e5cb6a1 100644
+--- a/base/files/file.h
++++ b/base/files/file.h
+@@ -22,10 +22,10 @@
+ 
+ namespace base {
+ 
+-#if defined(OS_BSD) || defined(OS_MACOSX) || defined(OS_NACL) || \
++#if defined(OS_BSD) || defined(OS_MACOSX) || defined(OS_NACL) || defined(OS_HAIKU) || \
+     defined(OS_ANDROID) && __ANDROID_API__ < 21
+ typedef struct stat stat_wrapper_t;
+-#elif defined(OS_POSIX) || defined(OS_FUCHSIA)
++#elif defined(OS_POSIX) && !defined(OS_HAIKU) || defined(OS_FUCHSIA)
+ typedef struct stat64 stat_wrapper_t;
+ #endif
+ 
+diff --git a/base/files/file_posix.cc b/base/files/file_posix.cc
+index ed9a5e2..5ee3166 100644
+--- a/base/files/file_posix.cc
++++ b/base/files/file_posix.cc
+@@ -24,7 +24,7 @@ static_assert(File::FROM_BEGIN == SEEK_SET && File::FROM_CURRENT == SEEK_CUR &&
+ 
+ namespace {
+ 
+-#if defined(OS_BSD) || defined(OS_MACOSX) || defined(OS_NACL) || \
++#if defined(OS_BSD) || defined(OS_MACOSX) || defined(OS_NACL) || defined(OS_HAIKU) || \
+     defined(OS_ANDROID) && __ANDROID_API__ < 21
+ int CallFstat(int fd, stat_wrapper_t* sb) {
+   return fstat(fd, sb);
+@@ -93,7 +93,7 @@ void File::Info::FromStat(const stat_wrapper_t& stat_info) {
+   int64_t last_accessed_nsec = stat_info.st_atimespec.tv_nsec;
+   time_t creation_time_sec = stat_info.st_ctimespec.tv_sec;
+   int64_t creation_time_nsec = stat_info.st_ctimespec.tv_nsec;
+-#elif defined(OS_AIX)
++#elif defined(OS_AIX) || defined(OS_HAIKU)
+   time_t last_modified_sec = stat_info.st_mtime;
+   int64_t last_modified_nsec = 0;
+   time_t last_accessed_sec = stat_info.st_atime;
+diff --git a/base/files/file_util_posix.cc b/base/files/file_util_posix.cc
+index eb07e64..e9dd41b 100644
+--- a/base/files/file_util_posix.cc
++++ b/base/files/file_util_posix.cc
+@@ -55,7 +55,7 @@ namespace base {
+ 
+ namespace {
+ 
+-#if defined(OS_BSD) || defined(OS_MACOSX) || defined(OS_NACL) || \
++#if defined(OS_BSD) || defined(OS_MACOSX) || defined(OS_NACL) || defined(OS_HAIKU) || \
+     defined(OS_ANDROID) && __ANDROID_API__ < 21
+ int CallStat(const char* path, stat_wrapper_t* sb) {
+   return stat(path, sb);
+diff --git a/build/build_haiku.ninja.template b/build/build_haiku.ninja.template
+new file mode 100644
+index 0000000..e59854b
+--- /dev/null
++++ b/build/build_haiku.ninja.template
+@@ -0,0 +1,19 @@
++rule cc
++  command = $cc -MMD -MF $out.d $defines $includes $cflags $cflags_c -c $in -o $out
++  description = CC $out
++  depfile = $out.d
++  deps = gcc
++
++rule cxx
++  command = $cxx -MMD -MF $out.d $defines $includes $cflags $cflags_cc -c $in -o $out
++  description = CXX $out
++  depfile = $out.d
++  deps = gcc
++
++rule alink_thin
++  command = rm -f $out && $ar rcsT $out $in
++  description = AR $out
++
++rule link
++  command = $ld $ldflags -o $out -Wl,--start-group $in $libs -Wl,--end-group $solibs
++  description = LINK $out
+diff --git a/build/gen.py b/build/gen.py
+index 40cfb90..73eb17c 100755
+--- a/build/gen.py
++++ b/build/gen.py
+@@ -43,10 +43,12 @@ class Platform(object):
+       self._platform = 'freebsd'
+     elif self._platform.startswith('openbsd'):
+       self._platform = 'openbsd'
++    elif self._platform.startswith('haiku'):
++      self._platform = 'haiku'
+ 
+   @staticmethod
+   def known_platforms():
+-    return ['linux', 'darwin', 'msvc', 'aix', 'fuchsia', 'openbsd']
++    return ['linux', 'darwin', 'msvc', 'aix', 'fuchsia', 'openbsd', 'haiku']
+ 
+   def platform(self):
+     return self._platform
+@@ -69,8 +71,11 @@ class Platform(object):
+   def is_aix(self):
+     return self._platform == 'aix'
+ 
++  def is_haiku(self):
++    return self._platform == 'haiku'
++
+   def is_posix(self):
+-    return self._platform in ['linux', 'freebsd', 'darwin', 'aix', 'openbsd']
++    return self._platform in ['linux', 'freebsd', 'darwin', 'aix', 'openbsd', 'haiku']
+ 
+ 
+ def main(argv):
+@@ -117,15 +122,6 @@ def main(argv):
+ 
+ 
+ def GenerateLastCommitPosition(host, header):
+-  ROOT_TAG = 'initial-commit'
+-  describe_output = subprocess.check_output(
+-      ['git', 'describe', 'HEAD', '--match', ROOT_TAG], shell=host.is_windows(),
+-      cwd=REPO_ROOT)
+-  mo = re.match(ROOT_TAG + '-(\d+)-g([0-9a-f]+)', describe_output.decode())
+-  if not mo:
+-    raise ValueError(
+-        'Unexpected output from git describe when generating version header')
+-
+   contents = '''// Generated by build/gen.py.
+ 
+ #ifndef OUT_LAST_COMMIT_POSITION_H_
+@@ -134,7 +130,7 @@ def GenerateLastCommitPosition(host, header):
+ #define LAST_COMMIT_POSITION "%s (%s)"
+ 
+ #endif  // OUT_LAST_COMMIT_POSITION_H_
+-''' % (mo.group(1), mo.group(2))
++''' % (999999, "091169b")
+ 
+   # Only write/touch this file if the commit position has changed.
+   old_contents = ''
+@@ -176,6 +172,7 @@ def WriteGenericNinja(path, static_libraries, executables,
+       'freebsd': 'build_linux.ninja.template',
+       'aix': 'build_aix.ninja.template',
+       'openbsd': 'build_openbsd.ninja.template',
++      'haiku': 'build_haiku.ninja.template',
+   }[platform.platform()])
+ 
+   with open(template_filename) as f:
+@@ -313,7 +310,7 @@ def WriteGNNinja(path, platform, host, options):
+     cflags.extend([
+         '-D_FILE_OFFSET_BITS=64',
+         '-D__STDC_CONSTANT_MACROS', '-D__STDC_FORMAT_MACROS',
+-        '-pthread',
++        '-pthread' if not platform.is_haiku() else '',
+         '-pipe',
+         '-fno-exceptions',
+         '-fno-rtti',
+@@ -335,8 +332,11 @@ def WriteGNNinja(path, platform, host, options):
+     elif platform.is_aix():
+       cflags_cc.append('-maix64')
+       ldflags.append('-maix64')
++    elif platform.is_haiku():
++      cflags_cc.append('-fPIC')
++      cflags_cc.extend(['-D_BSD_SOURCE', '-D__USE_XOPEN2K8'])
+ 
+-    if platform.is_posix():
++    if platform.is_posix() and not platform.is_haiku():
+       ldflags.append('-pthread')
+ 
+     if options.use_lto:
+diff --git a/tools/gn/args.cc b/tools/gn/args.cc
+index d1d7611..3d3f4ed 100644
+--- a/tools/gn/args.cc
++++ b/tools/gn/args.cc
+@@ -300,6 +300,8 @@ void Args::SetSystemVarsLocked(Scope* dest) const {
+   os = "aix";
+ #elif defined(OS_OPENBSD)
+   os = "openbsd";
++#elif defined(OS_HAIKU)
++  os = "haiku";
+ #else
+ #error Unknown OS type.
+ #endif
+@@ -320,7 +322,7 @@ void Args::SetSystemVarsLocked(Scope* dest) const {
+   // Set the host CPU architecture based on the underlying OS, not
+   // whatever the current bit-tedness of the GN binary is.
+   std::string os_arch = OperatingSystemArchitecture();
+-  if (os_arch == "x86")
++  if (os_arch == "x86" || os_arch == "BePC")
+     arch = kX86;
+   else if (os_arch == "x86_64")
+     arch = kX64;
+diff --git a/tools/gn/exec_process.cc b/tools/gn/exec_process.cc
+index 6c13558..dae3e8f 100644
+--- a/tools/gn/exec_process.cc
++++ b/tools/gn/exec_process.cc
+@@ -21,7 +21,11 @@
+ #else
+ #include <errno.h>
+ #include <fcntl.h>
++#if defined(OS_HAIKU)
++#include <signal.h>
++#else
+ #include <sys/signal.h>
++#endif
+ #include <sys/wait.h>
+ #include <unistd.h>
+ 
+diff --git a/tools/gn/function_write_file_unittest.cc b/tools/gn/function_write_file_unittest.cc
+index 4e317e1..a7fcd9b 100644
+--- a/tools/gn/function_write_file_unittest.cc
++++ b/tools/gn/function_write_file_unittest.cc
+@@ -13,7 +13,7 @@
+ #include "tools/gn/test_with_scope.h"
+ #include "util/test/test.h"
+ 
+-#if defined(OS_LINUX) || defined(OS_MACOSX)
++#if defined(OS_LINUX) || defined(OS_MACOSX) || defined(OS_HAIKU)
+ #include <sys/time.h>
+ #endif
+ 
+@@ -85,7 +85,7 @@ TEST_F(WriteFileTest, WithData) {
+   FILETIME last_modified_filetime = {};
+   ASSERT_TRUE(::SetFileTime(foo_file.GetPlatformFile(), nullptr,
+                             &last_access_filetime, &last_modified_filetime));
+-#elif defined(OS_AIX)
++#elif defined(OS_AIX) || defined(OS_HAIKU)
+   struct timeval times[2] = {};
+   ASSERT_EQ(utimes(foo_name.value().c_str(), times), 0);
+ #else
+diff --git a/util/build_config.h b/util/build_config.h
+index addd7cf..74029bd 100644
+--- a/util/build_config.h
++++ b/util/build_config.h
+@@ -65,6 +65,8 @@
+ #define OS_AIX 1
+ #elif defined(__asmjs__)
+ #define OS_ASMJS
++#elif defined(__HAIKU__)
++#define OS_HAIKU 1
+ #else
+ #error Please add support for your platform in build_config.h
+ #endif
+@@ -82,7 +84,7 @@
+ #if defined(OS_AIX) || defined(OS_ANDROID) || defined(OS_ASMJS) ||    \
+     defined(OS_FREEBSD) || defined(OS_LINUX) || defined(OS_MACOSX) || \
+     defined(OS_NACL) || defined(OS_NETBSD) || defined(OS_OPENBSD) ||  \
+-    defined(OS_QNX) || defined(OS_SOLARIS)
++    defined(OS_QNX) || defined(OS_SOLARIS) || defined(OS_HAIKU)
+ #define OS_POSIX 1
+ #endif
+ 
+diff --git a/util/exe_path.cc b/util/exe_path.cc
+index 2f80d5a..d5e1411 100644
+--- a/util/exe_path.cc
++++ b/util/exe_path.cc
+@@ -16,6 +16,9 @@
+ #elif defined(OS_FREEBSD)
+ #include <sys/sysctl.h>
+ #include <sys/types.h>
++#elif defined(OS_HAIKU)
++#include <OS.h>
++#include <image.h>
+ #endif
+ 
+ #if defined(OS_MACOSX)
+@@ -61,6 +64,20 @@ base::FilePath GetExePath() {
+   return base::FilePath(buf);
+ }
+ 
++#elif defined(OS_HAIKU)
++
++base::FilePath GetExePath() {
++  image_info i_info;
++  int32 image_cookie = 0;
++  while(get_next_image_info(B_CURRENT_TEAM, &image_cookie, &i_info) == B_OK) {
++    if(i_info.type == B_APP_IMAGE) {
++      break;
++    }
++  }
++  std::string system_buffer(i_info.name);
++  return base::FilePath(system_buffer);
++}
++
+ #else
+ 
+ base::FilePath GetExePath() {
+-- 
+2.21.0
+
+
+From 18fdfca08c5f37999f4fae844f102851c7aed7ee Mon Sep 17 00:00:00 2001
+From: Kacper Kasper <kacperkasper@gmail.com>
+Date: Sun, 21 Apr 2019 00:18:12 +0200
+Subject: Use internal test.h instead of GTest in Qt code
+
+
+diff --git a/tools/gn/qmake_link_writer_unittest.cc b/tools/gn/qmake_link_writer_unittest.cc
+index 8883c21..035839d 100644
+--- a/tools/gn/qmake_link_writer_unittest.cc
++++ b/tools/gn/qmake_link_writer_unittest.cc
+@@ -37,7 +37,7 @@
+ **
+ ****************************************************************************/
+ 
+-#include "testing/gtest/include/gtest/gtest.h"
++#include "util/test/test.h"
+ #include "tools/gn/qmake_link_writer.h"
+ #include "ninja_binary_target_writer.h"
+ #include "tools/gn/test_with_scope.h"
+-- 
+2.21.0
+
