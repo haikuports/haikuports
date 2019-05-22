@@ -1,0 +1,380 @@
+From a1e84fb39c3b2fbbd4e5cd9c84250467d01ec9d7 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 14 Apr 2019 17:27:45 +1000
+Subject: Add Haiku MediaKit support
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b759259..9622a62 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -20,7 +20,8 @@
+ # CMake based build system. Pedro Lopez-Cabanillas <plcl@users.sf.net>
+ 
+ cmake_minimum_required ( VERSION 3.1.0 ) # because of CMAKE_C_STANDARD
+-project ( FluidSynth C )
++project ( FluidSynth C CXX)
++set(CMAKE_CXX_STANDARD 11)
+ set ( CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake_admin )
+ 
+ # FluidSynth package name
+@@ -69,6 +70,7 @@ option ( enable-network "enable network support (requires BSD sockets)" on )
+ option ( enable-oss "compile OSS support (if it is available)" on )
+ option ( enable-dsound "compile DirectSound support (if it is available)" on )
+ option ( enable-winmidi "compile Windows MIDI support (if it is available)" on )
++option ( enable-haiku "compile Haiku MediaKit audio support (if it is available)" on )
+ option ( enable-pkgconfig "use pkg-config to locate fluidsynth's (mostly optional) dependencies" on )
+ option ( enable-pulseaudio "compile PulseAudio support (if it is available)" on )
+ option ( enable-readline "compile readline lib line editing (if it is available)" on )
+@@ -92,7 +94,7 @@ if ( CMAKE_SYSTEM MATCHES "OS2" )
+ endif ( CMAKE_SYSTEM MATCHES "OS2" )
+ 
+ # Initialize the library directory name suffix.
+-if (NOT MINGW AND NOT MSVC AND NOT CMAKE_SYSTEM_NAME MATCHES "FreeBSD|DragonFly")
++if (NOT MINGW AND NOT MSVC AND NOT HAIKU AND NOT CMAKE_SYSTEM_NAME MATCHES "FreeBSD|DragonFly")
+ if ( CMAKE_SIZEOF_VOID_P EQUAL 8 )
+   set ( _init_lib_suffix "64" )
+ else ( CMAKE_SIZEOF_VOID_P EQUAL 8 )
+@@ -156,8 +158,10 @@ check_include_file ( getopt.h HAVE_GETOPT_H )
+ check_include_file ( stdint.h HAVE_STDINT_H )
+ include ( TestInline )
+ include ( TestVLA )
++if ( NOT HAIKU )
+ include ( TestBigEndian )
+ test_big_endian ( WORDS_BIGENDIAN )
++endif ( NOT HAIKU )
+ 
+ unset ( LIBFLUID_CPPFLAGS CACHE )
+ unset ( LIBFLUID_LIBS CACHE )
+@@ -189,6 +193,11 @@ if ( CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_
+   
+ endif ( CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "Intel" )
+ 
++# Haiku
++if ( HAIKU )
++set ( CMAKE_CXX_FLAGS "-fpermissive")
++endif ( HAIKU )
++
+ # Windows
+ unset ( WINDOWS_SUPPORT CACHE )
+ unset ( WINDOWS_LIBS CACHE )
+@@ -256,7 +265,11 @@ else ( WIN32 )
+ # Check PThreads, but not in Windows
+   find_package ( Threads REQUIRED )
+   set ( HAVE_LIBPTHREAD ${Threads_FOUND} )
++if ( HAIKU )
++  set ( LIBFLUID_LIBS "network;bsd;be;media" ${CMAKE_THREAD_LIBS_INIT} )
++else ( HAIKU )
+   set ( LIBFLUID_LIBS "m" ${CMAKE_THREAD_LIBS_INIT} )
++endif ( HAIKU )
+ endif ( WIN32 )
+ 
+ # IBM OS/2
+@@ -538,6 +551,11 @@ else(NOT enable-pkgconfig)
+     endif ( LADSPA_SUPPORT )
+     endif ( enable-ladspa )
+     
++    unset ( HAIKU_SUPPORT CACHE )
++    if ( enable-haiku )
++        set ( HAIKU_SUPPORT 1 )
++    endif ( enable-haiku )
++    
+ endif(NOT enable-pkgconfig)
+ 
+ unset ( AUFILE_SUPPORT CACHE )
+diff --git a/cmake_admin/report.cmake b/cmake_admin/report.cmake
+index e25a989..be77acc 100644
+--- a/cmake_admin/report.cmake
++++ b/cmake_admin/report.cmake
+@@ -86,6 +86,12 @@ else ( WINMIDI_SUPPORT )
+   message ( "WinMidi support:       no" )
+ endif ( WINMIDI_SUPPORT )
+ 
++if ( HAIKU_SUPPORT )
++  message ( "Haiku MediaKit support: yes" )
++else ( HAIKU_SUPPORT )
++  message ( "Haiku MediaKit support: no" )
++endif ( HAIKU_SUPPORT )
++
+ if ( LADSPA_SUPPORT )
+   message ( "LADSPA support:        yes" )
+ else ( LADSPA_SUPPORT )
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index a0ba53d..b96dfb5 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -86,6 +86,10 @@ if ( WINMIDI_SUPPORT )
+   set ( fluid_winmidi_SOURCES drivers/fluid_winmidi.c )
+ endif ( WINMIDI_SUPPORT )
+ 
++if ( HAIKU_SUPPORT )
++  set ( fluid_haiku_SOURCES drivers/fluid_haiku.cpp )
++endif ( HAIKU_SUPPORT )
++
+ if ( OSS_SUPPORT )
+   set ( fluid_oss_SOURCES drivers/fluid_oss.c )
+ endif ( OSS_SUPPORT )
+@@ -249,6 +253,7 @@ add_library ( libfluidsynth-OBJ OBJECT
+     ${fluid_pulse_SOURCES}
+     ${fluid_dsound_SOURCES}
+     ${fluid_winmidi_SOURCES}
++    ${fluid_haiku_SOURCES}
+     ${libfluidsynth_SOURCES}
+     ${public_HEADERS}
+     ${public_main_HEADER}
+diff --git a/src/config.cmake b/src/config.cmake
+index 2d1d786..9ff3e29 100644
+--- a/src/config.cmake
++++ b/src/config.cmake
+@@ -199,6 +199,9 @@
+ /* Define to enable Windows MIDI driver */
+ #cmakedefine WINMIDI_SUPPORT @WINMIDI_SUPPORT@
+ 
++/* Define to enable Haiku MediaKit audio driver */
++#cmakedefine HAIKU_SUPPORT @HAIKU_SUPPORT@
++
+ /* Define to 1 if you have the ANSI C header files. */
+ #cmakedefine STDC_HEADERS @STDC_HEADERS@
+ 
+diff --git a/src/drivers/fluid_adriver.c b/src/drivers/fluid_adriver.c
+index 4311c46..bf4a84b 100644
+--- a/src/drivers/fluid_adriver.c
++++ b/src/drivers/fluid_adriver.c
+@@ -80,6 +80,16 @@ static const fluid_audriver_definition_t fluid_audio_drivers[] =
+     },
+ #endif
+ 
++#if HAIKU_SUPPORT
++    {
++        "mediakit",
++        new_fluid_haiku_audio_driver,
++        NULL,
++        delete_fluid_haiku_audio_driver,
++        fluid_haiku_audio_driver_settings
++    },
++#endif
++
+ #if COREAUDIO_SUPPORT
+     {
+         "coreaudio",
+diff --git a/src/drivers/fluid_adriver.h b/src/drivers/fluid_adriver.h
+index 5cfc688..ace6353 100644
+--- a/src/drivers/fluid_adriver.h
++++ b/src/drivers/fluid_adriver.h
+@@ -57,6 +57,13 @@ void delete_fluid_alsa_audio_driver(fluid_audio_driver_t *p);
+ void fluid_alsa_audio_driver_settings(fluid_settings_t *settings);
+ #endif
+ 
++#if HAIKU_SUPPORT
++fluid_audio_driver_t *new_fluid_haiku_audio_driver(fluid_settings_t *settings,
++        fluid_synth_t *synth);
++void delete_fluid_haiku_audio_driver(fluid_audio_driver_t *p);
++void fluid_haiku_audio_driver_settings(fluid_settings_t *settings);
++#endif
++
+ #if OSS_SUPPORT
+ fluid_audio_driver_t *new_fluid_oss_audio_driver(fluid_settings_t *settings,
+         fluid_synth_t *synth);
+diff --git a/src/drivers/fluid_haiku.cpp b/src/drivers/fluid_haiku.cpp
+new file mode 100644
+index 0000000..2871948
+--- /dev/null
++++ b/src/drivers/fluid_haiku.cpp
+@@ -0,0 +1,140 @@
++/* Haiku MediaKit Driver for FluidSynth
++ *
++ * Copyright (C) 2019  Gerasim Troeglazov
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public License
++ * as published by the Free Software Foundation; either version 2.1 of
++ * the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free
++ * Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
++ * 02110-1301, USA
++ */
++
++extern "C" {
++#include "fluid_synth.h"
++#include "fluid_adriver.h"
++#include "fluid_settings.h"
++}
++
++#include <MediaKit.h>
++#include <SupportKit.h>
++
++typedef struct
++{
++    fluid_audio_driver_t driver;
++
++    fluid_synth_t *synth;
++    fluid_audio_callback_t write_ptr;
++
++    int frame_size;
++	
++	BSoundPlayer *m_player;
++
++} fluid_haiku_audio_driver_t;
++
++
++static void playerProc(void *cookie, void *buffer, size_t len, const media_raw_audio_format &format)
++{
++    fluid_haiku_audio_driver_t *dev = (fluid_haiku_audio_driver_t *)cookie;
++    len /= dev->frame_size;
++    dev->write_ptr(dev->synth, len, buffer, 0, 2, buffer, 1, 2);
++}
++
++void fluid_haiku_audio_driver_settings(fluid_settings_t *settings)
++{
++    fluid_settings_register_str(settings, "audio.haiku.device", "default", 0);
++    fluid_settings_add_option(settings, "audio.haiku.device", "default");
++}
++
++fluid_audio_driver_t *
++new_fluid_haiku_audio_driver(fluid_settings_t *settings, fluid_synth_t *synth)
++{
++    fluid_haiku_audio_driver_t *dev = NULL;
++    fluid_audio_callback_t write_ptr;
++    
++    double sample_rate;
++    int period_size;
++    int periods;
++    int sample_size;
++    
++    char *device;
++    const char *dev_name;
++
++    fluid_settings_getnum(settings, "synth.sample-rate", &sample_rate);
++    fluid_settings_getint(settings, "audio.periods", &periods);
++    fluid_settings_getint(settings, "audio.period-size", &period_size);    
++
++    if(period_size < 1024) {
++        period_size = 1024;
++    } else {
++        if((period_size & (period_size - 1)) != 0) {
++            FLUID_LOG(FLUID_ERR, "\"audio.period-size\" must be a power of 2");
++            return NULL;
++        }
++    }
++
++	if(fluid_settings_str_equal(settings, "audio.sample-format", "16bits"))
++    {
++        FLUID_LOG(FLUID_DBG, "Selected 16 bit sample format");
++        sample_size = sizeof(short);
++        write_ptr   = fluid_synth_write_s16;
++    } else {
++        FLUID_LOG(FLUID_ERR, "Unhandled sample format");
++        return NULL;
++    }
++
++	dev = FLUID_NEW(fluid_haiku_audio_driver_t);
++	if(dev == NULL) {
++		FLUID_LOG(FLUID_ERR, "Out of memory");
++		return NULL;
++	}
++	FLUID_MEMSET(dev, 0, sizeof(fluid_haiku_audio_driver_t));
++
++    dev->synth = synth;
++    dev->frame_size = 2 * sample_size;
++	dev->write_ptr = write_ptr;
++	
++	media_raw_audio_format mediaKitFormat = {
++		(float)sample_rate,
++		(uint32)2,
++		media_raw_audio_format::B_AUDIO_SHORT,
++		B_MEDIA_LITTLE_ENDIAN,
++		(uint32)periods * period_size * dev->frame_size
++	};
++	
++	dev->m_player = new BSoundPlayer(&mediaKitFormat, "FluidSynth", playerProc, NULL, (void*)dev);
++
++	if(dev->m_player->InitCheck() != B_OK) {
++		delete dev->m_player;
++		dev->m_player = NULL;
++	    delete_fluid_haiku_audio_driver(&dev->driver);
++    	return NULL;
++	}
++	
++	dev->m_player->SetHasData(true);
++	dev->m_player->Start();
++
++	return (fluid_audio_driver_t *) dev;
++}
++
++
++void delete_fluid_haiku_audio_driver(fluid_audio_driver_t *d)
++{
++    fluid_haiku_audio_driver_t *dev = (fluid_haiku_audio_driver_t *) d;
++	if (dev->m_player != NULL) {
++		dev->m_player->SetHasData(false);
++		dev->m_player->Stop();
++		delete dev->m_player;
++		dev->m_player = NULL;
++	}
++	FLUID_FREE(dev);
++}
++
+diff --git a/src/synth/fluid_synth.c b/src/synth/fluid_synth.c
+index 15e167a..2bcf167 100644
+--- a/src/synth/fluid_synth.c
++++ b/src/synth/fluid_synth.c
+@@ -26,6 +26,10 @@
+ #include "fluid_sfont.h"
+ #include "fluid_defsfont.h"
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#endif
++
+ #ifdef TRAP_ON_FPE
+ #define _GNU_SOURCE
+ #include <fenv.h>
+@@ -209,8 +213,25 @@ void fluid_synth_settings(fluid_settings_t *settings)
+     fluid_settings_register_int(settings, "synth.lock-memory", 1, 0, 1, FLUID_HINT_TOGGLED);
+     fluid_settings_register_str(settings, "midi.portname", "", 0);
+ 
++#ifdef __HAIKU__
++	char midiSettings[PATH_MAX] = "";
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, false, midiSettings, sizeof(midiSettings)) == B_OK) {
++		strcat(midiSettings, "/Media/midi_settings");
++		if( access( midiSettings, F_OK ) != -1 ) {
++			FILE *inFile = fopen(midiSettings, "rt");
++			if (inFile) {
++				char sf2file[PATH_MAX];
++				if (fscanf(inFile, "# Midi\n\tsoundfont \"%[^\"]\"", sf2file)) {
++					fluid_settings_register_str(settings, "synth.default-soundfont", sf2file, 0);
++				}
++				fclose(inFile);
++			}
++		}
++	}
++#else
+ #ifdef DEFAULT_SOUNDFONT
+     fluid_settings_register_str(settings, "synth.default-soundfont", DEFAULT_SOUNDFONT, 0);
++#endif
+ #endif
+ 
+     fluid_settings_register_int(settings, "synth.polyphony", 256, 1, 65535, 0);
+diff --git a/src/utils/fluid_sys.h b/src/utils/fluid_sys.h
+index 9f2d6f6..f3d1464 100644
+--- a/src/utils/fluid_sys.h
++++ b/src/utils/fluid_sys.h
+@@ -687,7 +687,7 @@ enum
+     sample data.
+  */
+ 
+-#if defined(HAVE_SYS_MMAN_H) && !defined(__OS2__)
++#if defined(HAVE_SYS_MMAN_H) && !defined(__OS2__) && !defined(__HAIKU__)
+ #define fluid_mlock(_p,_n)      mlock(_p, _n)
+ #define fluid_munlock(_p,_n)    munlock(_p,_n)
+ #else
+-- 
+2.21.0
+
