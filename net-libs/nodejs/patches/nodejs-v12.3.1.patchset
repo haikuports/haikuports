@@ -1,0 +1,403 @@
+From ed9657362422bafc7d91ce8f10353a8bb6a8ee70 Mon Sep 17 00:00:00 2001
+From: Calvin Hill <calvin@hakobaito.co.uk>
+Date: Wed, 22 May 2019 11:23:37 +0000
+Subject: Initial Haiku support for Node.js
+
+
+diff --git a/common.gypi b/common.gypi
+index 223043e..faf30c7 100644
+--- a/common.gypi
++++ b/common.gypi
+@@ -107,6 +107,9 @@
+       ['OS=="mac"', {
+         'clang%': 1,
+       }],
++      ['OS=="haiku"', {
++        'clang%': 0,
++      }],
+     ],
+   },
+ 
+@@ -135,6 +138,10 @@
+             'cflags': [ '-fPIE' ],
+             'ldflags': [ '-fPIE', '-pie' ]
+           }],
++          ['OS == "haiku"', {
++            'cflags': [ '-fPIC' ],
++            'ldflags': [ '-fPIC']
++          }],
+         ],
+         'msvs_settings': {
+           'VCCLCompilerTool': {
+@@ -195,6 +202,10 @@
+             'cflags': [ '-fPIE' ],
+             'ldflags': [ '-fPIE', '-pie' ]
+           }],
++          ['OS == "haiku"', {
++            'cflags': [ '-fPIC' ],
++            'ldflags': [ '-fPIC']
++          }],
+         ],
+         'msvs_settings': {
+           'VCCLCompilerTool': {
+@@ -339,9 +350,10 @@
+         'cflags': [ '-pthread' ],
+         'ldflags': [ '-pthread' ],
+       }],
+-      [ 'OS in "linux freebsd openbsd solaris android aix cloudabi"', {
++      [ 'OS in "linux freebsd openbsd solaris android aix cloudabi haiku"', {
+         'cflags': [ '-Wall', '-Wextra', '-Wno-unused-parameter', ],
+         'cflags_cc': [ '-fno-rtti', '-fno-exceptions', '-std=gnu++1y' ],
++        
+         'ldflags': [ '-rdynamic' ],
+         'target_conditions': [
+           # The 1990s toolchain on SmartOS can't handle thin archives.
+@@ -352,6 +364,10 @@
+             'cflags': [ '-I/usr/local/include' ],
+             'ldflags': [ '-Wl,-z,wxneeded' ],
+           }],
++          ['OS=="haiku"', {
++            'cflags': [ '-fPIC' ],
++            'ldflags': [ '-fPIC' ],
++          }],
+         ],
+         'conditions': [
+           [ 'target_arch=="ia32"', {
+@@ -482,6 +498,13 @@
+           '-Wl,--export-dynamic',
+         ],
+       }],
++      ['OS=="haiku"', {
++          'ldflags': [ '-lroot', '-lbsd', '-lstdc++', '-lnetwork', '-Wl,-Bsymbolic', '-Wl,--export-dynamic', '-fPIC' ],
++          'ldflags!': [ '-pthread' ],
++          'ldflags!': [ '-pthreads',  '-rdynamic' ],
++          'clang%': 0,
++          '%v8_use_snapshot':0,
++      }],
+       ['node_shared_openssl!="true"', {
+         # `OPENSSL_THREADS` is defined via GYP for openSSL for all architectures.
+         'defines': [
+diff --git a/configure.py b/configure.py
+index 15ea568..32461f2 100755
+--- a/configure.py
++++ b/configure.py
+@@ -44,7 +44,7 @@ from fetch_deps import FetchDeps
+ parser = optparse.OptionParser()
+ 
+ valid_os = ('win', 'mac', 'solaris', 'freebsd', 'openbsd', 'linux',
+-            'android', 'aix', 'cloudabi')
++            'android', 'aix', 'cloudabi', "haiku")
+ valid_arch = ('arm', 'arm64', 'ia32', 'ppc',
+               'ppc64', 'x32','x64', 'x86', 'x86_64', 's390', 's390x')
+ valid_arm_float_abi = ('soft', 'softfp', 'hard')
+diff --git a/deps/openssl/config/archs/linux-x86_64/no-asm/openssl-cl.gypi b/deps/openssl/config/archs/linux-x86_64/no-asm/openssl-cl.gypi
+index 76984d4..eda4459 100644
+--- a/deps/openssl/config/archs/linux-x86_64/no-asm/openssl-cl.gypi
++++ b/deps/openssl/config/archs/linux-x86_64/no-asm/openssl-cl.gypi
+@@ -8,11 +8,9 @@
+     ],
+     'openssl_cflags_linux-x86_64': [
+       '-Wall -O3',
+-      '-pthread -m64',
+-      '-Wall -O3',
++      '-m64',
+     ],
+     'openssl_ex_libs_linux-x86_64': [
+-      '-ldl -pthread',
+     ],
+     'openssl_cli_srcs_linux-x86_64': [
+       'openssl/apps/asn1pars.c',
+diff --git a/deps/openssl/config/archs/linux-x86_64/no-asm/openssl.gypi b/deps/openssl/config/archs/linux-x86_64/no-asm/openssl.gypi
+index 11d3aa6..aba5d54 100644
+--- a/deps/openssl/config/archs/linux-x86_64/no-asm/openssl.gypi
++++ b/deps/openssl/config/archs/linux-x86_64/no-asm/openssl.gypi
+@@ -692,11 +692,10 @@
+     ],
+     'openssl_cflags_linux-x86_64': [
+       '-Wall -O3',
+-      '-pthread -m64',
++      '-m64',
+       '-Wall -O3',
+     ],
+-    'openssl_ex_libs_linux-x86_64': [
+-      '-ldl -pthread',
++    'openssl_ex_libs_linux-x86_64': [ 
+     ],
+   },
+   'include_dirs': [
+diff --git a/deps/openssl/openssl/crypto/rand/rand_unix.c b/deps/openssl/openssl/crypto/rand/rand_unix.c
+index 9cbc9ad..1f6268d 100644
+--- a/deps/openssl/openssl/crypto/rand/rand_unix.c
++++ b/deps/openssl/openssl/crypto/rand/rand_unix.c
+@@ -301,7 +301,7 @@ static ssize_t syscall_random(void *buf, size_t buflen)
+      * - Linux since 3.17 with glibc 2.25
+      * - FreeBSD since 12.0 (1200061)
+      */
+-#  if defined(__GNUC__) && __GNUC__>=2 && defined(__ELF__) && !defined(__hpux)
++#  if defined(__GNUC__) && __GNUC__>=2 && defined(__ELF__) && !defined(__hpux) && !defined(__HAIKU__)
+     extern int getentropy(void *buffer, size_t length) __attribute__((weak));
+ 
+     if (getentropy != NULL)
+diff --git a/deps/openssl/openssl_common.gypi b/deps/openssl/openssl_common.gypi
+index c4b95c2..5a05709 100644
+--- a/deps/openssl/openssl_common.gypi
++++ b/deps/openssl/openssl_common.gypi
+@@ -55,7 +55,14 @@
+         'ENGINESDIR="/dev/null"',
+         '__EXTENSIONS__'
+       ],
+-    }, {
++    },'OS=="haiku"', {
++      '!ldflags': ['-pthread', '-pthreads'],
++            'defines': [
++        'OPENSSLDIR="/boot/system/data/ssl/"',
++        'ENGINESDIR="/dev/null"',
++        'TERMIOS',
++      ],
++    },{
+       # linux and others
+       'cflags': ['-Wno-missing-field-initializers',],
+       'defines': [
+diff --git a/node.gypi b/node.gypi
+index 10c09a6..360e4b6 100644
+--- a/node.gypi
++++ b/node.gypi
+@@ -267,6 +267,16 @@
+         'NODE_PLATFORM="sunos"',
+       ],
+     }],
++    [ 'OS=="haiku"', {
++      'libraries': [
++        '-lroot',
++        '-lnetwork',
++        '-lbsd',
++      ],
++      'defines': [
++        'NODE_PLATFORM="haiku"',
++      ],
++    }],
+     [ '(OS=="freebsd" or OS=="linux") and node_shared=="false"'
+         ' and force_load=="true"', {
+       'ldflags': [ '-Wl,-z,noexecstack',
+diff --git a/src/node.cc b/src/node.cc
+index 953465e..8369cd4 100644
+--- a/src/node.cc
++++ b/src/node.cc
+@@ -492,7 +492,7 @@ inline void PlatformInit() {
+     if (nr == SIGKILL || nr == SIGSTOP)
+       continue;
+     act.sa_handler = (nr == SIGPIPE) ? SIG_IGN : SIG_DFL;
+-    CHECK_EQ(0, sigaction(nr, &act, nullptr));
++    //CHECK_EQ(0, sigaction(nr, &act, nullptr));
+   }
+ #endif  // !NODE_SHARED_MODE
+ 
+diff --git a/src/node_os.cc b/src/node_os.cc
+index d2387f2..c1a31aa 100644
+--- a/src/node_os.cc
++++ b/src/node_os.cc
+@@ -34,7 +34,7 @@
+ #include <array>
+ #include <cerrno>
+ #include <cstring>
+-
++#include <iostream>
+ namespace node {
+ namespace os {
+ 
+@@ -120,7 +120,17 @@ static void GetCPUInfo(const FunctionCallbackInfo<Value>& args) {
+   // [model, speed, (5 entries of cpu_times), model2, speed2, ...]
+   std::vector<Local<Value>> result(count * 7);
+   for (int i = 0, j = 0; i < count; i++) {
++    /*
+     uv_cpu_info_t* ci = cpu_infos + i;
++
++    std::cout << ci->speed << std::endl;
++    std::cout << ci->model << std::endl;
++    std::cout << ci->cpu_times.user << std::endl;
++    std::cout << ci->cpu_times.nice << std::endl;
++    std::cout << ci->cpu_times.sys << std::endl;
++    std::cout << ci->cpu_times.idle << std::endl;
++    std::cout << ci->cpu_times.irq << std::endl;
++
+     result[j++] = OneByteString(isolate, ci->model);
+     result[j++] = Number::New(isolate, ci->speed);
+     result[j++] = Number::New(isolate, ci->cpu_times.user);
+@@ -128,10 +138,11 @@ static void GetCPUInfo(const FunctionCallbackInfo<Value>& args) {
+     result[j++] = Number::New(isolate, ci->cpu_times.sys);
+     result[j++] = Number::New(isolate, ci->cpu_times.idle);
+     result[j++] = Number::New(isolate, ci->cpu_times.irq);
++    */
+   }
+ 
+   uv_free_cpu_info(cpu_infos, count);
+-  args.GetReturnValue().Set(Array::New(isolate, result.data(), result.size()));
++ // args.GetReturnValue().Set(Array::New(isolate, result.data(), result.size()));
+ }
+ 
+ 
+diff --git a/src/node_report.cc b/src/node_report.cc
+index 578da43..0f18c51 100644
+--- a/src/node_report.cc
++++ b/src/node_report.cc
+@@ -480,16 +480,16 @@ static void PrintSystemInformation(JSONWriter* writer) {
+     {"core_file_size_blocks", RLIMIT_CORE},
+     {"data_seg_size_kbytes", RLIMIT_DATA},
+     {"file_size_blocks", RLIMIT_FSIZE},
+-#if !(defined(_AIX) || defined(__sun))
++#if !(defined(_AIX) || defined(__sun) || defined(__HAIKU__))
+     {"max_locked_memory_bytes", RLIMIT_MEMLOCK},
+ #endif
+-#ifndef __sun
++#if !(defined(__sun) || defined(__HAIKU__))
+     {"max_memory_size_kbytes", RLIMIT_RSS},
+ #endif
+     {"open_files", RLIMIT_NOFILE},
+     {"stack_size_bytes", RLIMIT_STACK},
+     {"cpu_time_seconds", RLIMIT_CPU},
+-#ifndef __sun
++#if !(defined(__sun) || defined(__HAIKU__))
+     {"max_user_processes", RLIMIT_NPROC},
+ #endif
+     {"virtual_memory_kbytes", RLIMIT_AS}
+diff --git a/tools/utils.py b/tools/utils.py
+index dd5ce3f..0b69b16 100644
+--- a/tools/utils.py
++++ b/tools/utils.py
+@@ -57,6 +57,8 @@ def GuessOS():
+     return 'win32'
+   elif id == 'FreeBSD':
+     return 'freebsd'
++  elif id == 'Haiku':
++    return 'haiku'
+   elif id == 'OpenBSD':
+     return 'openbsd'
+   elif id == 'SunOS':
+-- 
+2.21.0
+
+
+From ff5bd3f52838dc769e68704497c7cb6b25c32b25 Mon Sep 17 00:00:00 2001
+From: Calvin Hill <calvin@hakobaito.co.uk>
+Date: Fri, 31 May 2019 02:58:35 +0000
+Subject: Import patch to use a shared V8 library.
+
+
+diff --git a/common.gypi b/common.gypi
+index faf30c7..25a04ca 100644
+--- a/common.gypi
++++ b/common.gypi
+@@ -38,7 +38,7 @@
+ 
+     # Reset this number to 0 on major V8 upgrades.
+     # Increment by one for each non-official patch applied to deps/v8.
+-    'v8_embedder_string': '-node.18',
++    'v8_embedder_string': '-node.17',
+ 
+     ##### V8 defaults for Node.js #####
+ 
+@@ -499,7 +499,15 @@
+         ],
+       }],
+       ['OS=="haiku"', {
+-          'ldflags': [ '-lroot', '-lbsd', '-lstdc++', '-lnetwork', '-Wl,-Bsymbolic', '-Wl,--export-dynamic', '-fPIC' ],
++          'ldflags': [
++                      '-lroot',
++                      '-lbsd',
++                      '-lstdc++',
++                      '-lnetwork',
++                      '-Wl,-Bsymbolic',
++                      '-Wl,--export-dynamic',
++                      '-fPIC',
++                      '-lexecinfo'],
+           'ldflags!': [ '-pthread' ],
+           'ldflags!': [ '-pthreads',  '-rdynamic' ],
+           'clang%': 0,
+diff --git a/configure.py b/configure.py
+index 32461f2..ab819d6 100755
+--- a/configure.py
++++ b/configure.py
+@@ -275,6 +275,26 @@ shared_optgroup.add_option('--shared-openssl-libpath',
+     dest='shared_openssl_libpath',
+     help='a directory to search for the shared OpenSSL DLLs')
+ 
++parser.add_option('--shared-v8',
++    action='store_true',
++    dest='shared_v8',
++    help='link to a shared V8 DLL instead of static linking')
++
++parser.add_option('--shared-v8-includes',
++    action='store',
++    dest='shared_v8_includes',
++    help='directory containing V8 header files')
++
++parser.add_option('--shared-v8-libname',
++    action='store',
++    dest='shared_v8_libname',
++    help='alternative lib name to link to (default: \'v8\')')
++
++parser.add_option('--shared-v8-libpath',
++    action='store',
++    dest='shared_v8_libpath',
++    help='a directory to search for the shared V8 DLL')
++
+ shared_optgroup.add_option('--shared-zlib',
+     action='store_true',
+     dest='shared_zlib',
+@@ -1133,6 +1153,7 @@ def configure_library(lib, output):
+ 
+ 
+ def configure_v8(o):
++  o['variables']['node_shared_v8'] = b(options.shared_v8)
+   o['variables']['v8_enable_gdbjit'] = 1 if options.gdb else 0
+   o['variables']['v8_no_strict_aliasing'] = 1  # Work around compiler bugs.
+   o['variables']['v8_optimized_debug'] = 0 if options.v8_non_optimized_debug else 1
+@@ -1158,6 +1179,16 @@ def configure_v8(o):
+     options.build_v8_with_gn = FetchDeps(v8_path)
+   o['variables']['build_v8_with_gn'] = b(options.build_v8_with_gn)
+ 
++    # assume shared_v8 if one of these is set?
++  if options.shared_v8_libpath:
++    o['libraries'] += ['-L%s' % options.shared_v8_libpath]
++  if options.shared_v8_libname:
++    o['libraries'] += ['-l%s' % options.shared_v8_libname]
++  elif options.shared_v8:
++    o['libraries'] += ['-lv8', '-lv8_libplatform']
++  if options.shared_v8_includes:
++    o['include_dirs'] += [options.shared_v8_includes]
++
+ 
+ def configure_openssl(o):
+   variables = o['variables']
+diff --git a/node.gyp b/node.gyp
+index df70d26..ae6aaaf 100644
+--- a/node.gyp
++++ b/node.gyp
+@@ -18,6 +18,7 @@
+     'node_shared_cares%': 'false',
+     'node_shared_libuv%': 'false',
+     'node_shared_nghttp2%': 'false',
++    'node_shared_v8%': 'false',
+     'node_use_openssl%': 'true',
+     'node_shared_openssl%': 'false',
+     'node_v8_options%': '',
+@@ -492,6 +493,8 @@
+         'src/cares_wrap.cc',
+         'src/connect_wrap.cc',
+         'src/connection_wrap.cc',
++        'src/node_code_cache_stub.cc',
++        'src/node_snapshot_stub.cc',
+         'src/debug_utils.cc',
+         'src/env.cc',
+         'src/fs_event_wrap.cc',
+@@ -1067,6 +1070,7 @@
+         'deps/cares/include',
+         'deps/uv/include',
+         'test/cctest',
++        '/boot/system/develop/headers/v8/',
+       ],
+ 
+       'defines': [ 'NODE_WANT_INTERNALS=1' ],
+-- 
+2.21.0
+
