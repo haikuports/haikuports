@@ -1,0 +1,137 @@
+SUMMARY="A JavaScript runtime built on Chrome's V8 Engine"
+DESCRIPTION="Node.js is a JavaScript runtime built on Chrome's V8 JavaScript engine. \
+As an asynchronous event driven JavaScript runtime, Node is designed to build scalable \
+network applications. In the following \"hello world\" example, many connections can be \
+handled concurrently. Upon each connection the callback is fired, but if there is no work \
+to be done, Node will sleep."
+HOMEPAGE="https://nodejs.org/"
+COPYRIGHT="2006-2019 The Node.js Foundation"
+LICENSE="BSD (2-clause)"
+REVISION="1"
+SOURCE_URI="https://nodejs.org/dist/v$portVersion/node-v$portVersion.tar.gz"
+SOURCE_DIR="node-v$portVersion"
+CHECKSUM_SHA256="d9132342815f04fdb8eb6cac5607fcee929a79e0339449774f411efed81693ac"
+
+PATCHES="nodejs-v$portVersion.patchset"
+
+ARCHITECTURES="!x86_gcc2 ?x86 x86_64"
+
+GLOBAL_WRITABLE_FILES="
+	non-packaged/lib/node_modules directory keep-old
+	"
+
+if [ "$targetArchitecture" = x86_gcc2 ]; then
+	SECONDARY_ARCHITECTURES="x86"
+	ARCH=x86
+else
+	ARCH=x64
+fi
+
+# On x86_gcc2 we don't want to install the commands in bin/<arch>/, but in bin/.
+commandBinDir=$binDir
+if [ "$targetArchitecture" = x86_gcc2 ]; then
+    commandBinDir=$prefix/bin
+fi
+
+PROVIDES="
+	nodejs$secondaryArchSuffix = $portVersion
+	cmd:node$commandSuffix = $portVersion
+	cmd:npm$secondaryArchSuffix = $portVersion
+	cmd:npx$secondaryArchSuffix = $portVersion
+	"
+REQUIRES="
+	haiku$secondaryArchSuffix
+	lib:libcares$secondaryArchSuffix
+	lib:libexecinfo$secondaryArchSuffix
+	lib:libssp$secondaryArchSuffix
+	lib:libuv$secondaryArchSuffix
+	lib:libv8$secondaryArchSuffix
+	lib:libz$secondaryArchSuffix >= 1.2.8
+	"
+
+PROVIDES_devel="
+	nodejs${secondaryArchSuffix}_devel
+	devel:libnode$secondaryArchSuffix = $portVersion
+	"
+REQUIRES_devel="
+	nodejs$secondaryArchSuffix == $portVersion base
+	"
+
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel
+	c_ares${seconddaryArchSuffix}_devel
+	gcc${secondaryArchSuffix}_syslibs
+	gcc${secondaryArchSuffix}_syslibs_devel
+	devel:libgcc$secondaryArchSuffix
+	devel:libexecinfo$secondaryArchSuffix
+	devel:libuv$secondaryArchSuffix
+	devel:libv8$secondaryArchSuffix
+	devel:libz$secondaryArchSuffix >= 1.2.8
+	"
+BUILD_PREREQUIRES="
+	cmd:find
+	cmd:gcc$secondaryArchSuffix
+	cmd:g++$secondaryArchSuffix
+	cmd:ld$secondaryArchSuffix
+	cmd:make
+	cmd:ninja
+	cmd:python2
+	cmd:which
+	"
+
+BUILD()
+{
+	./configure --with-intl=none --dest-os=haiku --dest-cpu=$ARCH --shared-v8 --shared \
+		--shared-v8-libpath="$(finddir B_SYSTEM_LIB_DIRECTORY)" --shared-zlib \
+		 --shared-cares --shared-libuv --shared-v8-includes="$(finddir B_SYSTEM_HEADERS_DIRECTORY)"/v8 \
+		--without-bundled-v8 --openssl-no-asm --prefix=$prefix
+
+	make $jobArgs
+}
+
+INSTALL()
+{
+	mkdir -p $commandBinDir $prefix $developDir/headers $dataDir $docDir $manDir
+	mkdir -p $prefix/non-packaged/lib/node_modules
+
+	export PREFIX=$(finddir B_SYSTEM_NONPACKAGED_LIB_DIRECTORY)
+	export USER_CONFIG=$(finddir B_USER_SETTINGS_DIRECTORY)
+	export INCLUDEDIR=$developDir/headers
+
+	make install
+
+	# Create the node_modules folder in the non-packaged folder
+	cp -r $prefix/lib/node_modules $prefix/non-packaged/lib
+
+	echo -e "prefix = $PREFIX/node_modules/npm/npmrc" > $prefix/non-packaged/lib/node_modules/npm/npmrc
+	echo -e "userconfig = $USER_CONFIG/.npmrc" >> $prefix/non-packaged/lib/node_modules/npm/npmrc
+	echo -e "user = 1" >> $prefix/non-packaged/lib/node_modules/npm/npmrc
+
+	# Copy node binary and link npm and npmx to use the non-packaged folder
+	cp ./out/Release/node $prefix/bin/node
+	ln -sfn $prefix/non-packaged/lib/node_modules/npm/bin/npm-cli.js  $prefix/bin/npm
+	ln -sfn $prefix/non-packaged/lib/node_modules/npm/bin/npx-cli.js  $prefix/bin/npx
+	ln -sfn $prefix/lib/libnode.so.* $prefix/lib/libnode.so
+
+	# Install the develop directory
+	mv $prefix/include/* $developDir/headers
+	rm -rf $prefix/include
+
+	mv $prefix/share/man $manDir
+	mv $prefix/share/systemtap $dataDir
+	mv $prefix/share/doc $docDir
+
+	rm -rf $prefix/share
+	rm -rf $prefix/lib/node_modules
+
+	prepareInstalledDevelLib libnode
+	fixPkgconfig
+
+	packageEntries devel \
+		$developDir
+}
+
+TEST()
+{
+    make check
+}
