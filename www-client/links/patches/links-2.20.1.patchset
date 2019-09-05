@@ -1,0 +1,139 @@
+From 1c7ffd296033bca5bffd53f7bfb2419f73c7e030 Mon Aug 26 00:00:00 2019
+From: Ken Mays <kmays2000@gmail.com>
+Date: Wed, Sep 4 2019 00:01:59 +0000
+Subject: add Haiku enhancements
+
+diff --git a/links.h.old b/links.h
+index 366bd5c..765f7bb 100644
+--- a/links.h
++++ b/links.h
+@@ -1069,6 +1069,8 @@ int os_default_charset(void);
+ void os_report_error_va(const char *caption, const char *msg, va_list l);
+ void os_report_error(const char *caption, const char *msg, ...);
+ 
++char *os_get_home(void);
++
+ /* memory.c */
+ 
+ #define SH_CHECK_QUOTA		0
+diff --git a/Makefile.am.old b/Makefile.am
+index 9e0bd83..9ccd9bf 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -24,6 +24,17 @@ if JAVASCRIPT
+ links_LDADD=builtin.o context.o ipret.o javascr.o javascript.o md5.o md5hl.o ns.o pomocny.o regexp.o
+ endif
+ 
++if HAIKU_GR
++links_LDADD=haiku.o -lbe -lstdc++
++EXTRA_links_DEPENDENCIES=links-haiku.rsrc
++# automake will not let us touch the binary after link
++# and install will not copy the attributes anyway... so do it after install
++install-exec-hook:
++	xres -o $(DESTDIR)$(bindir)/links$(EXEEXT) links-haiku.rsrc
++	mimeset $(DESTDIR)$(bindir)/links$(EXEEXT)
++else
++endif
++
+ links_SOURCES=af_unix.c auth.c beos.c bfu.c block.c bookmark.c cache.c charsets.c compress.c connect.c cookies.c data.c default.c dip.c directfb.c dither.c dns.c dos.c drivers.c error.c file.c finger.c fn_impl.c fontconf.c font_inc.c framebuf.c freetype.c ftp.c gif.c grx.c hpux.c html.c html_gr.c html_r.c html_tbl.c http.c https.c img.c imgcache.c jpeg.c jsint.c kbd.c language.c listedit.c lru.c mailto.c main.c memory.c menu.c objreq.c os_dep.c pmshell.c png.c sched.c select.c session.c smb.c string.c suffix.c svg.c svgalib.c terminal.c tiff.c types.c url.c view.c view_gr.c vms.c x.c xbm.c beos.h bits.h cfg.h codepage.h com-defs.h config-vms.h dfb_cur.h hpux.h language.h links.h os_dep.h os_depx.h setup.h arrow.inc certs.inc codepage.inc entity.inc fbcommon.inc language.inc links_ic.inc locase.inc suffix.inc suffix_x.inc uni_7b.inc upcase.inc vpipe.inc
+ # builtin.c context.c ipret.c javascr.c javascript.c md5.c md5hl.c ns.c pomocny.c regexp.c md5.h ns.h struct.h tree.h typy.h ipret.h javascript.h builtin.h builtin_keys.h
+ 
+@@ -43,6 +54,12 @@ atheos.o: $(srcdir)/atheos.cpp
+ haiku.o: $(srcdir)/haiku.cpp
+ 	$(CXX) $(DEFS) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(AM_CXXFLAGS) $(CXXFLAGS) -c $(srcdir)/haiku.cpp
+ 
++haiku.o: haiku.cpp
++	$(CXX) $(DEFS) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(AM_CXXFLAGS) $(CXXFLAGS) -o $@ -c $<
++
++links-haiku.rsrc: links-haiku.rdef
++	rc -o $@ $<
++
+ datadir = $(prefix)/@DATADIRNAME@
+ LIBS = @LIBS@
+ 
+diff --git a/os_dep.c.old b/os_dep.c
+index dc059b5..8395afa 100644
+--- a/os_dep.c
++++ b/os_dep.c
+@@ -29,6 +29,10 @@
+ #include <pthread.h>
+ #endif
+ 
++#ifdef HAIKU
++#include <FindDirectory.h>
++#endif
++
+ #ifdef OS2
+ 
+ #define INCL_MOU
+@@ -1118,6 +1122,12 @@ void init_os_terminal(void)
+ 		fatal_exit("Links doesn't work in detached session");
+ 	}
+ #endif
++#ifdef HAIKU
++	if (getenv("TERM") == NULL) {
++		/* probably launched from Tracker or Deskbar, force graphics mode */
++		force_g = 1;
++	}
++#endif
+ }
+ 
+ #ifdef INTERIX
+@@ -2104,7 +2114,7 @@ void unblock_stdin(void) {}
+ 
+ #if defined(BEOS)
+ 
+-#include <be/kernel/OS.h>
++#include <kernel/OS.h>
+ 
+ static int thr_sem_init = 0;
+ static sem_id thr_sem;
+@@ -2905,6 +2915,13 @@ int get_system_env(void)
+ 	return 0;
+ }
+ 
++#elif defined(HAIKU)
++
++int get_system_env(void)
++{
++	return ENV_BE;
++}
++
+ #elif defined(WIN)
+ 
+ int get_system_env(void)
+@@ -3034,6 +3051,14 @@ static int open_in_new_be(struct terminal *term, unsigned char *exe, unsigned ch
+ }
+ #endif
+ 
++#ifdef HAIKU
++static int open_in_new_haiku(struct terminal *term, unsigned char *exe, unsigned char *param)
++{
++	exec_new_links(term, cast_uchar "Terminal", exe, param);
++	return 0;
++}
++#endif
++
+ #ifdef G
+ static int open_in_new_g(struct terminal *term, unsigned char *exe, unsigned char *param)
+ {
+@@ -3082,6 +3107,9 @@ static const struct {
+ #if defined(BEOS) || defined(HAIKU)
+ 	{ENV_BE, open_in_new_be, TEXT_(T_BEOS_TERMINAL), TEXT_(T_HK_BEOS_TERMINAL)},
+ #endif
++#ifdef HAIKU
++	{ENV_BE, open_in_new_haiku, TEXT_(T_BEOS_TERMINAL), TEXT_(T_HK_BEOS_TERMINAL)},
++#endif
+ #ifdef G
+ 	{ENV_G, open_in_new_g, TEXT_(T_WINDOW), TEXT_(T_HK_WINDOW)},
+ #endif
+@@ -3129,6 +3157,9 @@ int can_open_os_shell(int environment)
+ #ifdef BEOS
+ 	if (!(environment & ENV_BE)) return 0;
+ #endif
++#ifdef HAIKU
++	if (!(environment & ENV_BE)) return 0;
++#endif
+ #ifdef G
+ 	if (F && drv->flags & GD_NO_OS_SHELL) return 0;
+ #endif
