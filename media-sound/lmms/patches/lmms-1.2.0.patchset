@@ -1,0 +1,181 @@
+From 8478979d9e9d215a5c05af3e7f4b255270bc5bd8 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 14 Apr 2019 19:41:47 +1000
+Subject: Disable TLS for Haiku
+
+
+diff --git a/src/3rdparty/rpmalloc/CMakeLists.txt b/src/3rdparty/rpmalloc/CMakeLists.txt
+index 23d1551..c0af99d 100644
+--- a/src/3rdparty/rpmalloc/CMakeLists.txt
++++ b/src/3rdparty/rpmalloc/CMakeLists.txt
+@@ -15,6 +15,12 @@ if (NOT LMMS_BUILD_WIN32)
+ 	)
+ endif()
+ 
++if (HAIKU)
++	target_compile_definitions(rpmalloc
++		PRIVATE -DENABLE_PRELOAD=1
++	)
++endif()
++
+ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+ 	# rpmalloc uses GCC builtin "__builtin_umull_overflow" with ENABLE_VALIDATE_ARGS,
+ 	# which is only available starting with GCC 5
+-- 
+2.21.0
+
+
+From f4ba6407553e7eabc6c51cb3b03661d3d9701233 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 14 Apr 2019 21:46:08 +1000
+Subject: Fix settings dir
+
+
+diff --git a/src/core/ConfigManager.cpp b/src/core/ConfigManager.cpp
+index 2ed0f83..050347f 100644
+--- a/src/core/ConfigManager.cpp
++++ b/src/core/ConfigManager.cpp
+@@ -33,6 +33,10 @@
+ #endif
+ #include <QtCore/QTextStream>
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#endif
++
+ #include "ConfigManager.h"
+ #include "MainWindow.h"
+ #include "ProjectVersion.h"
+@@ -73,7 +77,13 @@ ConfigManager::ConfigManager() :
+ 
+ 	if (! qgetenv("LMMS_DATA_DIR").isEmpty())
+ 		QDir::addSearchPath("data", QString::fromLocal8Bit(qgetenv("LMMS_DATA_DIR")));
+-
++#ifdef __HAIKU__
++	m_workingDir = QDir::home().absolutePath() +"/config/settings/LMMS/";
++	m_lmmsRcFile = m_workingDir +"/lmmsrc.xml";
++	m_gigDir = m_workingDir + GIG_PATH;
++	m_vstDir = "/system/add-ons/media/vstplugins/";
++	m_sf2Dir = "/system/data/synth/";
++#endif
+ 	// If we're in development (lmms is not installed) let's get the source and
+ 	// binary directories by reading the CMake Cache
+ 	QDir appPath = qApp->applicationDirPath();
+@@ -114,6 +124,8 @@ ConfigManager::ConfigManager() :
+ 
+ #ifdef LMMS_BUILD_WIN32
+ 	QDir::addSearchPath("data", qApp->applicationDirPath() + "/data/");
++#elif __HAIKU__
++	QDir::addSearchPath("data", qApp->applicationDirPath() + "/");
+ #else
+ 	QDir::addSearchPath("data", qApp->applicationDirPath().section('/', 0, -2) + "/share/lmms/");
+ #endif
+@@ -524,6 +536,23 @@ void ConfigManager::loadConfigFile( const QString & configFile )
+ 		cfg_file.close();
+ 	}
+ 
++#ifdef __HAIKU__
++	char midiSettings[PATH_MAX] = "";
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, false, midiSettings, sizeof(midiSettings)) == B_OK) {
++		strcat(midiSettings, "/Media/midi_settings");
++		if( access( midiSettings, F_OK ) != -1 ) {
++			FILE *inFile = fopen(midiSettings, "rt");
++			if (inFile) {
++				char sf2file[PATH_MAX];
++				if (fscanf(inFile, "# Midi\n\tsoundfont \"%[^\"]\"", sf2file)) {
++					setDefaultSoundfont( sf2file );
++				}
++				fclose(inFile);
++			}
++		}
++	}
++#endif
++
+ 	// Plugins are searched recursively, blacklist problematic locations
+ 	if( m_vstDir.isEmpty() || m_vstDir == QDir::separator() || m_vstDir == "/" ||
+ 			m_vstDir == ensureTrailingSlash( QDir::homePath() ) ||
+@@ -580,9 +609,6 @@ void ConfigManager::loadConfigFile( const QString & configFile )
+ 	}
+ }
+ 
+-
+-
+-
+ void ConfigManager::saveConfigFile()
+ {
+ 	setValue( "paths", "artwork", m_artworkDir );
+-- 
+2.21.0
+
+
+From 30054219222256dd02b59c639b9822580cb58bd2 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 28 Sep 2019 10:50:26 +0200
+Subject: rpmalloc: disable TLS for Haiku.
+
+
+diff --git a/src/3rdparty/rpmalloc/rpmalloc/rpmalloc/rpmalloc.c b/src/3rdparty/rpmalloc/rpmalloc/rpmalloc/rpmalloc.c
+index a5cf999..16c28b1 100644
+--- a/src/3rdparty/rpmalloc/rpmalloc/rpmalloc/rpmalloc.c
++++ b/src/3rdparty/rpmalloc/rpmalloc/rpmalloc/rpmalloc.c
+@@ -100,7 +100,7 @@
+ #  endif
+ #else
+ #  include <unistd.h>
+-#  if defined(__APPLE__) && ENABLE_PRELOAD
++#  if (defined(__APPLE__) || defined(__HAIKU__)) && ENABLE_PRELOAD
+ #    include <pthread.h>
+ #  endif
+ #  define ALIGNED_STRUCT(name, alignment) struct __attribute__((__aligned__(alignment))) name
+@@ -459,10 +459,10 @@ static atomic32_t _unmapped_total;
+ #define MEMORY_UNUSED(x) (void)sizeof((x))
+ 
+ //! Current thread heap
+-#if defined(__APPLE__) && ENABLE_PRELOAD
++#if (defined(__APPLE__) || defined(__HAIKU__)) && ENABLE_PRELOAD
+ static pthread_key_t _memory_thread_heap;
+ #else
+-#  ifdef _MSC_VER
++#  if defined(_MSC_VER)
+ #    define _Thread_local __declspec(thread)
+ #    define TLS_MODEL
+ #  else
+@@ -477,7 +477,7 @@ static _Thread_local heap_t* _memory_thread_heap TLS_MODEL;
+ //! Get the current thread heap
+ static FORCEINLINE heap_t*
+ get_thread_heap(void) {
+-#if defined(__APPLE__) && ENABLE_PRELOAD
++#if (defined(__APPLE__) || defined(__HAIKU__)) && ENABLE_PRELOAD
+ 	return pthread_getspecific(_memory_thread_heap);
+ #else
+ 	return _memory_thread_heap;
+@@ -487,7 +487,7 @@ get_thread_heap(void) {
+ //! Set the current thread heap
+ static void
+ set_thread_heap(heap_t* heap) {
+-#if defined(__APPLE__) && ENABLE_PRELOAD
++#if (defined(__APPLE__) || defined(__HAIKU__)) && ENABLE_PRELOAD
+ 	pthread_setspecific(_memory_thread_heap, heap);
+ #else
+ 	_memory_thread_heap = heap;
+@@ -1593,7 +1593,7 @@ rpmalloc_initialize_config(const rpmalloc_config_t* config) {
+ 	if (_memory_config.span_map_count > 128)
+ 		_memory_config.span_map_count = 128;
+ 
+-#if defined(__APPLE__) && ENABLE_PRELOAD
++#if (defined(__APPLE__) || defined(__HAIKU__)) && ENABLE_PRELOAD
+ 	if (pthread_key_create(&_memory_thread_heap, 0))
+ 		return -1;
+ #endif
+@@ -1698,7 +1698,7 @@ rpmalloc_finalize(void) {
+ 	assert(!atomic_load32(&_reserved_spans));
+ #endif
+ 
+-#if defined(__APPLE__) && ENABLE_PRELOAD
++#if (defined(__APPLE__) || defined(__HAIKU__)) && ENABLE_PRELOAD
+ 	pthread_key_delete(_memory_thread_heap);
+ #endif
+ }
+-- 
+2.21.0
+
