@@ -1,0 +1,276 @@
+From b992d9a20622f8ad9f738f1aad2ed06db9bc59a3 Mon Sep 17 00:00:00 2001
+From: Ken Mays <kmays2000@gmail.com>
+Date: Mon, 30 Sep 2019 18:41:24 +0100
+Subject: Add Haiku support
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Based on original Haiku patches by François Revol, updated for links 2.20
+
+diff --git a/Makefile.am b/Makefile.am
+index 9e0bd83..9ccd9bf 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -24,6 +24,17 @@ if JAVASCRIPT
+ links_LDADD=builtin.o context.o ipret.o javascr.o javascript.o md5.o md5hl.o ns.o pomocny.o regexp.o
+ endif
+ 
++if HAIKU_GR
++links_LDADD=haiku.o -lbe -lstdc++
++EXTRA_links_DEPENDENCIES=links-haiku.rsrc
++# automake will not let us touch the binary after link
++# and install will not copy the attributes anyway... so do it after install
++install-exec-hook:
++	xres -o $(DESTDIR)$(bindir)/links$(EXEEXT) links-haiku.rsrc
++	mimeset $(DESTDIR)$(bindir)/links$(EXEEXT)
++else
++endif
++
+ links_SOURCES=af_unix.c auth.c beos.c bfu.c block.c bookmark.c cache.c charsets.c compress.c connect.c cookies.c data.c default.c dip.c directfb.c dither.c dns.c dos.c drivers.c error.c file.c finger.c fn_impl.c fontconf.c font_inc.c framebuf.c freetype.c ftp.c gif.c grx.c hpux.c html.c html_gr.c html_r.c html_tbl.c http.c https.c img.c imgcache.c jpeg.c jsint.c kbd.c language.c listedit.c lru.c mailto.c main.c memory.c menu.c objreq.c os_dep.c pmshell.c png.c sched.c select.c session.c smb.c string.c suffix.c svg.c svgalib.c terminal.c tiff.c types.c url.c view.c view_gr.c vms.c x.c xbm.c beos.h bits.h cfg.h codepage.h com-defs.h config-vms.h dfb_cur.h hpux.h language.h links.h os_dep.h os_depx.h setup.h arrow.inc certs.inc codepage.inc entity.inc fbcommon.inc language.inc links_ic.inc locase.inc suffix.inc suffix_x.inc uni_7b.inc upcase.inc vpipe.inc
+ # builtin.c context.c ipret.c javascr.c javascript.c md5.c md5hl.c ns.c pomocny.c regexp.c md5.h ns.h struct.h tree.h typy.h ipret.h javascript.h builtin.h builtin_keys.h
+ 
+@@ -43,6 +54,12 @@ atheos.o: $(srcdir)/atheos.cpp
+ haiku.o: $(srcdir)/haiku.cpp
+ 	$(CXX) $(DEFS) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(AM_CXXFLAGS) $(CXXFLAGS) -c $(srcdir)/haiku.cpp
+ 
++haiku.o: haiku.cpp
++	$(CXX) $(DEFS) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(AM_CXXFLAGS) $(CXXFLAGS) -o $@ -c $<
++
++links-haiku.rsrc: links-haiku.rdef
++	rc -o $@ $<
++
+ datadir = $(prefix)/@DATADIRNAME@
+ LIBS = @LIBS@
+ 
+diff --git a/configure.in b/configure.in
+index 3475e7f..fca70dd 100644
+--- a/configure.in
++++ b/configure.in
+@@ -18,7 +18,7 @@ export CFLAGS
+ export LDFLAGS
+ export LIBS
+ 
+-AM_CONFIG_HEADER(config.h)
++AC_CONFIG_HEADER(config.h)
+ 
+ dnl Checks for programs.
+ AC_PROG_CC
+@@ -790,6 +790,7 @@ if test "$ac_cv_have_beginthread" = yes; then
+ 	AC_DEFINE(HAVE_BEGINTHREAD)
+ fi
+ AC_CHECK_HEADERS(atheos/threads.h)
++AC_CHECK_HEADERS(kernel/OS.h)
+ AC_HAVE_FUNCS(spawn_thread resume_thread)
+ 
+ AC_HAVE_FUNCS(MouOpen _read_kbd)
+@@ -1294,6 +1295,31 @@ if test "$disable_haiku" != yes ; then
+ 	fi
+ fi
+ 
++if test "$disable_haiku" != yes ; then
++	old_ext="$ac_ext"
++	ac_ext=cpp
++	AC_CHECK_HEADERS(interface/View.h)
++	AC_CHECK_HEADERS(interface/Window.h)
++	AC_CHECK_HEADERS(interface/Screen.h)
++	AC_CHECK_HEADERS(interface/Bitmap.h)
++	AC_CHECK_HEADERS(support/Locker.h)
++	AC_CHECK_HEADERS(app/Application.h)
++	ac_ext="$old_ext"
++
++	if test "$ac_cv_header_kernel_OS_h" = yes &&
++	   test "$ac_cv_header_interface_View_h" = yes &&
++	   test "$ac_cv_header_interface_Window_h" = yes &&
++	   test "$ac_cv_header_interface_Screen_h" = yes &&
++	   test "$ac_cv_header_interface_Bitmap_h" = yes &&
++	   test "$ac_cv_header_support_Locker_h" = yes &&
++	   test "$ac_cv_header_app_Application_h" = yes; then
++		AC_PROG_CXX
++		AC_DEFINE(GRDRV_HAIKU)
++		drivers="$drivers HAIKU"
++		cf_have_haiku=yes
++	fi
++fi
++
+ if test "$disable_grx" != yes -a "$ac_cv_have_djgpp" = yes; then
+ 	LIBS_X="$LIBS"
+ 	AC_CHECK_HEADERS(grx20.h)
+diff --git a/default.c b/default.c
+index a4e8973..e28042e 100644
+--- a/default.c
++++ b/default.c
+@@ -761,7 +761,11 @@ skip_path_conv:;
+ 		home = NULL;
+ 	}
+ #endif
++#ifdef HAIKU
++	if (!home) home = os_get_home();
++#else
+ 	if (!home) home = stracpy(cast_uchar getenv("HOME"));
++#endif
+ #ifdef WIN
+ /* When we run in Cygwin without Cygwin environment, it reports home "/".
+    Unfortunatelly, it can't write anything to that directory */
+diff --git a/links.h b/links.h
+index a344a36..8d6c761 100644
+--- a/links.h
++++ b/links.h
+@@ -1077,6 +1077,8 @@ int os_default_charset(void);
+ void os_report_error_va(const char *caption, const char *msg, va_list l);
+ void os_report_error(const char *caption, const char *msg, ...);
+ 
++char *os_get_home(void);
++
+ /* memory.c */
+ 
+ #define SH_CHECK_QUOTA		0
+diff --git a/os_dep.c b/os_dep.c
+index 854c823..8eaec33 100644
+--- a/os_dep.c
++++ b/os_dep.c
+@@ -31,6 +31,10 @@
+ #include <pthread.h>
+ #endif
+ 
++#ifdef HAIKU
++#include <FindDirectory.h>
++#endif
++
+ #ifdef OS2
+ 
+ #define INCL_MOU
+@@ -1120,6 +1124,12 @@ void init_os_terminal(void)
+ 		fatal_exit("Links doesn't work in detached session");
+ 	}
+ #endif
++#ifdef HAIKU
++	if (getenv("TERM") == NULL) {
++		/* probably launched from Tracker or Deskbar, force graphics mode */
++		force_g = 1;
++	}
++#endif
+ }
+ 
+ #ifdef INTERIX
+@@ -2097,6 +2107,20 @@ void terminate_osdep(void)
+ 
+ #endif
+ 
++char *os_get_home(void)
++{
++#ifdef HAIKU
++	char *result = cast_uchar mem_alloc(B_FILE_NAME_LENGTH);
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, 1, result, B_FILE_NAME_LENGTH) != B_OK) {
++		mem_free(result);
++		return NULL;
++	}
++	return result;
++#else
++	return NULL;
++#endif
++}
++
+ #ifndef BEOS
+ 
+ void block_stdin(void) {}
+@@ -2106,7 +2130,7 @@ void unblock_stdin(void) {}
+ 
+ #if defined(BEOS)
+ 
+-#include <be/kernel/OS.h>
++#include <kernel/OS.h>
+ 
+ static int thr_sem_init = 0;
+ static sem_id thr_sem;
+@@ -2907,6 +2931,13 @@ int get_system_env(void)
+ 	return 0;
+ }
+ 
++#elif defined(HAIKU)
++
++int get_system_env(void)
++{
++	return ENV_BE;
++}
++
+ #elif defined(WIN)
+ 
+ int get_system_env(void)
+@@ -3036,6 +3067,14 @@ static int open_in_new_be(struct terminal *term, unsigned char *exe, unsigned ch
+ }
+ #endif
+ 
++#ifdef HAIKU
++static int open_in_new_haiku(struct terminal *term, unsigned char *exe, unsigned char *param)
++{
++	exec_new_links(term, cast_uchar "Terminal", exe, param);
++	return 0;
++}
++#endif
++
+ #ifdef G
+ static int open_in_new_g(struct terminal *term, unsigned char *exe, unsigned char *param)
+ {
+@@ -3084,6 +3123,9 @@ static const struct {
+ #if defined(BEOS) || defined(HAIKU)
+ 	{ENV_BE, open_in_new_be, TEXT_(T_BEOS_TERMINAL), TEXT_(T_HK_BEOS_TERMINAL)},
+ #endif
++#ifdef HAIKU
++	{ENV_BE, open_in_new_haiku, TEXT_(T_BEOS_TERMINAL), TEXT_(T_HK_BEOS_TERMINAL)},
++#endif
+ #ifdef G
+ 	{ENV_G, open_in_new_g, TEXT_(T_WINDOW), TEXT_(T_HK_WINDOW)},
+ #endif
+@@ -3131,6 +3173,9 @@ int can_open_os_shell(int environment)
+ #ifdef BEOS
+ 	if (!(environment & ENV_BE)) return 0;
+ #endif
++#ifdef HAIKU
++	if (!(environment & ENV_BE)) return 0;
++#endif
+ #ifdef G
+ 	if (F && drv->flags & GD_NO_OS_SHELL) return 0;
+ #endif
+diff --git a/os_depx.h b/os_depx.h
+index c8f9db2..a31448c 100644
+--- a/os_depx.h
++++ b/os_depx.h
+@@ -152,6 +152,10 @@ int bounced_write(int fd, const void *buf, size_t size);
+ #endif
+ #endif
+ 
++#ifdef HAIKU
++/* nothing so far */
++#endif
++
+ #ifdef OPENVMS
+ #if defined(__INITIAL_POINTER_SIZE)
+ #if __INITIAL_POINTER_SIZE == 64
+@@ -368,7 +372,7 @@ typedef const char *const_char_ptr;
+ #if !defined(EXEC_IN_THREADS) || !defined(HAVE_GETHOSTBYNAME) || defined(USE_GETADDRINFO)
+ #define THREAD_SAFE_LOOKUP
+ #endif
+-
++/*
+ #if defined(DOS)
+ #define loop_select(a, b, c, d, e) dos_select(a, b, c, d, e, 1)
+ #elif defined(GRDRV_SVGALIB)
+@@ -376,8 +380,11 @@ typedef const char *const_char_ptr;
+ int vga_select(int n, fd_set *r, fd_set *w, fd_set *e, struct timeval *t);
+ #elif defined(GRDRV_ATHEOS)
+ #define loop_select ath_select
+-int ath_select(int n, fd_set *r, fd_set *w, fd_set *e, struct timeval *t);
+-#else
++int ath_select(int n, fd_set *r, fd_set *w, fd_set *e, struct timeval *t); 
++#elif defined(GRDRV_HAIKU)
++#define loop_select be_loop_select
++int be_loop_select(int n, fd_set *r, fd_set *w, fd_set *e, struct timeval *t);
++#else */
+ #define loop_select select
+-#endif
++/* #endif */
+ 
+-- 
+2.23.0
+
