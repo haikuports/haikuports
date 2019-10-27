@@ -1,0 +1,363 @@
+From 8dd8b22cb2a887d4ca90d3a3cfb8d6fcb35a30ad Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 27 Oct 2019 20:49:35 +1000
+Subject: Add Haiku support
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b18a3e2..fa06267 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -174,6 +174,12 @@ elseif (SWITCH_BUILD)
+         ${PROJECT_SOURCE_DIR}/src/platform/switch/switch_touch.c
+         ${PROJECT_SOURCE_DIR}/src/platform/switch/switch_keyboard.c
+     )
++elseif (HAIKU_BUILD)
++    set(PLATFORM_FILES
++        ${PLATFORM_FILES}
++        ${PROJECT_SOURCE_DIR}/src/platform/haiku/cursor.c
++        ${PROJECT_SOURCE_DIR}/src/platform/haiku/screen.c
++    )
+ else()
+     set(PLATFORM_FILES
+         ${PLATFORM_FILES}
+diff --git a/src/game/settings.c b/src/game/settings.c
+index 3bcaebb..1016cad 100644
+--- a/src/game/settings.c
++++ b/src/game/settings.c
+@@ -39,7 +39,7 @@ static struct {
+ 
+ static void load_default_settings(void)
+ {
+-    data.fullscreen = 1;
++    data.fullscreen = 0;
+     data.window_width = 800;
+     data.window_height = 600;
+ 
+@@ -68,7 +68,7 @@ static void load_default_settings(void)
+ static void load_settings(buffer *buf)
+ {
+     buffer_skip(buf, 4);
+-    data.fullscreen = buffer_read_i32(buf);
++    data.fullscreen = 0;
+     buffer_skip(buf, 3);
+     data.sound_effects.enabled = buffer_read_u8(buf);
+     data.sound_music.enabled = buffer_read_u8(buf);
+@@ -118,7 +118,7 @@ void settings_load(void)
+     buffer_init(&buf, data.inf_file, size);
+     load_settings(&buf);
+ 
+-    if (data.window_width + data.window_height < 500) {
++    if (data.window_width < 800 || data.window_height < 600) {
+         // most likely migration from Caesar 3
+         data.window_width = 800;
+         data.window_height = 600;
+diff --git a/src/platform/haiku/cursor.c b/src/platform/haiku/cursor.c
+new file mode 100644
+index 0000000..befff8f
+--- /dev/null
++++ b/src/platform/haiku/cursor.c
+@@ -0,0 +1,56 @@
++#include "graphics/color.h"
++#include "game/system.h"
++#include "input/cursor.h"
++
++#include "SDL.h"
++
++static SDL_Texture *cursors[CURSOR_MAX];
++SDL_Texture *current_cursor;
++
++extern struct {
++    SDL_Window *window;
++    SDL_Renderer *renderer;
++    SDL_Texture *texture;
++} SDL;
++
++static SDL_Texture *init_cursor(const cursor *c)
++{
++
++    SDL_Texture *tex = SDL_CreateTexture(SDL.renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 32, 32);
++
++    uint32_t pixels[32 * 32];
++
++    for (int i = 0; i < 32; i++) {
++        for (int j = 0; j < 32; j++) {
++            switch (c->data[i * 32 + j]) {
++                case 'X':
++                    pixels[i * 32 + j] =  0xFF000000; //black
++                    break;
++                case '.':
++                    pixels[i * 32 + j] = 0xFFFFFFFF; //white
++                    break;
++                case ' ':
++                    pixels[i * 32 + j] = 0x00000000; //transparent
++                    break; // Transparent is 0x00000000 which is the default value of the buffer
++            }
++        }
++    }
++
++    SDL_UpdateTexture(tex, NULL, pixels, 32 * 4);
++    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
++
++    return tex;
++}
++
++void system_init_cursors(void)
++{
++    for (int i = 0; i < CURSOR_MAX; i++) {
++        cursors[i] = init_cursor(input_cursor_data(i));
++    }
++    system_set_cursor(CURSOR_ARROW);
++}
++
++void system_set_cursor(int cursor_id)
++{
++    current_cursor = cursors[cursor_id];
++}
+diff --git a/src/platform/haiku/screen.c b/src/platform/haiku/screen.c
+new file mode 100644
+index 0000000..80fd5de
+--- /dev/null
++++ b/src/platform/haiku/screen.c
+@@ -0,0 +1,180 @@
++#include "platform/screen.h"
++
++#include "SDL.h"
++
++#include "game/settings.h"
++#include "graphics/graphics.h"
++#include "graphics/screen.h"
++
++extern SDL_Texture *current_cursor;
++#include "input/mouse.h"
++
++struct {
++    SDL_Window *window;
++    SDL_Renderer *renderer;
++    SDL_Texture *texture;
++} SDL = {0, 0, 0};
++
++static struct {
++    int x;
++    int y;
++    int centered;
++} window_pos = { 0, 0, 1 };
++
++static struct {
++    const int WIDTH;
++    const int HEIGHT;
++} MINIMUM = { 640, 480 };
++
++int platform_screen_create(const char *title)
++{
++    int width, height;
++    int fullscreen = setting_fullscreen();
++    if (fullscreen) {
++        SDL_DisplayMode mode;
++        SDL_GetDesktopDisplayMode(0, &mode);
++        width = mode.w;
++        height = mode.h;
++    } else {
++        setting_window(&width, &height);
++    }
++
++    platform_screen_destroy();
++
++    SDL_Log("Creating screen %d x %d, fullscreen? %d\n", width, height, fullscreen);
++    Uint32 flags = SDL_WINDOW_RESIZABLE;
++    if (fullscreen) {
++        flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
++    }
++    SDL.window = SDL_CreateWindow(title,
++        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
++        width, height, flags);
++
++    if (!SDL.window) {
++        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Unable to create window: %s", SDL_GetError());
++        return 0;
++    }
++
++    SDL.renderer = SDL_CreateRenderer(SDL.window, -1, SDL_RENDERER_PRESENTVSYNC);
++    if (!SDL.renderer) {
++        SDL_Log("Unable to create renderer, trying software renderer: %s", SDL_GetError());
++        SDL.renderer = SDL_CreateRenderer(SDL.window, -1, SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_SOFTWARE);
++        if (!SDL.renderer) {
++            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Unable to create renderer: %s", SDL_GetError());
++            return 0;
++        }
++    }
++    if (fullscreen && SDL_GetNumVideoDisplays() > 1) {
++        SDL_SetWindowGrab(SDL.window, SDL_TRUE);
++    }
++
++	SDL_ShowCursor(SDL_DISABLE);
++	
++    SDL_SetWindowMinimumSize(SDL.window, MINIMUM.WIDTH, MINIMUM.HEIGHT);
++    return platform_screen_resize(width, height);
++}
++
++void platform_screen_destroy(void)
++{
++    if (SDL.texture) {
++        SDL_DestroyTexture(SDL.texture);
++        SDL.texture = 0;
++    }
++    if (SDL.renderer) {
++        SDL_DestroyRenderer(SDL.renderer);
++        SDL.renderer = 0;
++    }
++    if (SDL.window) {
++        SDL_DestroyWindow(SDL.window);
++        SDL.window = 0;
++    }
++}
++
++int platform_screen_resize(int width, int height)
++{
++    if (SDL.texture) {
++        SDL_DestroyTexture(SDL.texture);
++        SDL.texture = 0;
++    }
++
++    setting_set_display(setting_fullscreen(), width, height);
++    SDL.texture = SDL_CreateTexture(SDL.renderer,
++        SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
++        width, height);
++    if (SDL.texture) {
++        SDL_Log("Texture created (%d x %d)", width, height);
++        screen_set_resolution(width, height);
++        return 1;
++    } else {
++        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Unable to create texture: %s", SDL_GetError());
++        return 0;
++    }
++}
++
++void platform_screen_move(int x, int y)
++{
++    if (!setting_fullscreen()) {
++        window_pos.x = x;
++        window_pos.y = y;
++        window_pos.centered = 0;
++    }
++}
++
++void platform_screen_set_fullscreen(void)
++{
++    SDL_GetWindowPosition(SDL.window, &window_pos.x, &window_pos.y);
++    int orig_w, orig_h;
++    SDL_GetWindowSize(SDL.window, &orig_w, &orig_h);
++    SDL_DisplayMode mode;
++    SDL_GetDesktopDisplayMode(SDL_GetWindowDisplayIndex(SDL.window), &mode);
++    SDL_Log("User to fullscreen %d x %d\n", mode.w, mode.h);
++    if (0 != SDL_SetWindowFullscreen(SDL.window, SDL_WINDOW_FULLSCREEN_DESKTOP)) {
++        SDL_Log("Unable to enter fullscreen: %s\n", SDL_GetError());
++        return;
++    }
++    SDL_SetWindowDisplayMode(SDL.window, &mode);
++    setting_set_display(1, mode.w, mode.h);
++}
++
++void platform_screen_set_windowed(void)
++{
++    int width, height;
++    setting_window(&width, &height);
++    SDL_Log("User to windowed %d x %d\n", width, height);
++    SDL_SetWindowFullscreen(SDL.window, 0);
++    SDL_SetWindowSize(SDL.window, width, height);
++    SDL_SetWindowPosition(SDL.window, window_pos.x, window_pos.y);
++    setting_set_display(0, width, height);
++}
++
++void platform_screen_set_window_size(int width, int height)
++{
++    if (setting_fullscreen()) {
++        SDL_SetWindowFullscreen(SDL.window, 0);
++    }
++    SDL_SetWindowSize(SDL.window, width, height);
++    SDL_SetWindowPosition(SDL.window, window_pos.x, window_pos.y);
++    SDL_Log("User resize to %d x %d\n", width, height);
++    setting_set_display(0, width, height);
++}
++
++void platform_screen_center_window(void)
++{
++    SDL_SetWindowPosition(SDL.window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
++}
++
++void platform_screen_render(void)
++{
++    SDL_UpdateTexture(SDL.texture, NULL, graphics_canvas(), screen_width() * 4);
++    SDL_RenderCopy(SDL.renderer, SDL.texture, NULL, NULL);
++
++    const mouse *mouse = mouse_get();
++    SDL_Rect dst;
++    dst.x = mouse->x;
++    dst.y = mouse->y;
++    dst.w = 32;
++    dst.h = 32;
++    SDL_RenderCopy(SDL.renderer, current_cursor, NULL, &dst);
++
++    SDL_RenderPresent(SDL.renderer);
++}
+diff --git a/src/platform/julius.c b/src/platform/julius.c
+index 99d8a66..64ae8a0 100644
+--- a/src/platform/julius.c
++++ b/src/platform/julius.c
+@@ -35,7 +35,7 @@
+ #include <string.h>
+ #endif
+ 
+-#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__) && !defined(__vita__) && !defined(__SWITCH__)
++#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__) && !defined(__vita__) && !defined(__SWITCH__) && !defined(__HAIKU__)
+ #include <execinfo.h>
+ #endif
+ 
+diff --git a/test/sav/run.c b/test/sav/run.c
+index 1093269..84d7977 100644
+--- a/test/sav/run.c
++++ b/test/sav/run.c
+@@ -3,7 +3,7 @@
+ #include "game/game.h"
+ #include "game/settings.h"
+ 
+-#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__)
++#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__) && !defined(__HAIKU__)
+ #include <execinfo.h>
+ #endif
+ 
+@@ -22,7 +22,7 @@
+ 
+ static void handler(int sig)
+ {
+-#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__)
++#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__) && !defined(__HAIKU__)
+     void *array[100];
+     size_t size;
+ 
+-- 
+2.23.0
+
+
+From 57c9d2ff4da9463fb563b9b8cad101c66844a7c6 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 27 Oct 2019 20:58:50 +1000
+Subject: Disable backtrace for Haiku
+
+
+diff --git a/src/platform/julius.c b/src/platform/julius.c
+index 64ae8a0..963b9a4 100644
+--- a/src/platform/julius.c
++++ b/src/platform/julius.c
+@@ -69,7 +69,7 @@ enum {
+ };
+ 
+ static void handler(int sig) {
+-#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__) && !defined(__vita__) && !defined(__SWITCH__)
++#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__) && !defined(__vita__) && !defined(__SWITCH__) && !defined(__HAIKU__)
+     void *array[100];
+     size_t size;
+ 
+-- 
+2.23.0
+
