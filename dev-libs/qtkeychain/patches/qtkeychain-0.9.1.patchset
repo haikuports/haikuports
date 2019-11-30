@@ -1,0 +1,287 @@
+From a0fa0df39e775dcdae816ac9c5e1d36f6077ac35 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Sat, 17 Nov 2018 18:38:47 +0100
+Subject: [PATCH 1/2] Add Haiku support
+
+---
+ CMakeLists.txt     |  17 ++++--
+ keychain_haiku.cpp | 129 +++++++++++++++++++++++++++++++++++++++++++++
+ keychain_p.h       |  10 ++--
+ 3 files changed, 148 insertions(+), 8 deletions(-)
+ create mode 100644 keychain_haiku.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4449bc2..2e7dccf 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -26,6 +26,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL Android)
+     set(ANDROID 1)
+ endif()
+ 
++if(CMAKE_SYSTEM_NAME STREQUAL Haiku)
++    set(HAIKU 1)
++endif()
++
+ if (WIN32)
+     option(USE_CREDENTIAL_STORE "Build with windows CredentialStore support" ON)
+ 
+@@ -42,7 +46,7 @@ endif()
+ if (Qt5Core_FOUND AND NOT BUILD_WITH_QT4)
+   set(QTKEYCHAIN_VERSION_INFIX 5)
+ 
+-  if(UNIX AND NOT APPLE AND NOT ANDROID)
++  if(UNIX AND NOT APPLE AND NOT ANDROID AND NOT HAIKU)
+     find_package(Qt5DBus REQUIRED)
+     include_directories(${Qt5DBus_INCLUDE_DIRS})
+     set(QTDBUS_LIBRARIES ${Qt5DBus_LIBRARIES})
+@@ -147,7 +151,14 @@ if(APPLE)
+     list(APPEND qtkeychain_LIBRARIES ${SECURITY_LIBRARY})
+ endif()
+ 
+-if(UNIX AND NOT APPLE AND NOT ANDROID)
++if(HAIKU)
++    list(APPEND qtkeychain_SOURCES keychain_haiku.cpp)
++
++    find_library(BE_LIBRARY be REQUIRED)
++    list(APPEND qtkeychain_LIBRARIES ${BE_LIBRARY})
++endif()
++
++if(UNIX AND NOT APPLE AND NOT ANDROID AND NOT HAIKU)
+     option(LIBSECRET_SUPPORT "Build with libsecret support" ON)
+ 
+     if(LIBSECRET_SUPPORT)
+@@ -248,7 +259,7 @@ ecm_setup_version("${QTKEYCHAIN_VERSION}" VARIABLE_PREFIX SNORE
+   PACKAGE_VERSION_FILE "${CMAKE_CURRENT_BINARY_DIR}/Qt${QTKEYCHAIN_VERSION_INFIX}KeychainConfigVersion.cmake"
+   SOVERSION ${QTKEYCHAIN_VERSION})
+ 
+-if(UNIX AND NOT APPLE AND NOT ANDROID)
++if(UNIX AND NOT APPLE AND NOT ANDROID AND NOT HAIKU)
+     set(PRI_EXTRA_DEPS "dbus")
+ endif()
+ ecm_generate_pri_file(BASE_NAME Qt${QTKEYCHAIN_VERSION_INFIX}Keychain
+diff --git a/keychain_haiku.cpp b/keychain_haiku.cpp
+new file mode 100644
+index 0000000..f54d2c8
+--- /dev/null
++++ b/keychain_haiku.cpp
+@@ -0,0 +1,129 @@
++/******************************************************************************
++ *   Copyright (C) 2011-2015 Frank Osterfeld <frank.osterfeld@gmail.com>      *
++ *                                                                            *
++ * This program is distributed in the hope that it will be useful, but        *
++ * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY *
++ * or FITNESS FOR A PARTICULAR PURPOSE. For licensing and distribution        *
++ * details, check the accompanying file 'COPYING'.                            *
++ *****************************************************************************/
++#include "keychain_p.h"
++
++#include <KeyStore.h>
++#include <QDebug>
++
++using namespace QKeychain;
++
++static QString strForStatus( status_t os ) {
++    const char * const buf = strerror(os) ;
++    return QObject::tr( "error 0x%1: %2" )
++            .arg( os, 8, 16 ).arg( QString::fromUtf8( buf, strlen( buf ) ) );
++}
++
++void ReadPasswordJobPrivate::scheduledStart()
++{
++    QString errorString;
++    Error error = NoError;
++    BKeyStore keyStore;
++    BPasswordKey password;
++
++    status_t result = keyStore.GetKey(B_KEY_TYPE_PASSWORD,
++                                      q->service().toUtf8().constData(),
++                                      q->key().toUtf8().constData(),
++                                      false, password);
++
++    data = QByteArray((char*)password.Data(), password.DataLength());
++
++    switch ( result ) {
++    case B_OK:
++        q->emitFinished();
++        return;
++    case B_ENTRY_NOT_FOUND:
++        errorString = tr("Password not found");
++        error = EntryNotFound;
++        break;
++    default:
++        errorString = strForStatus( result );
++        error = OtherError;
++        break;
++    }
++
++    q->emitFinishedWithError( error, errorString );
++}
++
++void WritePasswordJobPrivate::scheduledStart()
++{
++    QString errorString;
++    Error error = NoError;
++    BKeyStore keyStore;
++    BPasswordKey password(data.constData(),
++        B_KEY_PURPOSE_GENERIC,
++        q->service().toUtf8().constData(),
++        q->key().toUtf8().constData());
++    status_t result;
++
++    // XXX: is it a string or a blob??
++    result = password.SetData(reinterpret_cast<const uint8*>(data.constData()), data.size());
++
++    if (result == B_OK)
++        result = keyStore.AddKey(password);
++
++    if (result == B_NAME_IN_USE) {
++        BPasswordKey old_password;
++        result = keyStore.GetKey(B_KEY_TYPE_PASSWORD,
++                                 q->service().toUtf8().constData(),
++                                 q->key().toUtf8().constData(),
++                                 false, old_password);
++        if (result == B_OK)
++            result = keyStore.RemoveKey(old_password);
++        if (result == B_OK)
++            result = keyStore.AddKey(password);
++    }
++
++    switch ( result ) {
++    case B_OK:
++        q->emitFinished();
++        return;
++    case B_ENTRY_NOT_FOUND:
++        errorString = tr("Password not found");
++        error = EntryNotFound;
++        break;
++    default:
++        errorString = strForStatus( result );
++        error = OtherError;
++        break;
++    }
++
++    q->emitFinishedWithError( error, errorString );
++}
++
++void DeletePasswordJobPrivate::scheduledStart()
++{
++    QString errorString;
++    Error error = NoError;
++    BKeyStore keyStore;
++    BPasswordKey password;
++
++    status_t result = keyStore.GetKey(B_KEY_TYPE_PASSWORD,
++                                      q->service().toUtf8().constData(),
++                                      q->key().toUtf8().constData(),
++                                      false, password);
++
++    if (result == B_OK)
++        result = keyStore.RemoveKey(password);
++
++    switch ( result ) {
++    case B_OK:
++        q->emitFinished();
++        return;
++    case B_ENTRY_NOT_FOUND:
++        errorString = tr("Password not found");
++        error = EntryNotFound;
++        break;
++    default:
++        errorString = strForStatus( result );
++        error = CouldNotDeleteEntry;
++        break;
++    }
++
++    q->emitFinishedWithError( error, errorString );
++}
+diff --git a/keychain_p.h b/keychain_p.h
+index ab7f0be..f91db7c 100644
+--- a/keychain_p.h
++++ b/keychain_p.h
+@@ -15,7 +15,7 @@
+ #include <QSettings>
+ #include <QQueue>
+ 
+-#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID)
++#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID) && !defined(Q_OS_HAIKU)
+ 
+ #include <QDBusPendingCallWatcher>
+ 
+@@ -49,7 +49,7 @@ public:
+     Mode mode;
+     QByteArray data;
+ 
+-#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID)
++#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID) && !defined(Q_OS_HAIKU)
+     org::kde::KWallet* iface;
+     int walletHandle;
+ 
+@@ -93,7 +93,7 @@ public:
+     explicit ReadPasswordJobPrivate( const QString &service_, ReadPasswordJob* qq );
+     void scheduledStart();
+ 
+-#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID)
++#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID) && !defined(Q_OS_HAIKU)
+     void fallbackOnError(const QDBusError& err);
+ 
+ private Q_SLOTS:
+@@ -116,7 +116,7 @@ public:
+     explicit WritePasswordJobPrivate( const QString &service_, WritePasswordJob* qq );
+     void scheduledStart();
+ 
+-#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID)
++#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID) && !defined(Q_OS_HAIKU)
+     void fallbackOnError(const QDBusError& err);
+ #endif
+ 
+@@ -130,7 +130,7 @@ public:
+ 
+     void scheduledStart();
+ 
+-#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID)
++#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID) && !defined(Q_OS_HAIKU)
+     void fallbackOnError(const QDBusError& err);
+ #endif
+ 
+-- 
+2.19.1
+
+
+From 3bfc854a3595618096c4a55270ac46c318646f9f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Sat, 17 Nov 2018 18:39:27 +0100
+Subject: [PATCH 2/2] HACK: Haiku: work around QCoreApplication not creating a
+ BApplication
+
+---
+ testclient.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/testclient.cpp b/testclient.cpp
+index 94189cf..b34a32f 100644
+--- a/testclient.cpp
++++ b/testclient.cpp
+@@ -8,6 +8,9 @@
+  *****************************************************************************/
+ #include <QCoreApplication>
+ #include <QStringList>
++#ifdef __HAIKU__
++#include <Application.h>
++#endif
+ 
+ #include "keychain.h"
+ #include <iostream>
+@@ -23,6 +26,10 @@ static int printUsage() {
+ 
+ int main( int argc, char** argv ) {
+     QCoreApplication app( argc, argv );
++#ifdef __HAIKU__
++    // XXX: for some reason the QApp object doesn't create a BApp
++    BApplication bapp("application/x-vnd.QtKeychain");
++#endif
+     const QStringList args = app.arguments();
+     if ( args.count() < 2 )
+         return printUsage();
+-- 
+2.19.1
+
