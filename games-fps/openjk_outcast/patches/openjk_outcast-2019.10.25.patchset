@@ -1,0 +1,179 @@
+From fd56d9c29cb9d90e6718cffca7a8e19314e968d7 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 30 Oct 2019 00:18:24 +1000
+Subject: Add Haiku support
+
+
+diff --git a/code/qcommon/files.cpp b/code/qcommon/files.cpp
+index c35d0e0..c4f6149 100644
+--- a/code/qcommon/files.cpp
++++ b/code/qcommon/files.cpp
+@@ -2885,6 +2885,12 @@ void FS_Startup( const char *gameName ) {
+ 	if (fs_basepath->string[0]) {
+ 		FS_AddGameDirectory( fs_basepath->string, gameName );
+ 	}
++#ifdef __HAIKU__
++	char *p;
++	if ( (p = getenv( "OPENJK_GAME_DATA" )) != NULL ) {
++		FS_AddGameDirectory( p, gameName );
++	}
++#endif
+ 
+ #ifdef MACOS_X
+ 	fs_apppath = Cvar_Get ("fs_apppath", Sys_DefaultAppPath(), CVAR_INIT|CVAR_PROTECTED );
+diff --git a/code/rd-vanilla/qgl.h b/code/rd-vanilla/qgl.h
+index f9fc10f..3e3d384 100644
+--- a/code/rd-vanilla/qgl.h
++++ b/code/rd-vanilla/qgl.h
+@@ -39,6 +39,8 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
+ #	if defined(__FX__)
+ #		include <GL/fxmesa.h>
+ #	endif
++#elif defined( __HAIKU__ )
++#      include <GL/gl.h>
+ #elif defined( __FreeBSD__ ) || defined(__OpenBSD__) // rb010123
+ #	include <GL/gl.h>
+ #	include <GL/glx.h>
+diff --git a/lib/minizip/ioapi.c b/lib/minizip/ioapi.c
+index 7f5c191..0db4bbf 100644
+--- a/lib/minizip/ioapi.c
++++ b/lib/minizip/ioapi.c
+@@ -14,7 +14,7 @@
+         #define _CRT_SECURE_NO_WARNINGS
+ #endif
+ 
+-#if defined(__APPLE__) || defined(IOAPI_NO_64)
++#if defined(__APPLE__)  || defined(__HAIKU__) || defined(IOAPI_NO_64)
+ // In darwin and perhaps other BSD variants off_t is a 64 bit value, hence no need for specific 64 bit functions
+ #define FOPEN_FUNC(filename, mode) fopen(filename, mode)
+ #define FTELLO_FUNC(stream) ftello(stream)
+diff --git a/shared/qcommon/q_platform.h b/shared/qcommon/q_platform.h
+index bddb7bd..d54b0f8 100644
+--- a/shared/qcommon/q_platform.h
++++ b/shared/qcommon/q_platform.h
+@@ -143,6 +143,30 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
+ 
+ 	#define DLL_EXT ".so"
+ 
++// Haiku
++#elif defined(__HAIKU__)
++
++	#include <endian.h>
++	#define OS_STRING "haiku"
++	#define QINLINE inline
++	#define PATH_SEP '/'
++
++	#if !defined(ARCH_STRING)
++		#error ARCH_STRING should be defined by the build system
++	#endif
++
++	#if defined(__x86_64__)
++		#define idx64
++	#endif
++
++	#if __FLOAT_WORD_ORDER == __BIG_ENDIAN
++		#define Q3_BIG_ENDIAN
++	#else
++		#define Q3_LITTLE_ENDIAN
++	#endif
++
++	#define DLL_EXT ".so"
++
+ // BSD
+ #elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+ 
+diff --git a/shared/sdl/sdl_window.cpp b/shared/sdl/sdl_window.cpp
+index 5fa0f8b..4dfd01b 100644
+--- a/shared/sdl/sdl_window.cpp
++++ b/shared/sdl/sdl_window.cpp
+@@ -87,7 +87,7 @@ const vidmode_t r_vidModes[] = {
+ };
+ static const int	s_numVidModes = ARRAY_LEN( r_vidModes );
+ 
+-#define R_MODE_FALLBACK (4) // 640x480
++#define R_MODE_FALLBACK (6) // 1024x768
+ 
+ qboolean R_GetModeInfo( int *width, int *height, int mode ) {
+ 	const vidmode_t	*vm;
+@@ -347,6 +347,12 @@ static rserr_t GLimp_SetMode(glconfig_t *glConfig, const windowDesc_t *windowDes
+ #endif
+ 		);
+ 
++#ifdef __HAIKU__
++	if (r_fullscreen->integer == 1) {
++		mode = -2;
++	}
++#endif
++
+ 	// If a window exists, note its display index
+ 	if ( screen != NULL )
+ 	{
+@@ -713,9 +719,11 @@ static qboolean GLimp_StartDriverAndSetMode(glconfig_t *glConfig, const windowDe
+ 		case RSERR_INVALID_MODE:
+ 			Com_Printf( "...WARNING: could not set the given mode (%d)\n", mode );
+ 			return qfalse;
++#ifndef __HAIKU__
+ 		case RSERR_UNKNOWN:
+ 			Com_Printf( "...ERROR: no display modes could be found.\n" );
+ 			return qfalse;
++#endif
+ 		default:
+ 			break;
+ 	}
+@@ -809,8 +817,9 @@ void WIN_Shutdown( void )
+ 	Cmd_RemoveCommand("minimize");
+ 
+ 	IN_Shutdown();
+-
++#ifndef __HAIKU__
+ 	SDL_QuitSubSystem( SDL_INIT_VIDEO );
++#endif
+ 	screen = NULL;
+ }
+ 
+diff --git a/shared/sys/sys_unix.cpp b/shared/sys/sys_unix.cpp
+index 96f5b7a..c90f068 100644
+--- a/shared/sys/sys_unix.cpp
++++ b/shared/sys/sys_unix.cpp
+@@ -400,6 +400,12 @@ Sys_Mkdir
+ */
+ qboolean Sys_Mkdir( const char *path )
+ {
++#ifdef __HAIKU__
++	struct stat buff;
++	if (stat(path, &buff) == 0)
++		if (S_ISDIR(buff.st_mode))
++			return qtrue;
++#endif
+ 	int result = mkdir( path, 0750 );
+ 
+ 	if( result != 0 )
+@@ -468,6 +474,25 @@ char *Sys_DefaultHomePath(void)
+ 
+ 	return homePath;
+ }
++#elif defined(__HAIKU__)
++char *Sys_DefaultHomePath(void)
++{
++	char *p;
++
++	if ( !homePath[0] )
++	{
++		if ( (p = getenv( "HOME" )) != NULL )
++		{
++			Com_sprintf( homePath, sizeof( homePath ), "%s/config/settings/OpenJK/", p );
++			if ( com_homepath && com_homepath->string[0] )
++				Q_strcat( homePath, sizeof( homePath ), com_homepath->string );
++			else
++				Q_strcat( homePath, sizeof( homePath ), HOMEPATH_NAME_MACOSX );
++			return homePath;
++		}
++	}
++	return homePath;
++}
+ #else
+ char *Sys_DefaultHomePath(void)
+ {
+-- 
+2.23.0
+

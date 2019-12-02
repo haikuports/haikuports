@@ -1,0 +1,1067 @@
+From 138028ee8d96c12c7a1fa463ea1303bb9b93577f Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 14:52:03 +0200
+Subject: Tell perl that BFS has a link count of 1
+
+
+diff --git a/cpan/File-Temp/lib/File/Temp.pm b/cpan/File-Temp/lib/File/Temp.pm
+index 817c6d9..c3298a6 100644
+--- a/cpan/File-Temp/lib/File/Temp.pm
++++ b/cpan/File-Temp/lib/File/Temp.pm
+@@ -1425,7 +1425,8 @@ sub unlink0 {
+     # On NFS the link count may still be 1 but we can't know that
+     # we are on NFS.  Since we can't be sure, we'll defer it
+ 
+-    return 1 if $fh[3] == 0 || $^O eq 'cygwin';
++    # On haiku, the link count seems to be always 1 (at least for BFS)
++    return 1 if $fh[3] == 0 || $^O eq 'cygwin' || $^O eq 'haiku';
+   }
+   # fall-through if we can't unlink now
+   _deferred_unlink($fh, $path, 0);
+-- 
+2.21.0
+
+
+From ecb07d51515bb563ccd2663cbbff04f1b93c9959 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 14:52:53 +0200
+Subject: Haiku defines, but does not implement O_EXLOCK
+
+
+diff --git a/cpan/File-Temp/t/lock.t b/cpan/File-Temp/t/lock.t
+index ff8c7f9..4364bf6 100644
+--- a/cpan/File-Temp/t/lock.t
++++ b/cpan/File-Temp/t/lock.t
+@@ -8,7 +8,8 @@ use Fcntl;
+ BEGIN {
+ # see if we have O_EXLOCK
+   eval { &Fcntl::O_EXLOCK; };
+-  if ($@) {
++  if ($@  || $^O eq 'haiku') {
++    # haiku doesn't implement O_EXLOCK yet (but it defines the value)
+     plan skip_all => 'Do not seem to have O_EXLOCK';
+   } else {
+     plan tests => 4;
+-- 
+2.21.0
+
+
+From 2e5b03c3468e59495c1a00dc60fe83a2e6e9912e Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 14:53:40 +0200
+Subject: haiku sets all its specifics via Configure
+
+
+diff --git a/hints/haiku.sh b/hints/haiku.sh
+index fa8ebe5..0f09f53 100644
+--- a/hints/haiku.sh
++++ b/hints/haiku.sh
+@@ -1,44 +1 @@
+-# Haiku hints file
+-# $Id$
+-
+-case "$prefix" in
+-'') prefix="/boot/common" ;;
+-*) ;; # pass the user supplied value through
+-esac
+-
+-libpth='/boot/home/config/lib /boot/common/lib /system/lib'
+-usrinc='/boot/develop/headers/posix'
+-locinc='/boot/home/config/include /boot/common/include /boot/develop/headers'
+-
+-libc='/system/lib/libroot.so'
+-libs='-lnetwork'
+-
+-# Use Haiku's malloc() by default.
+-case "$usemymalloc" in
+-'') usemymalloc='n' ;;
+-esac
+-
+-# Haiku generally supports hard links, but the default file system (BFS)
+-# doesn't. So better avoid using hard links.
+-d_link='undef'
+-dont_use_nlink='define'
+-
+-# The array syserrlst[] is useless for the most part.
+-# Large negative numbers really kind of suck in arrays.
+-d_syserrlst='undef'
+-
+-# Haiku uses gcc.
+-cc="gcc"
+-ld='gcc'
+-
+-# The runtime loader library path variable is LIBRARY_PATH.
+-case "$ldlibpthname" in
+-'') ldlibpthname=LIBRARY_PATH ;;
+-esac
+-
+-# as of alpha 4.1 (at the latest) some symbols are versioned,
+-# confusing the nm lookup
+-case "$usenm" in
+-'') usenm='undef' ;;
+-esac
+-
++# haiku sets all its specifics via Configure
+-- 
+2.21.0
+
+
+From 05292785ddb832fb7545a0d310bd857b1c31f4c9 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 14:54:15 +0200
+Subject: Tell perl that Haiku needs haikuish.h installed as well
+
+
+diff --git a/installperl b/installperl
+index 6cd65a0..6114fce 100755
+--- a/installperl
++++ b/installperl
+@@ -382,6 +382,11 @@ elsif ($Is_Cygwin) { # On Cygwin symlink it to CORE to make Makefile happy
+ 
+     # AIX needs perl.exp installed as well.
+     push(@corefiles,'perl.exp') if $^O eq 'aix';
++    if ($^O eq 'haiku') {
++	# Haiku needs haikuish.h installed as well.
++	mkpath("$installarchlib/CORE/haiku", $opts{verbose}, 0777);
++	push(@corefiles,'haiku/haikuish.h');
++    }
+ }
+ 
+ 
+-- 
+2.21.0
+
+
+From f574057129f4fb1241c2fae8440aa139ae5f33f9 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 14:55:13 +0200
+Subject: Fix handling of exit codes on Haiku
+
+
+diff --git a/t/run/exit.t b/t/run/exit.t
+index ce3270e..cab9a79 100644
+--- a/t/run/exit.t
++++ b/t/run/exit.t
+@@ -55,18 +55,18 @@ is( ${^CHILD_ERROR_NATIVE}, $native_success,  'Normal exit ${^CHILD_ERROR_NATIVE
+ if (!$vms_exit_mode) {
+   my $posix_ok = eval { require POSIX; };
+   my $wait_macros_ok = defined &POSIX::WIFEXITED;
+-  eval { POSIX::WIFEXITED(${^CHILD_ERROR_NATIVE}) };
++  eval { POSIX::WIFEXITED($?) };
+   $wait_macros_ok = 0 if $@;
+   $exit = run('exit 42');
+   is( $exit >> 8, 42,             'Non-zero exit' );
+   is( $exit, $?,                  'Non-zero exit $?' );
+-  isnt( !${^CHILD_ERROR_NATIVE}, 0, 'Non-zero exit ${^CHILD_ERROR_NATIVE}' );
++  isnt( ${^CHILD_ERROR_NATIVE}, 0, 'Non-zero exit ${^CHILD_ERROR_NATIVE}' );
+   SKIP: {
+     skip("No POSIX", 3) unless $posix_ok;
+     skip("No POSIX wait macros", 3) unless $wait_macros_ok;
+-    ok(POSIX::WIFEXITED(${^CHILD_ERROR_NATIVE}), "WIFEXITED");
+-    ok(!POSIX::WIFSIGNALED(${^CHILD_ERROR_NATIVE}), "WIFSIGNALED");
+-    is(POSIX::WEXITSTATUS(${^CHILD_ERROR_NATIVE}), 42, "WEXITSTATUS");
++    ok(POSIX::WIFEXITED($?), "WIFEXITED");
++    ok(!POSIX::WIFSIGNALED($?), "WIFSIGNALED");
++    is(POSIX::WEXITSTATUS($?), 42, "WEXITSTATUS");
+   }
+ 
+   SKIP: {
+@@ -85,9 +85,9 @@ if (!$vms_exit_mode) {
+     SKIP: {
+       skip("No POSIX", 3) unless $posix_ok;
+       skip("No POSIX wait macros", 3) unless $wait_macros_ok;
+-      ok(!POSIX::WIFEXITED(${^CHILD_ERROR_NATIVE}), "WIFEXITED");
+-      ok(POSIX::WIFSIGNALED(${^CHILD_ERROR_NATIVE}), "WIFSIGNALED");
+-      is(POSIX::WTERMSIG(${^CHILD_ERROR_NATIVE}), 15, "WTERMSIG");
++      ok(!POSIX::WIFEXITED($?), "WIFEXITED");
++      ok(POSIX::WIFSIGNALED($?), "WIFSIGNALED");
++      is(POSIX::WTERMSIG($?), 15, "WTERMSIG");
+     }
+   }
+ 
+-- 
+2.21.0
+
+
+From cf5605acf93f6e07484df56b695d93f39b96e0bf Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 15:00:44 +0200
+Subject: Fix include path of errno.h
+
+
+diff --git a/ext/Errno/Errno_pm.PL b/ext/Errno/Errno_pm.PL
+index d565f31..f0ee43b 100644
+--- a/ext/Errno/Errno_pm.PL
++++ b/ext/Errno/Errno_pm.PL
+@@ -139,7 +139,7 @@ sub get_files {
+ 	$file{$linux_errno_h} = 1;
+     } elsif ($^O eq 'haiku') {
+ 	# hidden in a special place
+-	$file{'/boot/develop/headers/posix/errno.h'} = 1;
++	$file{'/boot/system/develop/headers/posix/errno.h'} = 1;
+ 
+     } elsif ($^O eq 'vos') {
+ 	# avoid problem where cpp returns non-POSIX pathnames
+-- 
+2.21.0
+
+
+From f15968c2bbe5db9ed5545f1c923a4b476756aa1e Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sat, 28 Sep 2013 13:46:42 +0200
+Subject: Adjust ExtUtils::MakeMaker for PM-Haiku.
+
+* MakeMaker-projects trying to install into 'site-perl' while specifying
+  PREFIX would end up using a wrong 'site-perl' prefix.
+* Split MM_Haiku.pm off MM_BeOS.pm, implementing Haiku-specific overrides
+  for MakeMaker.
+
+diff --git a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM.pm b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM.pm
+index b2c360b..c91c3c8 100644
+--- a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM.pm
++++ b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM.pm
+@@ -60,7 +60,8 @@ if( $^O eq 'MSWin32' ) {
+ $Is{UWIN}   = $^O =~ /^uwin(-nt)?$/;
+ $Is{Cygwin} = $^O eq 'cygwin';
+ $Is{NW5}    = $Config{osname} eq 'NetWare';  # intentional
+-$Is{BeOS}   = ($^O =~ /beos/i or $^O eq 'haiku');
++$Is{BeOS}   = $^O =~ /beos/i;
++$Is{Haiku}  = $^O eq 'haiku';
+ $Is{DOS}    = $^O eq 'dos';
+ if( $Is{NW5} ) {
+     $^O = 'NetWare';
+diff --git a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+new file mode 100644
+index 0000000..81e5f99
+--- /dev/null
++++ b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+@@ -0,0 +1,70 @@
++package ExtUtils::MM_Haiku;
++
++use strict;
++
++=head1 NAME
++
++ExtUtils::MM_Haiku - methods to override UN*X behaviour in ExtUtils::MakeMaker
++
++=head1 SYNOPSIS
++
++ use ExtUtils::MM_Haiku;	# Done internally by ExtUtils::MakeMaker if needed
++
++=head1 DESCRIPTION
++
++See ExtUtils::MM_Unix for a documentation of the methods provided
++there. This package overrides the implementation of these methods, not
++the semantics.
++
++=over 4
++
++=cut
++
++use ExtUtils::MakeMaker::Config;
++use File::Spec;
++require ExtUtils::MM_Any;
++require ExtUtils::MM_Unix;
++
++our @ISA = qw( ExtUtils::MM_Any ExtUtils::MM_Unix );
++our $VERSION = '6.66';
++
++
++=item os_flavor
++
++Haiku is Haiku.
++
++=cut
++
++sub os_flavor {
++    return('Haiku');
++}
++
++=head3 init_INSTALL_from_PREFIX
++
++  $mm->init_INSTALL_from_PREFIX;
++
++=cut
++
++sub init_INSTALL_from_PREFIX {
++    my $self = shift;
++
++	# If a prefix has been given from outside, the default implementation
++	# will set PERLPREFIX, SITEPREFIX and VENDORPREFIX to identical values,
++	# but due to the way how Haiku's package management works, PERLPREFIX
++	# and VENDORPREFIX are not writable at all (as they're being populated
++	# from installed packages via package-fs). SITEPREFIX, however needs to
++	# be set to a path which can be written to (since site packages are
++	# expected to be installed "manually") - so we make sure it points
++	# to a 'non-packaged'-folder:
++    my $prefixGiven = $self->{PREFIX};
++	$self->SUPER::init_INSTALL_from_PREFIX();
++	if ($prefixGiven) {
++        $self->{SITEPREFIX} = '$(PREFIX)/non-packaged';
++    } 
++}
++
++=back
++
++1;
++__END__
++
+-- 
+2.21.0
+
+
+From fe71122a98b710baf365fc2bd12e3298b1633889 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Tue, 8 Oct 2013 22:16:37 +0200
+Subject: Avoid using -rpath for dynamic modules.
+
+
+diff --git a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+index 81e5f99..25ace13 100644
+--- a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
++++ b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+@@ -65,6 +65,33 @@ sub init_INSTALL_from_PREFIX {
+ 
+ =back
+ 
++=head3 init_others
++
++    $MM->init_others();
++
++Initializes the macro definitions having to do with compiling and
++linking used by tools_other() and places them in the $MM object.
++
++If there is no description, its the same as the parameter to
++WriteMakefile() documented in ExtUtils::MakeMaker.
++
++=cut
++
++sub init_others {
++    my $self = shift;
++
++	$self->SUPER::init_others();
++
++	# Don't use run-time paths for libraries required by dynamic
++	# modules on Haiku, as that wouldn't work should a library be moved
++	# (for instance because the package has been activated somewhere else).
++    $self->{LD_RUN_PATH} = "";
++
++    return;
++}
++
++=back
++
+ 1;
+ __END__
+ 
+-- 
+2.21.0
+
+
+From 50e36aceedc3a20d6a1b0d8b5b109c80d5b07782 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Tue, 8 Oct 2013 22:17:26 +0200
+Subject: Add script sitecustomize.pl for setting up @INC as we need it.
+
+
+diff --git a/sitecustomize.pl b/sitecustomize.pl
+new file mode 100644
+index 0000000..a321e51
+--- /dev/null
++++ b/sitecustomize.pl
+@@ -0,0 +1,36 @@
++#! perl
++
++use Config;
++
++# Remove all compiled-in paths referring to Perl's installation dir
++# and replace them with a static set of paths that implement the intended
++# searching order:
++my @ourINC = (
++	"/boot/home/config/lib/perl5/$Config{version}/$Config{archname}",
++	"/boot/home/config/lib/perl5/$Config{version}",
++	"/boot/home/config/non-packaged/lib/perl5/site_perl/$Config{version}/$Config{archname}",
++	"/boot/home/config/non-packaged/lib/perl5/site_perl/$Config{version}",
++	"/boot/home/config/lib/perl5/vendor_perl/$Config{version}/$Config{archname}",
++	"/boot/home/config/lib/perl5/vendor_perl/$Config{version}",
++	"/boot/home/config/lib/perl5/vendor_perl",
++	"/boot/system/lib/perl5/$Config{version}/$Config{archname}",
++	"/boot/system/lib/perl5/$Config{version}",
++	"/boot/system/non-packaged/lib/perl5/site_perl/$Config{version}/$Config{archname}",
++	"/boot/system/non-packaged/lib/perl5/site_perl/$Config{version}",
++	"/boot/system/lib/perl5/vendor_perl/$Config{version}/$Config{archname}",
++	"/boot/system/lib/perl5/vendor_perl/$Config{version}",
++	"/boot/system/lib/perl5/vendor_perl",
++);
++my @newINC;
++my $removedPerlPaths;
++foreach my $inc (@INC) {
++	if ($inc =~ m[^/packages/perl-$Config{version}-\d+/.self/]o) {
++		if (! $removedPerlPaths) {
++			push @newINC, @ourINC;
++			$removedPerlPaths = 1;
++		}
++		next;
++	}
++	push @newINC, $inc;
++}
++@INC = @newINC;
+-- 
+2.21.0
+
+
+From b17410fa468a27c33cc3a2293af2fb577a16141c Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Wed, 9 Oct 2013 20:29:38 +0200
+Subject: Fix initialization check for CPAN.
+
+* On Haiku, only the site-lib directories will ever be writable,
+  as the others read-only. This avoids CPAN asking for a way to
+  circumvent unwritable lib dirs.
+
+diff --git a/cpan/CPAN/lib/CPAN/FirstTime.pm b/cpan/CPAN/lib/CPAN/FirstTime.pm
+index 49fa8ab..bc701d8 100644
+--- a/cpan/CPAN/lib/CPAN/FirstTime.pm
++++ b/cpan/CPAN/lib/CPAN/FirstTime.pm
+@@ -2068,6 +2068,12 @@ sub _print_urllist {
+ }
+ 
+ sub _can_write_to_libdirs {
++    if ($^O eq 'haiku') {
++    	# on Haiku, the other dirs are never writable, as they are
++    	# being populated by packagefs
++        return -w $Config{installsitelib}
++            && -w $Config{installsitearch}
++    }
+     return -w $Config{installprivlib}
+         && -w $Config{installarchlib}
+         && -w $Config{installsitelib}
+-- 
+2.21.0
+
+
+From 5165526c7021de44f4036f64430cca9a1619d5b4 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 13 Oct 2013 17:32:50 +0200
+Subject: Add support for HAIKU_USE_VENDOR_DIRECTORIES.
+
+* Adjust MakeMaker to automatically switch to vendor directories if
+  requested via HAIKU_USE_VENDOR_DIRECTORIES.
+
+diff --git a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+index 25ace13..8a04ead 100644
+--- a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
++++ b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+@@ -29,21 +29,20 @@ our @ISA = qw( ExtUtils::MM_Any ExtUtils::MM_Unix );
+ our $VERSION = '6.66';
+ 
+ 
+-=item os_flavor
+-
+-Haiku is Haiku.
+-
+-=cut
+-
+ sub os_flavor {
+     return('Haiku');
+ }
+ 
+-=head3 init_INSTALL_from_PREFIX
++sub init_main {
++    my $self = shift;
+ 
+-  $mm->init_INSTALL_from_PREFIX;
++    # switch to vendor directories if requested.
++    if ($ENV{'HAIKU_USE_VENDOR_DIRECTORIES'}) {
++        $self->{INSTALLDIRS} ||= 'vendor';
++    }
+ 
+-=cut
++    $self->SUPER::init_main();
++}
+ 
+ sub init_INSTALL_from_PREFIX {
+     my $self = shift;
+@@ -63,20 +62,6 @@ sub init_INSTALL_from_PREFIX {
+     } 
+ }
+ 
+-=back
+-
+-=head3 init_others
+-
+-    $MM->init_others();
+-
+-Initializes the macro definitions having to do with compiling and
+-linking used by tools_other() and places them in the $MM object.
+-
+-If there is no description, its the same as the parameter to
+-WriteMakefile() documented in ExtUtils::MakeMaker.
+-
+-=cut
+-
+ sub init_others {
+     my $self = shift;
+ 
+@@ -90,8 +75,6 @@ sub init_others {
+     return;
+ }
+ 
+-=back
+-
+ 1;
+ __END__
+ 
+-- 
+2.21.0
+
+
+From 4f18bd7b734a0e3a951aa1e8f37231b0bafdac63 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Fri, 9 Jun 2017 21:30:33 +0200
+Subject: disable fstack-protector for Haiku
+
+
+diff --git a/Configure b/Configure
+index f99377e..4cb2905 100755
+--- a/Configure
++++ b/Configure
+@@ -5493,6 +5493,7 @@ default|recommended)
+ 	# thing. (NWC)
+ 	case "$osname" in
+ 	amigaos) ;; # -fstack-protector builds but doesn't work
++	haiku) ;; # -fstack-protector builds but doesn't work
+ 	*)	case "$gccversion" in
+ 		?*)	set stack-protector-strong -fstack-protector-strong
+ 			eval $checkccflag
+-- 
+2.21.0
+
+
+From 944bba5bc3e7aad7196e5a9e87a946c4f5842b99 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Wed, 14 Mar 2018 21:33:54 +0100
+Subject: sitecustomize.pl: use the shortVersion for site and vendor.
+
+
+diff --git a/sitecustomize.pl b/sitecustomize.pl
+index a321e51..76c0e46 100644
+--- a/sitecustomize.pl
++++ b/sitecustomize.pl
+@@ -8,17 +8,17 @@ use Config;
+ my @ourINC = (
+ 	"/boot/home/config/lib/perl5/$Config{version}/$Config{archname}",
+ 	"/boot/home/config/lib/perl5/$Config{version}",
+-	"/boot/home/config/non-packaged/lib/perl5/site_perl/$Config{version}/$Config{archname}",
+-	"/boot/home/config/non-packaged/lib/perl5/site_perl/$Config{version}",
+-	"/boot/home/config/lib/perl5/vendor_perl/$Config{version}/$Config{archname}",
+-	"/boot/home/config/lib/perl5/vendor_perl/$Config{version}",
++	"/boot/home/config/non-packaged/lib/perl5/site_perl/$Config{revision}.$Config{patchlevel}/$Config{archname}",
++	"/boot/home/config/non-packaged/lib/perl5/site_perl/$Config{revision}.$Config{patchlevel}",
++	"/boot/home/config/lib/perl5/vendor_perl/$Config{revision}.$Config{patchlevel}/$Config{archname}",
++	"/boot/home/config/lib/perl5/vendor_perl/$Config{revision}.$Config{patchlevel}",
+ 	"/boot/home/config/lib/perl5/vendor_perl",
+ 	"/boot/system/lib/perl5/$Config{version}/$Config{archname}",
+ 	"/boot/system/lib/perl5/$Config{version}",
+-	"/boot/system/non-packaged/lib/perl5/site_perl/$Config{version}/$Config{archname}",
+-	"/boot/system/non-packaged/lib/perl5/site_perl/$Config{version}",
+-	"/boot/system/lib/perl5/vendor_perl/$Config{version}/$Config{archname}",
+-	"/boot/system/lib/perl5/vendor_perl/$Config{version}",
++	"/boot/system/non-packaged/lib/perl5/site_perl/$Config{revision}.$Config{patchlevel}/$Config{archname}",
++	"/boot/system/non-packaged/lib/perl5/site_perl/$Config{revision}.$Config{patchlevel}",
++	"/boot/system/lib/perl5/vendor_perl/$Config{revision}.$Config{patchlevel}/$Config{archname}",
++	"/boot/system/lib/perl5/vendor_perl/$Config{revision}.$Config{patchlevel}",
+ 	"/boot/system/lib/perl5/vendor_perl",
+ );
+ my @newINC;
+-- 
+2.21.0
+
+
+From 6edd86c7e4f618e63918a685df1c5a045cd08911 Mon Sep 17 00:00:00 2001
+From: Tony Cook <tony@develop-help.com>
+Date: Tue, 4 Dec 2018 15:11:17 +1100
+Subject: (perl #133708) remove build-time probing for stack limits for
+ Storable
+
+
+diff --git a/Makefile.SH b/Makefile.SH
+index 47edfe1..20c2ab1 100755
+--- a/Makefile.SH
++++ b/Makefile.SH
+@@ -184,15 +184,11 @@ esac
+ 
+ : is Cwd static or dynamic
+ static_cwd='define'
+-storable_limit_dep=''
+-storable_type=''
+ list_util_dep='$(PERL_EXE)'
+ for f in $dynamic_ext; do
+    case $f in
+        Cwd) static_cwd='undef' ;;
+        List/Util) list_util_dep=lib/auto/List/Util/Util.$dlext ;;
+-       Storable) storable_limit_dep=lib/auto/Storable/Storable.$dlext
+-                 storable_type='dynamic' ;;
+    esac
+ done
+ 
+@@ -229,7 +225,6 @@ for f in $static_ext; do
+ $this_target: lib/auto/List/Util/Util\$(LIB_EXT)" ;;
+ 	Unicode/Normalize) extra_dep="$extra_dep
+ $this_target: uni.data" ;;
+-        Storable) storable_type='static' ;;
+     esac
+ done
+ 
+@@ -1188,26 +1183,6 @@ no_install no-install: install-notify
+ install: install-all
+ !NO!SUBS!
+ 
+-if test "$storable_type" != "" ; then
+-
+-case "$static_cwd" in
+-undef) storable_limit_dep="$storable_limit_dep lib/auto/Cwd/Cwd.$dlext" ;;
+-esac
+-
+-$spitshell >>$Makefile <<EOT
+-
+-dist/Storable/lib/Storable/Limit.pm : \$(PERL_EXE) dist/Storable/stacksize $storable_limit_dep
+-	cd dist/Storable ; \$(LDLIBPTH) \$(MAKE) lib/Storable/Limit.pm
+-
+-lib/Storable/Limit.pm : dist/Storable/lib/Storable/Limit.pm
+-	test -d lib/Storable || mkdir lib/Storable
+-	cp dist/Storable/lib/Storable/Limit.pm lib/Storable/Limit.pm
+-EOT
+-
+-common_build_deps="$common_build_deps lib/Storable/Limit.pm"
+-
+-fi
+-
+ for name in all notify silent strip verbose; do
+     flags="--$name";
+     flags=`echo $flags | sed -e 's/--all//'`
+diff --git a/dist/Storable/Makefile.PL b/dist/Storable/Makefile.PL
+index 092bab4..60af5d2 100644
+--- a/dist/Storable/Makefile.PL
++++ b/dist/Storable/Makefile.PL
+@@ -12,13 +12,7 @@ use Config;
+ use File::Copy qw(move copy);
+ use File::Spec;
+ 
+-unlink "lib/Storable/Limit.pm";
+-
+ my $pm = { 'Storable.pm' => '$(INST_ARCHLIB)/Storable.pm' };
+-unless ($ENV{PERL_CORE}) {
+-    # the core Makefile takes care of this for core builds
+-    $pm->{"lib/Storable/Limit.pm"} = '$(INST_ARCHLIB)/Storable/Limit.pm';
+-}
+ 
+ WriteMakefile(
+     NAME                => 'Storable',
+@@ -81,28 +75,7 @@ sub xlinkext {
+ }
+ 
+ sub depend {
+-    my $extra_deps = "";
+-    my $options = "";
+-    if ($ENV{PERL_CORE}) {
+-        $options = "--core";
+-    }
+-    else {
+-        # blib.pm needs arch/lib
+-        $extra_deps = ' Storable.pm';
+-    }
+-    my $whichperl;
+-    if ($Config::Config{usecrosscompile}) {
+-        $whichperl = '$(PERLRUN)';
+-    }
+-    else {
+-        $whichperl = '$(FULLPERLRUNINST)';
+-    }
+-    my $linktype = uc($_[0]->{LINKTYPE});
+-    my $limit_pm = File::Spec->catfile('lib', 'Storable', 'Limit.pm');
+     "
+-$limit_pm : stacksize \$(INST_$linktype)$extra_deps
+-	\$(MKPATH) \$(INST_LIB)
+-	$whichperl stacksize $options
+ 
+ release : dist
+ 	git tag \$(VERSION)
+@@ -112,18 +85,6 @@ release : dist
+ "
+ }
+ 
+-sub test {
+-    my ($self, %attr) = @_;
+-
+-    my $out = $self->SUPER::test(%attr);
+-
+-    if ($ENV{PERL_CORE}) {
+-        $out =~ s!^(test(?:db)?_(?:static|dynamic)\b.*)!$1 lib/Storable/Limit.pm!gm;
+-    }
+-
+-    $out;
+-}
+-
+ sub postamble {
+ '
+ all :: Storable.pm
+diff --git a/dist/Storable/__Storable__.pm b/dist/Storable/__Storable__.pm
+index e77b240..8bb9117 100644
+--- a/dist/Storable/__Storable__.pm
++++ b/dist/Storable/__Storable__.pm
+@@ -32,8 +32,6 @@ our $VERSION = '3.08_01';
+ our $recursion_limit;
+ our $recursion_limit_hash;
+ 
+-do "Storable/Limit.pm";
+-
+ $recursion_limit = 512
+   unless defined $recursion_limit;
+ $recursion_limit_hash = 256
+@@ -941,13 +939,13 @@ There are a few things you need to know, however:
+ 
+ =item *
+ 
+-Since Storable 3.05 we probe for the stack recursion limit for references,
++From Storable 3.05 to 3.13 we probed for the stack recursion limit for references,
+ arrays and hashes to a maximal depth of ~1200-35000, otherwise we might
+ fall into a stack-overflow.  On JSON::XS this limit is 512 btw.  With
+ references not immediately referencing each other there's no such
+ limit yet, so you might fall into such a stack-overflow segfault.
+ 
+-This probing and the checks performed have some limitations:
++This probing and the checks we performed have some limitations:
+ 
+ =over
+ 
+@@ -955,7 +953,9 @@ This probing and the checks performed have some limitations:
+ 
+ the stack size at build time might be different at run time, eg. the
+ stack size may have been modified with ulimit(1).  If it's larger at
+-run time Storable may fail the freeze() or thaw() unnecessarily.
++run time Storable may fail the freeze() or thaw() unnecessarily.  If
++it's larger at build time Storable may segmentation fault when
++processing a deep structure at run time.
+ 
+ =item *
+ 
+@@ -970,6 +970,8 @@ stack without triggering Storable's recursion protection.
+ 
+ =back
+ 
++So these now have simple defaults rather than probing at build-time.
++
+ You can control the maximum array and hash recursion depths by
+ modifying C<$Storable::recursion_limit> and
+ C<$Storable::recursion_limit_hash> respectively.  Either can be set to
+diff --git a/dist/Storable/stacksize b/dist/Storable/stacksize
+index 14e0739..08bff78 100644
+--- a/dist/Storable/stacksize
++++ b/dist/Storable/stacksize
+@@ -1,6 +1,6 @@
+ #!/usr/bin/perl
+ # binary search maximum stack depth for arrays and hashes
+-# and store it in lib/Storable/Limit.pm
++# and report it to stdout as code to set the limits
+ 
+ use Config;
+ use Cwd;
+@@ -10,12 +10,11 @@ use strict;
+ -d "lib" or mkdir "lib";
+ -d "lib/Storable" or mkdir "lib/Storable";
+ 
+-my $fn = "lib/Storable/Limit.pm";
+ my $ptrsize = $Config{ptrsize};
+ my ($bad1, $bad2) = (65001, 25000);
+ sub QUIET () {
+     (defined $ENV{MAKEFLAGS} and $ENV{MAKEFLAGS} =~ /\b(s|silent|quiet)\b/
+-     and !defined($ENV{TRAVIS}))
++     and !defined($ENV{TRAVIS})) || @ARGV && $ARGV[0] eq "-q"
+       ? 1 : 0
+ }
+ sub PARALLEL () {
+@@ -51,58 +50,28 @@ elsif (system("ulimit -c 0 ;") == 0) {
+     # try to prevent core dumps
+     $prefix = "ulimit -c 0 ; ";
+ }
+-if (@ARGV and $ARGV[0] eq '--core') {
+-    $ENV{PERL_CORE} = 1;
+-}
+ my $PERL = $^X;
+-if ($ENV{PERL_CORE}) {
+-    my $path;
+-    my $ldlib = $Config{ldlibpthname};
+-    if (-d 'dist/Storable') {
+-        chdir 'dist/Storable';
+-        $PERL = "../../$PERL" unless $PERL =~ m|^/|;
+-    }
+-    if ($ldlib) {
+-        $path = getcwd()."/../..";
+-    }
+-    if ($^O eq 'MSWin32' and -d '../dist/Storable') {
+-        chdir '..\dist\Storable';
+-        $PERL = "..\\..\\$PERL" unless $PERL =~ /^[A-Za-z]:\\/;
+-    }
+-    $PERL = "\"$PERL\"" if $PERL =~ / /;
+-    if ($ldlib and $ldlib ne 'PATH') {
+-        $PERL = "$ldlib=$path $PERL";
+-    }
+-}
+-
+ if ($^O eq "MSWin32") {
+     require Win32;
+     my ($str, $major, $minor) = Win32::GetOSVersion();
+     if ($major < 6 || $major == 6 && $minor < 1) {
+-	print "Using defaults for older Win32\n";
++	print "# Using defaults for older Win32\n";
+ 	write_limits(500, 256);
+ 	exit;
+     }
+ }
+ my ($n, $good, $bad, $found) =
+     (65000, 100, $bad1, undef);
+-print "probe for max. stack sizes...\n" unless QUIET;
++print "# probe for max. stack sizes...\n" unless QUIET;
+ # -I. since we're run before pm_to_blib (which is going to copy the
+ # file we create) and need to load our Storable.pm, not the already
+ # installed Storable.pm
+-my $mblib = '-Mblib -I.';
+-if ($ENV{PERL_CORE}) {
+-    if ($^O eq 'MSWin32') {
+-        $mblib = '-I..\..\lib\auto -I..\..\lib';
+-    } else {
+-        $mblib = '-I../../lib/auto -I../../lib';
+-    }
++my $mblib = '';
++if (-d 'blib'}) {
++    $mblib = '-Mblib -I.';
+ }
+-if (PARALLEL) {
+-    # problem with parallel builds. wait for INST_DYNAMIC linking to be done.
+-    # the problem is the RM_F INST_DYNAMIC race.
+-    print "parallel build race - wait for linker ...\n" unless QUIET;
+-    sleep(2.0);
++elsif (-f "Configure") {
++    $mblib = '-Ilib';
+ }
+ 
+ sub cmd {
+@@ -117,7 +86,7 @@ sub cmd {
+ sub good {
+     my $i = shift; # this passed
+     my $j = $i + abs(int(($bad - $i) / 2));
+-    print "Storable: determining recursion limit: $i passed, try more $j ...\n" unless QUIET;
++    print "# Storable: determining recursion limit: $i passed, try more $j ...\n" unless QUIET;
+     $good = $i;
+     if ($j <= $i) {
+         $found++;
+@@ -128,7 +97,7 @@ sub good {
+ sub bad {
+     my $i = shift; # this failed
+     my $j = $i - abs(int(($i - $good) / 2));
+-    print "Storable: determining recursion limit: $i too big, try less $j ...\n" unless QUIET;
++    print "# Storable: determining recursion limit: $i too big, try less $j ...\n" unless QUIET;
+     $bad = $i;
+     if ($j >= $i) {
+         $j = $good;
+@@ -162,7 +131,7 @@ while (!$found) {
+         $n = bad($n);
+     }
+ }
+-print "MAX_DEPTH = $n\n" unless QUIET;
++print "# MAX_DEPTH = $n\n" unless QUIET;
+ my $max_depth = $n;
+ 
+ ($n, $good, $bad, $found) =
+@@ -186,13 +155,13 @@ if ($max_depth == $bad1-1
+     and $n == $bad2-1)
+ {
+     # more likely the shell. travis docker ubuntu, mingw e.g.
+-    print "Error: Apparently your system(SHELLSTRING) cannot catch stack overflows\n"
++    print "# Apparently your system(SHELLSTRING) cannot catch stack overflows\n"
+       unless QUIET;
+     $max_depth = 512;
+     $n = 256;
+     print "MAX_DEPTH = $max_depth\n" unless QUIET;
+ }
+-print "MAX_DEPTH_HASH = $n\n" unless QUIET;
++print "# MAX_DEPTH_HASH = $n\n" unless QUIET;
+ my $max_depth_hash = $n;
+ 
+ # Previously this calculation was done in the macro, calculate it here
+@@ -203,7 +172,7 @@ my $max_depth_hash = $n;
+ # several apparently random failures here, eg. working in one
+ # configuration, but not in a very similar configuration.
+ $max_depth = int(0.6 * $max_depth);
+-$max_depth_hash = int(0.6 * $max_depth);
++$max_depth_hash = int(0.6 * $max_depth_hash);
+ 
+ my $stack_reserve = $^O eq "MSWin32" ? 32 : 16;
+ if ($] ge "5.016" && !($^O eq "cygwin" && $ptrsize == 8)) {
+@@ -221,16 +190,11 @@ write_limits($max_depth, $max_depth_hash);
+ 
+ sub write_limits {
+     my ($max_depth, $max_depth_hash) = @_;
+-    my $f;
+-    open $f, ">", $fn or die "$fn $!";
+-    print $f <<EOS;
++    print <<EOS;
+ # bisected by stacksize
+ \$Storable::recursion_limit = $max_depth
+   unless defined \$Storable::recursion_limit;
+ \$Storable::recursion_limit_hash = $max_depth_hash
+   unless defined \$Storable::recursion_limit_hash;
+-1;
+ EOS
+-    close $f
+-      or die "Failed to close $fn: $!\n";
+ }
+diff --git a/dist/Storable/t/recurse.t b/dist/Storable/t/recurse.t
+index 63fde90..b5967a0 100644
+--- a/dist/Storable/t/recurse.t
++++ b/dist/Storable/t/recurse.t
+@@ -318,9 +318,11 @@ is($refcount_ok, 1, "check refcount");
+ # Small 64bit systems fail with 1200 (c++ debugging), with gcc 3000.
+ # Optimized 64bit allows up to 33.000 recursion depth.
+ # with asan the limit is 255 though.
++
++local $Storable::recursion_limit = 30;
++local $Storable::recursion_limit_hash = 20;
+ sub MAX_DEPTH () { Storable::stack_depth() }
+ sub MAX_DEPTH_HASH () { Storable::stack_depth_hash() }
+-sub OVERFLOW () { 35000 }
+ {
+     my $t;
+     print "# max depth ", MAX_DEPTH, "\n";
+diff --git a/win32/GNUmakefile b/win32/GNUmakefile
+index 200d8a5..1c163d7 100644
+--- a/win32/GNUmakefile
++++ b/win32/GNUmakefile
+@@ -1177,7 +1177,7 @@ CFG_VARS	=					\
+ 
+ .PHONY: all info
+ 
+-all : info rebasePE Extensions_nonxs $(PERLSTATIC) PostExt
++all : info rebasePE Extensions_nonxs $(PERLSTATIC)
+ 
+ info :
+ 	@echo # CCTYPE=$(CCTYPE)
+@@ -1621,16 +1621,6 @@ Extensions_clean :
+ Extensions_realclean :
+ 	-if exist $(MINIPERL) $(MINIPERL) -I..\lib ..\make_ext.pl "MAKE=$(PLMAKE)" --dir=$(CPANDIR) --dir=$(DISTDIR) --dir=$(EXTDIR) --all --target=realclean
+ 
+-PostExt : ..\lib\Storable\Limit.pm
+-
+-# we need the exe, perl(ver).dll, and the Exporter, Storable, Win32 extensions
+-# rebasePE most of that, including adjustment for static builds, so we
+-# just need non-xs extensions
+-..\lib\Storable\Limit.pm : rebasePE Extensions_nonxs
+-	$(PLMAKE) -C ..\dist\Storable lib\Storable\Limit.pm
+-	if not exist ..\lib\Storable mkdir ..\lib\Storable
+-	copy ..\dist\Storable\lib\Storable\Limit.pm ..\lib\Storable\Limit.pm
+-
+ # all PE files need to be built by the time this target runs, PP files can still
+ # be running in parallel like UNIDATAFILES, this target a placeholder for the
+ # future
+diff --git a/win32/Makefile b/win32/Makefile
+index 481fcd8..8e7878c 100644
+--- a/win32/Makefile
++++ b/win32/Makefile
+@@ -948,7 +948,7 @@ CFG_VARS	=					\
+ #
+ 
+ all : .\config.h ..\git_version.h $(GLOBEXE) $(CONFIGPM) \
+-	$(UNIDATAFILES) MakePPPort $(PERLEXE) Extensions_nonxs Extensions PostExt \
++	$(UNIDATAFILES) MakePPPort $(PERLEXE) Extensions_nonxs Extensions \
+ 	$(PERLSTATIC)
+ 	@echo	Everything is up to date. '$(MAKE_BARE) test' to run test suite.
+ 
+@@ -1234,13 +1234,6 @@ Extensions_clean:
+ Extensions_realclean: 
+ 	-if exist $(MINIPERL) $(MINIPERL) -I..\lib ..\make_ext.pl "MAKE=$(MAKE)" --dir=$(CPANDIR) --dir=$(DISTDIR) --dir=$(EXTDIR) --all --target=realclean
+ 
+-PostExt: ..\lib\Storable\Limit.pm
+-
+-..\lib\Storable\Limit.pm: $(PERLEXE) Extensions
+-	cd ..\dist\Storable && $(MAKE) lib\Storable\Limit.pm
+-	if not exist ..\lib\Storable mkdir ..\lib\Storable
+-	copy ..\dist\Storable\lib\Storable\Limit.pm ..\lib\Storable\Limit.pm
+-
+ #-------------------------------------------------------------------------------
+ 
+ doc: $(PERLEXE) ..\pod\perltoc.pod
+@@ -1319,7 +1312,6 @@ distclean: realclean
+ 	-del /f $(LIBDIR)\Time\HiRes.pm
+ 	-del /f $(LIBDIR)\Unicode\Normalize.pm
+ 	-del /f $(LIBDIR)\Math\BigInt\FastCalc.pm
+-	-del /f $(LIBDIR)\Storable.pm $(LIBDIR)\Storable\Limit.pm
+ 	-del /f $(LIBDIR)\Win32.pm
+ 	-del /f $(LIBDIR)\Win32CORE.pm
+ 	-del /f $(LIBDIR)\Win32API\File.pm
+diff --git a/win32/makefile.mk b/win32/makefile.mk
+index 7dae753..8122c75 100644
+--- a/win32/makefile.mk
++++ b/win32/makefile.mk
+@@ -1148,7 +1148,7 @@ CFG_VARS	=					\
+ # Top targets
+ #
+ 
+-all : CHECKDMAKE rebasePE Extensions_nonxs $(PERLSTATIC) PostExt
++all : CHECKDMAKE rebasePE Extensions_nonxs $(PERLSTATIC)
+ 
+ ..\regcomp$(o) : ..\regnodes.h ..\regcharclass.h
+ 
+@@ -1572,17 +1572,6 @@ rebasePE : Extensions $(PERLDLL) $(NORMALIZE_DYN) $(PERLEXE)
+ .ENDIF
+ 	$(NOOP)
+ 
+-PostExt : ..\lib\Storable\Limit.pm
+-	$(NOOP)
+-
+-# we need the exe, perl(ver).dll, and the Exporter, Storable, Win32 extensions
+-# rebasePE most of that, including adjustment for static builds, so we
+-# just need non-xs extensions
+-..\lib\Storable\Limit.pm : rebasePE Extensions_nonxs
+-	cd ..\dist\Storable && $(MAKE) lib\Storable\Limit.pm
+-	if not exist ..\lib\Storable mkdir ..\lib\Storable
+-	copy ..\dist\Storable\lib\Storable\Limit.pm ..\lib\Storable\Limit.pm
+-
+ #-------------------------------------------------------------------------------
+ 
+ 
+@@ -1657,7 +1646,7 @@ distclean: realclean
+ 	-del /f $(LIBDIR)\Time\HiRes.pm
+ 	-del /f $(LIBDIR)\Unicode\Normalize.pm
+ 	-del /f $(LIBDIR)\Math\BigInt\FastCalc.pm
+-	-del /f $(LIBDIR)\Storable.pm $(LIBDIR)\Storable\Limit.pm
++	-del /f $(LIBDIR)\Storable.pm
+ 	-del /f $(LIBDIR)\Win32.pm
+ 	-del /f $(LIBDIR)\Win32CORE.pm
+ 	-del /f $(LIBDIR)\Win32API\File.pm
+-- 
+2.21.0
+
+
+From 13ba96f1b4b43793549a74f0d339d8534ae551ff Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Thu, 25 Apr 2019 23:19:43 +0200
+Subject: locale.c: cast to char before comparing with a char constant.
+
+
+diff --git a/locale.c b/locale.c
+index 7653340..fc21330 100644
+--- a/locale.c
++++ b/locale.c
+@@ -4927,7 +4927,7 @@ Perl__is_cur_LC_category_utf8(pTHX_ int category)
+         Copy(delimited, utf8ness_cache, input_name_len_with_overhead - 1, char);
+         utf8ness_cache[input_name_len_with_overhead - 1] = is_utf8 + '0';
+ 
+-        if ((PL_locale_utf8ness[strlen(PL_locale_utf8ness)-1]
++        if ((char)(PL_locale_utf8ness[strlen(PL_locale_utf8ness)-1]
+                                                 & (PERL_UINTMAX_T) ~1) != '0')
+         {
+             Perl_croak(aTHX_
+-- 
+2.21.0
+

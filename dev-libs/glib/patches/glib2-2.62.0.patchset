@@ -1,0 +1,249 @@
+From 8953ca94d555aeadcc1e2b1bd4219b50af6f7aef Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 29 Jul 2017 12:13:00 +0200
+Subject: g_dbus_message_print: use B_PRIiDEV on Haiku
+
+because Haiku doesn't define major() and minor()
+
+diff --git a/gio/gdbusmessage.c b/gio/gdbusmessage.c
+index 852a704..968d33f 100644
+--- a/gio/gdbusmessage.c
++++ b/gio/gdbusmessage.c
+@@ -35,8 +35,12 @@
+ #elif MAJOR_IN_TYPES
+ #include <sys/types.h>
+ #else
++#ifdef __HAIKU__
++#include <SupportDefs.h>
++#else
+ #define MAJOR_MINOR_NOT_FOUND 1
+ #endif
++#endif
+ 
+ #include "gdbusutils.h"
+ #include "gdbusmessage.h"
+@@ -3514,8 +3518,14 @@ g_dbus_message_print (GDBusMessage *message,
+               if (fstat (fds[n], &statbuf) == 0)
+                 {
+ #ifndef MAJOR_MINOR_NOT_FOUND                       
++#ifdef __HAIKU__
++                  g_string_append_printf (fs, "%s" "dev=%" B_PRIiDEV, fs->len > 0 ? "," : "",
++                                          statbuf.st_dev);
++#else
++
+                   g_string_append_printf (fs, "%s" "dev=%d:%d", fs->len > 0 ? "," : "",
+                                           (gint) major (statbuf.st_dev), (gint) minor (statbuf.st_dev));
++#endif
+ #endif                  
+                   g_string_append_printf (fs, "%s" "mode=0%o", fs->len > 0 ? "," : "",
+                                           (guint) statbuf.st_mode);
+@@ -3526,9 +3536,14 @@ g_dbus_message_print (GDBusMessage *message,
+                   g_string_append_printf (fs, "%s" "gid=%u", fs->len > 0 ? "," : "",
+                                           (guint) statbuf.st_gid);
+ #ifndef MAJOR_MINOR_NOT_FOUND                     
++#ifdef __HAIKU__
++                  g_string_append_printf (fs, "%s" "rdev=%" B_PRIiDEV, fs->len > 0 ? "," : "",
++                                          statbuf.st_rdev);
++#else
+                   g_string_append_printf (fs, "%s" "rdev=%d:%d", fs->len > 0 ? "," : "",
+                                           (gint) major (statbuf.st_rdev), (gint) minor (statbuf.st_rdev));
+ #endif                  
++#endif
+                   g_string_append_printf (fs, "%s" "size=%" G_GUINT64_FORMAT, fs->len > 0 ? "," : "",
+                                           (guint64) statbuf.st_size);
+                   g_string_append_printf (fs, "%s" "atime=%" G_GUINT64_FORMAT, fs->len > 0 ? "," : "",
+-- 
+2.23.0
+
+
+From bee7a2522d34ee9e10e7e40d3e5987386c6fbb61 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 29 Jul 2017 12:19:31 +0200
+Subject: gunixmounts.c: on Haiku
+
+* define get_mtab_minitor_file() and _g_get_unix_mounts()
+* like Inerix, _g_get_unix_mount_points() calls _g_get_unix_mounts().
+
+diff --git a/gio/gunixmounts.c b/gio/gunixmounts.c
+index cf73fe5..88795f4 100644
+--- a/gio/gunixmounts.c
++++ b/gio/gunixmounts.c
+@@ -948,7 +948,18 @@ _g_get_unix_mounts (void)
+ 
+   return return_list;
+ }
++#elif defined(__HAIKU__)
++static char *
++get_mtab_monitor_file (void)
++{
++  return NULL;
++}
+ 
++static GList *
++_g_get_unix_mounts (void)
++{
++  return NULL;
++}
+ /* Common code {{{2 */
+ #else
+ #error No _g_get_unix_mounts() implementation for system
+@@ -1464,8 +1475,8 @@ _g_get_unix_mount_points (void)
+   
+   return g_list_reverse (return_list);
+ }
+-/* Interix {{{2 */
+-#elif defined(__INTERIX)
++/* Interix, Haiku {{{2 */
++#elif defined(__INTERIX) || defined(__HAIKU__)
+ static GList *
+ _g_get_unix_mount_points (void)
+ {
+-- 
+2.23.0
+
+
+From f64e4c89849681b3807501b504cbd02963af9f18 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 29 Jul 2017 12:32:14 +0200
+Subject: glib/gutils.c: on Haiku define load_user_special_dirs()
+
+use find_directory() from SupportDefs.h
+
+diff --git a/glib/gutils.c b/glib/gutils.c
+index 988d0a5..7248ead 100644
+--- a/glib/gutils.c
++++ b/glib/gutils.c
+@@ -74,6 +74,10 @@
+ #include "gwin32.h"
+ #endif
+ 
++#if defined(__HAIKU__)
++#include <FindDirectory.h>
++#include <fs_info.h>
++#endif
+ 
+ /**
+  * SECTION:misc_utils
+@@ -1513,6 +1517,35 @@ load_user_special_dirs (void)
+   load_user_special_dirs_macos (g_user_special_dirs);
+ }
+ 
++#elif defined(__HAIKU__)
++static void
++load_user_special_dirs (void)
++{
++  char path[B_PATH_NAME_LENGTH + B_FILE_NAME_LENGTH];
++
++  dev_t volume = dev_for_path("/boot");
++  if (find_directory(B_DESKTOP_DIRECTORY, volume, false, path, sizeof(path))
++      == B_OK) {
++    g_user_special_dirs[G_USER_DIRECTORY_DESKTOP] = g_strdup(path);
++    g_user_special_dirs[G_USER_DIRECTORY_DOWNLOAD] = g_strdup(path);
++  } else {
++    g_user_special_dirs[G_USER_DIRECTORY_DOCUMENTS] = NULL;
++    g_user_special_dirs[G_USER_DIRECTORY_DESKTOP] = NULL;
++  }
++
++  if (find_directory(B_USER_DIRECTORY, volume, false, path, sizeof(path))
++      == B_OK) {
++    g_user_special_dirs[G_USER_DIRECTORY_DOCUMENTS] = g_strdup(path);
++  } else
++    g_user_special_dirs[G_USER_DIRECTORY_DOWNLOAD] = NULL;
++
++  g_user_special_dirs[G_USER_DIRECTORY_MUSIC] = NULL;
++  g_user_special_dirs[G_USER_DIRECTORY_PICTURES] = NULL;
++  g_user_special_dirs[G_USER_DIRECTORY_PUBLIC_SHARE] = NULL;
++  g_user_special_dirs[G_USER_DIRECTORY_TEMPLATES] = NULL;
++  g_user_special_dirs[G_USER_DIRECTORY_VIDEOS] = NULL;
++}
++
+ #elif defined(G_OS_WIN32)
+ 
+ static void
+-- 
+2.23.0
+
+
+From d7c2d78ee7c9447765ec07e802ab0b2856e352a6 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 7 Sep 2019 15:24:28 +0200
+Subject: _SC_HOST_NAME_MAX is not defined on H1B1
+
+
+diff --git a/glib/gutils.c b/glib/gutils.c
+index 7248ead..a27c429 100644
+--- a/glib/gutils.c
++++ b/glib/gutils.c
+@@ -996,7 +996,11 @@ g_get_host_name (void)
+       const gsize size_large = (gsize) 256 * 256;
+       gchar *tmp;
+ 
++#ifdef __HAIKU__
++      max = 0;
++#else
+       max = sysconf (_SC_HOST_NAME_MAX);
++#endif
+       if (max > 0 && max <= G_MAXSIZE - 1)
+         size = (gsize) max + 1;
+       else
+-- 
+2.23.0
+
+
+From 69f610c998a72ed4ed06b26e632f4269d9bab8cc Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 23 Nov 2019 20:10:10 +0100
+Subject: Haiku patch for x86
+
+
+diff --git a/meson.build b/meson.build
+index 717d1bc..5b25886 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1324,14 +1324,14 @@ if sizet_size == short_size
+   glibconfig_conf.set_quoted('gsize_format', 'hu')
+   glibconfig_conf.set_quoted('gssize_format', 'hi')
+   glibconfig_conf.set('glib_msize_type', 'SHRT')
+-elif sizet_size == int_size
++elif sizet_size == int_size and host_system != 'haiku'
+   glibconfig_conf.set('glib_size_type_define', 'int')
+   glibconfig_conf.set_quoted('gsize_modifier', '')
+   glibconfig_conf.set_quoted('gssize_modifier', '')
+   glibconfig_conf.set_quoted('gsize_format', 'u')
+   glibconfig_conf.set_quoted('gssize_format', 'i')
+   glibconfig_conf.set('glib_msize_type', 'INT')
+-elif sizet_size == long_size
++elif sizet_size == long_size or host_system == 'haiku'
+   glibconfig_conf.set('glib_size_type_define', 'long')
+   glibconfig_conf.set_quoted('gsize_modifier', 'l')
+   glibconfig_conf.set_quoted('gssize_modifier', 'l')
+diff --git a/tests/mapping-test.c b/tests/mapping-test.c
+index ad776fa..49d2ea4 100644
+--- a/tests/mapping-test.c
++++ b/tests/mapping-test.c
+@@ -182,6 +182,10 @@ test_private (void)
+   g_message ("test_private: ok");
+ }
+ 
++#ifdef __HAIKU__
++#include <SupportDefs.h>
++#endif
++
+ static void
+ test_child_private (gchar *argv0)
+ {
+@@ -208,7 +212,11 @@ test_child_private (gchar *argv0)
+   signal (SIGUSR1, handle_usr1);
+ #endif
+ 
++#ifdef __HAIKU__
++  g_snprintf (pid, sizeof(pid), B_PRId32, getpid ());
++#else
+   g_snprintf (pid, sizeof(pid), "%d", getpid ());
++#endif
+   child_argv[0] = argv0;
+   child_argv[1] = "mapchild";
+   child_argv[2] = pid;
+-- 
+2.23.0
+
