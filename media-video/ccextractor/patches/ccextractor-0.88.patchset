@@ -1,0 +1,136 @@
+From 5ef10d9b82b160cbb3f8318ba1c059144e96b96a Mon Sep 17 00:00:00 2001
+From: sfanxiang <sfanxiang@gmail.com>
+Date: Mon, 8 Jan 2018 18:08:11 +0000
+Subject: port to Haiku
+
+
+diff --git a/linux/build b/linux/build
+index c5c8b2e..0fc55fb 100755
+--- a/linux/build
++++ b/linux/build
+@@ -1,11 +1,15 @@
+ #!/bin/bash
+-BLD_FLAGS="-std=gnu99 -Wno-write-strings -DGPAC_CONFIG_LINUX -D_FILE_OFFSET_BITS=64 -DVERSION_FILE_PRESENT -DENABLE_OCR -DFT2_BUILD_LIBRARY -DGPAC_DISABLE_VTT -DGPAC_DISABLE_OD_DUMP"
++INCLUDE_DIR=$(finddir B_SYSTEM_HEADERS_DIRECTORY)
++BLD_FLAGS="-std=gnu99 -Wno-write-strings -DGPAC_CONFIG_LINUX -D_FILE_OFFSET_BITS=64 -DVERSION_FILE_PRESENT -DENABLE_OCR -DFT2_BUILD_LIBRARY -DGPAC_DISABLE_VTT -DGPAC_DISABLE_OD_DUMP -D_BSD_SOURCE"
+ bit_os=$(getconf LONG_BIT)
+ if [ "$bit_os"=="64" ]
+ then
+     BLD_FLAGS="$BLD_FLAGS -DGPAC_64_BITS"
+ fi
+-BLD_INCLUDE="-I../src -I /usr/include/leptonica/ -I /usr/include/tesseract/ -I../src/lib_ccx/ -I../src/gpacmp4/ -I../src/libpng/ -I../src/zlib/ -I../src/zvbi -I../src/lib_hash -I../src/protobuf-c -I../src/utf8proc -I../src/freetype/include"
++BLD_INCLUDE="-I../src -I $INCLUDE_DIR/leptonica/ -I $INCLUDE_DIR/tesseract/ \
++	-I../src/lib_ccx/ -I../src/gpacmp4/ -I../src/libpng/ -I../src/zlib/ \
++	-I../src/zvbi -I../src/lib_hash -I../src/protobuf-c -I../src/utf8proc \
++	-I../src/freetype/include"
+ SRC_LIBPNG="$(find ../src/libpng/ -name '*.c')"
+ SRC_ZLIB="$(find ../src/zlib/ -name '*.c')"
+ SRC_ZVBI="$(find ../src/zvbi/ -name '*.c')"
+@@ -57,7 +61,7 @@ SRC_FREETYPE="../src/freetype/autofit/autofit.c
+         ../src/freetype/winfonts/winfnt.c"
+ API_WRAPPERS="$(find ../src/wrappers/ -name '*.c')"
+ BLD_SOURCES="../src/ccextractor.c $SRC_CCX $SRC_GPAC $SRC_ZLIB $SRC_ZVBI $SRC_LIBPNG $SRC_HASH $SRC_PROTOBUF $SRC_UTF8PROC $API_WRAPPERS $SRC_FREETYPE"
+-BLD_LINKER="-lm -zmuldefs -l tesseract -l lept"
++BLD_LINKER="-liconv -lnetwork -lm -zmuldefs -l tesseract -l lept"
+ 
+ echo "Running pre-build script..."
+ ./pre-build.sh
+diff --git a/src/gpacmp4/mp4.c b/src/gpacmp4/mp4.c
+index af7c00c..11e2ece 100644
+--- a/src/gpacmp4/mp4.c
++++ b/src/gpacmp4/mp4.c
+@@ -13,12 +13,12 @@
+ 
+ #define MEDIA_TYPE(type, subtype) (((u64)(type)<<32)+(subtype))
+ 
+-static short bswap16(short v)
++static short my_bswap16(short v)
+ {
+ 	return ((v >> 8) & 0x00FF) | ((v << 8) & 0xFF00);
+ }
+ 
+-static long bswap32(long v)
++static long my_bswap32(long v)
+ {
+ 	// For 0x12345678 returns 78563412	
+ 	long swapped=((v&0xFF)<<24) | ((v&0xFF00)<<8) | ((v&0xFF0000) >>8) | ((v&0xFF000000) >>24);	
+@@ -51,10 +51,10 @@ static int process_avc_sample(struct lib_ccx_ctx *ctx, u32 timescale, GF_AVCConf
+ 				nal_length = s->data[i];
+ 				break;
+ 			case 2:
+-				nal_length = bswap16(*(short* )&s->data[i]);
++				nal_length = my_bswap16(*(short* )&s->data[i]);
+ 				break;
+ 			case 4:
+-				nal_length = bswap32(*(long* )&s->data[i]);
++				nal_length = my_bswap32(*(long* )&s->data[i]);
+ 				break;
+ 		}
+ 		i += c->nal_unit_size;
+diff --git a/src/gpacmp4/os_file.c b/src/gpacmp4/os_file.c
+index 3a38eb5..f398ec9 100644
+--- a/src/gpacmp4/os_file.c
++++ b/src/gpacmp4/os_file.c
+@@ -50,6 +50,14 @@
+ #include <errno.h>
+ #endif
+ 
++#ifdef __HAIKU__
++typedef off_t off64_t;
++
++#define ftello64(stream) ftello(stream)
++#define fseeko64(stream, offset, whence) fseeko(stream, offset, whence)
++#define fopen64(filename, type) fopen(filename, type)
++#endif
++
+ #endif
+ 
+ 
+diff --git a/src/lib_ccx/matroska.c b/src/lib_ccx/matroska.c
+index 0b0cf39..86ea90f 100644
+--- a/src/lib_ccx/matroska.c
++++ b/src/lib_ccx/matroska.c
+@@ -585,7 +585,7 @@ void parse_simple_block(struct matroska_ctx* mkv_ctx, ULLONG frame_timestamp) {
+     free(frame.data);
+ }
+ 
+-static long bswap32(long v)
++static long my_bswap32(long v)
+ {
+     // For 0x12345678 returns 78563412
+     long swapped=((v&0xFF)<<24) | ((v&0xFF00)<<8) | ((v&0xFF0000) >>8) | ((v&0xFF000000) >>24);
+@@ -610,7 +610,7 @@ int process_avc_frame_mkv(struct matroska_ctx* mkv_ctx, struct matroska_avc_fram
+     {
+         uint32_t nal_length;
+ 
+-        nal_length = bswap32(*(long* ) &frame.data[i]);
++        nal_length = my_bswap32(*(long* ) &frame.data[i]);
+         i += nal_unit_size;
+ 
+         if (nal_length>0)
+diff --git a/src/lib_hash/sha2.h b/src/lib_hash/sha2.h
+index 0e143a1..3a72d6b 100644
+--- a/src/lib_hash/sha2.h
++++ b/src/lib_hash/sha2.h
+@@ -42,9 +42,9 @@
+  */
+ #include <sys/types.h>
+ 
+-#ifdef _WIN32
++#if defined(_WIN32) || defined(__HAIKU__)
+ 
+-#include <inttypes.h>
++#include <stdint.h>
+ 
+ #define u_int8_t  uint8_t
+ #define u_int32_t uint32_t
+@@ -190,4 +190,4 @@ char* SHA512_Data();
+ 
+ #endif /* NOPROTO */
+ 
+-#endif /* __SHA2_H__ */
+\ No newline at end of file
++#endif /* __SHA2_H__ */
+-- 
+2.24.0
+
