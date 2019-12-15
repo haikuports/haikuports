@@ -1,0 +1,228 @@
+From 25dade6bac63a20f5236bf8c9ade4d2d0e92863f Mon Sep 17 00:00:00 2001
+From: Ra-V2 <rav.bernacki@gmail.com>
+Date: Sun, 15 Dec 2019 13:29:16 +0100
+Subject: haiku support
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1debc8b..61a5400 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,4 +1,4 @@
+-cmake_minimum_required(VERSION 2.8.7)
++cmake_minimum_required(VERSION 3.7)
+ project(caveproductions)
+ 
+ #-------------------------------------------------------------------------------
+@@ -11,10 +11,15 @@ option(TOOLS "Builds with tools" ON)
+ option(VERBOSE "Print debug information" OFF)
+ option(COVERAGE "Compile with test coverage" OFF)
+ option(USE_CCACHE "Use ccache" ON)
++# The build system will search for system libs, if it can't find them (e.g. via pkg-config)
++# it will take those that are bundled under src/libs. If you don't want that for some reason,
++# you can set this to ON and the libs dir will not be taken into account at all.
++option(FORCE_USE_SYSTEM_LIBS "Use system libs" OFF)
+ option(CAVEEXPRESS "Build caveexpress" ON)
+ option(CAVEPACKER "Build cavepacker" ON)
+ option(MINIRACER "Build miniracer" OFF)
+ option(SANITIZER "Build with sanitizer support if available" ON)
++option(ANDROID_INSTALL_PACKAGES "Install required android packages" ON)
+ 
+ #-------------------------------------------------------------------------------
+ # end options
+@@ -31,6 +36,11 @@ else()
+ 	set(RELEASE True)
+ endif()
+ 
++if (BUILD_SHARED_LIBS)
++	message(STATUS "Forcing building the internal libraries as static, even though BUILD_SHARED_LIBS=ON was requested.")
++	set(BUILD_SHARED_LIBS OFF)
++endif()
++
+ set(ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR} CACHE STRING "Root dir")
+ message(STATUS "Place binaries in ${ROOT_DIR}")
+ # First for the generic no-config case (e.g. with mingw)
+@@ -75,6 +85,8 @@ endif()
+ cp_message("ROOT_DIR: ${ROOT_DIR}")
+ cp_message("CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
+ cp_message("PROJECT_SOURCE_DIR: ${PROJECT_SOURCE_DIR}")
++message(STATUS "CMAKE_SYSTEM_NAME: ${CMAKE_SYSTEM_NAME}")
++message(STATUS "CMAKE_HOST_SYSTEM_NAME: ${CMAKE_HOST_SYSTEM_NAME}")
+ 
+ #-------------------------------------------------------------------------------
+ # variables
+@@ -82,14 +94,16 @@ cp_message("PROJECT_SOURCE_DIR: ${PROJECT_SOURCE_DIR}")
+ 
+ if (${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
+ 	set(WINDOWS 1)
++elseif (${CMAKE_SYSTEM_NAME} STREQUAL "Android")
++	set(LINUX 1)
+ elseif (${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
+ 	set(DARWIN 1)
+ elseif (${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
+ 	set(LINUX 1)
+-elseif (${CMAKE_SYSTEM_NAME} STREQUAL "Android")
+-	set(LINUX 1)
+ elseif (${CMAKE_SYSTEM_NAME} STREQUAL "Emscripten")
+ 	set(EMSCRIPTEN 1)
++elseif (${CMAKE_SYSTEM_NAME} STREQUAL "Haiku")
++	set(HAIKU 1)
+ else()
+ 	message(WARNING "Unknown host system: ${CMAKE_SYSTEM_NAME}. Default to linux")
+ 	set(LINUX 1)
+@@ -99,10 +113,17 @@ include(${CP_CMAKE_DIR}/pack.cmake)
+ include(CPack)
+ 
+ # on mac it e.g. finds the gui launcher - this is not what we want - find a proper way to handle this
+-if (LINUX)
++if (NOT ${CMAKE_HOST_SYSTEM_NAME} STREQUAL "Darwin")
+ 	find_host_program(TEXTUREPACKER_BIN NAMES TexturePacker)
+-	if (${TEXTUREPACKER_BIN})
+-		message(STATUS "Found TexturePacker: ${TEXTUREPACKER_BIN}")
++	if (TEXTUREPACKER_BIN)
++		execute_process(COMMAND ${TEXTUREPACKER_BIN} --format CaveExpress ERROR_VARIABLE TEXTURE_PACKER_EXPORTER)
++		if (TEXTURE_PACKER_EXPORTER MATCHES "Unknown format")
++			message(STATUS "Found TexturePacker: ${TEXTUREPACKER_BIN}")
++			message(WARNING "but without the needed exporter. Find it in contrib/assets/png-packed/exporter. Check out the HOWTO.md in that directory.")
++			unset(TEXTUREPACKER_BIN)
++		else()
++			message(STATUS "Found TexturePacker: ${TEXTUREPACKER_BIN}")
++		endif()
+ 	else()
+ 		message(STATUS "Could not find TexturePacker")
+ 	endif()
+@@ -112,6 +133,8 @@ if (NOT CMAKE_TOOLCHAIN_FILE)
+ 		include(${CP_CMAKE_DIR}/toolchains/windows-toolchain.cmake)
+ 	elseif (DARWIN)
+ 		include(${CP_CMAKE_DIR}/toolchains/darwin-toolchain.cmake)
++	elseif (HAIKU)
++		include(${CP_CMAKE_DIR}/toolchains/haiku-toolchain.cmake)
+ 	else()
+ 		include(${CP_CMAKE_DIR}/toolchains/linux-toolchain.cmake)
+ 	endif()
+@@ -129,13 +152,14 @@ elseif (NACL)
+ 	include(${CP_CMAKE_DIR}/nacl.cmake)
+ elseif (EMSCRIPTEN)
+ 	include(${CP_CMAKE_DIR}/emscripten.cmake)
++elseif (HAIKU)
++#	include(${CP_CMAKE_DIR}/haiku.cmake)
+ endif()
+ 
+ if (PKGDATADIR)
+ 	add_definitions(-DPKGDATADIR="${PKGDATADIR}")
+-	message(STATUS "You specified a package data dir - but this means, you have to rebuild for each game.")
+-	message(STATUS "If you don't do this, you get all the data of all the games in the same directory.")
+-	message(STATUS "See the available options and disable all but one game for each build.")
++	message(STATUS "You specified a package data dir - the game will append the game name to this directory.")
++	message(STATUS "So you get e.g. ${PKGDATADIR}/caveexpress as final directory.")
+ endif()
+ 
+ if (NOT NETWORKING)
+@@ -167,12 +191,23 @@ include_directories(${CMAKE_BINARY_DIR})
+ 
+ include_directories(src)
+ include_directories(src/modules)
+-if (UNITTESTS)
+-	include_directories(src/libs/gtest)
+-	include_directories(src/libs/gtest/include)
+-endif()
++# Packagers might want to remove this
++if (EXISTS "${ROOT_DIR}/src/libs/" AND NOT FORCE_USE_SYSTEM_LIBS)
++	if (UNITTESTS)
++		include_directories(src/libs/gtest)
++		include_directories(src/libs/gtest/include)
++	endif()
+ 
+-add_subdirectory(src/libs)
++	add_subdirectory(src/libs)
++else()
++	include(FindPkgConfig)
++	PKG_SEARCH_MODULE(SDL2 REQUIRED sdl2>=2.0.3)
++	PKG_SEARCH_MODULE(SDL2IMAGE REQUIRED SDL2_image>=2.0.0)
++	PKG_SEARCH_MODULE(LUA5.2 REQUIRED lua5.2)
++	PKG_SEARCH_MODULE(BOX2D REQUIRED box2d>=2.3.0)
++	PKG_SEARCH_MODULE(SQLITE3 REQUIRED sqlite3)
++	include_directories(${SDL2_INCLUDE_DIRS} ${SDL2IMAGE_INCLUDE_DIRS})
++endif()
+ 
+ # TODO move into lib cmakefiles
+ if (LUA5.2_FOUND)
+@@ -193,4 +228,4 @@ if (MINIRACER)
+ endif()
+ if (UNITTESTS)
+ 	add_subdirectory(src/tests)
+-endif()
++endif()
+\ No newline at end of file
+diff --git a/cmake/toolchains/haiku-toolchain.cmake b/cmake/toolchains/haiku-toolchain.cmake
+new file mode 100644
+index 0000000..7045206
+--- /dev/null
++++ b/cmake/toolchains/haiku-toolchain.cmake
+@@ -0,0 +1,62 @@
++include(CheckFunctionExists)
++include(CheckLibraryExists)
++include(CheckCCompilerFlag)
++include(CheckIncludeFiles)
++
++set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
++find_package(Threads)
++
++set(CMAKE_REQUIRED_FLAGS "-Werror -fsanitize=undefined")
++check_c_compiler_flag("-faddress-sanitizer" HAVE_FLAG_SANITIZE_UNDEFINED)
++set(CMAKE_REQUIRED_FLAGS "-Werror -fsanitize=address")
++check_c_compiler_flag("-fsanitize=address" HAVE_FLAG_SANITIZE_ADDRESS)
++unset(CMAKE_REQUIRED_FLAGS)
++
++if (SANITIZER)
++	if (HAVE_FLAG_SANITIZE_UNDEFINED)
++		set(SANITIZE_FLAGS "${SANITIZE_FLAGS} -fsanitize=undefined")
++	endif()
++	if (HAVE_FLAG_SANITIZE_ADDRESS)
++		set(SANITIZE_FLAGS "${SANITIZE_FLAGS} -fsanitize=address")
++	endif()
++endif()
++
++set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} ${SANITIZE_FLAGS}")
++
++if (CMAKE_COMPILER_IS_GNUCXX)
++	check_function_exists(__atomic_fetch_add_4 HAVE___ATOMIC_FETCH_ADD_4)
++	if (NOT HAVE___ATOMIC_FETCH_ADD_4)
++		check_library_exists(atomic __atomic_fetch_add_4 "" HAVE_LIBATOMIC)
++		if (HAVE_LIBATOMIC)
++			set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -latomic")
++		endif()
++	endif()
++endif()
++
++set(CMAKE_C_STANDARD_LIBRARIES "${CMAKE_C_STANDARD_LIBRARIES} ${CMAKE_DL_LIBS}")
++
++check_include_files(execinfo.h HAVE_EXECINFO_H)
++if (HAVE_EXECINFO_H)
++	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -lexecinfo")
++	set(CMAKE_C_STANDARD_LIBRARIES "${CMAKE_C_STANDARD_LIBRARIES} -lexecinfo")
++	set(CMAKE_CXX_STANDARD_LIBRARIES "${CMAKE_CXX_STANDARD_LIBRARIES} -lexecinfo")
++endif()
++
++set(CURSES_NEED_NCURSES TRUE)
++find_package(Curses)
++if (NOT CURSES_FOUND)
++	set(CURSES_LIBRARIES "")
++endif()
++set(HAVE_NCURSES_H ${CURSES_HAVE_NCURSES_H})
++check_library_exists(root clock_gettime "posix/time.h" HAVE_CLOCKGETTIME)
++
++set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -Wcast-qual -Wcast-align -Wpointer-arith -Wno-long-long -Wno-multichar -Wshadow -Wall -Wextra -Wno-sign-compare -Wno-unused-parameter -Wreturn-type -Wwrite-strings -Wno-variadic-macros -Wno-unknown-pragmas")
++if (CMAKE_USE_PTHREADS_INIT)
++	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -lpthread")
++endif()
++set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_XOPEN_SOURCE -D_FORTIFY_SOURCE=2 -DNDEBUG -fexpensive-optimizations -fomit-frame-pointer -O3")
++set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -DDEBUG -fno-omit-frame-pointer ${SANITIZE_FLAGS}")
++
++set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CMAKE_C_FLAGS} -Wnon-virtual-dtor")
++set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${CMAKE_C_FLAGS_RELEASE}")
++set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} ${CMAKE_C_FLAGS_DEBUG}")
+\ No newline at end of file
+-- 
+2.23.0
+
