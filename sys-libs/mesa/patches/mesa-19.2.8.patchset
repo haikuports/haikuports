@@ -1,0 +1,135 @@
+From b9e747540a14b3debc90f078a495ed2d1efda0a8 Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Wed, 1 Jan 2020 05:47:17 +0900
+Subject: [PATCH 1/2] implement u_process and u_thread for Haiku
+
+---
+ src/util/u_process.c | 20 ++++++++++++++++++++
+ src/util/u_thread.h  |  8 +++++++-
+ 2 files changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/src/util/u_process.c b/src/util/u_process.c
+index 3713353..5a98d85 100644
+--- a/src/util/u_process.c
++++ b/src/util/u_process.c
+@@ -119,6 +119,26 @@ __getProgramName()
+     return progname;
+ }
+ 
++#    define GET_PROGRAM_NAME() __getProgramName()
++#elif defined(__HAIKU__)
++#    include <libgen.h>
++extern char **__libc_argv;
++extern int __libc_argc;
++
++static const char *
++__getProgramName()
++{
++    static const char *progname;
++
++    if (progname == NULL) {
++        char *n = strdup(__libc_argv[0]);
++        if (n != NULL) {
++            progname = basename(n);
++        }
++    }
++    return progname;
++}
++
+ #    define GET_PROGRAM_NAME() __getProgramName()
+ #endif
+ 
+diff --git a/src/util/u_thread.h b/src/util/u_thread.h
+index 6fc923c..5538f15 100644
+--- a/src/util/u_thread.h
++++ b/src/util/u_thread.h
+@@ -40,6 +40,10 @@
+ #endif
+ #endif
+ 
++#ifdef __HAIKU__
++#include <OS.h>
++#endif
++
+ #ifdef __FreeBSD__
+ #define cpu_set_t cpuset_t
+ #endif
+@@ -77,6 +81,8 @@ static inline void u_thread_setname( const char *name )
+    pthread_setname_np(pthread_self(), "%s", (void *)name);
+ #elif DETECT_OS_APPLE
+    pthread_setname_np(name);
++#elif __HAIKU__
++   rename_thread(find_thread(NULL), name);
+ #else
+ #error Not sure how to call pthread_setname_np
+ #endif
+@@ -173,7 +179,7 @@ static inline bool u_thread_is_self(thrd_t thread)
+  * util_barrier
+  */
+ 
+-#if defined(HAVE_PTHREAD) && !defined(__APPLE__)
++#if defined(HAVE_PTHREAD) && !defined(__APPLE__) && !defined(__HAIKU__)
+ 
+ typedef pthread_barrier_t util_barrier;
+ 
+-- 
+2.24.1
+
+From eaaabbbc060c08cde0c13ff0694f943393d49aaf Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Wed, 1 Jan 2020 06:00:33 +0900
+Subject: [PATCH 2/2] fix build for Haiku, disable HGL
+
+---
+ meson.build          | 7 +++++--
+ src/util/meson.build | 2 +-
+ 2 files changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index d584152..eaf4586 100644
+--- a/meson.build
++++ b/meson.build
+@@ -284,7 +284,7 @@ with_platform_android = _platforms.contains('android')
+ with_platform_x11 = _platforms.contains('x11')
+ with_platform_wayland = _platforms.contains('wayland')
+ with_platform_drm = _platforms.contains('drm')
+-with_platform_haiku = _platforms.contains('haiku')
++with_platform_haiku = false # _platforms.contains('haiku')
+ with_platform_surfaceless = _platforms.contains('surfaceless')
+ 
+ with_platforms = false
+@@ -378,7 +378,8 @@ if with_egl and not (with_platform_drm or with_platform_surfaceless or with_plat
+ endif
+ 
+ # Android uses emutls for versions <= P/28. For USE_ELF_TLS we need ELF TLS.
+-if not with_platform_android or get_option('platform-sdk-version') >= 29
++# Haiku do not support ELF TLS for now
++if (not with_platform_android or get_option('platform-sdk-version') >= 29) and (not _platforms.contains('haiku'))
+   pre_args += '-DUSE_ELF_TLS'
+ endif
+ 
+@@ -1150,6 +1151,8 @@ dep_expat = dependency('expat')
+ # this only exists on linux so either this is linux and it will be found, or
+ # it's not linux and wont
+ dep_m = cc.find_library('m', required : false)
++# Haiku
++dep_network = cc.find_library('network', required : false)
+ 
+ # Check for libdrm. Various drivers have different libdrm version requirements,
+ # but we always want to use the same version for all libdrm modules. That means
+diff --git a/src/util/meson.build b/src/util/meson.build
+index cf1616e..0490deb 100644
+--- a/src/util/meson.build
++++ b/src/util/meson.build
+@@ -138,7 +138,7 @@ _libmesa_util = static_library(
+   'mesa_util',
+   [files_mesa_util, format_srgb],
+   include_directories : inc_common,
+-  dependencies : [dep_zlib, dep_clock, dep_thread, dep_atomic, dep_m],
++  dependencies : [dep_zlib, dep_clock, dep_thread, dep_atomic, dep_m, dep_network],
+   c_args : [c_msvc_compat_args, c_vis_args],
+   build_by_default : false
+ )
+-- 
+2.24.1
+
