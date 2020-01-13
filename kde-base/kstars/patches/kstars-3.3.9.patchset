@@ -1,0 +1,160 @@
+From 06785240556b89317d27f6117c6e3b01c6b5e15d Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 8 Jan 2020 12:20:41 +1000
+Subject: Fix build for Haiku
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 93b6b35..17a6d29 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -290,6 +290,19 @@ if (ANDROID)
+ endif ()
+ 
+ # Add security (hardening flags)
++IF (HAIKU)
++	SET(SEC_COMP_FLAGS "-D_FORTIFY_SOURCE=2 -Wcast-align -Wa,--noexecstack")
++	SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${SEC_COMP_FLAGS}")
++	SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SEC_COMP_FLAGS}")
++	SET(SEC_LINK_FLAGS "-Wl,-z,nodump -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now")
++	IF("${CMAKE_SIZEOF_VOID_P}" EQUAL "8")
++		MESSAGE("++ 64 bit architecture")
++		SET(SEC_LINK_FLAGS "${SEC_LINK_FLAGS} -pie")
++		SET(SEC_COMP_FLAGS "${SEC_COMP_FLAGS} -fPIE")
++	ENDIF()
++	SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${SEC_LINK_FLAGS}")
++	SET(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${SEC_LINK_FLAGS}")
++ELSE ()
+ IF (UNIX OR APPLE OR ANDROID)
+     SET(SEC_COMP_FLAGS "-D_FORTIFY_SOURCE=2 -fstack-protector-all -Wcast-align -fPIE")
+     IF (NOT ANDROID AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND NOT APPLE)
+@@ -311,6 +324,7 @@ IF (UNIX OR APPLE OR ANDROID)
+     SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${SEC_LINK_FLAGS}")
+     SET(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${SEC_LINK_FLAGS}")
+ ENDIF ()
++ENDIF ()
+ 
+ # Clang Format support
+ IF (UNIX OR APPLE)
+@@ -428,7 +442,7 @@ endif()
+ add_subdirectory(kstars)
+ add_subdirectory(datahandlers)
+ 
+-IF (NOT ANDROID)
++IF (NOT ANDROID AND NOT HAIKU)
+     IF (BUILD_TESTING)
+     enable_testing(true)
+     add_subdirectory(Tests)
+diff --git a/datahandlers/catalogdb.cpp b/datahandlers/catalogdb.cpp
+index 1718342..a76c208 100644
+--- a/datahandlers/catalogdb.cpp
++++ b/datahandlers/catalogdb.cpp
+@@ -906,6 +906,11 @@ void CatalogDB::GetAllObjects(const QString &catalog, QList<SkyObject *> &sky_li
+     //     qWarning() << get_query.lastError();
+     //     qWarning() << FindCatalog(catalog);
+ 
++#if defined(__x86_64__) && defined(__HAIKU__)
++	if (FindCatalog(catalog) < 0)
++		return;
++#endif
++
+     if (!get_query.exec())
+     {
+         qWarning() << get_query.lastQuery();
+diff --git a/kstars/auxiliary/thememanager.cpp b/kstars/auxiliary/thememanager.cpp
+index a0e2b5d..5f76174 100644
+--- a/kstars/auxiliary/thememanager.cpp
++++ b/kstars/auxiliary/thememanager.cpp
+@@ -153,9 +153,11 @@ void Manager::slotChangePalette()
+ 
+     if (theme == "Macintosh" || theme == "White Balance" || theme == "High Key" || (theme == "Default" && currentDesktopdefaultTheme().contains("Dark") == false))
+         themeIconType = BREEZE_THEME;
+-
++#if defined(Q_OS_HAIKU)
++	if (theme == "Default")
++		themeIconType = SYSTEM_THEME;
+     setIconTheme(themeIconType);
+-
++#endif
+     QString filename        = d->themeMap.value(theme);
+     KSharedConfigPtr config = KSharedConfig::openConfig(filename);
+     // hint for the style to synchronize the color scheme with the window manager/compositor
+@@ -177,6 +179,10 @@ void Manager::slotChangePalette()
+ 
+     if(theme == "Macintosh")
+         qApp->setStyle(QStyleFactory::create("macintosh"));
++#if defined(Q_OS_HAIKU)
++	else if(theme == "Default")
++		qApp->setStyle(QStyleFactory::create("haiku"));
++#endif
+     else
+         qApp->setStyle(QStyleFactory::create("Fusion"));
+ 
+@@ -402,6 +408,12 @@ void Manager::setIconTheme(IconTheme theme)
+     themeSearchPaths = themeSearchPaths << QStandardPaths::locate(QStandardPaths::GenericDataLocation, "icons", QStandardPaths::LocateDirectory);
+     QString resourcePath = QStandardPaths::locate(QStandardPaths::GenericDataLocation, "icons", QStandardPaths::LocateDirectory) + QDir::separator() + iconTheme + QDir::separator() + rccFile;
+     QResource::registerResource(resourcePath, "/icons/" + iconTheme);
++	#elif defined(Q_OS_HAIKU)
++	if (theme == SYSTEM_THEME)
++		iconTheme = "haiku";
++	themeSearchPaths = themeSearchPaths << QStandardPaths::locate(QStandardPaths::GenericDataLocation, "icons", QStandardPaths::LocateDirectory);
++	QString resourcePath = QStandardPaths::locate(QStandardPaths::GenericDataLocation, "icons", QStandardPaths::LocateDirectory) + QDir::separator() + iconTheme + QDir::separator() + rccFile;
++	QResource::registerResource(resourcePath, "/icons/" + iconTheme);
+     #else
+     //TODO On Linux on non-KDE Distros, find out if the themes are installed or not and perhaps warn the user
+     #endif
+diff --git a/kstars/auxiliary/thememanager.h b/kstars/auxiliary/thememanager.h
+index 8eafbfa..09bab99 100644
+--- a/kstars/auxiliary/thememanager.h
++++ b/kstars/auxiliary/thememanager.h
+@@ -42,7 +42,7 @@ class Manager : public QObject
+ 
+ public:
+ 
+-    typedef enum { BREEZE_THEME, BREEZE_DARK_THEME } IconTheme;
++    typedef enum { BREEZE_THEME, BREEZE_DARK_THEME, SYSTEM_THEME } IconTheme;
+ 
+     ~Manager();
+     static Manager* instance();
+diff --git a/kstars/htmesh/SpatialGeneral.h b/kstars/htmesh/SpatialGeneral.h
+index fa3ae42..660498a 100644
+--- a/kstars/htmesh/SpatialGeneral.h
++++ b/kstars/htmesh/SpatialGeneral.h
+@@ -101,7 +101,7 @@ const float64 gEpsilon = 1.0E-15;
+ // standard explicit template instantiation, define.
+ //
+ 
+-#if defined(__APPLE__)
++#if defined(__APPLE__) || defined(__HAIKU__)
+ #define LINKAGE
+ #endif
+ 
+diff --git a/kstars/main.cpp b/kstars/main.cpp
+index bdd17f3..93ceb4c 100644
+--- a/kstars/main.cpp
++++ b/kstars/main.cpp
+@@ -50,6 +50,11 @@
+ #include <QtGlobal>
+ #include <QTranslator>
+ 
++#ifdef Q_OS_HAIKU
++#include <unistd.h>
++#include <sys/types.h>
++#include <signal.h>
++#endif
+ 
+ #ifndef KSTARS_LITE
+ static const char description[] = I18N_NOOP("Desktop Planetarium");
+@@ -335,6 +340,9 @@ int main(int argc, char *argv[])
+     KStarsLite::createInstance(true);
+ 
+     app.exec();
++#endif
++#ifdef Q_OS_HAIKU
++	kill(::getpid(), SIGKILL);
+ #endif
+     return 0;
+ }
+-- 
+2.24.1
+
