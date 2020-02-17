@@ -157,3 +157,976 @@ index 7e0af61..4129c00 100644
 -- 
 2.24.0
 
+From 80e563fea7297204df63502de3967ba6ba3f2459 Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Sun, 2 Feb 2020 12:51:02 +0900
+Subject: CPack: Add HPKG generation support
+
+Use "make package" to get an hpkg out of any cmake-based buildsystem.
+
+Original author: Adrien Destugues<pulkomandy@pulkomandy.tk>
+---
+ Modules/CPackHpkg.cmake                  | 296 +++++++++++++
+ Source/CMakeLists.txt                    |   6 +
+ Source/CPack/cmCPackGeneratorFactory.cxx |  11 +
+ Source/CPack/cmCPackHpkgGenerator.cxx    | 509 +++++++++++++++++++++++
+ Source/CPack/cmCPackHpkgGenerator.h      |  82 ++++
+ 5 files changed, 904 insertions(+)
+ create mode 100644 Modules/CPackHpkg.cmake
+ create mode 100644 Source/CPack/cmCPackHpkgGenerator.cxx
+ create mode 100644 Source/CPack/cmCPackHpkgGenerator.h
+
+diff --git a/Modules/CPackHpkg.cmake b/Modules/CPackHpkg.cmake
+new file mode 100644
+index 0000000..772f422
+--- /dev/null
++++ b/Modules/CPackHpkg.cmake
+@@ -0,0 +1,296 @@
++##section Variables specific to CPack Haiku (HPKG) generator
++##end
++##module
++# - The builtin (binary) CPack Haiku generator (Haiku only)
++# CPackHaiku may be used to create Haiku packages using CPack.
++# CPackHaiku is a CPack generator thus it uses the CPACK_XXX variables
++# used by CPack : http://www.cmake.org/Wiki/CMake:CPackConfiguration.
++# CPackHaiku will work only on haiku as it uss the 'package' tool available
++# there. With the custom archive format and compression algorithm, there is
++# currently no better way.
++#
++# CPackHaiku has specific features which are controlled by
++# the specifics CPACK_HAIKU_XXX variables.You'll find a detailed usage on
++# the wiki:
++#  http://www.cmake.org/Wiki/CMake:CPackPackageGenerators#HAIKU_.28HAIKU_only.29
++# However as a handy reminder here comes the list of specific variables:
++##end
++#
++##variable
++# CPACK_HAIKU_PACKAGE_NAME
++#     Mandatory : YES
++#     Default   : CPACK_PACKAGE_NAME (lower case)
++#     The haiku package name
++##end
++##variable
++# CPACK_HAIKU_PACKAGE_VERSION
++#     Mandatory : YES
++#     Default   : CPACK_PACKAGE_VERSION
++#     The haiku package version
++##end
++##variable
++# CPACK_HAIKU_PACKAGE_REVISION
++#     Mandatory : YES
++#     Default   : 1
++#     The haiku package version
++##end
++##variable
++# CPACK_HAIKU_PACKAGE_ARCHITECTURE
++#     Mandatory : YES
++#     Default   : $ENV{BE_SYSTEM_CPU}, or x86_gcc2 if using gcc2.
++#     The haiku package architecture
++##end
++##variable
++# CPACK_HAIKU_PACKAGE_PACKAGER
++#     Mandatory : YES
++#     Default   : CPACK_PACKAGE_CONTACT
++#     The haiku package maintainer e-mail address
++##end
++##variable
++# CPACK_HAIKU_PACKAGE_VENDOR
++#     Mandatory : YES
++#     Default   : CPACK_PACKAGE_VENDOR
++#     The haiku package vendor
++##end
++##variable
++# CPACK_HAIKU_PACKAGE_DESCRIPTION
++#     Mandatory : YES
++#     Default   : CPACK_PACKAGE_DESCRIPTION
++#     The haiku package description
++##end
++##variable
++# CPACK_HAIKU_PACKAGE_DESCRIPTION_SUMMARY
++#     Mandatory : YES
++#     Default   : CPACK_PACKAGE_DESCRIPTION_SUMMARY
++#     The haiku package one-line description
++##end
++##variable
++# CPACK_HAIKU_PACKAGE_COPYRIGHT
++#     Mandatory : YES
++#     Default   : -
++#     The haiku package copyright holders
++##end
++##variable
++# CPACK_HAIKU_PACKAGE_LICENSES
++#     Mandatory : YES
++#     Default   : -
++#     The haiku package licenses. This must be available in /system/data/licenses,
++#     either provided by the package or one of the system-provided licenses.
++##end
++##variable
++# CPACK_HAIKU_PACKAGE_URL
++#     Mandatory : NO
++#     Default   : -
++#     The URL of the web site for this package, preferably (when applicable) the
++#     site from which the original source can be obtained and any additional
++#     upstream documentation or information may be found.
++#     The content of this field is a simple URL without any surrounding
++#     characters such as <>.
++##end
++##variable
++# CPACK_HAIKU_PACKAGE_DEBUG
++#     Mandatory : NO
++#     Default   : -
++#     May be set when invoking cpack in order to trace debug information
++#     during CPackHpkg run.
++##end
++##variable
++# CPACK_HAIKU_PACKAGE_PREREQUIRES
++#     Mandatory : NO
++#     Default   : -
++#     This is similar to REQUIRES, but the package will not be rebuilt. This
++#     makes it possible to have circular dependencies between prerequired
++#     packages
++##end
++##variable
++# CPACK_HAIKU_PACKAGE_SUPPLEMENTS
++#     Mandatory : NO
++#     Default   : -
++#     This field allow adding functionality to an existing package. This will
++#     be made visible to the original package in its private directory.
++#     It is used to declare that a package can enhance the functionality of another package.
++##end
++##variable
++# CPACK_HAIKU_PACKAGE_CONFLICTS
++#     Mandatory : NO
++#     Default   : -
++#     When one binary package declares a conflict with another using a Conflicts field,
++#     Haiku will refuse to allow them to be installed on the system at the same time.
++##end
++##variable
++# CPACK_HAIKU_PACKAGE_CONTROL_EXTRA
++#     Mandatory : NO
++#     Default   : -
++#     This variable allow advanced user to add other entries to the .PackageInfo file
++##end
++##variable
++# CPACK_HAIKU_<COMPONENT_>PACKAGE_PROVIDES
++#     Mandatory : YES
++#     Default   : -
++#     List of provided entries for the package, with version constraints.
++#     There should be an entry for each binary, application, library and add-on
++#     provided by the package. The packages always provides itself, there is no
++#     need for explicitly mentionning it in this variable.
++##end
++##variable
++# CPACK_HAIKU_<COMPONENT_>PACKAGE_REQUIRES
++#     Mandatory : NO
++#     Default   : -
++#     May be used to set package dependencies.
++##end
++
++
++#=============================================================================
++# Copyright 2007-2013 Kitware, Inc.
++# Copyright 2007-2009 Mathieu Malaterre <mathieu.malaterre@gmail.com>
++#
++# Distributed under the OSI-approved BSD License (the "License");
++# see accompanying file Copyright.txt for details.
++#
++# This software is distributed WITHOUT ANY WARRANTY; without even the
++# implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++# See the License for more information.
++#=============================================================================
++# (To distribute this file outside of CMake, substitute the full
++#  License text for the above reference.)
++
++# CPack script for creating Haiku packages
++# Author: Adrien Destugues
++#
++# http://wiki.debian.org/HowToPackageForDebian
++
++if(CMAKE_BINARY_DIR)
++        message(FATAL_ERROR "CPackHpkg.cmake may only be used by CPack internally.")
++endif()
++
++if(NOT HAIKU)
++        message(FATAL_ERROR "CPackHpkg.cmake may only be used under Haiku.")
++endif()
++
++find_program(FAKEROOT_EXECUTABLE fakeroot)
++if(FAKEROOT_EXECUTABLE)
++  set(CPACK_DEBIAN_FAKEROOT_EXECUTABLE ${FAKEROOT_EXECUTABLE})
++endif()
++
++
++# Let's define the .PackageInfo file found in haiku package:
++
++# Package: (mandatory)
++if(NOT CPACK_HAIKU_PACKAGE_NAME)
++        string(TOLOWER "${CPACK_PACKAGE_NAME}" CPACK_HAIKU_PACKAGE_NAME)
++        string(REPLACE "_unspecified" "" CPACK_HAIKU_PACKAGE_NAME
++                "${CPACK_HAIKU_PACKAGE_NAME}")
++endif()
++
++# Version: (mandatory)
++if(NOT CPACK_HAIKU_PACKAGE_VERSION)
++  if(NOT CPACK_PACKAGE_VERSION)
++          message(FATAL_ERROR "CPackHpkg: Haiku package requires a package version")
++  endif()
++  set(CPACK_HAIKU_PACKAGE_VERSION ${CPACK_PACKAGE_VERSION})
++endif()
++
++# Revision: (mandatory)
++if(NOT CPACK_HAIKU_PACKAGE_REVISION)
++        set(CPACK_HAIKU_PACKAGE_REVISION 1)
++endif()
++
++# Architecture: (mandatory)
++if(NOT CPACK_HAIKU_PACKAGE_ARCHITECTURE)
++  if(NOT CMAKE_HAIKU_ARCHITECTURE)
++        message(FATAL_ERROR "CPackHpkg: Please set CPACK_HAIKU_PACKAGE_ARCHITECTURE or CMAKE_HAIKU_ARCHITECTURE")
++  endif()
++
++  set(CPACK_HAIKU_PACKAGE_ARCHITECTURE "${CMAKE_HAIKU_ARCHITECTURE}")
++endif()
++
++# have a look at get_property(result GLOBAL PROPERTY ENABLED_FEATURES),
++# this returns the successful find_package() calls, maybe this can help
++# Depends:
++# You should set: DEBIAN_PACKAGE_DEPENDS
++# TODO: automate 'objdump -p | grep NEEDED'
++if(NOT CPACK_HAIKU_PACKAGE_DEPENDS)
++        message(STATUS "CPACK_HAIKU_PACKAGE_DEPENDS not set, the package will have no dependencies.")
++endif()
++
++# Maintainer: (mandatory)
++if(NOT CPACK_HAIKU_PACKAGE_PACKAGER)
++  if(NOT CPACK_PACKAGE_CONTACT)
++          message(FATAL_ERROR "CPackHpkg: Haiku package requires a packager, set CPACK_PACKAGE_CONTACT or CPACK_HAIKU_PACKAGE_PACKAGER")
++  endif()
++  set(CPACK_HAIKU_PACKAGE_PACKAGER ${CPACK_PACKAGE_CONTACT})
++endif()
++
++# Vendor: (mandatory)
++if(NOT CPACK_HAIKU_PACKAGE_VENDOR)
++        if(NOT CPACK_PACKAGE_VENDOR)
++                message(FATAL_ERROR "CPackHpkg: Haiku package requires a vendor, set CPACK_PACKAGE_VENDOR or CPACK_HAIKU_PACKAGE_VENDOR")
++  endif()
++  set(CPACK_HAIKU_PACKAGE_VENDOR ${CPACK_PACKAGE_VENDOR})
++endif()
++
++# Copyright: (mandatory)
++if(NOT CPACK_HAIKU_PACKAGE_COPYRIGHT)
++        message(FATAL_ERROR "CPackHaiku: Haiku package requires a copyright for a package, set CPACK_HAIKU_PACKAGE_COPYRIGHT")
++endif()
++
++# License: (mandatory)
++if(NOT CPACK_HAIKU_PACKAGE_LICENSES)
++        message(FATAL_ERROR "CPackHaiku: Haiku package requires a copyright for a package, set CPACK_HAIKU_PACKAGE_LICENSES")
++endif()
++
++# Description: (mandatory)
++if(NOT CPACK_HAIKU_PACKAGE_DESCRIPTION)
++  if(NOT CPACK_PACKAGE_DESCRIPTION)
++          message(FATAL_ERROR "CPackHaiku: Haiku package requires a description for a package, set CPACK_PACKAGE_DESCRIPTION or CPACK_HAIKU_PACKAGE_DESCRIPTION")
++  endif()
++  set(CPACK_HAIKU_PACKAGE_DESCRIPTION ${CPACK_PACKAGE_DESCRIPTION})
++endif()
++
++# Summary: (mandatory)
++if(NOT CPACK_HAIKU_PACKAGE_DESCRIPTION_SUMMARY)
++        if(NOT CPACK_PACKAGE_DESCRIPTION_SUMMARY)
++                message(FATAL_ERROR "CPackHaiku: Haiku package requires a summary for a package, set CPACK_PACKAGE_DESCRIPTION_SUMMARY or CPACK_HAIKU_PACKAGE_DESCRIPTION_SUMMARY")
++  endif()
++  set(CPACK_HAIKU_PACKAGE_DESCRIPTION_SUMMARY ${CPACK_PACKAGE_DESCRIPTION_SUMMARY})
++endif()
++
++# Provides: (mandatory)
++if(NOT CPACK_HAIKU_PACKAGE_PROVIDES)
++        set(CPACK_HAIKU_PACKAGE_PROVIDES ${CPACK_HAIKU_PACKAGE_NAME})
++else()
++        set(CPACK_HAIKU_PACKAGE_PROVIDES ${CPACK_HAIKU_PACKAGE_NAME} ${CPACK_HAIKU_PACKAGE_PROVIDES})
++endif()
++
++# CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
++# This variable allow advanced user to add custom script to the control.tar.gz (inside the .deb archive)
++# Typical examples are:
++# - conffiles
++# - postinst
++# - postrm
++# - prerm"
++# Usage:
++# set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
++#    "${CMAKE_CURRENT_SOURCE_DIR/prerm;${CMAKE_CURRENT_SOURCE_DIR}/postrm")
++
++# Are we packaging components ?
++if(CPACK_HAIKU_PACKAGE_COMPONENT)
++        set(CPACK_HAIKU_PACKAGE_COMPONENT_PART_NAME "_${CPACK_HAIKU_PACKAGE_COMPONENT}")
++        string(TOLOWER "${CPACK_PACKAGE_NAME}${CPACK_HAIKU_PACKAGE_COMPONENT_PART_NAME}" CPACK_HAIKU_PACKAGE_NAME)
++else()
++        set(CPACK_HAIKU_PACKAGE_COMPONENT_PART_NAME "")
++endif()
++
++set(WDIR "${CPACK_TOPLEVEL_DIRECTORY}/${CPACK_PACKAGE_FILE_NAME}${CPACK_HAIKU_PACKAGE_COMPONENT_PART_PATH}")
++
++# Print out some debug information if we were asked for that
++if(CPACK_HAIKU_PACKAGE_DEBUG)
++   message("CPackHpkg:Debug: CPACK_TOPLEVEL_DIRECTORY          = ${CPACK_TOPLEVEL_DIRECTORY}")
++   message("CPackHpkg:Debug: CPACK_TOPLEVEL_TAG                = ${CPACK_TOPLEVEL_TAG}")
++   message("CPackHpkg:Debug: CPACK_TEMPORARY_DIRECTORY         = ${CPACK_TEMPORARY_DIRECTORY}")
++   message("CPackHpkg:Debug: CPACK_OUTPUT_FILE_NAME            = ${CPACK_OUTPUT_FILE_NAME}")
++   message("CPackHpkg:Debug: CPACK_OUTPUT_FILE_PATH            = ${CPACK_OUTPUT_FILE_PATH}")
++   message("CPackHpkg:Debug: CPACK_PACKAGE_FILE_NAME           = ${CPACK_PACKAGE_FILE_NAME}")
++   message("CPackHpkg:Debug: CPACK_PACKAGE_INSTALL_DIRECTORY   = ${CPACK_PACKAGE_INSTALL_DIRECTORY}")
++   message("CPackHpkg:Debug: CPACK_TEMPORARY_PACKAGE_FILE_NAME = ${CPACK_TEMPORARY_PACKAGE_FILE_NAME}")
++endif()
+diff --git a/Source/CMakeLists.txt b/Source/CMakeLists.txt
+index b1f7b29..1b48248 100644
+--- a/Source/CMakeLists.txt
++++ b/Source/CMakeLists.txt
+@@ -1044,6 +1044,12 @@ if(UNIX)
+   endif()
+ endif()
+ 
++if(HAIKU)
++  set(CPACK_SRCS ${CPACK_SRCS}
++    CPack/cmCPackHpkgGenerator.cxx
++  )
++endif()
++
+ if(CYGWIN)
+   find_package(LibUUID)
+ endif()
+diff --git a/Source/CPack/cmCPackGeneratorFactory.cxx b/Source/CPack/cmCPackGeneratorFactory.cxx
+index 79e344b..fa39d7f 100644
+--- a/Source/CPack/cmCPackGeneratorFactory.cxx
++++ b/Source/CPack/cmCPackGeneratorFactory.cxx
+@@ -40,6 +40,10 @@
+ #  include "WiX/cmCPackWIXGenerator.h"
+ #endif
+ 
++#ifdef __HAIKU__
++#  include "cmCPackHpkgGenerator.h"
++#endif
++
+ cmCPackGeneratorFactory::cmCPackGeneratorFactory()
+ {
+   if (cmCPackArchiveGenerator::CanGenerate()) {
+@@ -135,6 +139,13 @@ cmCPackGeneratorFactory::cmCPackGeneratorFactory()
+                             cmCPackFreeBSDGenerator::CreateGenerator);
+   }
+ #endif
++#if defined(__HAIKU__)
++  if (cmCPackHpkgGenerator::CanGenerate())
++  {
++    this->RegisterGenerator("HPKG", "Haiku Packages",
++      cmCPackHpkgGenerator::CreateGenerator);
++  }
++#endif
+ }
+ 
+ std::unique_ptr<cmCPackGenerator> cmCPackGeneratorFactory::NewGenerator(
+diff --git a/Source/CPack/cmCPackHpkgGenerator.cxx b/Source/CPack/cmCPackHpkgGenerator.cxx
+new file mode 100644
+index 0000000..b7e903a
+--- /dev/null
++++ b/Source/CPack/cmCPackHpkgGenerator.cxx
+@@ -0,0 +1,509 @@
++/*============================================================================
++  CMake - Cross Platform Makefile Generator
++  Copyright 2000-2009 Kitware, Inc., Insight Software Consortium
++
++  Distributed under the OSI-approved BSD License (the "License");
++  see accompanying file Copyright.txt for details.
++
++  This software is distributed WITHOUT ANY WARRANTY; without even the
++  implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++  See the License for more information.
++============================================================================*/
++#include "cmCPackHpkgGenerator.h"
++
++#include "cmSystemTools.h"
++#include "cmMakefile.h"
++#include "cmGeneratedFileStream.h"
++#include "cmCPackLog.h"
++
++#include <cmsys/SystemTools.hxx>
++#include <cmsys/Glob.hxx>
++
++#include <limits.h> // USHRT_MAX
++
++// NOTE:
++// Haiku .hpkg files are package using a custom compression and archive format.
++// The only way of creating them isusing the package tool provided with Haiku.
++
++//----------------------------------------------------------------------
++cmCPackHpkgGenerator::cmCPackHpkgGenerator()
++{
++}
++
++//----------------------------------------------------------------------
++cmCPackHpkgGenerator::~cmCPackHpkgGenerator()
++{
++}
++
++//----------------------------------------------------------------------
++int cmCPackHpkgGenerator::InitializeInternal()
++{
++  // Haiku packages are "rootless": the hierarchy inside them is relative to
++  // the package mount/install point.
++  this->SetOption("CPACK_PACKAGING_INSTALL_PREFIX", NULL);
++  if (this->IsOn("CPACK_SET_DESTDIR"))
++    {
++    this->SetOption("CPACK_SET_DESTDIR", "I_OFF");
++    }
++  return this->Superclass::InitializeInternal();
++}
++
++//----------------------------------------------------------------------
++int cmCPackHpkgGenerator::PackageOnePack(std::string initialTopLevel,
++                                         std::string packageName)
++{
++  int retval = 1;
++  // Begin the archive for this pack
++  std::string localToplevel(initialTopLevel);
++  std::string packageFileName(
++    cmSystemTools::GetParentDirectory(toplevel.c_str())
++    );
++  std::string outputFileName(
++    std::string(this->GetOption("CPACK_PACKAGE_FILE_NAME"))
++    +"_"+packageName + this->GetOutputExtension()
++    );
++
++  cmCPackLogger(cmCPackLog::LOG_DEBUG,
++                "Packaging " << outputFileName << std::endl);
++
++  localToplevel += "/"+ packageName;
++  /* replace the TEMP DIRECTORY with the component one */
++  this->SetOption("CPACK_TEMPORARY_DIRECTORY",localToplevel.c_str());
++  packageFileName += "/"+ outputFileName;
++  /* replace proposed CPACK_OUTPUT_FILE_NAME */
++  this->SetOption("CPACK_OUTPUT_FILE_NAME",outputFileName.c_str());
++  /* replace the TEMPORARY package file name */
++  this->SetOption("CPACK_TEMPORARY_PACKAGE_FILE_NAME",
++                  packageFileName.c_str());
++  // Tell CPackHpkg.cmake the name of the component GROUP.
++  this->SetOption("CPACK_HAIKU_PACKAGE_COMPONENT",packageName.c_str());
++  // Tell CPackHpkg.cmake the path where the component is.
++  std::string component_path = "/";
++  component_path += packageName;
++  this->SetOption("CPACK_HAIKU_PACKAGE_COMPONENT_PART_PATH",
++                  component_path.c_str());
++  if (!this->ReadListFile("CPackHpkg.cmake"))
++    {
++    cmCPackLogger(cmCPackLog::LOG_ERROR,
++                  "Error while execution CPackHpkg.cmake" << std::endl);
++    retval = 0;
++    return retval;
++    }
++
++  cmsys::Glob gl;
++  std::string findExpr(this->GetOption("WDIR"));
++  findExpr += "/*";
++  gl.RecurseOn();
++  if ( !gl.FindFiles(findExpr) )
++    {
++    cmCPackLogger(cmCPackLog::LOG_ERROR,
++      "Cannot find any files in the installed directory" << std::endl);
++    return 0;
++    }
++  packageFiles = gl.GetFiles();
++
++  int res = createHpkg(packageName);
++  if (res != 1)
++    {
++    retval = 0;
++    }
++  // add the generated package to package file names list
++  packageFileNames.push_back(packageFileName);
++  return retval;
++}
++
++//----------------------------------------------------------------------
++int cmCPackHpkgGenerator::PackageComponents(bool ignoreGroup)
++{
++  int retval = 1;
++  /* Reset package file name list it will be populated during the
++   * component packaging run*/
++  packageFileNames.clear();
++  std::string initialTopLevel(this->GetOption("CPACK_TEMPORARY_DIRECTORY"));
++
++  cmCPackLogger(cmCPackLog::LOG_DEBUG,
++                "Packaging in components mode" << std::endl);
++
++  // The default behavior is to have one package by component group
++  // unless CPACK_COMPONENTS_IGNORE_GROUP is specified.
++  if (!ignoreGroup)
++    {
++    std::map<std::string, cmCPackComponentGroup>::iterator compGIt;
++    for (compGIt=this->ComponentGroups.begin();
++         compGIt!=this->ComponentGroups.end(); ++compGIt)
++      {
++      cmCPackLogger(cmCPackLog::LOG_VERBOSE, "Packaging component group: "
++                    << compGIt->first
++                    << std::endl);
++      // Begin the archive for this group
++      retval &= PackageOnePack(initialTopLevel,compGIt->first);
++      }
++    // Handle Orphan components (components not belonging to any groups)
++    std::map<std::string, cmCPackComponent>::iterator compIt;
++    for (compIt=this->Components.begin();
++         compIt!=this->Components.end(); ++compIt )
++      {
++      // Does the component belong to a group?
++      if (compIt->second.Group==NULL)
++        {
++        cmCPackLogger(cmCPackLog::LOG_VERBOSE,
++          "Component <"
++          << compIt->second.Name
++          << "> does not belong to any group, package it separately."
++          << std::endl);
++        // Begin the archive for this orphan component
++        retval &= PackageOnePack(initialTopLevel,compIt->first);
++        }
++      }
++    }
++  // CPACK_COMPONENTS_IGNORE_GROUPS is set
++  // We build 1 package per component
++  else
++    {
++    cmCPackLogger(cmCPackLog::LOG_DEBUG,
++                  "Groups are ignored" << std::endl);
++
++    std::map<std::string, cmCPackComponent>::iterator compIt;
++    for (compIt=this->Components.begin();
++         compIt!=this->Components.end(); ++compIt )
++      {
++      retval &= PackageOnePack(initialTopLevel,compIt->first);
++      }
++    }
++  return retval;
++}
++
++//----------------------------------------------------------------------
++int cmCPackHpkgGenerator::PackageComponentsAllInOne()
++{
++  int retval = 1;
++  std::string compInstDirName;
++  /* Reset package file name list it will be populated during the
++   * component packaging run*/
++  packageFileNames.clear();
++  std::string initialTopLevel(this->GetOption("CPACK_TEMPORARY_DIRECTORY"));
++
++  compInstDirName = "ALL_COMPONENTS_IN_ONE";
++
++  cmCPackLogger(cmCPackLog::LOG_VERBOSE,
++                "Packaging all groups in one package..."
++                "(CPACK_COMPONENTS_ALL_[GROUPS_]IN_ONE_PACKAGE is set)"
++                << std::endl);
++
++  cmCPackLogger(cmCPackLog::LOG_DEBUG,
++                "Packaging in all-in-one mode" << std::endl);
++
++  // The ALL GROUPS in ONE package case
++  std::string localToplevel(initialTopLevel);
++  std::string packageFileName(
++    cmSystemTools::GetParentDirectory(toplevel.c_str())
++    );
++  std::string outputFileName(
++    std::string(this->GetOption("CPACK_PACKAGE_FILE_NAME"))
++    + this->GetOutputExtension()
++    );
++  // all GROUP in one vs all COMPONENT in one
++  localToplevel += "/"+compInstDirName;
++
++  /* replace the TEMP DIRECTORY with the component one */
++  this->SetOption("CPACK_TEMPORARY_DIRECTORY",localToplevel.c_str());
++  packageFileName += "/"+ outputFileName;
++  /* replace proposed CPACK_OUTPUT_FILE_NAME */
++  this->SetOption("CPACK_OUTPUT_FILE_NAME",outputFileName.c_str());
++  /* replace the TEMPORARY package file name */
++  this->SetOption("CPACK_TEMPORARY_PACKAGE_FILE_NAME",
++                  packageFileName.c_str());
++  // Tell CPackHpkg.cmake the path where the component is.
++  std::string component_path = "/";
++  component_path += compInstDirName;
++  this->SetOption("CPACK_HPKG_PACKAGE_COMPONENT_PART_PATH",
++                  component_path.c_str());
++  if (!this->ReadListFile("CPackHpkg.cmake"))
++    {
++    cmCPackLogger(cmCPackLog::LOG_ERROR,
++                  "Error while execution CPackHpkg.cmake" << std::endl);
++    retval = 0;
++    return retval;
++    }
++
++  cmsys::Glob gl;
++  std::string findExpr(this->GetOption("WDIR"));
++  findExpr += "/*";
++  gl.RecurseOn();
++  if ( !gl.FindFiles(findExpr) )
++    {
++    cmCPackLogger(cmCPackLog::LOG_ERROR,
++      "Cannot find any files in the installed directory" << std::endl);
++    return 0;
++    }
++  packageFiles = gl.GetFiles();
++
++  int res = createHpkg();
++  if (res != 1)
++    {
++    retval = 0;
++    }
++  // add the generated package to package file names list
++  packageFileNames.push_back(packageFileName);
++  return retval;
++}
++
++//----------------------------------------------------------------------
++int cmCPackHpkgGenerator::PackageFiles()
++{
++  int retval = -1;
++
++  /* Are we in the component packaging case */
++  if (WantsComponentInstallation()) {
++  // CASE 1 : COMPONENT ALL-IN-ONE package
++  // If ALL GROUPS or ALL COMPONENTS in ONE package has been requested
++  // then the package file is unique and should be open here.
++  if (componentPackageMethod == ONE_PACKAGE)
++    {
++    return PackageComponentsAllInOne();
++    }
++  // CASE 2 : COMPONENT CLASSICAL package(s) (i.e. not all-in-one)
++  // There will be 1 package for each component group
++  // however one may require to ignore component group and
++  // in this case you'll get 1 package for each component.
++  else
++    {
++    return PackageComponents(componentPackageMethod ==
++                             ONE_PACKAGE_PER_COMPONENT);
++    }
++  }
++  // CASE 3 : NON COMPONENT package.
++  else
++    {
++    if (!this->ReadListFile("CPackHpkg.cmake"))
++      {
++      cmCPackLogger(cmCPackLog::LOG_ERROR,
++                    "Error while execution CPackHpkg.cmake" << std::endl);
++      retval = 0;
++      }
++    else
++      {
++      packageFiles = files;
++      return createHpkg();
++      }
++    }
++  return retval;
++}
++
++int cmCPackHpkgGenerator::createHpkg(std::string packageName)
++{
++  // .PackageInfo file
++  std::string infofilename;
++  infofilename = this->GetOption("WDIR");
++  infofilename += "/.PackageInfo";
++
++  std::string haiku_pkg_id = this->GetOption("CPACK_HAIKU_PACKAGE_NAME");
++  if(packageName == "Unspecified") {
++  // Remove package specifier for the "unspecified" package
++  haiku_pkg_id.erase(haiku_pkg_id.length() - packageName.length() - 1);
++  packageName = "";
++  } else if(packageName.length() > 0) {
++  packageName += "_";
++  }
++  // haiku policy enforce lower case for package name
++  std::string haiku_pkg_name = cmsys::SystemTools::LowerCase(haiku_pkg_id);
++
++  // mandatory entries:
++  const char* haiku_pkg_version =
++    this->GetOption("CPACK_HAIKU_PACKAGE_VERSION");
++  const char* haiku_pkg_revision =
++    this->GetOption("CPACK_HAIKU_PACKAGE_REVISION");
++  const char* haiku_pkg_arch =
++    this->GetOption("CPACK_HAIKU_PACKAGE_ARCHITECTURE");
++  const char* maintainer =  this->GetOption("CPACK_HAIKU_PACKAGE_PACKAGER");
++  const char* vendor =  this->GetOption("CPACK_HAIKU_PACKAGE_VENDOR");
++  const char* summary =
++    this->GetOption("CPACK_HAIKU_PACKAGE_DESCRIPTION_SUMMARY");
++  const char* desc =       this->GetOption("CPACK_HAIKU_PACKAGE_DESCRIPTION");
++  const char* copyrights = this->GetOption("CPACK_HAIKU_PACKAGE_COPYRIGHT");
++  const char* haiku_pkg_licenses =
++    this->GetOption("CPACK_HAIKU_PACKAGE_LICENSES");
++
++  // component-specific entries
++  std::string pkg_requires_option = "CPACK_HAIKU_" + packageName
++    + "PACKAGE_REQUIRES";
++  const char* haiku_pkg_dep = this->GetOption(pkg_requires_option.c_str());
++  std::string pkg_provides_option = "CPACK_HAIKU_" + packageName
++    + "PACKAGE_PROVIDES";
++  const char* haiku_pkg_provides =
++    this->GetOption(pkg_provides_option.c_str());
++
++  // optional entries
++  const char* haiku_pkg_url = this->GetOption("CPACK_HAIKU_PACKAGE_HOMEPAGE");
++  const char* haiku_pkg_enhances =
++    this->GetOption("CPACK_HAIKU_PACKAGE_ENHANCES");
++  const char* haiku_pkg_conflicts =
++    this->GetOption("CPACK_HAIKU_PACKAGE_CONFLICTS");
++  const char* haiku_pkg_replaces =
++    this->GetOption("CPACK_HAIKU_PACKAGE_REPLACES");
++
++  { // the scope is needed for cmGeneratedFileStream
++  cmGeneratedFileStream out(infofilename.c_str());
++  out << "name " << haiku_pkg_name << "\n";
++  out << "version " << haiku_pkg_version << "-" << haiku_pkg_revision << "\n";
++  out << "architecture " << haiku_pkg_arch << "\n";
++  if(haiku_pkg_dep && *haiku_pkg_dep)
++    {
++    out << "requires {";
++    std::vector<std::string> requiresList;
++    cmExpandList(haiku_pkg_dep, requiresList);
++    for(std::vector<std::string>::iterator i =
++          requiresList.begin(); i != requiresList.end(); ++i)
++      {
++      out << *i << "\n";
++      }
++
++    out << "}\n";
++    }
++  if(haiku_pkg_url && *haiku_pkg_url)
++    {
++    out << "urls " << haiku_pkg_url << "\n";
++    }
++  if (haiku_pkg_enhances && *haiku_pkg_enhances)
++    {
++    out << "freshens " << haiku_pkg_enhances << "\n";
++    }
++  if (haiku_pkg_conflicts && *haiku_pkg_conflicts)
++    {
++    out << "conflicts " << haiku_pkg_conflicts << "\n";
++    }
++  if (haiku_pkg_replaces && *haiku_pkg_replaces)
++    {
++    out << "replaces " << haiku_pkg_replaces << "\n";
++    }
++
++  out << "provides {";
++  std::vector<std::string> providesList;
++  cmExpandList(haiku_pkg_provides, providesList);
++  for(std::vector<std::string>::iterator i =
++        providesList.begin(); i != providesList.end(); ++i)
++    {
++    out << *i << "\n";
++    }
++
++  out << "}\n";
++
++  out << "licenses {";
++  std::vector<std::string> licensesList;
++  cmExpandList(haiku_pkg_licenses, licensesList);
++  for(std::vector<std::string>::iterator i =
++        licensesList.begin(); i != licensesList.end(); ++i)
++    {
++    out << "\"" << *i << "\"\n";
++    }
++
++  out << "}\n";
++
++  out << "copyrights {\"" << copyrights << "\"}\n";
++  out << "packager " << maintainer << "\n";
++  out << "vendor \"" << vendor << "\"\n";
++  out << "summary \"" << summary << "\"\n";
++  out << "description \"" << desc << "\"\n";
++  out << std::endl;
++  }
++
++  std::string cmd;
++  if (NULL != this->GetOption("CPACK_HAIKU_FAKEROOT_EXECUTABLE")) {
++  cmd += this->GetOption("CPACK_HAIKU_FAKEROOT_EXECUTABLE");
++  }
++  cmd += "package create ";
++  cmd += this->GetOption("CPACK_TEMPORARY_PACKAGE_FILE_NAME");
++
++  std::string output;
++  int retval = -1;
++  int res = cmSystemTools::RunSingleCommand(cmd.c_str(), &output, &output,
++              &retval, this->GetOption("WDIR"), this->GeneratorVerbose, cmDuration::zero());
++
++  if ( !res || retval )
++    {
++    std::string tmpFile = this->GetOption("CPACK_TOPLEVEL_DIRECTORY");
++    tmpFile += "/Hpkg.log";
++    cmGeneratedFileStream ofs(tmpFile.c_str());
++    ofs << "# Run command: " << cmd.c_str() << std::endl
++        << "# Working directory: " << toplevel << std::endl
++        << "# Output:" << std::endl
++        << output.c_str() << std::endl;
++    cmCPackLogger(cmCPackLog::LOG_ERROR, "Problem running package command: "
++      << cmd.c_str() << std::endl
++      << "Please check " << tmpFile.c_str() << " for errors" << std::endl);
++    return 0;
++    }
++
++  const char* infoExtra =
++    this->GetOption("CPACK_HAIKU_PACKAGE_INFO_EXTRA");
++  if( infoExtra )
++    {
++    std::vector<std::string> controlExtraList;
++    cmExpandList(infoExtra, controlExtraList);
++    for(std::vector<std::string>::iterator i =
++          controlExtraList.begin(); i != controlExtraList.end(); ++i)
++      {
++      std::string filenamename =
++        cmsys::SystemTools::GetFilenameName(i->c_str());
++      std::string localcopy = this->GetOption("WDIR");
++      localcopy += "/";
++      localcopy += filenamename;
++      // if we can copy the file, it means it does exist, let's add it:
++      if( cmsys::SystemTools::CopyFileIfDifferent(
++            i->c_str(), localcopy.c_str()) )
++        {
++        // haiku is picky and need relative to ./ path in the tar.gz
++        cmd += " ./";
++        cmd += filenamename;
++        }
++      }
++    }
++  res = cmSystemTools::RunSingleCommand(cmd.c_str(), &output, &output,
++          &retval, this->GetOption("WDIR"), this->GeneratorVerbose, cmDuration::zero());
++
++  if ( !res || retval )
++    {
++    std::string tmpFile = this->GetOption("CPACK_TOPLEVEL_DIRECTORY");
++    tmpFile += "/Hpkg.log";
++    cmGeneratedFileStream ofs(tmpFile.c_str());
++    ofs << "# Run command: " << cmd.c_str() << std::endl
++        << "# Working directory: " << toplevel << std::endl
++        << "# Output:" << std::endl
++        << output.c_str() << std::endl;
++    cmCPackLogger(cmCPackLog::LOG_ERROR, "Problem running tar command: "
++      << cmd.c_str() << std::endl
++      << "Please check " << tmpFile.c_str() << " for errors" << std::endl);
++    return 0;
++    }
++
++  return 1;
++}
++
++bool cmCPackHpkgGenerator::SupportsComponentInstallation() const
++{
++  return true;
++}
++
++std::string cmCPackHpkgGenerator::GetComponentInstallDirNameSuffix(
++  const std::string& componentName)
++{
++  if (componentPackageMethod == ONE_PACKAGE_PER_COMPONENT) {
++  return componentName;
++  }
++
++  if (componentPackageMethod == ONE_PACKAGE) {
++  return std::string("ALL_COMPONENTS_IN_ONE");
++  }
++  // We have to find the name of the COMPONENT GROUP
++  // the current COMPONENT belongs to.
++  std::string groupVar = "CPACK_COMPONENT_" +
++    cmSystemTools::UpperCase(componentName) + "_GROUP";
++  if (NULL != GetOption(groupVar.c_str()))
++    {
++    return std::string(GetOption(groupVar.c_str()));
++    }
++  else
++    {
++    return componentName;
++    }
++}
+diff --git a/Source/CPack/cmCPackHpkgGenerator.h b/Source/CPack/cmCPackHpkgGenerator.h
+new file mode 100644
+index 0000000..ffa803d
+--- /dev/null
++++ b/Source/CPack/cmCPackHpkgGenerator.h
+@@ -0,0 +1,82 @@
++/*============================================================================
++  CMake - Cross Platform Makefile Generator
++  Copyright 2000-2013 Kitware, Inc.
++
++  Distributed under the OSI-approved BSD License (the "License");
++  see accompanying file Copyright.txt for details.
++
++  This software is distributed WITHOUT ANY WARRANTY; without even the
++  implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++  See the License for more information.
++============================================================================*/
++
++#ifndef cmCPackHpkgGenerator_h
++#define cmCPackHpkgGenerator_h
++
++
++#include "cmCPackGenerator.h"
++
++/** \class cmCPackHpkgGenerator
++ * \brief A generator for Haiku packages
++ *
++ */
++class cmCPackHpkgGenerator : public cmCPackGenerator
++{
++public:
++  cmCPackTypeMacro(cmCPackHpkgGenerator, cmCPackGenerator);
++
++  /**
++   * Construct generator
++   */
++  cmCPackHpkgGenerator();
++  virtual ~cmCPackHpkgGenerator();
++
++  static bool CanGenerate()
++    {
++#ifdef __HAIKU__
++    return true;
++#else
++    // Sorry! Need the "package" tool from Haiku!
++    return false;
++#endif
++    }
++
++protected:
++  virtual int InitializeInternal();
++  /**
++   * This method factors out the work done in component packaging case.
++   */
++  int PackageOnePack(std::string initialToplevel, std::string packageName);
++  /**
++   * The method used to package files when component
++   * install is used. This will create one
++   * archive for each component group.
++   */
++  int PackageComponents(bool ignoreGroup);
++  /**
++   * Special case of component install where all
++   * components will be put in a single installer.
++   */
++  int PackageComponentsAllInOne();
++  virtual int PackageFiles();
++  virtual const char* GetOutputExtension() { return ".hpkg"; }
++  virtual enum CPackSetDestdirSupport SupportsSetDestdir() const
++    {
++    return SETDESTDIR_UNSUPPORTED;
++    }
++
++  virtual bool SupportsAbsoluteDestination() const
++    {
++    return false;
++    }
++  virtual bool SupportsComponentInstallation() const;
++  virtual std::string GetComponentInstallDirNameSuffix(
++      const std::string& componentName);
++
++private:
++  int createHpkg(std::string packageName = "");
++  std::vector<std::string> packageFiles;
++
++};
++
++#endif
+-- 
+2.24.1
+
