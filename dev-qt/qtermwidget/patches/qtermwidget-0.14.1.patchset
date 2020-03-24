@@ -1,0 +1,300 @@
+From 93e1b441be4855de113e9add42b8a315cbeef838 Mon Sep 17 00:00:00 2001
+From: Khaled <khallbal@gmail.com>
+Date: Sun, 22 Mar 2020 18:17:46 +0100
+Subject: Disable utmp.h/utmpx.h stuff, missing in haiku
+
+
+diff --git a/lib/kpty.cpp b/lib/kpty.cpp
+index 542bde3..91bb28f 100644
+--- a/lib/kpty.cpp
++++ b/lib/kpty.cpp
+@@ -27,12 +27,12 @@
+ #include <QtDebug>
+ 
+ 
+-#if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
++#if defined(__FreeBSD__) || defined(__DragonFly__)
+ #define HAVE_LOGIN
+ #define HAVE_LIBUTIL_H
+ #endif
+ 
+-#if defined(__OpenBSD__)
++#if defined(__OpenBSD__) || defined(__NetBSD__)
+ #define HAVE_LOGIN
+ #define HAVE_UTIL_H
+ #endif
+@@ -70,12 +70,12 @@
+ #include <sys/stat.h>
+ #include <sys/param.h>
+ 
+-#include <errno.h>
++#include <cerrno>
+ #include <fcntl.h>
+-#include <time.h>
+-#include <stdlib.h>
+-#include <stdio.h>
+-#include <string.h>
++#include <ctime>
++#include <cstdlib>
++#include <cstdio>
++#include <cstring>
+ #include <unistd.h>
+ #include <grp.h>
+ 
+@@ -94,7 +94,7 @@ extern "C" {
+ # include <utempter.h>
+ }
+ #else
+-# include <utmp.h>
++//# include <utmp.h>
+ # ifdef HAVE_UTMPX
+ #  include <utmpx.h>
+ # endif
+@@ -130,7 +130,7 @@ extern "C" {
+ #if defined (__FreeBSD__) || defined(__FreeBSD_kernel__) || defined (__NetBSD__) || defined (__OpenBSD__) || defined (__bsdi__) || defined(__APPLE__) || defined (__DragonFly__)
+ # define _tcgetattr(fd, ttmode) ioctl(fd, TIOCGETA, (char *)ttmode)
+ #else
+-# if defined(_HPUX_SOURCE) || defined(__Lynx__) || defined (__CYGWIN__) || defined(__GNU__)
++# if defined(_HPUX_SOURCE) || defined(__Lynx__) || defined (__CYGWIN__) || defined(__GNU__) || defined(__HAIKU__)
+ #  define _tcgetattr(fd, ttmode) tcgetattr(fd, ttmode)
+ # else
+ #  define _tcgetattr(fd, ttmode) ioctl(fd, TCGETS, (char *)ttmode)
+@@ -140,7 +140,7 @@ extern "C" {
+ #if defined (__FreeBSD__) || defined(__FreeBSD_kernel__) || defined (__NetBSD__) || defined (__OpenBSD__) || defined (__bsdi__) || defined(__APPLE__) || defined (__DragonFly__)
+ # define _tcsetattr(fd, ttmode) ioctl(fd, TIOCSETA, (char *)ttmode)
+ #else
+-# if defined(_HPUX_SOURCE) || defined(__CYGWIN__) || defined(__GNU__)
++# if defined(_HPUX_SOURCE) || defined(__CYGWIN__) || defined(__GNU__) || defined(__HAIKU__)
+ #  define _tcsetattr(fd, ttmode) tcsetattr(fd, TCSANOW, ttmode)
+ # else
+ #  define _tcsetattr(fd, ttmode) ioctl(fd, TCSETS, (char *)ttmode)
+@@ -174,14 +174,12 @@ KPtyPrivate::~KPtyPrivate()
+ {
+ }
+ 
+-#ifndef HAVE_OPENPTY
+ bool KPtyPrivate::chownpty(bool)
+ {
+ //    return !QProcess::execute(KStandardDirs::findExe("kgrantpty"),
+ //        QStringList() << (grant?"--grant":"--revoke") << QString::number(masterFd));
+     return true;
+ }
+-#endif
+ 
+ /////////////////////////////
+ // public member functions //
+@@ -281,8 +279,8 @@ bool KPty::open()
+     // Linux device names, FIXME: Trouble on other systems?
+     for (const char * s3 = "pqrstuvwxyzabcde"; *s3; s3++) {
+         for (const char * s4 = "0123456789abcdef"; *s4; s4++) {
+-            ptyName = QString().sprintf("/dev/pty%c%c", *s3, *s4).toUtf8();
+-            d->ttyName = QString().sprintf("/dev/tty%c%c", *s3, *s4).toUtf8();
++            ptyName = QByteArrayLiteral("/dev/pty") + *s3 + *s4;
++            d->ttyName = QByteArrayLiteral("/dev/tty") + *s3 + *s4;
+ 
+             d->masterFd = ::open(ptyName.data(), O_RDWR);
+             if (d->masterFd >= 0) {
+@@ -395,8 +393,12 @@ bool KPty::open(int fd)
+ # else
+     int ptyno;
+     if (!ioctl(fd, TIOCGPTN, &ptyno)) {
+-        char buf[32];
+-        sprintf(buf, "/dev/pts/%d", ptyno);
++        const size_t sz = 32;
++        char buf[sz];
++        const size_t r = snprintf(buf, sz, "/dev/pts/%d", ptyno);
++        if (sz <= r) {
++            qWarning("KPty::open: Buffer too small\n");
++        }
+         d->ttyName = buf;
+ # endif
+     } else {
+@@ -500,6 +502,7 @@ void KPty::setCTty()
+ 
+ void KPty::login(const char * user, const char * remotehost)
+ {
++#ifndef __HAIKU__
+ #ifdef HAVE_UTEMPTER
+     Q_D(KPty);
+ 
+@@ -546,7 +549,7 @@ void KPty::login(const char * user, const char * remotehost)
+ # ifdef HAVE_UTMPX
+     gettimeofday(&l_struct.ut_tv, 0);
+ # else
+-    l_struct.ut_time = time(0);
++    l_struct.ut_time = time(nullptr);
+ # endif
+ 
+ # ifdef HAVE_LOGIN
+@@ -582,6 +585,7 @@ void KPty::login(const char * user, const char * remotehost)
+ #  endif
+ # endif
+ #endif
++#endif // #ifndef __HAIKU__
+ }
+ 
+ void KPty::logout()
+@@ -612,6 +616,7 @@ void KPty::logout()
+     ::logout(str_ptr);
+ #  endif
+ # else
++#ifndef __HAIKU__
+ #  ifdef HAVE_UTMPX
+     struct utmpx l_struct, *ut;
+ #  else
+@@ -648,13 +653,14 @@ void KPty::logout()
+     }
+     endutxent();
+ #  else
+-    ut->ut_time = time(0);
++    ut->ut_time = time(nullptr);
+     pututline(ut);
+ }
+ endutent();
+ #  endif
+ # endif
+ #endif
++#endif // #ifndef __HAIKU__
+ }
+ 
+ // XXX Supposedly, tc[gs]etattr do not work with the master on Solaris.
+-- 
+2.24.1
+
+
+From baf3898683bdb6a71bc53e36493f3bb97db74eab Mon Sep 17 00:00:00 2001
+From: Khaled <khallbal@gmail.com>
+Date: Sun, 22 Mar 2020 18:21:00 +0100
+Subject: Fix paths for haiku
+
+
+diff --git a/lib/qtermwidget.cpp b/lib/qtermwidget.cpp
+index 5c3e56f..156a212 100644
+--- a/lib/qtermwidget.cpp
++++ b/lib/qtermwidget.cpp
+@@ -33,6 +33,12 @@
+ #include "SearchBar.h"
+ #include "qtermwidget.h"
+ 
++#ifdef Q_OS_MACOS
++// Qt does not support fontconfig on macOS, so we need to use a "real" font name.
++#define DEFAULT_FONT_FAMILY                   "Menlo"
++#else
++#define DEFAULT_FONT_FAMILY                   "Monospace"
++#endif
+ 
+ #define STEP_ZOOM 1
+ 
+@@ -43,8 +49,10 @@ void *createTermWidget(int startnow, void *parent)
+     return (void*) new QTermWidget(startnow, (QWidget*)parent);
+ }
+ 
+-struct TermWidgetImpl {
+-    TermWidgetImpl(QWidget* parent = 0);
++class TermWidgetImpl {
++
++public:
++    TermWidgetImpl(QWidget* parent = nullptr);
+ 
+     TerminalDisplay *m_terminalDisplay;
+     Session *m_session;
+@@ -156,8 +164,8 @@ void QTermWidget::search(bool forwards, bool next)
+         m_impl->m_terminalDisplay->screenWindow()->screen()->getSelectionStart(startColumn, startLine);
+     }
+ 
+-    qDebug() << "current selection starts at: " << startColumn << startLine;
+-    qDebug() << "current cursor position: " << m_impl->m_terminalDisplay->screenWindow()->cursorPosition();
++    //qDebug() << "current selection starts at: " << startColumn << startLine;
++    //qDebug() << "current cursor position: " << m_impl->m_terminalDisplay->screenWindow()->cursorPosition();
+ 
+     QRegExp regExp(m_searchBar->searchText());
+     regExp.setPatternSyntax(m_searchBar->useRegularExpression() ? QRegExp::RegExp : QRegExp::FixedString);
+@@ -175,7 +183,7 @@ void QTermWidget::search(bool forwards, bool next)
+ void QTermWidget::matchFound(int startColumn, int startLine, int endColumn, int endLine)
+ {
+     ScreenWindow* sw = m_impl->m_terminalDisplay->screenWindow();
+-    qDebug() << "Scroll to" << startLine;
++    //qDebug() << "Scroll to" << startLine;
+     sw->scrollTo(startLine);
+     sw->setTrackOutput(false);
+     sw->notifyOutputChanged();
+@@ -260,19 +268,26 @@ void QTermWidget::init(int startnow)
+     // First check $XDG_DATA_DIRS. This follows the implementation in libqtxdg
+     QString d = QFile::decodeName(qgetenv("XDG_DATA_DIRS"));
+     QStringList dirs = d.split(QLatin1Char(':'), QString::SkipEmptyParts);
++#ifdef Q_OS_HAIKU
+     if (dirs.isEmpty()) {
+         dirs.append(QString::fromLatin1("/usr/local/share"));
+         dirs.append(QString::fromLatin1("/usr/share"));
+     }
++#else
++    if (dirs.isEmpty()) {
++        dirs.append(QString::fromLatin1("/boot/system/non-packaged/data"));
++        dirs.append(QString::fromLatin1("/boot/system/data"));
++    }
++#endif
+     dirs.append(QFile::decodeName(TRANSLATIONS_DIR));
+ 
+     m_translator = new QTranslator(this);
+ 
+-    for (const QString& dir : dirs) {
+-        qDebug() << "Trying to load translation file from dir" << dir;
++    for (const QString& dir : qAsConst(dirs)) {
++        //qDebug() << "Trying to load translation file from dir" << dir;
+         if (m_translator->load(QLocale::system(), QLatin1String("qtermwidget"), QLatin1String(QLatin1String("_")), dir)) {
+             qApp->installTranslator(m_translator);
+-            qDebug() << "Translations found in" << dir;
++            //qDebug() << "Translations found in" << dir;
+             break;
+         }
+     }
+@@ -321,7 +336,7 @@ void QTermWidget::init(int startnow)
+ //    m_impl->m_terminalDisplay->setSize(80, 40);
+ 
+     QFont font = QApplication::font();
+-    font.setFamily(QLatin1String("Monospace"));
++    font.setFamily(QLatin1String(DEFAULT_FONT_FAMILY));
+     font.setPointSize(10);
+     font.setStyleHint(QFont::TypeWriter);
+     setTerminalFont(font);
+@@ -419,7 +434,7 @@ void QTermWidget::setTextCodec(QTextCodec *codec)
+ 
+ void QTermWidget::setColorScheme(const QString& origName)
+ {
+-    const ColorScheme *cs = 0;
++    const ColorScheme *cs = nullptr;
+ 
+     const bool isFile = QFile::exists(origName);
+     const QString& name = isFile ?
+@@ -499,6 +514,11 @@ void QTermWidget::sendText(const QString &text)
+     m_impl->m_session->sendText(text);
+ }
+ 
++void QTermWidget::sendKeyEvent(QKeyEvent *e)
++{
++    m_impl->m_session->sendKeyEvent(e);
++}
++
+ void QTermWidget::resizeEvent(QResizeEvent*)
+ {
+ //qDebug("global window resizing...with %d %d", this->size().width(), this->size().height());
+@@ -743,3 +763,16 @@ int QTermWidget::getMargin() const
+ {
+     return m_impl->m_terminalDisplay->margin();
+ }
++
++void QTermWidget::saveHistory(QIODevice *device)
++{
++    QTextStream stream(device);
++    PlainTextDecoder decoder;
++    decoder.begin(&stream);
++    m_impl->m_session->emulation()->writeToStream(&decoder, 0, m_impl->m_session->emulation()->lineCount());
++}
++
++void QTermWidget::setDrawLineChars(bool drawLineChars)
++{
++    m_impl->m_terminalDisplay->setDrawLineChars(drawLineChars);
++}
+-- 
+2.24.1
+
