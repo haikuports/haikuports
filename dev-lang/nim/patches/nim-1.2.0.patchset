@@ -732,3 +732,129 @@ index a23d17b21..ba60a3749 100644
 -- 
 2.25.2
 
+
+From a9c0b59248c205990b4f6a077d586eab8bebff3f Mon Sep 17 00:00:00 2001
+From: Leorize <leorize+oss@disroot.org>
+Date: Thu, 9 Apr 2020 17:20:54 -0500
+Subject: osproc: added a better version of waitForExit for Haiku
+
+Also modified tosprocterminate to verify waitForExit implementations.
+
+diff --git a/lib/pure/osproc.nim b/lib/pure/osproc.nim
+index 1472d4e3d..ed5ab7b97 100644
+--- a/lib/pure/osproc.nim
++++ b/lib/pure/osproc.nim
+@@ -1167,6 +1167,67 @@ elif not defined(useNimRtl):
+           discard posix.close(kqFD)
+ 
+       result = exitStatusLikeShell(p.exitStatus)
++  elif defined(haiku):
++    const
++      B_OBJECT_TYPE_THREAD = 3
++      B_EVENT_INVALID = 0x1000
++      B_RELATIVE_TIMEOUT = 0x8
++
++    type
++      ObjectWaitInfo {.importc: "object_wait_info", header: "OS.h".} = object
++        obj {.importc: "object".}: int32
++        typ {.importc: "type".}: uint16
++        events: uint16
++
++    proc waitForObjects(infos: ptr ObjectWaitInfo, numInfos: cint, flags: uint32,
++                        timeout: int64): clong
++                       {.importc: "wait_for_objects_etc", header: "OS.h".}
++
++    proc waitForExit(p: Process, timeout: int = -1): int =
++      if p.exitFlag:
++        return exitStatusLikeShell(p.exitStatus)
++
++      if timeout == -1:
++        var status: cint = 1
++        if waitpid(p.id, status, 0) < 0:
++          raiseOSError(osLastError())
++        p.exitFlag = true
++        p.exitStatus = status
++      else:
++        var info = ObjectWaitInfo(
++          obj: p.id, # Haiku's PID is actually the main thread ID.
++          typ: B_OBJECT_TYPE_THREAD,
++          events: B_EVENT_INVALID # notify when the thread die.
++        )
++
++        while true:
++          var status: cint = 1
++          let count = waitForObjects(addr info, 1, B_RELATIVE_TIMEOUT, timeout)
++
++          if count < 0:
++            let err = count.cint
++            if err == ETIMEDOUT:
++              # timeout expired, so we try to kill the process
++              if posix.kill(p.id, SIGKILL) == -1:
++                raiseOSError(osLastError())
++              if waitpid(p.id, status, 0) < 0:
++                raiseOSError(osLastError())
++              p.exitFlag = true
++              p.exitStatus = status
++              break
++            elif err != EINTR:
++              raiseOSError(err.OSErrorCode)
++          elif count > 0:
++            if waitpid(p.id, status, 0) < 0:
++              raiseOSError(osLastError())
++            p.exitFlag = true
++            p.exitStatus = status
++            break
++          else:
++            doAssert false, "unreachable!"
++
++      result = exitStatusLikeShell(p.exitStatus)
++
+   else:
+     import times
+ 
+diff --git a/tests/stdlib/tosprocterminate.nim b/tests/stdlib/tosprocterminate.nim
+index a46d91d68..d487b5e60 100644
+--- a/tests/stdlib/tosprocterminate.nim
++++ b/tests/stdlib/tosprocterminate.nim
+@@ -1,8 +1,10 @@
+ discard """
+-outputsub: "SUCCESS"
++  cmd: "nim $target $options -r $file"
++  targets: "c cpp"
++  matrix: "--threads:on; "
+ """
+ 
+-import os, osproc
++import os, osproc, times, std / monotimes
+ 
+ when defined(Windows):
+   const ProgramWhichDoesNotEnd = "notepad"
+@@ -19,7 +21,21 @@ while process.running() and TimeToWait > 0:
+   sleep(100)
+   TimeToWait = TimeToWait - 100
+ 
+-if process.running():
+-  echo("FAILED")
+-else:
+-  echo("SUCCESS")
++doAssert not process.running()
++echo("stopped process")
++
++process.close()
++
++echo("starting " & ProgramWhichDoesNotEnd)
++process = startProcess(ProgramWhichDoesNotEnd)
++echo("process should be stopped after 2s")
++
++let start = getMonoTime()
++discard process.waitForExit(2000)
++let took = getMonoTime() - start
++
++doAssert not process.running()
++# some additional time to account for overhead
++doAssert took < initDuration(seconds = 3)
++
++echo("stopped process after ", took)
+-- 
+2.25.2
+
