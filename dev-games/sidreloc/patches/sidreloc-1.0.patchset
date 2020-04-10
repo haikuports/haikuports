@@ -1,25 +1,300 @@
-From f2291056e2784bd724f2eb383b901ca6ecae97a3 Mon Sep 17 00:00:00 2001
+From 274ad0be938d3e11ea5f27b6a201e47e0382f224 Mon Sep 17 00:00:00 2001
 From: Gabriele Baldassarre <gabriele@gabrielebaldassarre.com>
-Date: Sat, 4 Apr 2020 22:38:01 +0000
-Subject: Modified Makefile
+Date: Fri, 10 Apr 2020 22:23:50 +0000
+Subject: Replaced err* with something roughly equivalent but supported in
+ Haiku
 
 
-diff --git a/Makefile b/Makefile
-index ee80c69..2ad5e15 100644
---- a/Makefile
-+++ b/Makefile
-@@ -14,7 +14,7 @@ clean:
- 		rm -rf *.o reloc
+diff --git a/sidreloc.c b/sidreloc.c
+index 7714af5..8bb1622 100644
+--- a/sidreloc.c
++++ b/sidreloc.c
+@@ -28,6 +28,8 @@
+ #include <getopt.h>
+ #include <math.h>
  
- install:	all
--		mkdir -p /usr/local/bin
--		cp sidreloc /usr/local/bin/
--		mkdir -p /usr/local/man/man1
--		cp sidreloc.1 /usr/local/man/man1/
-+		mkdir -p ${BINDIR}
-+		cp -p sidreloc ${BINDIR}
-+		mkdir -p ${MANDIR}
-+		cp -p sidreloc.1 ${MANDIR}
++#include <errno.h>
++
+ #include "reloc.h"
+ 
+ struct sidheader {
+@@ -94,7 +96,10 @@ static int readheader(struct sidheader *head, uint8_t *data, int filesize) {
+ 		head->dataoffset += 2;
+ 	}
+ 	head->loadsize = filesize - head->dataoffset;
+-	if(head->loadaddr < 0x7e8 && head->rsid) errx(RET_RSID, "RSID standard violation");
++	if(head->loadaddr < 0x7e8 && head->rsid) {
++		fprintf(stderr,"%s: %s\n", "sidreloc", "RSID standard violation");
++		exit(RET_RSID);
++	}
+ 	head->initaddr = (data[0x0a] << 8) | data[0x0b];
+ 	if(!head->initaddr) head->initaddr = head->loadaddr;
+ 	head->playaddr = (data[0x0c] << 8) | data[0x0d];
+@@ -108,9 +113,18 @@ static int readheader(struct sidheader *head, uint8_t *data, int filesize) {
+ 	head->released[31] = 0;
+ 	if(head->version > 1) {
+ 		uint16_t flags = (data[0x76] << 8) | data[0x77];
+-		if(flags & 1) errx(RET_MUS, "MUS format not supported");
+-		if(head->rsid && (flags & 2)) errx(RET_BASIC, "BASIC tunes not supported");
+-		if(!head->rsid && (flags & 2)) errx(RET_PSID, "PSID tunes not supported");
++		if(flags & 1){
++			fprintf(stderr,"%s: %s\n", "sidreloc", "MUS format not supported");
++			exit(RET_MUS);
++		}
++		if(head->rsid && (flags & 2)){
++			fprintf(stderr,"%s: %s\n", "sidreloc", "BASIC tunes not supported");
++			exit(RET_BASIC);
++		}
++		if(!head->rsid && (flags & 2)){
++			fprintf(stderr,"%s: %s\n", "sidreloc", "PSID tunes not supported");
++			exit(RET_PSID);
++		}
+ 	}
+ 	return 0;
+ }
+@@ -140,7 +154,10 @@ static uint16_t get_from_vector(struct core *core, uint16_t fallback, uint16_t v
+ 
+ static void init_tune(struct core *core, uint16_t initaddr, int tune) {
+ 	int errcode = emulate(core, initaddr, tune, cycles_init);
+-	if(errcode == ERR_CYCLES) errx(RET_CYCLES | exitbits, "Max cycles exhausted during init routine. Infinite loop?");
++	if(errcode == ERR_CYCLES){
++			fprintf(stderr,"%s: %s\n", "sidreloc", "Max cycles exhausted during init routine. Infinite loop?");
++			exit(RET_CYCLES | exitbits);
++		}
+ 	if(errcode) fprintf(stderr, "%s\n", emulate_err[errcode - 1]);
+ }
+ 
+@@ -159,12 +176,16 @@ static int play_step(struct core *core, uint16_t playaddr, char *errprefix) {
+ 		allow_digi = 0;
+ 	}
+ 
+-	if(!playaddr) errx(RET_PLAYADDR, "%sCouldn't determine address of playroutine.", errprefix);
++	if(!playaddr){
++			fprintf(stderr,"%s: %s%s\n", "sidreloc", errprefix, "Couldn't determine address of playroutine.");
++			exit(RET_PLAYADDR);
++		} 
+ 
+ 	errcode = emulate(core, playaddr, 0, cycles_play);
+ 	if(errcode == ERR_CYCLES && !force) {
+-		errx(RET_CYCLES | exitbits, "Max cycles exhausted during playroutine. Infinite loop?");
+-	}
++			fprintf(stderr,"%s: %s\n", "sidreloc", "Max cycles exhausted during init routine. Infinite loop?");
++			exit(RET_CYCLES | exitbits);
++		}
+ 	if(errcode) {
+ 		fprintf(stderr, "%s%s\n", errprefix, emulate_err[errcode - 1]);
+ 	} else if(allow_digi) {
+@@ -178,7 +199,8 @@ static int play_step(struct core *core, uint16_t playaddr, char *errprefix) {
+ 			for(i = 0; i < nmi_calls; i++) {
+ 				errcode = emulate(core, digiaddr, 0, cycles_nmi);
+ 				if(errcode == ERR_CYCLES && !force) {
+-					errx(RET_CYCLES | exitbits, "Max cycles exhausted during NMI routine. Infinite loop?");
++					fprintf(stderr,"%s: %s\n", "sidreloc", "Max cycles exhausted during init routine. Infinite loop?");
++					exit(RET_CYCLES | exitbits);
+ 				}
+ 				if(errcode) break;
+ 			}
+@@ -283,7 +305,10 @@ static void usage() {
+ static int readfile(uint8_t *data, char *filename) {
+ 	int filesize;
+ 	FILE *f = fopen(filename, "rb");
+-	if(!f) err(RET_IO, "%s", filename);
++	if(!f){
++		fprintf(stderr,"%s: %s: %s\n", "sidreloc", filename, strerror(errno));
++		exit(RET_IO);
++	}
+ 	filesize = fread(data, 1, 65536, f);
+ 	fclose(f);
+ 	return filesize;
+@@ -291,8 +316,14 @@ static int readfile(uint8_t *data, char *filename) {
+ 
+ static void writefile(uint8_t *data, char *filename, int filesize) {
+ 	FILE *f = fopen(filename, "wb");
+-	if(!f) err(RET_IO | exitbits, "%s", filename);
+-	if(fwrite(data, 1, filesize, f) != filesize) err(RET_IO | exitbits, "fwrite");
++	if(!f){
++		fprintf(stderr,"%s: %s: %s\n", "sidreloc", filename, strerror(errno));
++		exit(RET_IO | exitbits);
++	}
++	if(fwrite(data, 1, filesize, f) != filesize){
++		fprintf(stderr,"%s: %s: %s\n", "sidreloc", "fwrite", strerror(errno));
++		exit(RET_IO | exitbits);
++	}
+ 	fclose(f);
+ }
+ 
+@@ -370,7 +401,8 @@ int main(int argc, char **argv) {
+ 				if(!(1 == sscanf(optarg, "%x", &dest_page)
+ 				&& dest_page >= 0x00
+ 				&& dest_page <= 0xff)) {
+-					errx(RET_PARAM, "Invalid page number (should be a hexadecimal number in the range 00-ff)");
++					fprintf(stderr,"%s: %s\n", "sidreloc", "Invalid page number (should be a hexadecimal number in the range 00-ff)");
++					exit(RET_PARAM);
+ 				}
+ 				break;
+ 			case 'z':
+@@ -380,7 +412,8 @@ int main(int argc, char **argv) {
+ 				&& last_zp >= 0x02
+ 				&& last_zp <= 0xff
+ 				&& first_zp <= last_zp)) {
+-					errx(RET_PARAM, "Invalid zero-page address range (should be two hexadecimal numbers in the range 02-ff)");
++					fprintf(stderr,"%s: %s\n", "sidreloc", "Invalid zero-page address range (should be two hexadecimal numbers in the range 02-ff)");
++					exit(RET_PARAM);
+ 				}
+ 				break;
+ 			case 'k':
+@@ -393,14 +426,16 @@ int main(int argc, char **argv) {
+ 				&& given_reloc_end >= 0x01
+ 				&& given_reloc_end <= 0xff
+ 				&& given_reloc_start <= given_reloc_end)) {
+-					errx(RET_PARAM, "Invalid relocation range (should be two hexadecimal numbers in the range 01-ff)");
++					fprintf(stderr,"%s: %s\n", "sidreloc", "Invalid relocation range (should be two hexadecimal numbers in the range 01-ff)");
++					exit(RET_PARAM);
+ 				}
+ 				break;
+ 			case 't':
+ 				if(!(1 == sscanf(optarg, "%d", &tolerance)
+ 				&& tolerance >= 0
+ 				&& tolerance < 100)) {
+-					errx(RET_PARAM, "Invalid tolerance percentage (should be an integer in the range 0-100)");
++					fprintf(stderr,"%s: %s\n", "sidreloc", "Invalid tolerance percentage (should be an integer in the range 0-100)");
++					exit(RET_PARAM);
+ 				}
+ 				break;
+ 			case 's':
+@@ -418,31 +453,36 @@ int main(int argc, char **argv) {
+ 			case OPT_FRAMES:
+ 				if(!(1 == sscanf(optarg, "%d", &play_calls)
+ 				&& play_calls >= 0)) {
+-					errx(RET_PARAM, "Invalid number of calls to the playroutine.");
++					fprintf(stderr,"%s: %s\n", "sidreloc", "Invalid number of calls to the playroutine.");
++					exit(RET_PARAM);
+ 				}
+ 				break;
+ 			case OPT_NMI_CALLS:
+ 				if(!(1 == sscanf(optarg, "%d", &nmi_calls)
+ 				&& nmi_calls >= 0)) {
+-					errx(RET_PARAM, "Invalid number of calls to the NMI routine.");
++					fprintf(stderr,"%s: %s\n", "sidreloc", "Invalid number of calls to the NMI routine.");
++					exit(RET_PARAM);
+ 				}
+ 				break;
+ 			case OPT_INIT_CYCLES:
+ 				if(!(1 == sscanf(optarg, "%d", &cycles_init)
+ 				&& cycles_init >= 0)) {
+-					errx(RET_PARAM, "Invalid cycle limit for the init routine.");
++					fprintf(stderr,"%s: %s\n", "sidreloc", "Invalid cycle limit for the init routine.");
++					exit(RET_PARAM);
+ 				}
+ 				break;
+ 			case OPT_PLAY_CYCLES:
+ 				if(!(1 == sscanf(optarg, "%d", &cycles_play)
+ 				&& cycles_play >= 0)) {
+-					errx(RET_PARAM, "Invalid cycle limit for the playroutine.");
++					fprintf(stderr,"%s: %s\n", "sidreloc", "Invalid cycle limit for the playroutine.");
++					exit(RET_PARAM);
+ 				}
+ 				break;
+ 			case OPT_NMI_CYCLES:
+ 				if(!(1 == sscanf(optarg, "%d", &cycles_nmi)
+ 				&& cycles_nmi >= 0)) {
+-					errx(RET_PARAM, "Invalid cycle limit for the NMI routine.");
++					fprintf(stderr,"%s: %s\n", "sidreloc", "Invalid cycle limit for the NMI routine.");
++					exit(RET_PARAM);
+ 				}
+ 				break;
+ 		}
+@@ -453,13 +493,16 @@ int main(int argc, char **argv) {
+ 
+ 	if(argc != 2) usage();
+ 
+-	filename = argv[0];
++	filename = "sidreloc";
+ 	outputname = argv[1];
+ 
+ 	/* Read the SID file. */
+ 
+ 	filesize = readfile(data, filename);
+-	if(readheader(&head, data, filesize)) errx(RET_HEADER, "Bad SID file header");
++	if(readheader(&head, data, filesize)){
++		fprintf(stderr,"%s: %s\n", "sidreloc", "Bad SID file header");
++		exit(RET_HEADER);
++	}
+ 	if(verbose >= 0) {
+ 		fprintf(stderr, "%s, %s, %s, $%04x-$%04x, %d subtunes\n",
+ 			head.title,
+@@ -484,10 +527,8 @@ int main(int argc, char **argv) {
+ 		reloc_end = (given_reloc_end << 8) | 0xff;
+ 		if(reloc_start > head.loadaddr
+ 		|| reloc_end < (head.loadaddr + head.loadsize - 1)) {
+-			errx(RET_RANGE,
+-				"Relocation range (-r) must contain all the SID data! (SID loads at $%04x-$%04x)",
+-				head.loadaddr,
+-				head.loadaddr + head.loadsize - 1);
++				fprintf(stderr,"%s: %s%04x%s%04x%s\n", "sidreloc", "Relocation range (-r) must contain all the SID data! (SID loads at $", head.loadaddr, "-$", head.loadaddr + head.loadsize - 1, ").");
++				exit(RET_RANGE);
+ 		}
+ 	}
+ 
+@@ -502,7 +543,8 @@ int main(int argc, char **argv) {
+ 	if(reloc_start < 0x100 || reloc_end < reloc_start
+ 	|| ((reloc_start + reloc_offset) & 0xffff) < 0x100
+ 	|| ((reloc_end + reloc_offset) & 0xffff) < ((reloc_start + reloc_offset) & 0xffff)) {
+-		errx(RET_RANGE, "Neither the source nor the destination relocation range may overlap with the zero-page.");
++		fprintf(stderr,"%s: %s\n", "sidreloc", "Neither the source nor the destination relocation range may overlap with the zero-page.");
++		exit(RET_RANGE);
+ 	}
+ 
+ 	prealloc_cons_cells();
+@@ -565,7 +607,10 @@ int main(int argc, char **argv) {
+ 
+ 	/* Find a solution to the set of constraints. */
+ 
+-	if(trivially_inconsistent() || solver()) errx(RET_CONSTR | exitbits, "No solution found");
++	if(trivially_inconsistent() || solver()){
++		fprintf(stderr,"%s: %s\n", "sidreloc", "No solution found");
++		exit(RET_CONSTR | exitbits);
++	}
+ 
+ 	/* Map the zero-page addresses to new locations. */
+ 
+@@ -629,10 +674,8 @@ int main(int argc, char **argv) {
+ 					}
+ 				}
+ 				if(dest > last_zp) {
+-					errx(RET_ZPFULL | exitbits,
+-						"Can't fit all zero-page addresses into specified range ($%02x-$%02x).",
+-						first_zp,
+-						last_zp);
++					fprintf(stderr,"%s: %s%02x%s%02x%s\n", "sidreloc", "Can't fit all zero-page addresses into specified range (", first_zp, "-$", last_zp, ").");
++					exit(RET_ZPFULL | exitbits);
+ 				}
+ 			}
+ 		}
+@@ -703,7 +746,8 @@ int main(int argc, char **argv) {
+ 				if(force) {
+ 					break;
+ 				} else {
+-					errx(RET_VERIFY | exitbits, "Verification failed");
++					fprintf(stderr,"%s: %s\n", "sidreloc", "Verification failed");
++					exit(RET_VERIFY | exitbits);
+ 				}
+ 			}
+ 
+@@ -724,9 +768,11 @@ int main(int argc, char **argv) {
+ 		exitbits |= RETF_TOLERANCE;
+ 		if(!force) {
+ 			if(n_badpitch && (!tolerance || (perc_badpitch > tolerance))) {
+-				errx(RET_VERIFY | exitbits, "Relocation failed; too many mismatching pitches.\n");
++				fprintf(stderr,"%s: %s\n", "sidreloc", "Relocation failed; too many mismatching pitches");
++				exit(RET_VERIFY | exitbits);
+ 			} else if(n_badpw && strictpw) {
+-				errx(RET_VERIFY | exitbits, "Relocation failed; mismatching pulse widths and strict flag given.\n");
++				fprintf(stderr,"%s: %s\n", "sidreloc", "Relocation failed; mismatching pulse widths and strict flag given");
++				exit(RET_VERIFY | exitbits);
+ 			}
+ 		}
+ 	}
 -- 
 2.26.0
 
