@@ -1,14 +1,14 @@
-From 8dd8b22cb2a887d4ca90d3a3cfb8d6fcb35a30ad Mon Sep 17 00:00:00 2001
+From 86840c5c8d290d2e66df7f2c22b10c7314bb8d4a Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Sun, 27 Oct 2019 20:49:35 +1000
+Date: Fri, 1 May 2020 21:01:19 +1000
 Subject: Add Haiku support
 
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index b18a3e2..fa06267 100644
+index 1ec88a2..ff9e355 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -174,6 +174,12 @@ elseif (SWITCH_BUILD)
+@@ -188,6 +188,12 @@ elseif (SWITCH_BUILD)
          ${PROJECT_SOURCE_DIR}/src/platform/switch/switch_touch.c
          ${PROJECT_SOURCE_DIR}/src/platform/switch/switch_keyboard.c
      )
@@ -21,11 +21,24 @@ index b18a3e2..fa06267 100644
  else()
      set(PLATFORM_FILES
          ${PLATFORM_FILES}
+diff --git a/src/core/backtrace.c b/src/core/backtrace.c
+index b676e38..20ff0ee 100644
+--- a/src/core/backtrace.c
++++ b/src/core/backtrace.c
+@@ -2,7 +2,7 @@
+ 
+ #include "core/log.h"
+ 
+-#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__) && !defined(__vita__) && !defined(__SWITCH__)
++#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__) && !defined(__vita__) && !defined(__SWITCH__) && !defined(__HAIKU__)
+ 
+ #include <execinfo.h>
+ 
 diff --git a/src/game/settings.c b/src/game/settings.c
-index 3bcaebb..1016cad 100644
+index fc206c8..ecba257 100644
 --- a/src/game/settings.c
 +++ b/src/game/settings.c
-@@ -39,7 +39,7 @@ static struct {
+@@ -41,7 +41,7 @@ static struct {
  
  static void load_default_settings(void)
  {
@@ -34,7 +47,7 @@ index 3bcaebb..1016cad 100644
      data.window_width = 800;
      data.window_height = 600;
  
-@@ -68,7 +68,7 @@ static void load_default_settings(void)
+@@ -70,7 +70,7 @@ static void load_default_settings(void)
  static void load_settings(buffer *buf)
  {
      buffer_skip(buf, 4);
@@ -43,7 +56,7 @@ index 3bcaebb..1016cad 100644
      buffer_skip(buf, 3);
      data.sound_effects.enabled = buffer_read_u8(buf);
      data.sound_music.enabled = buffer_read_u8(buf);
-@@ -118,7 +118,7 @@ void settings_load(void)
+@@ -127,7 +127,7 @@ void settings_load(void)
      buffer_init(&buf, data.inf_file, size);
      load_settings(&buf);
  
@@ -54,18 +67,24 @@ index 3bcaebb..1016cad 100644
          data.window_height = 600;
 diff --git a/src/platform/haiku/cursor.c b/src/platform/haiku/cursor.c
 new file mode 100644
-index 0000000..befff8f
+index 0000000..953b4e8
 --- /dev/null
 +++ b/src/platform/haiku/cursor.c
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,64 @@
 +#include "graphics/color.h"
 +#include "game/system.h"
 +#include "input/cursor.h"
++#include "platform/cursor.h"
++
++#include "haiku.h"
 +
 +#include "SDL.h"
 +
-+static SDL_Texture *cursors[CURSOR_MAX];
-+SDL_Texture *current_cursor;
++#define CURSOR_SIZE 32
++#define ALPHA_OPAQUE (0xFFu << 24)
++
++static haiku_cursor cursors[CURSOR_MAX];
++haiku_cursor *current_cursor;
 +
 +extern struct {
 +    SDL_Window *window;
@@ -75,51 +94,76 @@ index 0000000..befff8f
 +
 +static SDL_Texture *init_cursor(const cursor *c)
 +{
++    SDL_Texture *tex = SDL_CreateTexture(SDL.renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, CURSOR_SIZE, CURSOR_SIZE);
 +
-+    SDL_Texture *tex = SDL_CreateTexture(SDL.renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 32, 32);
++    uint32_t pixels[CURSOR_SIZE * CURSOR_SIZE] = { 0 };
 +
-+    uint32_t pixels[32 * 32];
-+
-+    for (int i = 0; i < 32; i++) {
-+        for (int j = 0; j < 32; j++) {
-+            switch (c->data[i * 32 + j]) {
-+                case 'X':
-+                    pixels[i * 32 + j] =  0xFF000000; //black
++    for (int y = 0; y < c->height; y++) {
++        for (int x = 0; x < c->width; x++) {
++            switch (c->data[y * c->width + x]) {
++                case '#':
++                    pixels[y * CURSOR_SIZE + x] = COLOR_BLACK | ALPHA_OPAQUE;
 +                    break;
-+                case '.':
-+                    pixels[i * 32 + j] = 0xFFFFFFFF; //white
++                case '\'':
++                    pixels[y * CURSOR_SIZE + x] = COLOR_WHITE | ALPHA_OPAQUE;
 +                    break;
 +                case ' ':
-+                    pixels[i * 32 + j] = 0x00000000; //transparent
-+                    break; // Transparent is 0x00000000 which is the default value of the buffer
++                    pixels[y * CURSOR_SIZE + x] = 0x00000000; // transparent
++                    break;
 +            }
 +        }
 +    }
 +
-+    SDL_UpdateTexture(tex, NULL, pixels, 32 * 4);
++    SDL_UpdateTexture(tex, NULL, pixels, CURSOR_SIZE * 4);
 +    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
 +
 +    return tex;
 +}
 +
-+void system_init_cursors(void)
++void platform_init_cursors(int scale_percentage)
 +{
 +    for (int i = 0; i < CURSOR_MAX; i++) {
-+        cursors[i] = init_cursor(input_cursor_data(i));
++        const cursor *c = input_cursor_data(i, CURSOR_SCALE_1);
++        cursors[i].texture = init_cursor(c);
++        cursors[i].hotspot_x = c->hotspot_x;
++        cursors[i].hotspot_y = c->hotspot_y;
 +    }
 +    system_set_cursor(CURSOR_ARROW);
 +}
 +
 +void system_set_cursor(int cursor_id)
 +{
-+    current_cursor = cursors[cursor_id];
++    current_cursor = &cursors[cursor_id];
 +}
+diff --git a/src/platform/haiku/haiku.h b/src/platform/haiku/haiku.h
+new file mode 100644
+index 0000000..4d8179a
+--- /dev/null
++++ b/src/platform/haiku/haiku.h
+@@ -0,0 +1,17 @@
++#ifndef PLATFORM_HAIKU_H
++#define PLATFORM_HAIKU_H
++
++#include "SDL.h"
++
++extern int last_mouse_x;
++extern int last_mouse_y;
++
++typedef struct {
++    SDL_Texture *texture;
++    int hotspot_x;
++    int hotspot_y;
++} haiku_cursor;
++
++extern haiku_cursor *current_cursor;
++
++#endif
 diff --git a/src/platform/haiku/screen.c b/src/platform/haiku/screen.c
 new file mode 100644
-index 0000000..80fd5de
+index 0000000..f737ceb
 --- /dev/null
 +++ b/src/platform/haiku/screen.c
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,176 @@
 +#include "platform/screen.h"
 +
 +#include "SDL.h"
@@ -127,9 +171,9 @@ index 0000000..80fd5de
 +#include "game/settings.h"
 +#include "graphics/graphics.h"
 +#include "graphics/screen.h"
-+
-+extern SDL_Texture *current_cursor;
 +#include "input/mouse.h"
++
++#include "haiku.h"
 +
 +struct {
 +    SDL_Window *window;
@@ -140,18 +184,19 @@ index 0000000..80fd5de
 +static struct {
 +    int x;
 +    int y;
-+    int centered;
-+} window_pos = { 0, 0, 1 };
++} window_pos = { 100, 100 };
 +
 +static struct {
 +    const int WIDTH;
 +    const int HEIGHT;
-+} MINIMUM = { 640, 480 };
++} MINIMUM = { 800, 600 };
 +
-+int platform_screen_create(const char *title)
++int platform_screen_create(const char *title, int display_scale_percentage)
 +{
 +    int width, height;
-+    int fullscreen = setting_fullscreen();
++    int fullscreen = 0;
++    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "best");
++
 +    if (fullscreen) {
 +        SDL_DisplayMode mode;
 +        SDL_GetDesktopDisplayMode(0, &mode);
@@ -169,9 +214,8 @@ index 0000000..80fd5de
 +        flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
 +    }
 +    SDL.window = SDL_CreateWindow(title,
-+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
++        window_pos.x, window_pos.y,
 +        width, height, flags);
-+
 +    if (!SDL.window) {
 +        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Unable to create window: %s", SDL_GetError());
 +        return 0;
@@ -186,13 +230,11 @@ index 0000000..80fd5de
 +            return 0;
 +        }
 +    }
-+    if (fullscreen && SDL_GetNumVideoDisplays() > 1) {
-+        SDL_SetWindowGrab(SDL.window, SDL_TRUE);
-+    }
 +
 +	SDL_ShowCursor(SDL_DISABLE);
-+	
++
 +    SDL_SetWindowMinimumSize(SDL.window, MINIMUM.WIDTH, MINIMUM.HEIGHT);
++
 +    return platform_screen_resize(width, height);
 +}
 +
@@ -230,15 +272,6 @@ index 0000000..80fd5de
 +    } else {
 +        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Unable to create texture: %s", SDL_GetError());
 +        return 0;
-+    }
-+}
-+
-+void platform_screen_move(int x, int y)
-+{
-+    if (!setting_fullscreen()) {
-+        window_pos.x = x;
-+        window_pos.y = y;
-+        window_pos.centered = 0;
 +    }
 +}
 +
@@ -292,72 +325,21 @@ index 0000000..80fd5de
 +
 +    const mouse *mouse = mouse_get();
 +    SDL_Rect dst;
-+    dst.x = mouse->x;
-+    dst.y = mouse->y;
++    dst.x = mouse->x - current_cursor->hotspot_x;
++    dst.y = mouse->y - current_cursor->hotspot_y;
 +    dst.w = 32;
 +    dst.h = 32;
-+    SDL_RenderCopy(SDL.renderer, current_cursor, NULL, &dst);
++    SDL_RenderCopy(SDL.renderer, current_cursor->texture, NULL, &dst);
 +
 +    SDL_RenderPresent(SDL.renderer);
 +}
-diff --git a/src/platform/julius.c b/src/platform/julius.c
-index 99d8a66..64ae8a0 100644
---- a/src/platform/julius.c
-+++ b/src/platform/julius.c
-@@ -35,7 +35,7 @@
- #include <string.h>
- #endif
- 
--#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__) && !defined(__vita__) && !defined(__SWITCH__)
-+#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__) && !defined(__vita__) && !defined(__SWITCH__) && !defined(__HAIKU__)
- #include <execinfo.h>
- #endif
- 
-diff --git a/test/sav/run.c b/test/sav/run.c
-index 1093269..84d7977 100644
---- a/test/sav/run.c
-+++ b/test/sav/run.c
-@@ -3,7 +3,7 @@
- #include "game/game.h"
- #include "game/settings.h"
- 
--#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__)
-+#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__) && !defined(__HAIKU__)
- #include <execinfo.h>
- #endif
- 
-@@ -22,7 +22,7 @@
- 
- static void handler(int sig)
- {
--#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__)
-+#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__) && !defined(__HAIKU__)
-     void *array[100];
-     size_t size;
- 
++
++void platform_screen_move(int x, int y)
++{
++	window_pos.x = x;
++	window_pos.y = y;
++	SDL_SetWindowPosition(SDL.window, x, y);
++}
 -- 
-2.23.0
-
-
-From 57c9d2ff4da9463fb563b9b8cad101c66844a7c6 Mon Sep 17 00:00:00 2001
-From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Sun, 27 Oct 2019 20:58:50 +1000
-Subject: Disable backtrace for Haiku
-
-
-diff --git a/src/platform/julius.c b/src/platform/julius.c
-index 64ae8a0..963b9a4 100644
---- a/src/platform/julius.c
-+++ b/src/platform/julius.c
-@@ -69,7 +69,7 @@ enum {
- };
- 
- static void handler(int sig) {
--#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__) && !defined(__vita__) && !defined(__SWITCH__)
-+#if defined(__GNUC__) && !defined(__MINGW32__) && !defined(__OpenBSD__) && !defined(__vita__) && !defined(__SWITCH__) && !defined(__HAIKU__)
-     void *array[100];
-     size_t size;
- 
--- 
-2.23.0
+2.26.0
 
