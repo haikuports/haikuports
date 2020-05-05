@@ -1,0 +1,203 @@
+From 91c03e53e8575c4477ebc969eae3ed7387e2d499 Mon Sep 17 00:00:00 2001
+From: Ken Mays <kmays2000@gmail.com>
+Date: Sun, 3 May 2020 04:06:05 +0100
+Subject: x86_64 pkg-config support
+
+
+diff --git a/platform/haiku/detect.py b/platform/haiku/detect.py
+index dd72294..e22b28c 100644
+--- a/platform/haiku/detect.py
++++ b/platform/haiku/detect.py
+@@ -61,9 +61,11 @@ def configure(env):
+ 
+     ## Compiler configuration
+ 
+-    env["CC"] = "gcc-x86"
+-    env["CXX"] = "g++-x86"
+-
++ 
++        env["CC"] = "gcc"
++        env["CXX"] = "g++"
++        pkgconf = "pkg-config"
++ 
+     ## Dependencies
+ 
+     if not env['builtin_libwebp']:
+@@ -145,6 +147,79 @@ def configure(env):
+     if not env['builtin_pcre2']:
+         env.ParseConfig('pkg-config libpcre2-32 --cflags --libs')
+ 
++    ## Dependencies
++
++    if not env['builtin_libwebp']:
++        env.ParseConfig('pkg-config libwebp --cflags --libs')
++
++    # freetype depends on libpng and zlib, so bundling one of them while keeping others
++    # as shared libraries leads to weird issues
++    if env['builtin_freetype'] or env['builtin_libpng'] or env['builtin_zlib']:
++        env['builtin_freetype'] = True
++        env['builtin_libpng'] = True
++        env['builtin_zlib'] = True
++
++    if not env['builtin_freetype']:
++        env.ParseConfig('pkg-config freetype2 --cflags --libs')
++
++    if not env['builtin_libpng']:
++        env.ParseConfig('pkg-config libpng --cflags --libs')
++
++    if not env['builtin_bullet']:
++        # We need at least version 2.88
++        import subprocess
++        bullet_version = subprocess.check_output(['pkgconf', 'bullet', '--modversion']).strip()
++        if bullet_version < "2.88":
++            # Abort as system bullet was requested but too old
++            print("Bullet: System version {0} does not match minimal requirements ({1}). Aborting.".format(bullet_version, "2.88"))
++            sys.exit(255)
++        env.ParseConfig('pkg-config bullet --cflags --libs')
++
++    if not env['builtin_enet']:
++        env.ParseConfig('pkg-config libenet --cflags --libs')
++
++    if not env['builtin_squish'] and env['tools']:
++        env.ParseConfig('pkg-config libsquish --cflags --libs')
++
++    if not env['builtin_zstd']:
++        env.ParseConfig('pkg-config libzstd --cflags --libs')
++
++    # Sound and video libraries
++    # Keep the order as it triggers chained dependencies (ogg needed by others, etc.)
++
++    if not env['builtin_libtheora']:
++        env['builtin_libogg'] = False  # Needed to link against system libtheora
++        env['builtin_libvorbis'] = False  # Needed to link against system libtheora
++        env.ParseConfig('pkg-config theora theoradec --cflags --libs')
++
++    if not env['builtin_libvpx']:
++        env.ParseConfig('pkg-config vpx --cflags --libs')
++
++    if not env['builtin_libvorbis']:
++        env['builtin_libogg'] = False  # Needed to link against system libvorbis
++        env.ParseConfig('pkg-config vorbis vorbisfile --cflags --libs')
++
++    if not env['builtin_opus']:
++        env['builtin_libogg'] = False  # Needed to link against system opus
++        env.ParseConfig('pkg-config opus opusfile --cflags --libs')
++
++    if not env['builtin_libogg']:
++        env.ParseConfig('pkg-config ogg --cflags --libs')
++
++    if env['builtin_libtheora']:
++        list_of_x86 = ['x86_64', 'x86', 'i386', 'i586']
++        if any(platform.machine() in s for s in list_of_x86):
++            env["x86_libtheora_opt_gcc"] = True
++
++#    if not env['builtin_openssl']:
++#        env.ParseConfig('pkg-config openssl --cflags --libs')
++
++    # On Linux wchar_t should be 32-bits
++    # 16-bit library shouldn't be required due to compiler optimisations
++    if not env['builtin_pcre2']:
++        env.ParseConfig('pkg-config libpcre2-32 --cflags --libs')
++
++
+     ## Flags
+ 
+     env.Prepend(CPPPATH=['#platform/haiku'])
+-- 
+2.26.0
+
+
+From 5cfe70165cee5347f53705df6ef09aedf217cb57 Mon Sep 17 00:00:00 2001
+From: Ken Mays <kmays2000@gmail.com>
+Date: Sun, 3 May 2020 04:06:05 +0100
+Subject: Fix return state for Haiku
+
+
+diff --git a/platform/haiku/haiku_direct_window.cpp b/platform/haiku/haiku_direct_window.cpp
+index 3c2b7f8..34c36b2 100644
+--- a/platform/haiku/haiku_direct_window.cpp
++++ b/platform/haiku/haiku_direct_window.cpp
+@@ -337,7 +337,6 @@ inline void HaikuDirectWindow::GetKeyModifierState(Ref<InputEventWithModifiers>
+ 	event->set_alt(p_state & B_OPTION_KEY);
+ 	event->set_metakey(p_state & B_COMMAND_KEY);
+ 
+-	return state;
+ }
+ 
+ inline int HaikuDirectWindow::GetMouseButtonState(uint32 p_state) {
+@@ -357,5 +356,5 @@ inline int HaikuDirectWindow::GetMouseButtonState(uint32 p_state) {
+ 
+ 	last_button_mask = state;
+ 
+-	return state;
++	return 0;
+ }
+-- 
+2.26.0
+
+
+From 97ae4a3b6e71f43ce3ae8a99a603e38685be8724 Mon Sep 17 00:00:00 2001
+From: Ken Mays <kmays2000@gmail.com>
+Date: Sun, 3 May 2020 04:06:05 +0100
+Subject: get Cursor_Shape support
+
+
+diff --git a/platform/haiku/os_haiku.cpp b/platform/haiku/os_haiku.cpp
+index 80ab9c6..4a3b822 100644
+--- a/platform/haiku/os_haiku.cpp
++++ b/platform/haiku/os_haiku.cpp
+@@ -205,6 +205,7 @@ void OS_Haiku::set_cursor_shape(CursorShape p_shape) {
+ 
+ OS::CursorShape OS_Haiku::get_cursor_shape() const {
+ 	// TODO: implement get_cursor_shape
++	return get_cursor_shape();
+ }
+ 
+ void OS_Haiku::set_custom_mouse_cursor(const RES &p_cursor, CursorShape p_shape, const Vector2 &p_hotspot) {
+-- 
+2.26.0
+
+
+From 8bf8e16a59a2964db822b40fa3bb9c9bd14cd6e0 Mon Sep 17 00:00:00 2001
+From: Ken Mays <kmays2000@gmail.com>
+Date: Sun, 3 May 2020 04:06:05 +0100
+Subject: read directory access support
+
+
+diff --git a/drivers/unix/dir_access_unix.cpp b/drivers/unix/dir_access_unix.cpp
+index 02cb4fa..fe1d5a3 100644
+--- a/drivers/unix/dir_access_unix.cpp
++++ b/drivers/unix/dir_access_unix.cpp
+@@ -141,18 +141,18 @@ String DirAccessUnix::get_next() {
+ 	// the type is a link, in that case we want to resolve the link to
+ 	// known if it points to a directory. stat() will resolve the link
+ 	// for us.
+-	if (entry->d_type == DT_UNKNOWN || entry->d_type == DT_LNK) {
+-		String f = current_dir.plus_file(fname);
+-
+-		struct stat flags;
+-		if (stat(f.utf8().get_data(), &flags) == 0) {
+-			_cisdir = S_ISDIR(flags.st_mode);
+-		} else {
++//	if (entry->d_type == DT_UNKNOWN || entry->d_type == DT_LNK) {
++//		String f = current_dir.plus_file(fname);
++//
++//		struct stat flags;
++//		if (stat(f.utf8().get_data(), &flags) == 0) {
++//			_cisdir = S_ISDIR(flags.st_mode);
++//		} else {
+ 			_cisdir = false;
+-		}
+-	} else {
+-		_cisdir = (entry->d_type == DT_DIR);
+-	}
++//		}
++//	} else {
++//		_cisdir = (entry->d_type == DT_DIR);
++//	}
+ 
+ 	_cishidden = (fname != "." && fname != ".." && fname.begins_with("."));
+ 
+-- 
+2.26.0
+
