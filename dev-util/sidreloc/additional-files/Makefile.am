@@ -2,7 +2,7 @@ bin_PROGRAMS = sidreloc
 dist_sidreloc_SOURCES = sidreloc.c solver.c cpu.c reloc.h
 notrans_dist_man1_MANS = sidreloc.1
 
-sidreloc_CFLAGS=-Wall -std=c99 -O3 -DNDEBUG
+sidreloc_CFLAGS=-Wall -std=c99 -O3 -DNDEBUG $(ENABLE_BSD)
 
 check_SCRIPTS = greptest.sh
 
