@@ -10,7 +10,10 @@ AC_PROG_CC
 AC_PROG_INSTALL
 
 # Checks for header files.
-AC_CHECK_HEADERS([stdint.h stdlib.h string.h stdarg.h err.h])
+AC_CHECK_HEADERS([stdint.h stdlib.h string.h stdarg.h err.h errno.h])
+
+AC_SEARCH_LIBS([err], [bsd])
+AC_SEARCH_LIBS([errx], [bsd])
 
 AC_DEFINE_UNQUOTED([RELEASE], ["$PACKAGE_VERSION"], [convenience define used for release number])
 
