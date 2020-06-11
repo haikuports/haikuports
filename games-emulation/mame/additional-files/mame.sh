@@ -1,4 +1,8 @@
 #!/bin/bash
+if [ "$0" != "`realpath \"$0\"`" ]; then
+	open "`realpath \"$0\"`" "$@"
+	exit
+fi
 mame=$(findpaths -r 'cmd:mame' B_FIND_PATH_BIN_DIRECTORY mame)
 userSettingsDir=$(finddir B_USER_SETTINGS_DIRECTORY)
 
@@ -48,6 +52,7 @@ options and paths before running MAME again."
     -snapshot_directory "$(gen_mame_dirs snap)" \
     -state_directory "$(gen_mame_dirs sta)" \
     -video opengl \
+    -window \
     -createconfig
 }
 
