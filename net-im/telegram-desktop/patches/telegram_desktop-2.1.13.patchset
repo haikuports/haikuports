@@ -1,6 +1,6 @@
-From 6180ec679fd27168e0b0d1566021c20231fe7471 Mon Sep 17 00:00:00 2001
+From 190d66a78672bb2d33216b881d6607487f0b9015 Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Fri, 19 Jun 2020 20:44:13 +1000
+Date: Wed, 24 Jun 2020 21:19:37 +1000
 Subject: Add Haiku support
 
 
@@ -25,19 +25,6 @@ index 9dfcd61..28fd5f1 100644
      platform/platform_audio.h
      platform/platform_file_utilities.h
      platform/platform_launcher.h
-diff --git a/Telegram/SourceFiles/core/application.cpp b/Telegram/SourceFiles/core/application.cpp
-index fb79b73..cb01f64 100644
---- a/Telegram/SourceFiles/core/application.cpp
-+++ b/Telegram/SourceFiles/core/application.cpp
-@@ -773,7 +773,7 @@ void Application::notifyFileDialogShown(bool shown) {
- }
- 
- QWidget *Application::getModalParent() {
--#if defined Q_OS_UNIX && !defined Q_OS_MAC
-+#if defined Q_OS_UNIX && !defined Q_OS_MAC && !defined Q_OS_HAIKU
- 	return Platform::IsWayland()
- 		? App::wnd()
- 		: nullptr;
 diff --git a/Telegram/SourceFiles/core/launcher.cpp b/Telegram/SourceFiles/core/launcher.cpp
 index b15a25c..df1ffef 100644
 --- a/Telegram/SourceFiles/core/launcher.cpp
@@ -78,38 +65,29 @@ index 2d0af62..7f1a5fe 100644
  		if (wasVersion >= 1007011 && wasVersion < 1007015) {
  			_bigFileCache->clear();
 diff --git a/Telegram/SourceFiles/mainwindow.cpp b/Telegram/SourceFiles/mainwindow.cpp
-index 17a2561..27b5de5 100644
+index ae582e0..a3a358e 100644
 --- a/Telegram/SourceFiles/mainwindow.cpp
 +++ b/Telegram/SourceFiles/mainwindow.cpp
-@@ -143,7 +143,7 @@ void MainWindow::createTrayIconMenu() {
- 		? tr::lng_disable_notifications_from_tray(tr::now)
- 		: tr::lng_enable_notifications_from_tray(tr::now);
- 
--	if (Platform::IsLinux()) {
-+	if (Platform::IsLinux() || Platform::IsHaiku()) {
- 		trayIconMenu->addAction(tr::lng_open_from_tray(tr::now), this, SLOT(showFromTray()));
- 	}
- 	trayIconMenu->addAction(tr::lng_minimize_to_tray(tr::now), this, SLOT(minimizeToTray()));
-@@ -596,7 +596,7 @@ void MainWindow::updateTrayMenu(bool force) {
- 	if (!trayIconMenu || (Platform::IsWindows() && !force)) return;
- 
- 	auto actions = trayIconMenu->actions();
--	if (Platform::IsLinux()) {
-+	if (Platform::IsLinux() || Platform::IsHaiku()) {
- 		auto minimizeAction = actions.at(1);
+@@ -601,7 +601,7 @@ void MainWindow::updateTrayMenu(bool force) {
  		minimizeAction->setEnabled(isVisible());
  	} else {
-@@ -610,7 +610,7 @@ void MainWindow::updateTrayMenu(bool force) {
- 			? tr::lng_minimize_to_tray(tr::now)
- 			: tr::lng_open_from_tray(tr::now));
- 	}
--	auto notificationAction = actions.at(Platform::IsLinux() ? 2 : 1);
-+	auto notificationAction = actions.at(Platform::IsLinux() || Platform::IsHaiku() ? 2 : 1);
- 	auto notificationActionText = Global::DesktopNotify()
- 		? tr::lng_disable_notifications_from_tray(tr::now)
- 		: tr::lng_enable_notifications_from_tray(tr::now);
+ 		updateIsActive(0);
+-		auto active = Platform::IsWayland() ? isVisible() : isActive();
++		auto active = (Platform::IsWayland() || Platform::IsHaiku()) ? isVisible() : isActive();
+ 		auto toggleAction = actions.at(0);
+ 		disconnect(toggleAction, SIGNAL(triggered(bool)), this, SLOT(minimizeToTray()));
+ 		disconnect(toggleAction, SIGNAL(triggered(bool)), this, SLOT(showFromTray()));
+@@ -735,7 +735,7 @@ void MainWindow::handleTrayIconActication(
+ 		updateTrayMenu(true);
+ 		QTimer::singleShot(1, this, SLOT(psShowTrayMenu()));
+ 	} else if (!skipTrayClick()) {
+-		if (Platform::IsWayland() ? isVisible() : isActive()) {
++		if ((Platform::IsWayland() || Platform::IsHaiku()) ? isVisible() : isActive()) {
+ 			minimizeToTray();
+ 		} else {
+ 			showFromTray(reason);
 diff --git a/Telegram/SourceFiles/media/view/media_view_overlay_widget.cpp b/Telegram/SourceFiles/media/view/media_view_overlay_widget.cpp
-index e6ecdb2..262f4a9 100644
+index 202a92b..b5ce108 100644
 --- a/Telegram/SourceFiles/media/view/media_view_overlay_widget.cpp
 +++ b/Telegram/SourceFiles/media/view/media_view_overlay_widget.cpp
 @@ -365,7 +365,7 @@ OverlayWidget::OverlayWidget()
@@ -123,10 +101,10 @@ index e6ecdb2..262f4a9 100644
  	}
 diff --git a/Telegram/SourceFiles/platform/haiku/file_utilities_haiku.cpp b/Telegram/SourceFiles/platform/haiku/file_utilities_haiku.cpp
 new file mode 100644
-index 0000000..c3033e7
+index 0000000..c0784ff
 --- /dev/null
 +++ b/Telegram/SourceFiles/platform/haiku/file_utilities_haiku.cpp
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,34 @@
 +/* 
 +This file is part of Telegram Desktop for Haiku,
 +
@@ -141,56 +119,32 @@ index 0000000..c3033e7
 +#include "core/application.h"
 +#include "mainwindow.h"
 +#include "boxes/abstract_box.h"
++#include "base/platform/base_platform_file_utilities.h"
 +#include "storage/localstorage.h"
 +#include "facades.h"
 +
-+#include <QtCore/QProcess>
++#include <QtGui/QDesktopServices>
 +
 +namespace Platform {
 +namespace File {
 +
 +void UnsafeShowInFolder(const QString &filepath) {
-+	Ui::hideLayer(anim::type::instant); // Hide mediaview to make other apps visible.
-+	auto absolutePath = QFileInfo(filepath).absoluteFilePath();
-+	QProcess process;
-+	auto command = qsl("open");
-+	auto arguments = QStringList();
-+	arguments << QFileInfo(filepath).absoluteDir().absolutePath();
-+
-+	if (!process.startDetached(command, arguments)) {
-+		LOG(("Failed to launch '%1 %2'").arg(command).arg(arguments.join(' ')));
-+	}
-+}
-+
-+bool UnsafeShowOpenWith(const QString &filepath) {
-+	auto absolutePath = QFileInfo(filepath).absoluteFilePath();
-+
-+	QProcess process;
-+	auto command = qsl("open");
-+	auto arguments = QStringList();
-+	arguments << absolutePath;
-+
-+	if (!process.startDetached(command, arguments)) {
-+		LOG(("Failed to launch '%1 %2'").arg(command).arg(arguments.join(' ')));
-+		return false;
-+	}
-+	return true;
++	Ui::hideLayer(anim::type::instant);
++	base::Platform::ShowInFolder(filepath);
 +}
 +
 +void UnsafeOpenUrl(const QString &url) {
-+	const QStringList arguments{url};
-+	QProcess process;
-+	process.startDetached(qsl("open"), arguments);
++	QDesktopServices::openUrl(url);
 +}
 +
 +} // namespace File
 +} // namespace Platform
 diff --git a/Telegram/SourceFiles/platform/haiku/file_utilities_haiku.h b/Telegram/SourceFiles/platform/haiku/file_utilities_haiku.h
 new file mode 100644
-index 0000000..829e17e
+index 0000000..429f17a
 --- /dev/null
 +++ b/Telegram/SourceFiles/platform/haiku/file_utilities_haiku.h
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,66 @@
 +/* 
 +This file is part of Telegram Desktop for Haiku,
 +
@@ -204,11 +158,6 @@ index 0000000..829e17e
 +
 +#include "platform/platform_file_utilities.h"
 +
-+extern "C" {
-+#undef signals
-+#define signals public
-+} // extern "C"
-+
 +namespace Platform {
 +namespace File {
 +
@@ -220,6 +169,9 @@ index 0000000..829e17e
 +	return ::File::internal::UnsafeOpenEmailLinkDefault(email);
 +}
 +
++inline bool UnsafeShowOpenWith(const QString &filepath) {
++	return false;
++}
 +inline bool UnsafeShowOpenWithDropdown(const QString &filepath, QPoint menuPosition) {
 +	return false;
 +}
@@ -573,10 +525,10 @@ index 0000000..b6f3490
 +resource app_signature "application/x-vnd.tg-notify-gate";
 diff --git a/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.cpp b/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.cpp
 new file mode 100644
-index 0000000..563ddc0
+index 0000000..2e9b7e5
 --- /dev/null
 +++ b/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.cpp
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,190 @@
 +/* 
 +This file is part of Telegram Desktop for Haiku,
 +
@@ -737,9 +689,6 @@ index 0000000..563ddc0
 +, _private(std::make_unique<Private>(this, Private::Type::Rounded)) {
 +}
 +
-+void Manager::clearNotification(PeerId peerId, MsgId msgId) {
-+}
-+
 +Manager::~Manager() = default;
 +
 +void Manager::doShowNativeNotification(
@@ -772,10 +721,10 @@ index 0000000..563ddc0
 +} // namespace Platform
 diff --git a/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.h b/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.h
 new file mode 100644
-index 0000000..cc12f7d
+index 0000000..ae98024
 --- /dev/null
 +++ b/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.h
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,114 @@
 +/* 
 +This file is part of Telegram Desktop for Haiku,
 +
@@ -841,9 +790,6 @@ index 0000000..cc12f7d
 +	, public base::has_weak_ptr {
 +public:
 +	Manager(Window::Notifications::System *system);
-+
-+	void clearNotification(PeerId peerId, MsgId msgId);
-+
 +	~Manager();
 +
 +protected:
@@ -895,10 +841,10 @@ index 0000000..cc12f7d
 +} // namespace Platform
 diff --git a/Telegram/SourceFiles/platform/haiku/specific_haiku.cpp b/Telegram/SourceFiles/platform/haiku/specific_haiku.cpp
 new file mode 100644
-index 0000000..d34b1c8
+index 0000000..bc24038
 --- /dev/null
 +++ b/Telegram/SourceFiles/platform/haiku/specific_haiku.cpp
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,222 @@
 +/* 
 +This file is part of Telegram Desktop for Haiku,
 +
@@ -941,10 +887,6 @@ index 0000000..d34b1c8
 +QString SingleInstanceLocalServerName(const QString &hash) {
 +	return QStandardPaths::writableLocation(QStandardPaths::TempLocation)
 +			+ '/' + hash + '-' + cGUIDStr();
-+}
-+
-+QString GetIconName() {	
-+	return qsl("telegram");
 +}
 +
 +bool AutostartSupported() {
@@ -1127,10 +1069,10 @@ index 0000000..d34b1c8
 +}
 diff --git a/Telegram/SourceFiles/platform/haiku/specific_haiku.h b/Telegram/SourceFiles/platform/haiku/specific_haiku.h
 new file mode 100644
-index 0000000..521582d
+index 0000000..a5cc480
 --- /dev/null
 +++ b/Telegram/SourceFiles/platform/haiku/specific_haiku.h
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,101 @@
 +/* 
 +This file is part of Telegram Desktop for Haiku,
 +
@@ -1155,8 +1097,6 @@ index 0000000..521582d
 +
 +inline void IgnoreApplicationActivationRightNow() {
 +}
-+
-+QString GetIconName();
 +
 +inline std::optional<crl::time> LastUserInputTime() {
 +	return std::nullopt;
@@ -1318,20 +1258,31 @@ index 56acbb9..a33da8e 100644
  
  #ifdef NEED_TO_RESTORE_SLOTS
 diff --git a/Telegram/SourceFiles/settings/settings_notifications.cpp b/Telegram/SourceFiles/settings/settings_notifications.cpp
-index 59996f7..e974216 100644
+index 5f30627..5fda223 100644
 --- a/Telegram/SourceFiles/settings/settings_notifications.cpp
 +++ b/Telegram/SourceFiles/settings/settings_notifications.cpp
-@@ -633,8 +633,8 @@ void SetupNotificationsContent(
+@@ -633,7 +633,7 @@ void SetupNotificationsContent(
  			return QString();
  		} else if (Platform::IsWindows()) {
  			return tr::lng_settings_use_windows(tr::now);
--		} else if (Platform::IsLinux()) {
+-		} else if (Platform::IsLinux() && !Platform::IsWayland()) {
++		} else if ((Platform::IsLinux() || Platform::IsHaiku()) && !Platform::IsWayland()) {
+ 			return tr::lng_settings_use_native_notifications(tr::now);
+ 		}
+ 		return QString();
+diff --git a/Telegram/SourceFiles/window/main_window.cpp b/Telegram/SourceFiles/window/main_window.cpp
+index d90294d..5bdeca3 100644
+--- a/Telegram/SourceFiles/window/main_window.cpp
++++ b/Telegram/SourceFiles/window/main_window.cpp
+@@ -117,7 +117,7 @@ QIcon CreateOfficialIcon(Main::Account *account) {
+ 
+ QIcon CreateIcon(Main::Account *account) {
+ 	auto result = CreateOfficialIcon(account);
 -#if defined Q_OS_UNIX && !defined Q_OS_MAC
-+		} else if (Platform::IsLinux() || Platform::IsHaiku()) {
 +#if defined Q_OS_UNIX && !defined Q_OS_MAC && !defined Q_OS_HAIKU
- 			if (Platform::IsWayland()) {
- 				return QString();
- 			}
+ 	return QIcon::fromTheme(Platform::GetIconName(), result);
+ #endif
+ 	return result;
 diff --git a/Telegram/ThirdParty/libtgvoip/VoIPController.cpp b/Telegram/ThirdParty/libtgvoip/VoIPController.cpp
 index b1a513f..faebc2f 100644
 --- a/Telegram/ThirdParty/libtgvoip/VoIPController.cpp
@@ -2309,11 +2260,11 @@ index 1b63b2a..00a9900 100644
  #include "base/platform/linux/base_file_utilities_linux.h"
  #elif defined Q_OS_WINRT || defined Q_OS_WIN // Q_OS_MAC || Q_OS_UNIX
 diff --git a/Telegram/lib_base/base/platform/base_platform_info.h b/Telegram/lib_base/base/platform/base_platform_info.h
-index 1691f02..e9998e1 100644
+index 52c07f8..b88c6b8 100644
 --- a/Telegram/lib_base/base/platform/base_platform_info.h
 +++ b/Telegram/lib_base/base/platform/base_platform_info.h
-@@ -53,6 +53,8 @@ enum class OutdateReason {
- [[nodiscard]] constexpr bool IsLinux64Bit();
+@@ -54,6 +54,8 @@ enum class OutdateReason {
+ [[nodiscard]] bool IsWayland();
  [[nodiscard]] QString GetGlibCVersion();
  
 +[[nodiscard]] constexpr bool IsHaiku();
@@ -2321,7 +2272,7 @@ index 1691f02..e9998e1 100644
  void Start(QJsonObject settings);
  void Finish();
  
-@@ -60,6 +62,8 @@ void Finish();
+@@ -61,6 +63,8 @@ void Finish();
  
  #ifdef Q_OS_MAC
  #include "base/platform/mac/base_info_mac.h"
@@ -2455,10 +2406,10 @@ index 0000000..6700d58
 +} // namespace base::Platform
 diff --git a/Telegram/lib_base/base/platform/haiku/base_info_haiku.cpp b/Telegram/lib_base/base/platform/haiku/base_info_haiku.cpp
 new file mode 100644
-index 0000000..ee5332c
+index 0000000..20dcf3e
 --- /dev/null
 +++ b/Telegram/lib_base/base/platform/haiku/base_info_haiku.cpp
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,67 @@
 +/* 
 +This file is part of Telegram Desktop for Haiku,
 +
@@ -2480,7 +2431,15 @@ index 0000000..ee5332c
 +namespace Platform {
 +
 +QString DeviceModelPretty() {
-+	return "PC";
++	const auto cpuArch = QSysInfo::buildCpuArchitecture();
++
++	if (cpuArch == qstr("x86_64")) {
++		return "PC 64bit";
++	} else if (cpuArch == qstr("i386")) {
++		return "PC 32bit";
++	}
++
++	return "PC " + cpuArch;
 +}
 +
 +QString SystemVersionPretty() {
@@ -2520,10 +2479,10 @@ index 0000000..ee5332c
 +} // namespace Platform
 diff --git a/Telegram/lib_base/base/platform/haiku/base_info_haiku.h b/Telegram/lib_base/base/platform/haiku/base_info_haiku.h
 new file mode 100644
-index 0000000..a3a44e4
+index 0000000..dc77ab1
 --- /dev/null
 +++ b/Telegram/lib_base/base/platform/haiku/base_info_haiku.h
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,43 @@
 +/* 
 +This file is part of Telegram Desktop for Haiku,
 +
@@ -2564,6 +2523,7 @@ index 0000000..a3a44e4
 +inline bool IsMac10_12OrGreater() { return false; }
 +inline bool IsMac10_13OrGreater() { return false; }
 +inline bool IsMac10_14OrGreater() { return false; }
++inline bool IsWayland() { return false; }
 +
 +} // namespace Platform
 diff --git a/Telegram/lib_base/base/platform/haiku/base_last_input_haiku.cpp b/Telegram/lib_base/base/platform/haiku/base_last_input_haiku.cpp
@@ -3095,5 +3055,5 @@ index 17bb351..6f3a3f0 100644
      if (CMAKE_SIZEOF_VOID_P EQUAL 4)
          set(build_linux32 1)
 -- 
-2.26.0
+2.27.0
 
