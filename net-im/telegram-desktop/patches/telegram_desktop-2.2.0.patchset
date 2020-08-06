@@ -1,0 +1,3124 @@
+From 28d7477d246f843a5e14567da3af27df45121146 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 29 Jul 2020 10:59:07 +1000
+Subject: Add Haiku support
+
+
+diff --git a/Telegram/CMakeLists.txt b/Telegram/CMakeLists.txt
+index f0bafb1..5a88ae7 100644
+--- a/Telegram/CMakeLists.txt
++++ b/Telegram/CMakeLists.txt
+@@ -920,6 +920,16 @@ PRIVATE
+     platform/win/windows_event_filter.cpp
+     platform/win/windows_event_filter.h
+     platform/win/wrapper_wrl_implements_h.h
++    platform/haiku/file_utilities_haiku.cpp
++    platform/haiku/file_utilities_haiku.h
++    platform/haiku/launcher_haiku.cpp
++    platform/haiku/launcher_haiku.h
++    platform/haiku/main_window_haiku.cpp
++    platform/haiku/main_window_haiku.h
++    platform/haiku/notifications_manager_haiku.cpp
++    platform/haiku/notifications_manager_haiku.h
++    platform/haiku/specific_haiku.cpp
++    platform/haiku/specific_haiku.h
+     platform/platform_audio.h
+     platform/platform_file_utilities.h
+     platform/platform_launcher.h
+@@ -1133,7 +1143,7 @@ PRIVATE
+     settings.h
+ )
+ 
+-if (NOT LINUX)
++if (NOT LINUX AND NOT HAIKU)
+     remove_target_sources(Telegram ${src_loc}
+         window/window_title_qt.cpp
+         window/window_title_qt.h
+diff --git a/Telegram/SourceFiles/core/launcher.cpp b/Telegram/SourceFiles/core/launcher.cpp
+index 46066bf..1dd944e 100644
+--- a/Telegram/SourceFiles/core/launcher.cpp
++++ b/Telegram/SourceFiles/core/launcher.cpp
+@@ -297,7 +297,7 @@ void Launcher::init() {
+ 
+ 	QApplication::setApplicationName(qsl("TelegramDesktop"));
+ 
+-#if defined Q_OS_UNIX && !defined Q_OS_MAC && QT_VERSION >= QT_VERSION_CHECK(5, 7, 0)
++#if defined Q_OS_UNIX && !defined Q_OS_MAC && !defined Q_OS_HAIKU && QT_VERSION >= QT_VERSION_CHECK(5, 7, 0)
+ 	QApplication::setDesktopFileName(Platform::GetLauncherFilename());
+ #endif
+ 
+diff --git a/Telegram/SourceFiles/core/update_checker.cpp b/Telegram/SourceFiles/core/update_checker.cpp
+index c291bd2..6f8a482 100644
+--- a/Telegram/SourceFiles/core/update_checker.cpp
++++ b/Telegram/SourceFiles/core/update_checker.cpp
+@@ -1551,7 +1551,7 @@ bool checkReadyUpdate() {
+ 		ClearAll();
+ 		return false;
+ 	}
+-#elif defined Q_OS_UNIX // Q_OS_MAC
++#elif defined Q_OS_UNIX && !defined Q_OS_HAIKU // Q_OS_MAC
+ 	if (!linuxMoveFile(QFile::encodeName(updater.absoluteFilePath()).constData(), QFile::encodeName(curUpdater).constData())) {
+ 		ClearAll();
+ 		return false;
+diff --git a/Telegram/SourceFiles/data/data_session.cpp b/Telegram/SourceFiles/data/data_session.cpp
+index 2b3b9d6..056110d 100644
+--- a/Telegram/SourceFiles/data/data_session.cpp
++++ b/Telegram/SourceFiles/data/data_session.cpp
+@@ -231,7 +231,7 @@ Session::Session(not_null<Main::Session*> session)
+ 	_cache->open(_session->local().cacheKey());
+ 	_bigFileCache->open(_session->local().cacheBigFileKey());
+ 
+-	if constexpr (Platform::IsLinux()) {
++	if constexpr (Platform::IsLinux() || Platform::IsHaiku()) {
+ 		const auto wasVersion = _session->local().oldMapVersion();
+ 		if (wasVersion >= 1007011 && wasVersion < 1007015) {
+ 			_bigFileCache->clear();
+diff --git a/Telegram/SourceFiles/mainwindow.cpp b/Telegram/SourceFiles/mainwindow.cpp
+index 3bafea1..8bb7bff 100644
+--- a/Telegram/SourceFiles/mainwindow.cpp
++++ b/Telegram/SourceFiles/mainwindow.cpp
+@@ -625,7 +625,7 @@ void MainWindow::updateTrayMenu(bool force) {
+ 		minimizeAction->setEnabled(isVisible());
+ 	} else {
+ 		updateIsActive();
+-		auto active = Platform::IsWayland() ? isVisible() : isActive();
++		auto active = (Platform::IsWayland() || Platform::IsHaiku()) ? isVisible() : isActive();
+ 		auto toggleAction = actions.at(0);
+ 		disconnect(toggleAction, SIGNAL(triggered(bool)), this, SLOT(minimizeToTray()));
+ 		disconnect(toggleAction, SIGNAL(triggered(bool)), this, SLOT(showFromTray()));
+@@ -759,7 +759,7 @@ void MainWindow::handleTrayIconActication(
+ 		updateTrayMenu(true);
+ 		QTimer::singleShot(1, this, SLOT(psShowTrayMenu()));
+ 	} else if (!skipTrayClick()) {
+-		if (Platform::IsWayland() ? isVisible() : isActive()) {
++		if ((Platform::IsWayland() || Platform::IsHaiku()) ? isVisible() : isActive()) {
+ 			minimizeToTray();
+ 		} else {
+ 			showFromTray(reason);
+diff --git a/Telegram/SourceFiles/media/view/media_view_overlay_widget.cpp b/Telegram/SourceFiles/media/view/media_view_overlay_widget.cpp
+index 0c22481..e64f232 100644
+--- a/Telegram/SourceFiles/media/view/media_view_overlay_widget.cpp
++++ b/Telegram/SourceFiles/media/view/media_view_overlay_widget.cpp
+@@ -353,7 +353,7 @@ OverlayWidget::OverlayWidget()
+ 
+ 	hide();
+ 	createWinId();
+-	if (Platform::IsLinux()) {
++	if (Platform::IsLinux() || Platform::IsHaiku()) {
+ 		windowHandle()->setTransientParent(App::wnd()->windowHandle());
+ 		setWindowModality(Qt::WindowModal);
+ 	}
+diff --git a/Telegram/SourceFiles/platform/haiku/file_utilities_haiku.cpp b/Telegram/SourceFiles/platform/haiku/file_utilities_haiku.cpp
+new file mode 100644
+index 0000000..c0784ff
+--- /dev/null
++++ b/Telegram/SourceFiles/platform/haiku/file_utilities_haiku.cpp
+@@ -0,0 +1,34 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2019 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#include "platform/haiku/file_utilities_haiku.h"
++
++#include "core/application.h"
++#include "mainwindow.h"
++#include "boxes/abstract_box.h"
++#include "base/platform/base_platform_file_utilities.h"
++#include "storage/localstorage.h"
++#include "facades.h"
++
++#include <QtGui/QDesktopServices>
++
++namespace Platform {
++namespace File {
++
++void UnsafeShowInFolder(const QString &filepath) {
++	Ui::hideLayer(anim::type::instant);
++	base::Platform::ShowInFolder(filepath);
++}
++
++void UnsafeOpenUrl(const QString &url) {
++	QDesktopServices::openUrl(url);
++}
++
++} // namespace File
++} // namespace Platform
+diff --git a/Telegram/SourceFiles/platform/haiku/file_utilities_haiku.h b/Telegram/SourceFiles/platform/haiku/file_utilities_haiku.h
+new file mode 100644
+index 0000000..429f17a
+--- /dev/null
++++ b/Telegram/SourceFiles/platform/haiku/file_utilities_haiku.h
+@@ -0,0 +1,66 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2019 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#pragma once
++
++#include "platform/platform_file_utilities.h"
++
++namespace Platform {
++namespace File {
++
++inline QString UrlToLocal(const QUrl &url) {
++	return ::File::internal::UrlToLocalDefault(url);
++}
++
++inline void UnsafeOpenEmailLink(const QString &email) {
++	return ::File::internal::UnsafeOpenEmailLinkDefault(email);
++}
++
++inline bool UnsafeShowOpenWith(const QString &filepath) {
++	return false;
++}
++inline bool UnsafeShowOpenWithDropdown(const QString &filepath, QPoint menuPosition) {
++	return false;
++}
++
++inline void UnsafeLaunch(const QString &filepath) {
++	return ::File::internal::UnsafeLaunchDefault(filepath);
++}
++
++inline void PostprocessDownloaded(const QString &filepath) {
++}
++
++} // namespace File
++
++namespace FileDialog {
++
++inline void InitLastPath() {
++	::FileDialog::internal::InitLastPathDefault();
++}
++
++inline bool Get(
++		QPointer<QWidget> parent,
++		QStringList &files,
++		QByteArray &remoteContent,
++		const QString &caption,
++		const QString &filter,
++		::FileDialog::internal::Type type,
++		QString startFile) {
++	return ::FileDialog::internal::GetDefault(
++		parent,
++		files,
++		remoteContent,
++		caption,
++		filter,
++		type,
++		startFile);
++}
++
++} // namespace FileDialog
++} // namespace Platform
+diff --git a/Telegram/SourceFiles/platform/haiku/launcher_haiku.cpp b/Telegram/SourceFiles/platform/haiku/launcher_haiku.cpp
+new file mode 100644
+index 0000000..537a2df
+--- /dev/null
++++ b/Telegram/SourceFiles/platform/haiku/launcher_haiku.cpp
+@@ -0,0 +1,32 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2019 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#include "platform/haiku/launcher_haiku.h"
++
++#include "base/platform/base_platform_info.h"
++#include "core/crash_reports.h"
++
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <cstdlib>
++#include <unistd.h>
++#include <dirent.h>
++#include <pwd.h>
++
++namespace Platform {
++
++Launcher::Launcher(int argc, char *argv[])
++: Core::Launcher(argc, argv, DeviceModelPretty(), SystemVersionPretty()) {
++}
++
++bool Launcher::launchUpdater(UpdaterLaunch action) {
++	return false;
++}
++
++} // namespace
+diff --git a/Telegram/SourceFiles/platform/haiku/launcher_haiku.h b/Telegram/SourceFiles/platform/haiku/launcher_haiku.h
+new file mode 100644
+index 0000000..45d4cf8
+--- /dev/null
++++ b/Telegram/SourceFiles/platform/haiku/launcher_haiku.h
+@@ -0,0 +1,25 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2019 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#pragma once
++
++#include "core/launcher.h"
++
++namespace Platform {
++
++class Launcher : public Core::Launcher {
++public:
++	Launcher(int argc, char *argv[]);
++
++private:
++	bool launchUpdater(UpdaterLaunch action) override;
++
++};
++
++} // namespace Platform
+diff --git a/Telegram/SourceFiles/platform/haiku/main_window_haiku.cpp b/Telegram/SourceFiles/platform/haiku/main_window_haiku.cpp
+new file mode 100644
+index 0000000..4f7a1a3
+--- /dev/null
++++ b/Telegram/SourceFiles/platform/haiku/main_window_haiku.cpp
+@@ -0,0 +1,91 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#include "platform/haiku/main_window_haiku.h"
++
++#include "styles/style_window.h"
++#include "platform/platform_notifications_manager.h"
++#include "window/notifications_manager.h"
++#include "mainwindow.h"
++#include "base/crc32hash.h"
++#include "core/application.h"
++#include "lang/lang_keys.h"
++#include "storage/localstorage.h"
++#include "ui/widgets/popup_menu.h"
++#include "window/themes/window_theme.h"
++#include "history/history.h"
++#include "facades.h"
++#include "app.h"
++
++#include <QtGui/QWindow>
++
++namespace Platform {
++
++MainWindow::MainWindow(not_null<Window::Controller*> controller)
++: Window::MainWindow(controller) {
++}
++
++bool MainWindow::hasTrayIcon() const {
++	return true;
++}
++
++void MainWindow::psShowTrayMenu() {
++}
++
++void MainWindow::psTrayMenuUpdated() {
++	if (trayIcon && trayIconMenu
++		&& trayIcon->contextMenu() != trayIconMenu) {
++		trayIcon->setContextMenu(trayIconMenu);
++	}
++}
++
++void MainWindow::psSetupTrayIcon() {
++	if (!trayIcon) {
++		trayIcon = new QSystemTrayIcon(this);
++		auto icon = QIcon(App::pixmapFromImageInPlace(Core::App().logoNoMargin()));
++		trayIcon->setIcon(icon);
++		attachToTrayIcon(trayIcon);
++	}
++	updateIconCounters();
++	trayIcon->show();
++}
++
++void MainWindow::workmodeUpdated(DBIWorkMode mode) {
++	psSetupTrayIcon();
++	if (mode == dbiwmWindowOnly) {
++		if (trayIcon) {
++			trayIcon->setContextMenu(0);
++			delete trayIcon;
++			trayIcon = nullptr;
++		}
++	}
++}
++
++void MainWindow::unreadCounterChangedHook() {
++	setWindowTitle(titleText());
++	updateIconCounters();
++}
++
++void MainWindow::updateIconCounters() {
++	const auto counter = Core::App().unreadBadge();
++	const auto muted = Core::App().unreadBadgeMuted();
++	auto &bg = (muted ? st::trayCounterBgMute : st::trayCounterBg);
++	auto &fg = st::trayCounterFg;
++	if (trayIcon) {
++		QIcon icon;
++		icon.addPixmap(App::pixmapFromImageInPlace(iconWithCounter(16, counter, bg, fg, true)));
++		icon.addPixmap(App::pixmapFromImageInPlace(iconWithCounter(32, counter, bg, fg, true)));
++		trayIcon->setIcon(icon);
++	}
++}
++
++MainWindow::~MainWindow() {
++}
++
++} // namespace Platform
+diff --git a/Telegram/SourceFiles/platform/haiku/main_window_haiku.h b/Telegram/SourceFiles/platform/haiku/main_window_haiku.h
+new file mode 100644
+index 0000000..7450e60
+--- /dev/null
++++ b/Telegram/SourceFiles/platform/haiku/main_window_haiku.h
+@@ -0,0 +1,52 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#pragma once
++
++#include "platform/platform_main_window.h"
++#include "ui/widgets/popup_menu.h"
++#include "base/flags.h"
++
++#include <QtCore/QTimer>
++
++namespace Platform {
++
++class MainWindow : public Window::MainWindow {
++	Q_OBJECT
++
++public:
++	explicit MainWindow(not_null<Window::Controller*> controller);
++
++	virtual QImage iconWithCounter(int size, int count, style::color bg, style::color fg, bool smallIcon) = 0;
++
++	~MainWindow();
++
++public slots:
++	void psShowTrayMenu();
++
++protected:
++	void unreadCounterChangedHook() override;
++
++	bool hasTrayIcon() const override;
++
++	void workmodeUpdated(DBIWorkMode mode) override;
++
++	QSystemTrayIcon *trayIcon = nullptr;
++	QMenu *trayIconMenu = nullptr;
++
++	void psTrayMenuUpdated();
++	void psSetupTrayIcon();
++
++	virtual void placeSmallCounter(QImage &img, int size, int count, style::color bg, const QPoint &shift, style::color color) = 0;
++
++private:
++	void updateIconCounters();
++};
++
++} // namespace Platform
+diff --git a/Telegram/SourceFiles/platform/haiku/notifications_haiku_gate.cpp b/Telegram/SourceFiles/platform/haiku/notifications_haiku_gate.cpp
+new file mode 100644
+index 0000000..d567f10
+--- /dev/null
++++ b/Telegram/SourceFiles/platform/haiku/notifications_haiku_gate.cpp
+@@ -0,0 +1,64 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2019 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#include <Application.h>
++#include <OS.h>
++
++#include <stdlib.h>
++#include <stdio.h>
++
++#define APPSIGNATURE "application/x-vnd.tg-notify-gate"
++#define NOTIFY_PORT_NAME "tg_notify"
++#define NOTIFY_MESSAGE 'TGNF'
++
++typedef struct notify_msg
++{
++	uint64	sessionId;
++	uint64	peerId;
++	int32	msgId;
++} notify_msg;
++
++class SimpleLauncherApp : public BApplication {
++	public:
++		SimpleLauncherApp(int argc, char **argv);
++		void	ArgvReceived(int32 argc, char **argv);
++		virtual void ReadyToRun();
++};
++
++SimpleLauncherApp::SimpleLauncherApp(int argc, char **argv) : BApplication(APPSIGNATURE)
++{
++}
++
++void
++SimpleLauncherApp::ArgvReceived(int32 argc, char **argv)
++{
++	if (argc == 2) {
++		notify_msg message;
++		sscanf(argv[1], "%lld %lld %d", &message.sessionId, &message.peerId, &message.msgId);
++		if (message.peerId != 0 && message.msgId != 0) {
++			port_id portId = find_port(NOTIFY_PORT_NAME);
++			if (portId > 0) {
++				write_port(portId, NOTIFY_MESSAGE, &message, sizeof(message));
++			}
++		}
++	}
++}
++
++void
++SimpleLauncherApp::ReadyToRun()
++{
++    Quit();
++}
++
++int main(int argc, char **argv)
++{
++	SimpleLauncherApp application(argc, argv);
++	application.Run();
++	return 0;
++}
+diff --git a/Telegram/SourceFiles/platform/haiku/notifications_haiku_gate.rdef b/Telegram/SourceFiles/platform/haiku/notifications_haiku_gate.rdef
+new file mode 100644
+index 0000000..b6f3490
+--- /dev/null
++++ b/Telegram/SourceFiles/platform/haiku/notifications_haiku_gate.rdef
+@@ -0,0 +1,13 @@
++resource app_flags B_MULTIPLE_LAUNCH | B_BACKGROUND_APP;
++
++resource app_version {
++	major  = 0,
++	middle = 0,
++	minor  = 1,
++	variety = B_APPV_FINAL,
++	internal = 0,
++	short_info = "tg-notify-gate",
++	long_info = "Telegram native notifications gate"
++};
++
++resource app_signature "application/x-vnd.tg-notify-gate";
+diff --git a/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.cpp b/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.cpp
+new file mode 100644
+index 0000000..ef09960
+--- /dev/null
++++ b/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.cpp
+@@ -0,0 +1,201 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2019 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#ifdef __x86_64__
++#define int64 XXX
++#define uint64 YYY
++#else
++#define int32 XXX
++#define uint32 YYY
++#endif
++
++#include <stdio.h>
++#include <unistd.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++
++#include <SupportDefs.h>
++#include <Notification.h>
++#include <Bitmap.h>
++#include <TranslationUtils.h>
++#include <Entry.h>
++#include <OS.h>
++
++#include "platform/haiku/notifications_manager_haiku.h"
++
++#include "window/notifications_utilities.h"
++#include "history/history.h"
++#include "lang/lang_keys.h"
++#include "core/application.h"
++#include "core/core_settings.h"
++#include "main/main_session.h"
++
++#define DeclareReadOnlyVar(Type, Name) const Type &Name();
++#define DeclareRefVar(Type, Name) DeclareReadOnlyVar(Type, Name) \
++	Type &Ref##Name();
++#define DeclareVar(Type, Name) DeclareRefVar(Type, Name) \
++	void Set##Name(const Type &Name);
++
++#include <QProcess>
++#include <QThread>
++#include <QObject>
++#include <QString>
++#include <QStringList>
++
++namespace Platform {
++namespace Notifications {
++namespace {
++
++} // namespace
++
++bool Supported() {
++	return true;
++}
++
++std::unique_ptr<Window::Notifications::Manager> Create(
++		Window::Notifications::System *system) {
++	if (Core::App().settings().nativeNotifications() && Supported())
++		return std::make_unique<Manager>(system);
++	return nullptr;
++}
++
++void Finish() {
++}
++
++NotifyReader::NotifyReader()
++{
++	portId = create_port(NOTIFY_MESSAGE_DEEP, NOTIFY_PORT_NAME);
++}
++
++NotifyReader::~NotifyReader()
++{
++	if (portId >= B_OK)
++		delete_port(portId);
++}
++
++void NotifyReader::run()
++{
++	notify_msg message;
++	int32 code;
++	
++	while (true) {
++		ssize_t bytesRead = read_port(portId, &code, &message, sizeof(message));
++		if (bytesRead == B_BAD_PORT_ID)
++			break;
++		if (bytesRead < (ssize_t)sizeof(message) || code != NOTIFY_MESSAGE)
++			continue;
++		if (message.peerId != 0 && message.msgId != 0)
++			notificationActivated(message.sessionId, message.peerId, message.msgId);
++	}
++}
++
++Manager::Private::Private(not_null<Manager*> manager, Type type)
++: _manager(manager)
++, _cachedUserpics(type) {
++	portReaderThread = new QThread;
++	portReader = new NotifyReader();
++	portReader->moveToThread(portReaderThread);
++	connect(portReaderThread, SIGNAL(started()), portReader, SLOT(run()));
++	qRegisterMetaType<PeerId>("PeerId");
++	qRegisterMetaType<MsgId>("MsgId");
++	connect(
++		portReader,
++		SIGNAL(notificationActivated(PeerId, PeerId, MsgId)),
++		this,
++		SLOT(notificationActivatedSlot(PeerId, PeerId, MsgId)));
++	portReaderThread->start();
++}
++
++void Manager::Private::showNotification(
++	not_null<PeerData*> peer,
++	std::shared_ptr<Data::CloudImageView> &userpicView,
++	MsgId msgId,
++	const QString &title,
++	const QString &subtitle,
++	const QString &msg,
++	bool hideNameAndPhoto,
++	bool hideReplyButton) {
++	auto titleText = title;
++	auto subtitleText = subtitle;
++	auto msgText = msg;
++
++	const auto key = hideNameAndPhoto
++		? InMemoryKey()
++		: peer->userpicUniqueKey(userpicView);
++
++	auto userpicPath = _cachedUserpics.get(key, peer, userpicView);
++	BBitmap *icon = BTranslationUtils::GetBitmapFile(userpicPath.toUtf8().data());
++	QString args = QString("%1 %2 %3").arg(peer->session().uniqueId()).arg(peer->id).arg(msgId);
++	BNotification notify(B_INFORMATION_NOTIFICATION);
++	if (icon)
++		notify.SetIcon(icon);
++	notify.SetGroup("Telegram");
++	notify.SetTitle(titleText.toUtf8().data());
++	notify.SetContent(msgText.toUtf8().data());
++	entry_ref ref;
++	BEntry entry(NOTIFY_GATE_NAME);
++	entry.GetRef(&ref);
++	notify.SetOnClickFile(&ref);
++	notify.AddOnClickArg(BString(args.toUtf8().data()));
++	notify.Send();
++}
++
++void
++Manager::Private::notificationActivatedSlot(PeerId _sessionId, PeerId _peerId, MsgId _msgId) {
++	const auto manager = _manager;
++	const auto my = Window::Notifications::Manager::NotificationId{
++		.full = Manager::FullPeer{
++			.sessionId = _sessionId,
++			.peerId = _peerId
++		},
++		.msgId = _msgId
++	};
++	crl::on_main(manager, [=] {
++		manager->notificationActivated(my);
++	});
++}
++
++Manager::Manager(not_null<Window::Notifications::System*> system)
++: NativeManager(system)
++, _private(std::make_unique<Private>(this, Private::Type::Rounded)) {
++}
++
++Manager::~Manager() = default;
++
++void Manager::doShowNativeNotification(
++		not_null<PeerData*> peer,
++		std::shared_ptr<Data::CloudImageView> &userpicView,
++		MsgId msgId,
++		const QString &title,
++		const QString &subtitle,
++		const QString &msg,
++		bool hideNameAndPhoto,
++		bool hideReplyButton) {
++	_private->showNotification(
++		peer,
++		userpicView,
++		msgId,
++		title,
++		subtitle,
++		msg,
++		hideNameAndPhoto,
++		hideReplyButton);
++}
++
++void Manager::doClearAllFast() {
++}
++
++void Manager::doClearFromHistory(not_null<History*> history) {
++}
++
++void Manager::doClearFromSession(not_null<Main::Session*> session) {
++}
++
++} // namespace Notifications
++} // namespace Platform
+diff --git a/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.h b/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.h
+new file mode 100644
+index 0000000..34b6aaf
+--- /dev/null
++++ b/Telegram/SourceFiles/platform/haiku/notifications_manager_haiku.h
+@@ -0,0 +1,116 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2019 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#pragma once
++
++#include "platform/platform_notifications_manager.h"
++#include "window/notifications_utilities.h"
++
++#include <QProcess>
++#include <QThread>
++#include <QObject>
++
++#define NOTIFY_MESSAGE_DEEP	16
++#define NOTIFY_PORT_NAME "tg_notify"
++#define NOTIFY_GATE_NAME "/bin/tg-notify-gate"
++#define NOTIFY_MESSAGE 'TGNF'
++
++typedef struct notify_msg
++{
++	uint64  sessionId;
++	uint64	peerId;
++	int32	msgId;
++} notify_msg;
++
++namespace Platform {
++namespace Notifications {
++
++inline bool SkipAudio() {
++	return false;
++}
++
++inline bool SkipToast() {
++	return false;
++}
++
++inline bool SkipFlashBounce() {
++	return false;
++}
++
++void Finish();
++
++class NotifyReader:public QObject {
++	Q_OBJECT
++public:
++	NotifyReader();
++	~NotifyReader();
++public slots:
++	void run();
++signals:
++	void notificationActivated(PeerId sessionId, PeerId peerId, MsgId msgId);
++private:	
++	int32 portId;
++};
++
++
++class Manager
++	: public Window::Notifications::NativeManager
++	, public base::has_weak_ptr {
++public:
++	Manager(not_null<Window::Notifications::System*> system);
++	~Manager();
++
++protected:
++	void doShowNativeNotification(
++		not_null<PeerData*> peer,
++		std::shared_ptr<Data::CloudImageView> &userpicView,
++		MsgId msgId,
++		const QString &title,
++		const QString &subtitle,
++		const QString &msg,
++		bool hideNameAndPhoto,
++		bool hideReplyButton) override;
++	void doClearAllFast() override;
++	void doClearFromHistory(not_null<History*> history) override;
++	void doClearFromSession(not_null<Main::Session*> session) override;
++
++private:
++	class Private;
++	const std::unique_ptr<Private> _private;
++};
++
++class Manager::Private : public QObject {
++	Q_OBJECT
++
++public:
++	using Type = Window::Notifications::CachedUserpics::Type;
++	explicit Private(not_null<Manager*> manager, Type type);
++
++	void showNotification(
++		not_null<PeerData*> peer,
++		std::shared_ptr<Data::CloudImageView> &userpicView,
++		MsgId msgId,
++		const QString &title,
++		const QString &subtitle,
++		const QString &msg,
++		bool hideNameAndPhoto,
++		bool hideReplyButton);
++
++public slots:
++	void notificationActivatedSlot(PeerId sessionId, PeerId peerId, MsgId msgId);
++
++private:
++	Window::Notifications::CachedUserpics _cachedUserpics;
++	base::weak_ptr<Manager> _manager;
++	QThread *portReaderThread;
++	NotifyReader *portReader;
++};
++
++} // namespace Notifications
++} // namespace Platform
+diff --git a/Telegram/SourceFiles/platform/haiku/specific_haiku.cpp b/Telegram/SourceFiles/platform/haiku/specific_haiku.cpp
+new file mode 100644
+index 0000000..d168dfb
+--- /dev/null
++++ b/Telegram/SourceFiles/platform/haiku/specific_haiku.cpp
+@@ -0,0 +1,243 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2019 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#include "platform/haiku/specific_haiku.h"
++
++#include "lang/lang_keys.h"
++#include "mainwidget.h"
++#include "mainwindow.h"
++#include "storage/localstorage.h"
++#include "platform/haiku/file_utilities_haiku.h"
++
++#include <QtWidgets/QApplication>
++#include <QtWidgets/QDesktopWidget>
++#include <QtCore/QStandardPaths>
++#include <QtCore/QProcess>
++
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <cstdlib>
++#include <unistd.h>
++#include <dirent.h>
++#include <pwd.h>
++
++#include <iostream>
++
++using namespace Platform;
++
++namespace Platform {
++
++QString CurrentExecutablePath(int argc, char *argv[]) {
++	return argc ? QFile::decodeName(argv[0]) : QString();
++}
++
++QString SingleInstanceLocalServerName(const QString &hash) {
++	return QStandardPaths::writableLocation(QStandardPaths::TempLocation)
++			+ '/' + hash + '-' + cGUIDStr();
++}
++
++bool AutostartSupported() {
++	return true;
++}
++
++bool TrayIconSupported() {
++	return true;
++}
++
++std::optional<bool> IsDarkMode() {
++	return std::nullopt;
++}
++
++Window::ControlsLayout WindowControlsLayout() {
++	Window::ControlsLayout controls;
++	controls.left = {
++		Window::Control::Close,
++	};
++
++	controls.right = {
++		Window::Control::Minimize,
++		Window::Control::Maximize,
++	};
++
++	return controls;
++}
++
++} // namespace Platform
++
++namespace {
++
++QRect _monitorRect;
++auto _monitorLastGot = 0LL;
++
++} // namespace
++
++QRect psDesktopRect() {
++	auto tnow = crl::now();
++	if (tnow > _monitorLastGot + 1000LL || tnow < _monitorLastGot) {
++		_monitorLastGot = tnow;
++		_monitorRect = QApplication::desktop()->availableGeometry(App::wnd());
++	}
++	return _monitorRect;
++}
++
++void psWriteDump() {
++}
++
++bool _removeDirectory(const QString &path) { // from http://stackoverflow.com/questions/2256945/removing-a-non-empty-directory-programmatically-in-c-or-c
++	QByteArray pathRaw = QFile::encodeName(path);
++	DIR *d = opendir(pathRaw.constData());
++	if (!d) return false;
++
++	while (struct dirent *p = readdir(d)) {
++		/* Skip the names "." and ".." as we don't want to recurse on them. */
++		if (!strcmp(p->d_name, ".") || !strcmp(p->d_name, "..")) continue;
++
++		QString fname = path + '/' + p->d_name;
++		QByteArray fnameRaw = QFile::encodeName(fname);
++		struct stat statbuf;
++		if (!stat(fnameRaw.constData(), &statbuf)) {
++			if (S_ISDIR(statbuf.st_mode)) {
++				if (!_removeDirectory(fname)) {
++					closedir(d);
++					return false;
++				}
++			} else {
++				if (unlink(fnameRaw.constData())) {
++					closedir(d);
++					return false;
++				}
++			}
++		}
++	}
++	closedir(d);
++
++	return !rmdir(pathRaw.constData());
++}
++
++void psDeleteDir(const QString &dir) {
++	_removeDirectory(dir);
++}
++
++void psActivateProcess(uint64 pid) {
++}
++
++QString psAppDataPath() {
++	return QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) + '/';
++}
++
++void psDoCleanup() {
++	try {
++		psAutoStart(false, true);
++		psSendToMenu(false, true);
++	} catch (...) {
++	}
++}
++
++int psCleanup() {
++	psDoCleanup();
++	return 0;
++}
++
++void psDoFixPrevious() {
++}
++
++int psFixPrevious() {
++	psDoFixPrevious();
++	return 0;
++}
++
++namespace Platform {
++
++void start() {
++}
++
++void finish() {
++}
++
++void RegisterCustomScheme(bool force) {
++}
++
++void SetApplicationIcon(const QIcon &icon) {
++	qApp->setWindowIcon(icon);
++}
++
++PermissionStatus GetPermissionStatus(PermissionType type){
++	return PermissionStatus::Granted;
++}
++
++void RequestPermission(PermissionType type, Fn<void(PermissionStatus)> resultCallback){
++	resultCallback(PermissionStatus::Granted);
++}
++
++void OpenSystemSettingsForPermission(PermissionType type){
++}
++
++bool OpenSystemSettings(SystemSettingsType type) {
++	if (type == SystemSettingsType::Audio) {
++		auto options = std::vector<QString>();
++		const auto add = [&](const char *option) {
++			options.emplace_back(option);
++		};
++		add("Media");
++		return ranges::find_if(options, [](const QString &command) {
++			return QProcess::startDetached(command);
++		}) != end(options);
++	}
++	return true;
++}
++
++namespace ThirdParty {
++
++void start() {
++}
++
++void finish() {
++}
++
++} // namespace ThirdParty
++
++} // namespace Platform
++
++void psNewVersion() {
++	Platform::RegisterCustomScheme();
++}
++
++bool psShowOpenWithMenu(int x, int y, const QString &file) {
++	return false;
++}
++
++void psAutoStart(bool start, bool silent) {
++	auto home = QDir::homePath();
++	if (home.isEmpty())
++		return;
++
++	QFile file(home + "/config/settings/boot/launch/telegram-desktop");
++	if (start) {
++		if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
++			QTextStream out(&file);
++			out << "#!/bin/bash" << endl
++				<< "cd /system/apps" << endl
++				<< "./Telegram -autostart" << " &" << endl;
++			file.close();
++			file.setPermissions(file.permissions()
++				| QFileDevice::ExeOwner
++				| QFileDevice::ExeGroup
++				| QFileDevice::ExeOther);
++		}
++	} else {
++		file.remove();
++	}
++}
++
++void psSendToMenu(bool send, bool silent) {
++}
++
++bool psLaunchMaps(const Data::LocationPoint &point) {
++	return false;
++}
+diff --git a/Telegram/SourceFiles/platform/haiku/specific_haiku.h b/Telegram/SourceFiles/platform/haiku/specific_haiku.h
+new file mode 100644
+index 0000000..20d7e4a
+--- /dev/null
++++ b/Telegram/SourceFiles/platform/haiku/specific_haiku.h
+@@ -0,0 +1,109 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2019 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#pragma once
++
++#include <signal.h>
++
++namespace Data {
++class LocationPoint;
++} // namespace Data
++
++namespace Platform {
++
++inline void SetWatchingMediaKeys(bool watching) {
++}
++
++inline void IgnoreApplicationActivationRightNow() {
++}
++
++inline std::optional<crl::time> LastUserInputTime() {
++	return std::nullopt;
++}
++
++inline void FallbackFontConfigCheckBegin() {
++}
++
++inline void FallbackFontConfigCheckEnd() {
++}
++
++inline QImage GetImageFromClipboard() {
++	return {};
++}
++
++inline bool StartSystemMove(QWindow *window) {
++	return false;
++}
++
++inline bool StartSystemResize(QWindow *window, Qt::Edges edges) {
++	return false;
++}
++
++} // namespace Platform
++
++inline void psCheckLocalSocket(const QString &serverName) {
++    QFile address(serverName);
++	if (address.exists()) {
++		address.remove();
++	}
++}
++
++void psWriteDump();
++
++void psDeleteDir(const QString &dir);
++
++QStringList psInitLogs();
++void psClearInitLogs();
++
++void psActivateProcess(uint64 pid = 0);
++QString psLocalServerPrefix();
++QString psAppDataPath();
++void psAutoStart(bool start, bool silent = false);
++void psSendToMenu(bool send, bool silent = false);
++
++QRect psDesktopRect();
++
++int psCleanup();
++int psFixPrevious();
++
++void psNewVersion();
++
++inline QByteArray psDownloadPathBookmark(const QString &path) {
++	return QByteArray();
++}
++inline QByteArray psPathBookmark(const QString &path) {
++	return QByteArray();
++}
++inline void psDownloadPathEnableAccess() {
++}
++
++class PsFileBookmark {
++public:
++	PsFileBookmark(const QByteArray &bookmark) {
++	}
++	bool check() const {
++		return true;
++	}
++	bool enable() const {
++		return true;
++	}
++	void disable() const {
++	}
++	const QString &name(const QString &original) const {
++		return original;
++	}
++	QByteArray bookmark() const {
++		return QByteArray();
++	}
++
++};
++
++//ool linuxMoveFile(const char *from, const char *to);
++
++bool psLaunchMaps(const Data::LocationPoint &point);
+diff --git a/Telegram/SourceFiles/platform/platform_file_utilities.h b/Telegram/SourceFiles/platform/platform_file_utilities.h
+index cd70b78..ac7bbe6 100644
+--- a/Telegram/SourceFiles/platform/platform_file_utilities.h
++++ b/Telegram/SourceFiles/platform/platform_file_utilities.h
+@@ -46,6 +46,8 @@ bool Get(
+ 
+ #ifdef Q_OS_MAC
+ #include "platform/mac/file_utilities_mac.h"
++#elif defined Q_OS_HAIKU
++#include "platform/haiku/file_utilities_haiku.h"
+ #elif defined Q_OS_UNIX // Q_OS_MAC
+ #include "platform/linux/file_utilities_linux.h"
+ #elif defined Q_OS_WINRT || defined Q_OS_WIN // Q_OS_MAC || Q_OS_UNIX
+diff --git a/Telegram/SourceFiles/platform/platform_launcher.h b/Telegram/SourceFiles/platform/platform_launcher.h
+index d79aea6..53a1b91 100644
+--- a/Telegram/SourceFiles/platform/platform_launcher.h
++++ b/Telegram/SourceFiles/platform/platform_launcher.h
+@@ -23,6 +23,8 @@ namespace Platform {
+ 
+ #ifdef Q_OS_MAC
+ #include "platform/mac/launcher_mac.h"
++#elif defined Q_OS_HAIKU
++#include "platform/haiku/launcher_haiku.h"
+ #elif defined Q_OS_UNIX // Q_OS_MAC
+ #include "platform/linux/launcher_linux.h"
+ #elif defined Q_OS_WINRT || defined Q_OS_WIN // Q_OS_MAC || Q_OS_UNIX
+diff --git a/Telegram/SourceFiles/platform/platform_main_window.h b/Telegram/SourceFiles/platform/platform_main_window.h
+index 4bdb939..88bfaf6 100644
+--- a/Telegram/SourceFiles/platform/platform_main_window.h
++++ b/Telegram/SourceFiles/platform/platform_main_window.h
+@@ -19,6 +19,8 @@ class MainWindow;
+ 
+ #ifdef Q_OS_MAC
+ #include "platform/mac/main_window_mac.h"
++#elif defined Q_OS_HAIKU
++#include "platform/haiku/main_window_haiku.h"
+ #elif defined Q_OS_UNIX // Q_OS_MAC
+ #include "platform/linux/main_window_linux.h"
+ #elif defined Q_OS_WIN // Q_OS_MAC || Q_OS_UNIX
+diff --git a/Telegram/SourceFiles/platform/platform_notifications_manager.h b/Telegram/SourceFiles/platform/platform_notifications_manager.h
+index 4afeadf..7e4398a 100644
+--- a/Telegram/SourceFiles/platform/platform_notifications_manager.h
++++ b/Telegram/SourceFiles/platform/platform_notifications_manager.h
+@@ -27,6 +27,8 @@ namespace Notifications {
+ 
+ #ifdef Q_OS_MAC
+ #include "platform/mac/notifications_manager_mac.h"
++#elif defined Q_OS_HAIKU
++#include "platform/haiku/notifications_manager_haiku.h"
+ #elif defined Q_OS_UNIX // Q_OS_MAC
+ #include "platform/linux/notifications_manager_linux.h"
+ #elif defined Q_OS_WIN // Q_OS_MAC || Q_OS_UNIX
+diff --git a/Telegram/SourceFiles/platform/platform_specific.h b/Telegram/SourceFiles/platform/platform_specific.h
+index efd75cd..cf12a28 100644
+--- a/Telegram/SourceFiles/platform/platform_specific.h
++++ b/Telegram/SourceFiles/platform/platform_specific.h
+@@ -66,6 +66,8 @@ void finish();
+ 
+ #ifdef Q_OS_MAC
+ #include "platform/mac/specific_mac.h"
++#elif defined Q_OS_HAIKU
++#include "platform/haiku/specific_haiku.h"
+ #elif defined Q_OS_UNIX // Q_OS_MAC
+ #include "platform/linux/specific_linux.h"
+ #elif defined Q_OS_WIN // Q_OS_MAC || Q_OS_UNIX
+diff --git a/Telegram/SourceFiles/settings/settings_calls.cpp b/Telegram/SourceFiles/settings/settings_calls.cpp
+index 01b1bf5..23faa9f 100644
+--- a/Telegram/SourceFiles/settings/settings_calls.cpp
++++ b/Telegram/SourceFiles/settings/settings_calls.cpp
+@@ -33,6 +33,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #define NEED_TO_RESTORE_SLOTS
+ #endif // slots
+ 
++// Don't include SupportDefs.h
++#ifdef __HAIKU__
++#define _SUPPORT_DEFS_H
++typedef int32 status_t;
++typedef uint32 type_code;
++#endif
++
+ #include <VoIPController.h>
+ 
+ #ifdef NEED_TO_RESTORE_SLOTS
+diff --git a/Telegram/SourceFiles/settings/settings_notifications.cpp b/Telegram/SourceFiles/settings/settings_notifications.cpp
+index 19ce0db..7597438 100644
+--- a/Telegram/SourceFiles/settings/settings_notifications.cpp
++++ b/Telegram/SourceFiles/settings/settings_notifications.cpp
+@@ -680,7 +680,7 @@ void SetupNotificationsContent(
+ 			return QString();
+ 		} else if (Platform::IsWindows()) {
+ 			return tr::lng_settings_use_windows(tr::now);
+-		} else if (Platform::IsLinux() && !Platform::IsWayland()) {
++		} else if ((Platform::IsLinux() || Platform::IsHaiku()) && !Platform::IsWayland()) {
+ 			return tr::lng_settings_use_native_notifications(tr::now);
+ 		}
+ 		return QString();
+diff --git a/Telegram/SourceFiles/window/main_window.cpp b/Telegram/SourceFiles/window/main_window.cpp
+index e567d93..34162a6 100644
+--- a/Telegram/SourceFiles/window/main_window.cpp
++++ b/Telegram/SourceFiles/window/main_window.cpp
+@@ -114,7 +114,7 @@ QIcon CreateOfficialIcon(Main::Session *session) {
+ 
+ QIcon CreateIcon(Main::Session *session) {
+ 	auto result = CreateOfficialIcon(session);
+-#if defined Q_OS_UNIX && !defined Q_OS_MAC
++#if defined Q_OS_UNIX && !defined Q_OS_MAC && !defined Q_OS_HAIKU
+ 	return QIcon::fromTheme(Platform::GetIconName(), result);
+ #endif
+ 	return result;
+diff --git a/Telegram/ThirdParty/libtgvoip/VoIPController.cpp b/Telegram/ThirdParty/libtgvoip/VoIPController.cpp
+index b1a513f..faebc2f 100644
+--- a/Telegram/ThirdParty/libtgvoip/VoIPController.cpp
++++ b/Telegram/ThirdParty/libtgvoip/VoIPController.cpp
+@@ -8,6 +8,9 @@
+ #include <unistd.h>
+ #include <sys/time.h>
+ #endif
++#ifdef __HAIKU__
++#include <OS.h>
++#endif
+ #include <errno.h>
+ #include <string.h>
+ #include <wchar.h>
+@@ -3009,6 +3012,10 @@ double VoIPController::GetCurrentTime(){
+ 	struct timespec ts;
+ 	clock_gettime(CLOCK_MONOTONIC, &ts);
+ 	return ts.tv_sec+(double)ts.tv_nsec/1000000000.0;
++#elif defined(__HAIKU__)
++	struct timeval tm;
++	gettimeofday(&tm, NULL);
++	return tm.tv_sec+(double)tm.tv_usec/1000000.0;
+ #elif defined(__APPLE__)
+ 	static pthread_once_t token = PTHREAD_ONCE_INIT;
+ 	pthread_once(&token, &initMachTimestart);
+diff --git a/Telegram/ThirdParty/libtgvoip/audio/AudioIO.cpp b/Telegram/ThirdParty/libtgvoip/audio/AudioIO.cpp
+index 2c16ca7..e00c731 100644
+--- a/Telegram/ThirdParty/libtgvoip/audio/AudioIO.cpp
++++ b/Telegram/ThirdParty/libtgvoip/audio/AudioIO.cpp
+@@ -39,6 +39,9 @@
+ #ifndef WITHOUT_PULSE
+ #include "../os/linux/AudioPulse.h"
+ #endif
++#elif defined(__HAIKU__)
++#include "../os/haiku/AudioInputHaiku.h"
++#include "../os/haiku/AudioOutputHaiku.h"
+ #else
+ #error "Unsupported operating system"
+ #endif
+@@ -65,6 +68,8 @@ AudioIO* AudioIO::Create(std::string inputDevice, std::string outputDevice){
+ 		return new ContextlessAudioIO<AudioInputWave, AudioOutputWave>(inputDevice, outputDevice);
+ #endif
+ 	return new ContextlessAudioIO<AudioInputWASAPI, AudioOutputWASAPI>(inputDevice, outputDevice);
++#elif defined(__HAIKU__)
++	return new ContextlessAudioIO<AudioInputHaiku, AudioOutputHaiku>();
+ #elif defined(__linux__)
+ #ifndef WITHOUT_ALSA
+ #ifndef WITHOUT_PULSE
+diff --git a/Telegram/ThirdParty/libtgvoip/audio/AudioInput.cpp b/Telegram/ThirdParty/libtgvoip/audio/AudioInput.cpp
+index 674cd34..83a6dbb 100644
+--- a/Telegram/ThirdParty/libtgvoip/audio/AudioInput.cpp
++++ b/Telegram/ThirdParty/libtgvoip/audio/AudioInput.cpp
+@@ -33,6 +33,8 @@
+ #ifndef WITHOUT_PULSE
+ #include "../os/linux/AudioPulse.h"
+ #endif
++#elif defined(__HAIKU__)
++#include "../os/haiku/AudioInputHaiku.h"
+ #else
+ #error "Unsupported operating system"
+ #endif
+diff --git a/Telegram/ThirdParty/libtgvoip/audio/AudioOutput.cpp b/Telegram/ThirdParty/libtgvoip/audio/AudioOutput.cpp
+index 14ab0be..44c615e 100644
+--- a/Telegram/ThirdParty/libtgvoip/audio/AudioOutput.cpp
++++ b/Telegram/ThirdParty/libtgvoip/audio/AudioOutput.cpp
+@@ -37,6 +37,8 @@
+ #include "../os/linux/AudioOutputPulse.h"
+ #include "../os/linux/AudioPulse.h"
+ #endif
++#elif defined(__HAIKU__)
++#include "../os/haiku/AudioOutputHaiku.h"
+ #else
+ #error "Unsupported operating system"
+ #endif
+diff --git a/Telegram/ThirdParty/libtgvoip/os/haiku/AudioInputHaiku.cpp b/Telegram/ThirdParty/libtgvoip/os/haiku/AudioInputHaiku.cpp
+new file mode 100644
+index 0000000..7cce3e3
+--- /dev/null
++++ b/Telegram/ThirdParty/libtgvoip/os/haiku/AudioInputHaiku.cpp
+@@ -0,0 +1,276 @@
++//
++// libtgvoip is free and unencumbered public domain software.
++// For more information, see http://unlicense.org or the UNLICENSE file
++// you should have received with this source code distribution.
++//
++
++#include <stdlib.h>
++#include <stdio.h>
++#include <assert.h>
++#include <dlfcn.h>
++#include "AudioInputHaiku.h"
++#include "../../logging.h"
++#include "../../audio/Resampler.h"
++#include "../../VoIPController.h"
++
++#include "RingBuffer.h"
++
++using namespace tgvoip::audio;
++
++void RecordData(void* cookie, bigtime_t timestamp, void* data, size_t size, const media_format &format)
++{
++	AudioInputHaiku *audioInput = (AudioInputHaiku*)cookie;
++	if (!audioInput->IsRecording())
++		return;
++
++	if (format.u.raw_audio.format == media_raw_audio_format::B_AUDIO_SHORT &&
++		format.u.raw_audio.channel_count == 1) {
++		audioInput->fRingBuffer->Write((unsigned char*)data, size);
++		return;
++	}
++
++	uint32 bytesPerSample = 2;
++	switch (format.u.raw_audio.format) {
++	    case media_raw_audio_format::B_AUDIO_CHAR:
++			bytesPerSample = 1;
++			break;
++	    case media_raw_audio_format::B_AUDIO_SHORT:
++			bytesPerSample = 2;
++			break;
++	    case media_raw_audio_format::B_AUDIO_INT:
++			bytesPerSample = 4;
++	        break;
++	    case media_raw_audio_format::B_AUDIO_FLOAT:
++			bytesPerSample = 4;
++	        break;
++	    default:
++	        break;
++    }
++
++	int frames = size / (format.u.raw_audio.channel_count * bytesPerSample);
++	int16_t *dst = audioInput->workBuffer;
++
++	if (format.u.raw_audio.format == media_raw_audio_format::B_AUDIO_CHAR) {
++		unsigned char* src=reinterpret_cast<unsigned char*>(data);
++		for (int n=0; n < frames; n++) {
++			int32_t value = 0;
++			for (int j=0; j < format.u.raw_audio.channel_count; j++, src++) {
++				value += ((int32_t)(*src) - INT8_MAX) * UINT8_MAX;
++			}
++			value /= format.u.raw_audio.channel_count;
++			dst[n] = (int16_t)value;
++		}
++	} else if (format.u.raw_audio.format == media_raw_audio_format::B_AUDIO_SHORT) {
++		int16_t* src=reinterpret_cast<int16_t*>(data);
++		for (int n=0; n < frames; n++) {
++			int32_t value = 0;
++			for (int j=0; j < format.u.raw_audio.channel_count; j++, src++) {
++				value += *src;
++			}
++			value /= format.u.raw_audio.channel_count;
++			dst[n] = (int16_t)value;
++		}
++	} else if (format.u.raw_audio.format == media_raw_audio_format::B_AUDIO_INT) {
++		int32_t* src=reinterpret_cast<int32_t*>(data);
++		for (int n=0; n < frames; n++) {
++			int64_t value = 0;
++			for (int j=0; j < format.u.raw_audio.channel_count; j++, src++) {
++				value += (int64_t)(*src);
++			}
++			value /= format.u.raw_audio.channel_count;
++			dst[n] = (int16_t)(value / (UINT16_MAX + 1));
++		}
++	} else if (format.u.raw_audio.format == media_raw_audio_format::B_AUDIO_FLOAT) {
++		float* src=reinterpret_cast<float*>(data);
++		for (int n=0; n < frames; n++) {
++			float value = 0;
++			for (int j=0; j < format.u.raw_audio.channel_count; j++, src++) {
++				value += *src;
++			}
++			value /= format.u.raw_audio.channel_count;
++			dst[n] = (int16_t)(value*INT16_MAX);
++		}
++	}
++
++	if(format.u.raw_audio.frame_rate != audioInput->tgFrameRate) {
++		size_t len = tgvoip::audio::Resampler::Convert(dst, audioInput->convertBuffer,
++			frames, frames, audioInput->tgFrameRate, format.u.raw_audio.frame_rate) * audioInput->tgBytesPerSample;
++		audioInput->fRingBuffer->Write((unsigned char*)audioInput->convertBuffer, len);
++	} else {
++		audioInput->fRingBuffer->Write((unsigned char*)dst, frames * audioInput->tgBytesPerSample);
++	}
++}
++
++void NotifyRecordData(void * cookie, BMediaRecorder::notification code, ...)
++{
++	AudioInputHaiku *audioInput = (AudioInputHaiku*)cookie;
++	if (code == BMediaRecorder::B_WILL_STOP) {
++		if (audioInput->IsRecording()) {
++			audioInput->Stop();
++		}
++	}
++}
++
++AudioInputHaiku::AudioInputHaiku()
++{
++	fRecorder = NULL;
++	fRingBuffer = NULL;
++	isRecording = false;
++
++	tgFrameRate = 48000;
++	tgChannelsCount = 1;
++	tgBytesPerSample = 2;
++
++	status_t error;
++
++	fRoster = BMediaRoster::Roster(&error);
++	if (!fRoster) {
++		failed=true;		
++		return;
++	}
++	error = fRoster->GetAudioInput(&fAudioInputNode);
++	if (error < B_OK) {
++		failed=true;
++		return;
++	}
++	error = fRoster->GetAudioMixer(&fAudioMixerNode);
++	if (error < B_OK) {
++		failed=true;
++		return;
++	}
++	fRecorder = new BMediaRecorder("Telegram", B_MEDIA_RAW_AUDIO);
++	if (fRecorder->InitCheck() < B_OK) {
++		failed=true;
++		return;
++	}	
++	media_format output_format;
++	output_format.type = B_MEDIA_RAW_AUDIO;
++	output_format.u.raw_audio = media_raw_audio_format::wildcard;
++    output_format.u.raw_audio.channel_count = 1;
++	fRecorder->SetAcceptedFormat(output_format);
++	
++	const int maxInputCount = 64;
++	dormant_node_info dni[maxInputCount];
++
++	int32 real_count = maxInputCount;
++
++	error = fRoster->GetDormantNodes(dni, &real_count, 0, &output_format, 0, B_BUFFER_PRODUCER | B_PHYSICAL_INPUT);
++	if (real_count > maxInputCount)
++			real_count = maxInputCount;
++	char selected_name[B_MEDIA_NAME_LENGTH] = "Default input";
++	
++	for (int i = 0; i < real_count; i++) {
++		media_node_id ni[12];
++		int32 ni_count = 12;
++		error = fRoster->GetInstancesFor(dni[i].addon, dni[i].flavor_id, ni, &ni_count);
++		if (error == B_OK) {
++			for (int j = 0; j < ni_count; j++) {
++				if (ni[j] == fAudioInputNode.node) {
++					strcpy(selected_name, dni[i].name);
++					break;
++				}
++			}
++		}
++	}
++
++	media_output audioOutput;
++	if (!fRecorder->IsConnected()) {
++		int32 count = 0;
++		error = fRoster->GetFreeOutputsFor(fAudioInputNode, &audioOutput, 1, &count, B_MEDIA_RAW_AUDIO);
++		if (error < B_OK) {
++			failed=true;
++			return;
++		}
++
++		if (count < 1) {
++			failed=true;
++			return;
++		}
++		fRecordFormat.u.raw_audio = audioOutput.format.u.raw_audio;
++	} else {
++		fRecordFormat.u.raw_audio = fRecorder->AcceptedFormat().u.raw_audio;
++	}
++	fRecordFormat.type = B_MEDIA_RAW_AUDIO;
++
++	error = fRecorder->SetHooks(RecordData, NotifyRecordData, this);
++	if (error < B_OK) {
++		failed=true;
++		return;
++	}
++	
++	if (!fRecorder->IsConnected()) {
++		error = fRecorder->Connect(fAudioInputNode, &audioOutput, &fRecordFormat);
++		if (error < B_OK) {
++			fRecorder->SetHooks(NULL, NULL, NULL);
++			failed=true;
++			return;
++		}
++	}
++	
++	fRingBuffer = new RingBuffer(BUFFER_SIZE * 2 * 3);
++	if (fRingBuffer->InitCheck() != B_OK) {
++		failed=true;
++		return;
++	}	
++}
++
++AudioInputHaiku::~AudioInputHaiku(){
++	if (fRecorder != NULL) {
++		if (fRecorder->InitCheck() == B_OK) {
++			if (fRecorder->IsConnected())
++				fRecorder->Disconnect();
++		}
++		delete fRecorder;
++	}
++	if (fRingBuffer != NULL)
++		delete fRingBuffer;
++}
++
++void AudioInputHaiku::Configure(uint32_t sampleRate, uint32_t bitsPerSample, uint32_t channels){
++	tgFrameRate = sampleRate;
++	tgChannelsCount = channels;
++	tgBytesPerSample = bitsPerSample / 8;
++}
++
++bool AudioInputHaiku::IsRecording(){
++	return isRecording;
++}
++
++void AudioInputHaiku::Start(){
++	if(failed || isRecording)
++		return;
++
++	isRecording=true;
++
++	thread = new Thread(std::bind(&AudioInputHaiku::RunThread, this));
++	thread->SetName("AudioInputHaiku");
++	thread->Start();
++
++	fRecorder->Start();
++}
++
++void AudioInputHaiku::Stop(){
++	if(!isRecording)
++		return;
++
++	isRecording=false;
++
++	fRecorder->Stop();
++
++	thread->Join();
++	delete thread;
++	thread=NULL;
++}
++
++void AudioInputHaiku::RunThread(){
++	unsigned char buffer[BUFFER_SIZE*2];
++	while (isRecording){
++		if (fRingBuffer->GetReadAvailable() >= sizeof(buffer)) {
++			int readed = fRingBuffer->Read(buffer, sizeof(buffer));
++			if (readed < sizeof(buffer))
++				memset(buffer + readed, 0, sizeof(buffer) - readed);		
++			InvokeCallback(buffer, sizeof(buffer));
++		} else
++			snooze(100);
++	}
++}
+diff --git a/Telegram/ThirdParty/libtgvoip/os/haiku/AudioInputHaiku.h b/Telegram/ThirdParty/libtgvoip/os/haiku/AudioInputHaiku.h
+new file mode 100644
+index 0000000..1c63afe
+--- /dev/null
++++ b/Telegram/ThirdParty/libtgvoip/os/haiku/AudioInputHaiku.h
+@@ -0,0 +1,66 @@
++//
++// libtgvoip is free and unencumbered public domain software.
++// For more information, see http://unlicense.org or the UNLICENSE file
++// you should have received with this source code distribution.
++//
++
++#ifndef LIBTGVOIP_AUDIOINPUTHAIKU_H
++#define LIBTGVOIP_AUDIOINPUTHAIKU_H
++
++#include "../../audio/AudioInput.h"
++#include "../../threading.h"
++
++#include <OS.h>
++#include <MediaFile.h>
++#include <MediaNode.h>
++#include <MediaRecorder.h>
++#include <MediaTrack.h>
++#include <MediaRoster.h>
++#include <TimeSource.h>
++#include <NodeInfo.h>
++#include <MediaAddOn.h>
++
++#include "RingBuffer.h"
++
++#define BUFFER_SIZE 960
++
++namespace tgvoip{
++namespace audio{
++
++class AudioInputHaiku : public AudioInput{
++
++public:
++	AudioInputHaiku();
++	virtual ~AudioInputHaiku();
++	virtual void Configure(uint32_t sampleRate, uint32_t bitsPerSample, uint32_t channels);
++	virtual void Start();
++	virtual void Stop();
++	virtual bool IsRecording();
++
++	RingBuffer *fRingBuffer;
++	int16_t workBuffer[BUFFER_SIZE * 64];
++	int16_t convertBuffer[BUFFER_SIZE * 64];
++
++	uint32 tgFrameRate;
++	uint32 tgChannelsCount;
++	uint32 tgBytesPerSample;
++
++private:
++	void RunThread();
++
++	bool isConfigured;
++	bool isRecording;
++	
++	BMediaRoster * fRoster;
++	BMediaRecorder * fRecorder;
++	media_format fRecordFormat;
++	media_node fAudioInputNode;
++	media_node fAudioMixerNode;
++
++	Thread* thread;
++};
++
++}
++}
++
++#endif //LIBTGVOIP_AUDIOINPUTHAIKU_H
+diff --git a/Telegram/ThirdParty/libtgvoip/os/haiku/AudioOutputHaiku.cpp b/Telegram/ThirdParty/libtgvoip/os/haiku/AudioOutputHaiku.cpp
+new file mode 100644
+index 0000000..2fca8a1
+--- /dev/null
++++ b/Telegram/ThirdParty/libtgvoip/os/haiku/AudioOutputHaiku.cpp
+@@ -0,0 +1,99 @@
++//
++// libtgvoip is free and unencumbered public domain software.
++// For more information, see http://unlicense.org or the UNLICENSE file
++// you should have received with this source code distribution.
++//
++
++
++#include <assert.h>
++#include <dlfcn.h>
++#include "AudioOutputHaiku.h"
++#include "../../logging.h"
++#include "../../VoIPController.h"
++
++#define BUFFER_SIZE 960
++
++using namespace tgvoip::audio;
++
++static void playerProc(void *cookie, void *buffer, size_t len, const media_raw_audio_format &format)
++{
++	AudioOutputHaiku *obj = (AudioOutputHaiku*)cookie;
++	obj->InvokeCallback((unsigned char*)buffer, len);
++}
++
++
++AudioOutputHaiku::AudioOutputHaiku(){
++	soundPlayer = NULL;
++	isPlaying = false;
++	isConfigured = false;
++	Configure(48000, 16, 1);
++	return;
++}
++
++AudioOutputHaiku::~AudioOutputHaiku(){
++	if (isConfigured) {
++		if (soundPlayer != NULL) {
++			soundPlayer->Stop();
++			delete soundPlayer;
++		}
++	}
++}
++
++void AudioOutputHaiku::Configure(uint32_t sampleRate, uint32_t bitsPerSample, uint32_t channels){
++	media_raw_audio_format mediaKitFormat = {
++		(float)sampleRate,
++		(uint32)channels,
++		media_raw_audio_format::B_AUDIO_SHORT,
++		B_MEDIA_LITTLE_ENDIAN,
++		(uint32)BUFFER_SIZE * (bitsPerSample / 8) * channels
++	};
++
++	switch (bitsPerSample) {
++	    case 8:
++	        mediaKitFormat.format = media_raw_audio_format::B_AUDIO_CHAR;
++	        break;
++	    case 16:
++	    	mediaKitFormat.format = media_raw_audio_format::B_AUDIO_SHORT;
++	        break;
++	    case 32:
++	        mediaKitFormat.format = media_raw_audio_format::B_AUDIO_INT;
++	        break;
++	    default:
++	    	mediaKitFormat.format = media_raw_audio_format::B_AUDIO_SHORT;
++	        break;
++    }
++
++	soundPlayer = new BSoundPlayer(&mediaKitFormat, "Telegram", playerProc, NULL, (void*)this);
++
++	if(soundPlayer->InitCheck() != B_OK) {
++		delete soundPlayer;
++		soundPlayer = NULL;
++		isPlaying = false;
++		failed = true;
++		return;
++	}
++
++	isConfigured = true;
++}
++
++void AudioOutputHaiku::Start(){
++	if(soundPlayer == NULL || isPlaying)
++		return;
++
++	soundPlayer->Start();
++	soundPlayer->SetHasData(true);
++
++	isPlaying=true;
++}
++
++void AudioOutputHaiku::Stop(){
++	if(!isPlaying)
++		return;
++	
++	soundPlayer->Stop();
++	isPlaying=false;
++}
++
++bool AudioOutputHaiku::IsPlaying(){
++	return isPlaying;
++}
+diff --git a/Telegram/ThirdParty/libtgvoip/os/haiku/AudioOutputHaiku.h b/Telegram/ThirdParty/libtgvoip/os/haiku/AudioOutputHaiku.h
+new file mode 100644
+index 0000000..91f2521
+--- /dev/null
++++ b/Telegram/ThirdParty/libtgvoip/os/haiku/AudioOutputHaiku.h
+@@ -0,0 +1,35 @@
++//
++// libtgvoip is free and unencumbered public domain software.
++// For more information, see http://unlicense.org or the UNLICENSE file
++// you should have received with this source code distribution.
++//
++
++#ifndef LIBTGVOIP_AUDIOOUTPUTHAIKU_H
++#define LIBTGVOIP_AUDIOOUTPUTHAIKU_H
++
++#include "../../audio/AudioOutput.h"
++#include "../../threading.h"
++
++#include <SoundPlayer.h>
++
++namespace tgvoip{
++namespace audio{
++
++class AudioOutputHaiku : public AudioOutput{
++public:
++	AudioOutputHaiku();
++	virtual ~AudioOutputHaiku();
++	virtual void Configure(uint32_t sampleRate, uint32_t bitsPerSample, uint32_t channels);
++	virtual void Start();
++	virtual void Stop();
++	virtual bool IsPlaying() override;
++private:
++	bool isPlaying;
++	bool isConfigured;
++	BSoundPlayer *soundPlayer;
++};
++
++}
++}
++
++#endif //LIBTGVOIP_AUDIOOUTPUTHAIKU_H
+diff --git a/Telegram/ThirdParty/libtgvoip/os/haiku/RingBuffer.cpp b/Telegram/ThirdParty/libtgvoip/os/haiku/RingBuffer.cpp
+new file mode 100644
+index 0000000..6c94933
+--- /dev/null
++++ b/Telegram/ThirdParty/libtgvoip/os/haiku/RingBuffer.cpp
+@@ -0,0 +1,136 @@
++//
++// libtgvoip is free and unencumbered public domain software.
++// For more information, see http://unlicense.org or the UNLICENSE file
++// you should have received with this source code distribution.
++//
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <OS.h>
++
++#include "RingBuffer.h"
++
++RingBuffer::RingBuffer( int size )
++{
++	 initialized = false;
++     Buffer = new unsigned char[size];
++     if(Buffer!=NULL) {
++     	memset( Buffer, 0, size );
++	    BufferSize = size;     	
++     } else {
++     	BufferSize = 0;
++     }
++     reader = 0;
++     writer = 0;
++     writeBytesAvailable = size;
++     if((locker=create_sem(1,"locker")) >= B_OK) {
++     	initialized = true;
++     } else {
++     	if(Buffer!=NULL) {
++     		delete[] Buffer;     		
++     	}
++     }
++}
++
++RingBuffer::~RingBuffer( )
++{
++	 if(initialized) {
++     	delete[] Buffer;
++     	delete_sem(locker);
++	 }
++}
++
++bool 
++RingBuffer::Empty( void )
++{
++     memset( Buffer, 0, BufferSize );
++     reader = 0;
++     writer = 0;
++     writeBytesAvailable = BufferSize;
++     return true;
++}
++
++int 
++RingBuffer::Read( unsigned char *data, int size )
++{	
++	 acquire_sem(locker);
++	 
++     if( data == 0 || size <= 0 || writeBytesAvailable == BufferSize ) {
++     	 release_sem(locker);
++         return 0;
++     }
++
++     int readBytesAvailable = BufferSize - writeBytesAvailable;
++
++     if( size > readBytesAvailable ) {
++         size = readBytesAvailable;
++     }
++
++     if(size > BufferSize - reader) {
++         int len = BufferSize - reader;
++         memcpy(data, Buffer + reader, len);
++         memcpy(data + len, Buffer, size-len);
++     } else {
++         memcpy(data, Buffer + reader, size);
++     }
++
++     reader = (reader + size) % BufferSize;
++     writeBytesAvailable += size;
++	 
++	 release_sem(locker);
++     return size;
++}
++
++int 
++RingBuffer::Write( unsigned char *data, int size )
++{
++	 acquire_sem(locker);
++	 
++     if( data == 0 || size <= 0 || writeBytesAvailable == 0 ) {
++     	 release_sem(locker);
++         return 0;
++     }
++
++     if( size > writeBytesAvailable ) {
++         size = writeBytesAvailable;
++     }
++
++     if(size > BufferSize - writer) {
++         int len = BufferSize - writer;
++         memcpy(Buffer + writer, data, len);
++         memcpy(Buffer, data+len, size-len);
++     } else {
++         memcpy(Buffer + writer, data, size);
++     }
++
++     writer = (writer + size) % BufferSize;
++     writeBytesAvailable -= size;
++
++	 release_sem(locker);	 
++     return size;
++}
++
++int 
++RingBuffer::GetSize( void )
++{
++     return BufferSize;
++}
++
++int 
++RingBuffer::GetWriteAvailable( void )
++{
++     return writeBytesAvailable;
++}
++
++int 
++RingBuffer::GetReadAvailable( void )
++{
++     return BufferSize - writeBytesAvailable;
++}
++
++status_t 
++RingBuffer::InitCheck( void )
++{
++	return initialized?B_OK:B_ERROR;
++}
+diff --git a/Telegram/ThirdParty/libtgvoip/os/haiku/RingBuffer.h b/Telegram/ThirdParty/libtgvoip/os/haiku/RingBuffer.h
+new file mode 100644
+index 0000000..01f6096
+--- /dev/null
++++ b/Telegram/ThirdParty/libtgvoip/os/haiku/RingBuffer.h
+@@ -0,0 +1,37 @@
++//
++// libtgvoip is free and unencumbered public domain software.
++// For more information, see http://unlicense.org or the UNLICENSE file
++// you should have received with this source code distribution.
++//
++
++#ifndef __RING_BUFFER_H__
++#define __RING_BUFFER_H__
++
++#include <OS.h>
++
++class RingBuffer {
++
++public:
++     RingBuffer(int size);
++     ~RingBuffer();
++     int Read( unsigned char* dataPtr, int numBytes );
++     int Write( unsigned char *dataPtr, int numBytes );
++     
++     bool Empty( void );
++     int GetSize( );
++     int GetWriteAvailable( );
++     int GetReadAvailable( );
++     status_t InitCheck( );
++private:
++     unsigned char *Buffer;
++     int BufferSize;
++     int reader;
++     int writer;
++     int writeBytesAvailable;
++     
++     sem_id locker;
++     
++     bool 	initialized;
++};
++
++#endif
+diff --git a/Telegram/ThirdParty/libtgvoip/os/posix/NetworkSocketPosix.cpp b/Telegram/ThirdParty/libtgvoip/os/posix/NetworkSocketPosix.cpp
+index 78e0583..81bf9fc 100644
+--- a/Telegram/ThirdParty/libtgvoip/os/posix/NetworkSocketPosix.cpp
++++ b/Telegram/ThirdParty/libtgvoip/os/posix/NetworkSocketPosix.cpp
+@@ -248,12 +248,13 @@ void NetworkSocketPosix::Open(){
+ 	}
+ 	int flag=0;
+ 	int res=setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &flag, sizeof(flag));
++#ifndef __HAIKU__
+ 	if(res<0){
+ 		LOGE("error enabling dual stack socket: %d / %s", errno, strerror(errno));
+ 		failed=true;
+ 		return;
+ 	}
+-
++#endif
+ 	SetMaxPriority();
+ 	fcntl(fd, F_SETFL, O_NONBLOCK);
+ 
+@@ -403,6 +404,8 @@ std::string NetworkSocketPosix::GetLocalInterfaceInfo(IPv4Address *v4addr, IPv6A
+ 	if(didAttach){
+ 		sharedJVM->DetachCurrentThread();
+ 	}
++#elif defined(__HAIKU__)
++	return name;
+ #else
+ 	struct ifaddrs* interfaces;
+ 	if(!getifaddrs(&interfaces)){
+diff --git a/Telegram/ThirdParty/libtgvoip/threading.h b/Telegram/ThirdParty/libtgvoip/threading.h
+old mode 100755
+new mode 100644
+index 81c577c..1ccf029
+--- a/Telegram/ThirdParty/libtgvoip/threading.h
++++ b/Telegram/ThirdParty/libtgvoip/threading.h
+@@ -9,7 +9,7 @@
+ 
+ #include <functional>
+ 
+-#if defined(_POSIX_THREADS) || defined(_POSIX_VERSION) || defined(__unix__) || defined(__unix) || (defined(__APPLE__) && defined(__MACH__))
++#if defined(_POSIX_THREADS) || defined(_POSIX_VERSION) || defined(__unix__) || defined(__unix) || defined(__HAIKU__) || (defined(__APPLE__) && defined(__MACH__))
+ 
+ #include <pthread.h>
+ #include <semaphore.h>
+@@ -92,6 +92,7 @@ namespace tgvoip{
+ 		static void* ActualEntryPoint(void* arg){
+ 			Thread* self=reinterpret_cast<Thread*>(arg);
+ 			if(self->name){
++#ifndef __HAIKU__
+ #if !defined(__APPLE__) && !defined(__gnu_hurd__)
+ 				pthread_setname_np(self->thread, self->name);
+ #elif !defined(__gnu_hurd__)
+@@ -100,6 +101,7 @@ namespace tgvoip{
+ 					DarwinSpecific::SetCurrentThreadPriority(DarwinSpecific::THREAD_PRIO_USER_INTERACTIVE);
+ 				}
+ #endif
++#endif //__HAIKU__
+ 			}
+ 			self->entry();
+ 			return NULL;
+diff --git a/Telegram/ThirdParty/libtgvoip/webrtc_dsp/rtc_base/logging_webrtc.cc b/Telegram/ThirdParty/libtgvoip/webrtc_dsp/rtc_base/logging_webrtc.cc
+old mode 100755
+new mode 100644
+index a8d1522..991241b
+--- a/Telegram/ThirdParty/libtgvoip/webrtc_dsp/rtc_base/logging_webrtc.cc
++++ b/Telegram/ThirdParty/libtgvoip/webrtc_dsp/rtc_base/logging_webrtc.cc
+@@ -28,6 +28,10 @@
+ static const int kMaxLogLineSize = 1024 - 60;
+ #endif  // WEBRTC_MAC && !defined(WEBRTC_IOS) || WEBRTC_ANDROID
+ 
++#if defined(WEBRTC_HAIKU)
++#include <OS.h>
++#endif
++
+ #include <stdio.h>
+ #include <string.h>
+ #include <time.h>
+@@ -120,7 +124,12 @@ LogMessage::LogMessage(const char* file,
+ 
+   if (thread_) {
+     PlatformThreadId id = CurrentThreadId();
++#if defined(WEBRTC_HAIKU)
++	thread_id tid = get_pthread_thread_id(id);
++	print_stream_ << "[" << tid << "] ";
++#else
+     print_stream_ << "[" << id << "] ";
++#endif
+   }
+ 
+   if (file != nullptr) {
+diff --git a/Telegram/ThirdParty/libtgvoip/webrtc_dsp/rtc_base/platform_file.h b/Telegram/ThirdParty/libtgvoip/webrtc_dsp/rtc_base/platform_file.h
+old mode 100755
+new mode 100644
+diff --git a/Telegram/ThirdParty/libtgvoip/webrtc_dsp/rtc_base/platform_thread_types.cc b/Telegram/ThirdParty/libtgvoip/webrtc_dsp/rtc_base/platform_thread_types.cc
+index 70cf237..e48948e 100644
+--- a/Telegram/ThirdParty/libtgvoip/webrtc_dsp/rtc_base/platform_thread_types.cc
++++ b/Telegram/ThirdParty/libtgvoip/webrtc_dsp/rtc_base/platform_thread_types.cc
+@@ -20,6 +20,8 @@ namespace rtc {
+ PlatformThreadId CurrentThreadId() {
+ #if defined(WEBRTC_WIN)
+   return GetCurrentThreadId();
++#elif defined(WEBRTC_HAIKU)
++	return pthread_self();
+ #elif defined(WEBRTC_POSIX)
+ #if defined(WEBRTC_MAC) || defined(WEBRTC_IOS)
+   return pthread_mach_thread_np(pthread_self());
+diff --git a/Telegram/ThirdParty/libtgvoip/webrtc_dsp/rtc_base/platform_thread_types.h b/Telegram/ThirdParty/libtgvoip/webrtc_dsp/rtc_base/platform_thread_types.h
+index 0bc42eb..c87cde9 100644
+--- a/Telegram/ThirdParty/libtgvoip/webrtc_dsp/rtc_base/platform_thread_types.h
++++ b/Telegram/ThirdParty/libtgvoip/webrtc_dsp/rtc_base/platform_thread_types.h
+@@ -35,6 +35,9 @@ typedef DWORD PlatformThreadRef;
+ #elif defined(WEBRTC_FUCHSIA)
+ typedef zx_handle_t PlatformThreadId;
+ typedef zx_handle_t PlatformThreadRef;
++#elif defined(WEBRTC_HAIKU)
++typedef pthread_t PlatformThreadId;
++typedef pthread_t PlatformThreadRef;
+ #elif defined(WEBRTC_POSIX)
+ typedef pid_t PlatformThreadId;
+ typedef pthread_t PlatformThreadRef;
+diff --git a/Telegram/cmake/lib_tgvoip.cmake b/Telegram/cmake/lib_tgvoip.cmake
+index 05ad50b..b45f1cb 100644
+--- a/Telegram/cmake/lib_tgvoip.cmake
++++ b/Telegram/cmake/lib_tgvoip.cmake
+@@ -120,6 +120,14 @@ else()
+         os/linux/AudioPulse.cpp
+         os/linux/AudioPulse.h
+ 
++        # Haiku
++        os/haiku/AudioInputHaiku.cpp
++        os/haiku/AudioInputHaiku.h
++        os/haiku/AudioOutputHaiku.cpp
++        os/haiku/AudioOutputHaiku.h
++        os/haiku/RingBuffer.cpp
++        os/haiku/RingBuffer.h
++
+         # POSIX
+         os/posix/NetworkSocketPosix.cpp
+         os/posix/NetworkSocketPosix.h
+@@ -776,6 +784,20 @@ else()
+                 TGVOIP_NO_OSX_PRIVATE_API
+             )
+         endif()
++    elseif (HAIKU)
++         target_compile_options(lib_tgvoip
++         PRIVATE
++             -Wno-unknown-pragmas
++             -Wno-error=sequence-point
++             -Wno-error=unused-result
++             -mmmx
++             -msse2
++         )
++         target_compile_definitions(lib_tgvoip
++         PUBLIC
++             WEBRTC_POSIX
++             WEBRTC_HAIKU
++        )
+     else()
+         target_compile_options(lib_tgvoip
+         PRIVATE
+diff --git a/Telegram/lib_base/CMakeLists.txt b/Telegram/lib_base/CMakeLists.txt
+index 28e5f85..42e52b1 100644
+--- a/Telegram/lib_base/CMakeLists.txt
++++ b/Telegram/lib_base/CMakeLists.txt
+@@ -58,6 +58,18 @@ PRIVATE
+     base/platform/win/base_windows_h.h
+     base/platform/win/base_windows_safe_library.cpp
+     base/platform/win/base_windows_safe_library.h
++    base/platform/haiku/base_file_utilities_haiku.cpp
++    base/platform/haiku/base_file_utilities_haiku.h
++    base/platform/haiku/base_info_haiku.cpp
++    base/platform/haiku/base_info_haiku.h
++    base/platform/haiku/base_last_input_haiku.cpp
++    base/platform/haiku/base_last_input_haiku.h
++    base/platform/haiku/base_layout_switch_haiku.cpp
++    base/platform/haiku/base_layout_switch_haiku.h
++    base/platform/haiku/base_process_haiku.cpp
++    base/platform/haiku/base_process_haiku.h
++    base/platform/haiku/base_url_scheme_haiku.cpp
++    base/platform/haiku/base_url_scheme_haiku.h
+     base/platform/base_platform_info.h
+     base/platform/base_platform_last_input.h
+     base/platform/base_platform_layout_switch.h
+diff --git a/Telegram/lib_base/base/crash_report_writer.cpp b/Telegram/lib_base/base/crash_report_writer.cpp
+index dff7624..c20bb20 100644
+--- a/Telegram/lib_base/base/crash_report_writer.cpp
++++ b/Telegram/lib_base/base/crash_report_writer.cpp
+@@ -107,6 +107,8 @@ const char *PlatformString() {
+ 		return "Linux32Bit";
+ 	} else if (Platform::IsLinux64Bit()) {
+ 		return "Linux64bit";
++	} else if (Platform::IsHaiku()) {
++		return "Haiku";
+ 	}
+ 	Unexpected("Platform in CrashReports::PlatformString.");
+ }
+@@ -243,7 +245,7 @@ void SignalHandler(int signum) {
+ 	ReportingThreadId = nullptr;
+ }
+ 
+-bool SetSignalHandlers = Platform::IsLinux() || Platform::IsMac();
++bool SetSignalHandlers = Platform::IsLinux() || Platform::IsMac() || Platform::IsHaiku();
+ bool CrashLogged = false;
+ 
+ #ifdef USE_BREAKPAD
+diff --git a/Telegram/lib_base/base/platform/base_platform_file_utilities.h b/Telegram/lib_base/base/platform/base_platform_file_utilities.h
+index 1b63b2a..00a9900 100644
+--- a/Telegram/lib_base/base/platform/base_platform_file_utilities.h
++++ b/Telegram/lib_base/base/platform/base_platform_file_utilities.h
+@@ -26,6 +26,8 @@ void FlushFileData(QFile &file);
+ 
+ #ifdef Q_OS_MAC
+ #include "base/platform/mac/base_file_utilities_mac.h"
++#elif defined Q_OS_HAIKU
++#include "base/platform/haiku/base_file_utilities_haiku.h"
+ #elif defined Q_OS_UNIX // Q_OS_MAC
+ #include "base/platform/linux/base_file_utilities_linux.h"
+ #elif defined Q_OS_WINRT || defined Q_OS_WIN // Q_OS_MAC || Q_OS_UNIX
+diff --git a/Telegram/lib_base/base/platform/base_platform_info.h b/Telegram/lib_base/base/platform/base_platform_info.h
+index 52c07f8..b88c6b8 100644
+--- a/Telegram/lib_base/base/platform/base_platform_info.h
++++ b/Telegram/lib_base/base/platform/base_platform_info.h
+@@ -54,6 +54,8 @@ enum class OutdateReason {
+ [[nodiscard]] bool IsWayland();
+ [[nodiscard]] QString GetGlibCVersion();
+ 
++[[nodiscard]] constexpr bool IsHaiku();
++
+ void Start(QJsonObject settings);
+ void Finish();
+ 
+@@ -61,6 +63,8 @@ void Finish();
+ 
+ #ifdef Q_OS_MAC
+ #include "base/platform/mac/base_info_mac.h"
++#elif defined Q_OS_HAIKU
++#include "base/platform/haiku/base_info_haiku.h"
+ #elif defined Q_OS_UNIX // Q_OS_MAC
+ #include "base/platform/linux/base_info_linux.h"
+ #elif defined Q_OS_WIN // Q_OS_MAC || Q_OS_UNIX
+diff --git a/Telegram/lib_base/base/platform/haiku/base_file_utilities_haiku.cpp b/Telegram/lib_base/base/platform/haiku/base_file_utilities_haiku.cpp
+new file mode 100644
+index 0000000..0facb49
+--- /dev/null
++++ b/Telegram/lib_base/base/platform/haiku/base_file_utilities_haiku.cpp
+@@ -0,0 +1,84 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#include "base/platform/haiku/base_file_utilities_haiku.h"
++
++#include "base/platform/base_platform_file_utilities.h"
++#include "base/algorithm.h"
++
++#include <QtCore/QProcess>
++#include <QtCore/QFileInfo>
++#include <QtCore/QDir>
++
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <dirent.h>
++
++namespace base::Platform {
++
++bool ShowInFolder(const QString &filepath) {
++	const auto absolutePath = QFileInfo(filepath).absoluteFilePath();
++	QProcess process;
++	auto command = QString("open");
++	auto arguments = QStringList();
++	arguments << QFileInfo(filepath).absoluteDir().absolutePath();
++	return process.startDetached(command, arguments);
++}
++
++QString CurrentExecutablePath(int argc, char *argv[]) {
++	return argc ? QFile::decodeName(argv[0]) : QString();
++}
++
++void RemoveQuarantine(const QString &path) {
++}
++
++bool DeleteDirectory(QString path) {
++	if (path.endsWith('/')) {
++		path.chop(1);
++	}
++	const auto pathRaw = QFile::encodeName(path);
++	const auto d = opendir(pathRaw.constData());
++	if (!d) {
++		return false;
++	}
++
++	while (struct dirent *p = readdir(d)) {
++		if (!strcmp(p->d_name, ".") || !strcmp(p->d_name, ".."))
++			continue;
++		const auto fname = path + '/' + p->d_name;
++		const auto encoded = QFile::encodeName(fname);
++		struct stat statbuf;
++		if (!stat(encoded.constData(), &statbuf)) {
++			if (S_ISDIR(statbuf.st_mode)) {
++				if (!DeleteDirectory(fname)) {
++					closedir(d);
++					return false;
++				}
++			} else {
++				if (unlink(encoded.constData())) {
++					closedir(d);
++					return false;
++				}
++			}
++		}
++	}
++	closedir(d);
++
++	return !rmdir(pathRaw.constData());
++}
++
++void FlushFileData(QFile &file) {
++	file.flush();
++	if (const auto descriptor = file.handle()) {
++		fsync(descriptor);
++	}
++}
++
++} // namespace base::Platform
+diff --git a/Telegram/lib_base/base/platform/haiku/base_file_utilities_haiku.h b/Telegram/lib_base/base/platform/haiku/base_file_utilities_haiku.h
+new file mode 100644
+index 0000000..6700d58
+--- /dev/null
++++ b/Telegram/lib_base/base/platform/haiku/base_file_utilities_haiku.h
+@@ -0,0 +1,27 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#pragma once
++
++#include <QtCore/QFile>
++#include <QtCore/QString>
++
++namespace base::Platform {
++
++inline QString FileNameFromUserString(QString name) {
++	return name;
++}
++
++inline bool RenameWithOverwrite(const QString &from, const QString &to) {
++	const auto fromPath = QFile::encodeName(from);
++	const auto toPath = QFile::encodeName(to);
++	return (rename(fromPath.constData(), toPath.constData()) == 0);
++}
++
++} // namespace base::Platform
+diff --git a/Telegram/lib_base/base/platform/haiku/base_info_haiku.cpp b/Telegram/lib_base/base/platform/haiku/base_info_haiku.cpp
+new file mode 100644
+index 0000000..20dcf3e
+--- /dev/null
++++ b/Telegram/lib_base/base/platform/haiku/base_info_haiku.cpp
+@@ -0,0 +1,67 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#include "base/platform/haiku/base_info_haiku.h"
++
++#include <QtCore/QJsonObject>
++#include <QtCore/QLocale>
++#include <QtCore/QFile>
++#include <QtCore/QProcess>
++#include <QtCore/QVersionNumber>
++#include <QtCore/QDate>
++
++namespace Platform {
++
++QString DeviceModelPretty() {
++	const auto cpuArch = QSysInfo::buildCpuArchitecture();
++
++	if (cpuArch == qstr("x86_64")) {
++		return "PC 64bit";
++	} else if (cpuArch == qstr("i386")) {
++		return "PC 32bit";
++	}
++
++	return "PC " + cpuArch;
++}
++
++QString SystemVersionPretty() {
++	return "Haiku";
++}
++
++QString SystemCountry() {
++	return QLocale::system().name().split('_').last();
++}
++
++QString SystemLanguage() {
++	const auto system = QLocale::system();
++	const auto languages = system.uiLanguages();
++	return languages.isEmpty()
++		? system.name().split('_').first()
++		: languages.front();
++}
++
++QDate WhenSystemBecomesOutdated() {
++	return QDate();
++}
++
++int AutoUpdateVersion() {
++	return 2;
++}
++
++QString AutoUpdateKey() {
++		return "haiku";
++}
++
++void Start(QJsonObject options) {
++}
++
++void Finish() {
++}
++
++} // namespace Platform
+diff --git a/Telegram/lib_base/base/platform/haiku/base_info_haiku.h b/Telegram/lib_base/base/platform/haiku/base_info_haiku.h
+new file mode 100644
+index 0000000..dc77ab1
+--- /dev/null
++++ b/Telegram/lib_base/base/platform/haiku/base_info_haiku.h
+@@ -0,0 +1,43 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#pragma once
++
++#include "base/platform/base_platform_info.h"
++
++namespace Platform {
++
++inline constexpr bool IsHaiku() { return true;}
++
++inline constexpr bool IsLinux() { return false;}
++inline constexpr bool IsLinux32Bit() { return false; }
++inline constexpr bool IsLinux64Bit() { return false; }
++inline constexpr bool IsWindows() { return false; }
++inline constexpr bool IsWindowsStoreBuild() { return false; }
++inline bool IsWindowsXPOrGreater() { return false; }
++inline bool IsWindowsVistaOrGreater() { return false; }
++inline bool IsWindows7OrGreater() { return false; }
++inline bool IsWindows8OrGreater() { return false; }
++inline bool IsWindows8Point1OrGreater() { return false; }
++inline bool IsWindows10OrGreater() { return false; }
++inline constexpr bool IsMac() { return false; }
++inline constexpr bool IsOSXBuild() { return false; }
++inline constexpr bool IsMacStoreBuild() { return false; }
++inline bool IsMac10_6OrGreater() { return false; }
++inline bool IsMac10_7OrGreater() { return false; }
++inline bool IsMac10_8OrGreater() { return false; }
++inline bool IsMac10_9OrGreater() { return false; }
++inline bool IsMac10_10OrGreater() { return false; }
++inline bool IsMac10_11OrGreater() { return false; }
++inline bool IsMac10_12OrGreater() { return false; }
++inline bool IsMac10_13OrGreater() { return false; }
++inline bool IsMac10_14OrGreater() { return false; }
++inline bool IsWayland() { return false; }
++
++} // namespace Platform
+diff --git a/Telegram/lib_base/base/platform/haiku/base_last_input_haiku.cpp b/Telegram/lib_base/base/platform/haiku/base_last_input_haiku.cpp
+new file mode 100644
+index 0000000..8fa3e9f
+--- /dev/null
++++ b/Telegram/lib_base/base/platform/haiku/base_last_input_haiku.cpp
+@@ -0,0 +1,20 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#include "base/platform/haiku/base_last_input_haiku.h"
++
++#include <optional>
++
++namespace base::Platform {
++
++std::optional<crl::time> LastUserInputTime() {
++	return std::nullopt;
++}
++
++} // namespace base::Platform
+diff --git a/Telegram/lib_base/base/platform/haiku/base_last_input_haiku.h b/Telegram/lib_base/base/platform/haiku/base_last_input_haiku.h
+new file mode 100644
+index 0000000..a24adad
+--- /dev/null
++++ b/Telegram/lib_base/base/platform/haiku/base_last_input_haiku.h
+@@ -0,0 +1,11 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#pragma once
++
+diff --git a/Telegram/lib_base/base/platform/haiku/base_layout_switch_haiku.cpp b/Telegram/lib_base/base/platform/haiku/base_layout_switch_haiku.cpp
+new file mode 100644
+index 0000000..533b8ea
+--- /dev/null
++++ b/Telegram/lib_base/base/platform/haiku/base_layout_switch_haiku.cpp
+@@ -0,0 +1,18 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#include "base/platform/haiku/base_layout_switch_haiku.h"
++
++namespace base::Platform {
++
++bool SwitchKeyboardLayoutToEnglish() {
++	return false;
++}
++
++} // namespace base::Platform
+diff --git a/Telegram/lib_base/base/platform/haiku/base_layout_switch_haiku.h b/Telegram/lib_base/base/platform/haiku/base_layout_switch_haiku.h
+new file mode 100644
+index 0000000..a24adad
+--- /dev/null
++++ b/Telegram/lib_base/base/platform/haiku/base_layout_switch_haiku.h
+@@ -0,0 +1,11 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#pragma once
++
+diff --git a/Telegram/lib_base/base/platform/haiku/base_process_haiku.cpp b/Telegram/lib_base/base/platform/haiku/base_process_haiku.cpp
+new file mode 100644
+index 0000000..6e88f99
+--- /dev/null
++++ b/Telegram/lib_base/base/platform/haiku/base_process_haiku.cpp
+@@ -0,0 +1,20 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#include "base/platform/haiku/base_process_haiku.h"
++
++namespace base::Platform {
++
++void ActivateProcessWindow(int64 pid, WId windowId) {
++}
++
++void ActivateThisProcessWindow(WId windowId) {
++}
++
++} // namespace base::Platform
+diff --git a/Telegram/lib_base/base/platform/haiku/base_process_haiku.h b/Telegram/lib_base/base/platform/haiku/base_process_haiku.h
+new file mode 100644
+index 0000000..4d0bce3
+--- /dev/null
++++ b/Telegram/lib_base/base/platform/haiku/base_process_haiku.h
+@@ -0,0 +1,12 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#pragma once
++
++#include "base/platform/base_platform_process.h"
+diff --git a/Telegram/lib_base/base/platform/haiku/base_url_scheme_haiku.cpp b/Telegram/lib_base/base/platform/haiku/base_url_scheme_haiku.cpp
+new file mode 100644
+index 0000000..ca200de
+--- /dev/null
++++ b/Telegram/lib_base/base/platform/haiku/base_url_scheme_haiku.cpp
+@@ -0,0 +1,21 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#include "base/platform/haiku/base_url_scheme_haiku.h"
++
++namespace base::Platform {
++
++bool CheckUrlScheme(const UrlSchemeDescriptor &descriptor) {
++	return false;
++}
++
++void RegisterUrlScheme(const UrlSchemeDescriptor &descriptor) { }
++void UnregisterUrlScheme(const UrlSchemeDescriptor &descriptor) { }
++
++} // namespace base::Platform
+diff --git a/Telegram/lib_base/base/platform/haiku/base_url_scheme_haiku.h b/Telegram/lib_base/base/platform/haiku/base_url_scheme_haiku.h
+new file mode 100644
+index 0000000..6402509
+--- /dev/null
++++ b/Telegram/lib_base/base/platform/haiku/base_url_scheme_haiku.h
+@@ -0,0 +1,12 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2018-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#pragma once
++
++#include "base/platform/base_platform_url_scheme.h"
+diff --git a/Telegram/lib_crl/CMakeLists.txt b/Telegram/lib_crl/CMakeLists.txt
+index 5e8f33f..bc87ddb 100644
+--- a/Telegram/lib_crl/CMakeLists.txt
++++ b/Telegram/lib_crl/CMakeLists.txt
+@@ -32,6 +32,7 @@ PRIVATE
+     crl/dispatch/crl_dispatch_semaphore.h
+     crl/mac/crl_mac_time.cpp
+     crl/linux/crl_linux_time.cpp
++    crl/haiku/crl_haiku_time.cpp
+     crl/qt/crl_qt_async.cpp
+     crl/qt/crl_qt_async.h
+     crl/qt/crl_qt_guards.h
+diff --git a/Telegram/lib_crl/crl/haiku/crl_haiku_time.cpp b/Telegram/lib_crl/crl/haiku/crl_haiku_time.cpp
+new file mode 100644
+index 0000000..f682740
+--- /dev/null
++++ b/Telegram/lib_crl/crl/haiku/crl_haiku_time.cpp
+@@ -0,0 +1,44 @@
++// This file is part of Desktop App Toolkit,
++// a set of libraries for developing nice desktop applications.
++//
++// For license and copyright information please follow this link:
++// https://github.com/desktop-app/legal/blob/master/LEGAL
++//
++#include <crl/crl_time.h>
++
++#ifdef CRL_USE_LINUX_TIME
++
++#include <time.h>
++
++namespace crl::details {
++
++void init() {
++}
++
++inner_time_type current_value() {
++	timespec ts;
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	const auto seconds = inner_time_type(ts.tv_sec);
++	const auto milliseconds = inner_time_type(ts.tv_nsec) / 1000000;
++	return seconds * 1000 + milliseconds;
++}
++
++time convert(inner_time_type value) {
++	return time(value);
++}
++
++inner_profile_type current_profile_value() {
++	timespec ts;
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	const auto seconds = inner_profile_type(ts.tv_sec);
++	const auto milliseconds = inner_profile_type(ts.tv_nsec) / 1000;
++	return seconds * 1000000 + milliseconds;
++}
++
++profile_time convert_profile(inner_profile_type value) {
++	return profile_time(value);
++}
++
++} // namespace crl::details
++
++#endif // CRL_USE_LINUX_TIME
+diff --git a/Telegram/lib_ui/CMakeLists.txt b/Telegram/lib_ui/CMakeLists.txt
+index 562ba9c..acb1f21 100644
+--- a/Telegram/lib_ui/CMakeLists.txt
++++ b/Telegram/lib_ui/CMakeLists.txt
+@@ -84,6 +84,10 @@ PRIVATE
+     ui/platform/win/ui_window_win.h
+     ui/platform/win/ui_utility_win.cpp
+     ui/platform/win/ui_utility_win.h
++    ui/platform/haiku/ui_window_haiku.cpp
++    ui/platform/haiku/ui_window_haiku.h
++    ui/platform/haiku/ui_utility_haiku.cpp
++    ui/platform/haiku/ui_utility_haiku.h
+     ui/platform/ui_platform_window.h
+     ui/platform/ui_platform_utility.h
+     ui/style/style_core.cpp
+diff --git a/Telegram/lib_ui/ui/platform/haiku/ui_utility_haiku.cpp b/Telegram/lib_ui/ui/platform/haiku/ui_utility_haiku.cpp
+new file mode 100644
+index 0000000..b152b0f
+--- /dev/null
++++ b/Telegram/lib_ui/ui/platform/haiku/ui_utility_haiku.cpp
+@@ -0,0 +1,29 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2019-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#include "ui/platform/haiku/ui_utility_haiku.h"
++
++#include <QtWidgets/QApplication>
++
++namespace Ui {
++namespace Platform {
++
++bool IsApplicationActive() {
++	return QApplication::activeWindow() != nullptr;
++}
++
++bool TranslucentWindowsSupported(QPoint globalPosition) {
++	return false;
++}
++
++void IgnoreAllActivation(not_null<QWidget*> widget) {
++}
++
++} // namespace Platform
++} // namespace Ui
+diff --git a/Telegram/lib_ui/ui/platform/haiku/ui_utility_haiku.h b/Telegram/lib_ui/ui/platform/haiku/ui_utility_haiku.h
+new file mode 100644
+index 0000000..c1419cb
+--- /dev/null
++++ b/Telegram/lib_ui/ui/platform/haiku/ui_utility_haiku.h
+@@ -0,0 +1,44 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2019-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#pragma once
++
++class QPainter;
++class QPaintEvent;
++
++namespace Ui {
++namespace Platform {
++
++inline void StartTranslucentPaint(QPainter &p, gsl::span<const QRect> rects) {
++}
++
++inline void InitOnTopPanel(not_null<QWidget*> panel) {
++}
++
++inline void DeInitOnTopPanel(not_null<QWidget*> panel) {
++}
++
++inline void ReInitOnTopPanel(not_null<QWidget*> panel) {
++}
++
++inline void UpdateOverlayed(not_null<QWidget*> widget) {
++}
++
++inline void ShowOverAll(not_null<QWidget*> widget, bool canFocus) {
++}
++
++inline void BringToBack(not_null<QWidget*> widget) {
++}
++
++inline constexpr bool UseMainQueueGeneric() {
++	return true;
++}
++
++} // namespace Platform
++} // namespace Ui
+diff --git a/Telegram/lib_ui/ui/platform/haiku/ui_window_haiku.cpp b/Telegram/lib_ui/ui/platform/haiku/ui_window_haiku.cpp
+new file mode 100644
+index 0000000..e7a032f
+--- /dev/null
++++ b/Telegram/lib_ui/ui/platform/haiku/ui_window_haiku.cpp
+@@ -0,0 +1,21 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2019-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#include "ui/platform/haiku/ui_window_haiku.h"
++
++namespace Ui {
++namespace Platform {
++
++std::unique_ptr<BasicWindowHelper> CreateWindowHelper(
++		not_null<RpWidget*> window) {
++	return nullptr;
++}
++
++} // namespace Platform
++} // namespace Ui
+diff --git a/Telegram/lib_ui/ui/platform/haiku/ui_window_haiku.h b/Telegram/lib_ui/ui/platform/haiku/ui_window_haiku.h
+new file mode 100644
+index 0000000..ecb1277
+--- /dev/null
++++ b/Telegram/lib_ui/ui/platform/haiku/ui_window_haiku.h
+@@ -0,0 +1,12 @@
++/* 
++This file is part of Telegram Desktop for Haiku,
++
++For license and copyright information please follow this link:
++https://github.com/desktop-app/legal/blob/master/LEGAL
++
++Copyright (c) 2019-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++*/
++
++#pragma once
++
++#include "ui/platform/ui_platform_window.h"
+diff --git a/Telegram/lib_ui/ui/platform/ui_platform_utility.h b/Telegram/lib_ui/ui/platform/ui_platform_utility.h
+index 0e23059..e37e977 100644
+--- a/Telegram/lib_ui/ui/platform/ui_platform_utility.h
++++ b/Telegram/lib_ui/ui/platform/ui_platform_utility.h
+@@ -37,6 +37,8 @@ void DrainMainQueue(); // Needed only if UseMainQueueGeneric() is false.
+ 
+ #ifdef Q_OS_MAC
+ #include "ui/platform/mac/ui_utility_mac.h"
++#elif defined Q_OS_HAIKU
++#include "ui/platform/haiku/ui_utility_haiku.h"
+ #elif defined Q_OS_UNIX // Q_OS_MAC
+ #include "ui/platform/linux/ui_utility_linux.h"
+ #elif defined Q_OS_WINRT || defined Q_OS_WIN // Q_OS_MAC || Q_OS_UNIX
+diff --git a/Telegram/lib_ui/ui/style/style_core_custom_font.cpp b/Telegram/lib_ui/ui/style/style_core_custom_font.cpp
+index 570d169..8644d20 100644
+--- a/Telegram/lib_ui/ui/style/style_core_custom_font.cpp
++++ b/Telegram/lib_ui/ui/style/style_core_custom_font.cpp
+@@ -44,7 +44,10 @@ QFont ResolveFont(uint32 flags, int size) {
+ 		const auto point = good.isEmpty() ? size : good.front();
+ 		result = Database.font(custom.family, custom.style, point);
+ 	} else {
++// Don't override fonts for Haiku
++#ifndef __HAIKU__
+ 		result.setFamily(GetFontOverride(flags));
++#endif
+ 		if (bold) {
+ #ifdef DESKTOP_APP_USE_PACKAGED_FONTS
+ 			result.setWeight(QFont::DemiBold);
+diff --git a/cmake/nice_target_sources.cmake b/cmake/nice_target_sources.cmake
+index 81f9a7b..3b55109 100644
+--- a/cmake/nice_target_sources.cmake
++++ b/cmake/nice_target_sources.cmake
+@@ -15,6 +15,7 @@ function(nice_target_sources target_name src_loc)
+     set(not_win_sources "")
+     set(not_mac_sources "")
+     set(not_linux_sources "")
++    set(not_haiku_sources "")
+     foreach (entry ${list})
+         if (${entry} STREQUAL "PRIVATE" OR ${entry} STREQUAL "PUBLIC" OR ${entry} STREQUAL "INTERFACE")
+             set(writing_now ${entry})
+@@ -23,12 +24,19 @@ function(nice_target_sources target_name src_loc)
+             if (${entry} MATCHES "(^|/)win/" OR ${entry} MATCHES "(^|/)winrc/" OR ${entry} MATCHES "(^|/)windows/" OR ${entry} MATCHES "[_\\/]win\\.")
+                 list(APPEND not_mac_sources ${full_name})
+                 list(APPEND not_linux_sources ${full_name})
++                list(APPEND not_haiku_sources ${full_name})
+             elseif (${entry} MATCHES "(^|/)mac/" OR ${entry} MATCHES "(^|/)darwin/" OR ${entry} MATCHES "(^|/)osx/" OR ${entry} MATCHES "[_\\/]mac\\." OR ${entry} MATCHES "[_\\/]darwin\\." OR ${entry} MATCHES "[_\\/]osx\\.")
+                 list(APPEND not_win_sources ${full_name})
+                 list(APPEND not_linux_sources ${full_name})
++                list(APPEND not_haiku_sources ${full_name})
+             elseif (${entry} MATCHES "(^|/)linux/" OR ${entry} MATCHES "[_\\/]linux\\.")
+                 list(APPEND not_win_sources ${full_name})
+                 list(APPEND not_mac_sources ${full_name})
++                list(APPEND not_haiku_sources ${full_name})
++            elseif (${entry} MATCHES "(^|/)haiku/" OR ${entry} MATCHES "[_\\/]haiku\\.")
++                list(APPEND not_win_sources ${full_name})
++                list(APPEND not_mac_sources ${full_name})
++                list(APPEND not_linux_sources ${full_name})
+             elseif (${entry} MATCHES "(^|/)posix/" OR ${entry} MATCHES "[_\\/]posix\\.")
+                 list(APPEND not_win_sources ${full_name})
+             endif()
+@@ -64,6 +72,9 @@ function(nice_target_sources target_name src_loc)
+     elseif (APPLE)
+         set_source_files_properties(${not_mac_sources} PROPERTIES HEADER_FILE_ONLY TRUE)
+         set_source_files_properties(${not_mac_sources} PROPERTIES SKIP_AUTOGEN TRUE)
++    elseif (HAIKU)
++        set_source_files_properties(${not_haiku_sources} PROPERTIES HEADER_FILE_ONLY TRUE)
++        set_source_files_properties(${not_haiku_sources} PROPERTIES SKIP_AUTOGEN TRUE)
+     elseif (LINUX)
+         set_source_files_properties(${not_linux_sources} PROPERTIES HEADER_FILE_ONLY TRUE)
+         set_source_files_properties(${not_linux_sources} PROPERTIES SKIP_AUTOGEN TRUE)
+diff --git a/cmake/options.cmake b/cmake/options.cmake
+index 80b7405..705de6f 100644
+--- a/cmake/options.cmake
++++ b/cmake/options.cmake
+@@ -65,6 +65,8 @@ if (WIN32)
+     include(cmake/options_win.cmake)
+ elseif (APPLE)
+     include(cmake/options_mac.cmake)
++elseif (HAIKU)
++    include(cmake/options_haiku.cmake)
+ elseif (LINUX)
+     include(cmake/options_linux.cmake)
+ else()
+diff --git a/cmake/options_haiku.cmake b/cmake/options_haiku.cmake
+new file mode 100644
+index 0000000..718f37a
+--- /dev/null
++++ b/cmake/options_haiku.cmake
+@@ -0,0 +1,34 @@
++# This file is part of Telegram Desktop for Haiku
++# For license and copyright information please follow this link:
++# https://github.com/desktop-app/legal/blob/master/LEGAL
++# Copyright (c) 2019-2020 Gerasim Troeglazov, 3dEyes@gmail.com
++
++target_compile_options(common_options
++INTERFACE
++    $<IF:$<CONFIG:Debug>,,-fno-strict-aliasing>
++    -fPIC
++    -mmmx
++    -msse2
++    -Wno-unused-variable
++    -Wno-unused-parameter
++    -Wno-unused-function
++    -Wno-switch
++    -Wno-comment
++    -Wno-unused-but-set-variable
++    -Wno-missing-field-initializers
++    -Wno-sign-compare
++    -Wno-attributes
++    -Wno-parentheses
++    -Wno-stringop-overflow
++    -Wno-maybe-uninitialized
++    -Wno-error=class-memaccess
++    -Wno-deprecated-declarations
++)
++
++target_link_libraries(common_options
++INTERFACE
++	be
++	network
++	media
++	translation
++)
+diff --git a/cmake/validate_special_target.cmake b/cmake/validate_special_target.cmake
+index c87b135..5b488bf 100644
+--- a/cmake/validate_special_target.cmake
++++ b/cmake/validate_special_target.cmake
+@@ -29,7 +29,7 @@ elseif (APPLE)
+         AND NOT DESKTOP_APP_SPECIAL_TARGET STREQUAL "mac")
+         report_bad_special_target()
+     endif()
+-else()
++elseif (LINUX)
+     set(LINUX 1)
+     if (NOT DESKTOP_APP_SPECIAL_TARGET STREQUAL "linux"
+         AND NOT DESKTOP_APP_SPECIAL_TARGET STREQUAL "linux32")
+diff --git a/cmake/variables.cmake b/cmake/variables.cmake
+index 17bb351..6f3a3f0 100644
+--- a/cmake/variables.cmake
++++ b/cmake/variables.cmake
+@@ -63,6 +63,7 @@ set(build_osx 0)
+ set(build_macstore 0)
+ set(build_winstore 0)
+ set(build_linux32 0)
++set(build_haiku 0)
+ 
+ if (WIN32)
+     if (DESKTOP_APP_SPECIAL_TARGET STREQUAL "uwp")
+@@ -74,6 +75,12 @@ elseif (APPLE)
+     elseif (DESKTOP_APP_SPECIAL_TARGET STREQUAL "macstore")
+         set(build_macstore 1)
+     endif()
++elseif (HAIKU)
++    set(build_haiku 1)
++    set(DESKTOP_APP_USE_GLIBC_WRAPS OFF)
++    set(CMAKE_AR gcc-ar)
++    set(CMAKE_RANLIB gcc-ranlib)
++    set(CMAKE_NM gcc-nm)
+ else()
+     if (CMAKE_SIZEOF_VOID_P EQUAL 4)
+         set(build_linux32 1)
+-- 
+2.27.0
+
