@@ -14,5 +14,5 @@ libirrxml_la_SOURCES = src/irrXML.cpp
 libirrxml_la_LDFLAGS = -no-undefined -shared
 libirrxml_la_CPPFLAGS = -fPIC
 
-pkgconfigdir = $(libDir)/pkgconfig
+pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = irrxml.pc
