@@ -543,3 +543,100 @@ index 0000000..22875de
 -- 
 2.28.0
 
+
+From ace9f930ce398bd23fa5977c82885941855e0d19 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?M=C3=A1ximo=20Casta=C3=B1eda?= <antiswen@yahoo.es>
+Date: Fri, 30 Oct 2020 12:42:28 +0100
+Subject: snooze-based timer loop
+
+Couldn't make the volatile counter in the SIGALRM handler work as it's
+supposed to. May be due to bad assumptions, bad code, bad compiler or
+a multitude of reasons. So just ditch it and use snooze and system_time.
+It's smooth now and doesn't hog the CPU.
+
+diff --git a/src/timer.c b/src/timer.c
+index bd35a4b..85de1d6 100644
+--- a/src/timer.c
++++ b/src/timer.c
+@@ -16,6 +16,8 @@
+ 	#include <mint/sysvars.h>
+ #elif defined(__WATCOMC__)
+ 	#include <time.h>
++#elif defined(__HAIKU__)
++	#include <OS.h>
+ #else
+ 	/* Linux / Mac OS X / etc. */
+ 	#if !defined(__USE_POSIX)
+@@ -52,7 +54,7 @@ typedef struct TimerNode {
+ static HANDLE s_timerMainThread = NULL;
+ static HANDLE s_timerThread = NULL;
+ static int s_timerTime;
+-#elif !defined(TOS) && !defined(DOS)
++#elif !defined(TOS) && !defined(DOS) && !defined(__HAIKU__)
+ static struct itimerval s_timerTime;
+ #endif /* _WIN32 */
+ 
+@@ -137,6 +139,24 @@ void SleepAndProcessBackgroundTasks(void)
+ 	Timer_InterruptRun(0);
+ }
+ 
++#elif defined(__HAIKU__)
++void SleepAndProcessBackgroundTasks(void)
++{
++	static bigtime_t next_trigger = 0;
++	if (next_trigger == 0) next_trigger = system_time();
++
++	while (snooze_until(next_trigger, B_SYSTEM_TIMEBASE) != B_OK)
++		/* We were interrupted, snooze again */
++		;
++
++	int dont_callonce = 0;
++	do {
++		next_trigger += s_timerSpeed;
++		Timer_InterruptRun(dont_callonce);
++		dont_callonce = 1;
++	} while (system_time() - next_trigger > 0);
++}
++
+ #elif !defined(_WIN32) || defined(WITH_SDL) || defined(WITH_SDL2)
+ #if defined(_WIN32)
+ static volatile int s_timer_count = 0;
+@@ -195,7 +216,7 @@ void CALLBACK Timer_InterruptWindows(LPVOID arg, BOOLEAN TimerOrWaitFired) {
+ }
+ #endif /* _WIN32 */
+ 
+-#if !defined(TOS) && !defined(DOS)
++#if !defined(TOS) && !defined(DOS) && !defined(__HAIKU__)
+ 
+ /**
+  * Suspend the timer interrupt handling.
+@@ -245,7 +266,7 @@ void Timer_Init(void)
+ #if 0
+ 	Xbtimer(0/* Timer A */, 1/* divider = 4 */, s_timerSpeed * 6144 / 10000, Timer_Handler);
+ #endif
+-#elif defined(DOS)
++#elif defined(DOS) || defined(__HAIKU__)
+ 	/* */
+ #else
+ 	s_timerTime.it_value.tv_sec = 0;
+@@ -262,7 +283,7 @@ void Timer_Init(void)
+ 		sigaction(SIGALRM, &timerSignal, NULL);
+ 	}
+ #endif /* _WIN32 */
+-#if !defined(TOS) && !defined(DOS)
++#if !defined(TOS) && !defined(DOS) && !defined(__HAIKU__)
+ 	Timer_InterruptResume();
+ #endif /* !defined(TOS) && !defined(DOS) */
+ }
+@@ -272,7 +293,7 @@ void Timer_Init(void)
+  */
+ void Timer_Uninit(void)
+ {
+-#if !defined(TOS) && !defined(DOS)
++#if !defined(TOS) && !defined(DOS) && !defined(__HAIKU__)
+ 	Timer_InterruptSuspend();
+ #endif /* !defined(TOS) && !defined(DOS) */
+ #if defined(_WIN32)
+-- 
+2.28.0
+
