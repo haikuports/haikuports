@@ -361,3 +361,185 @@ index f0d3cc6..4a1b510 100644
 -- 
 2.28.0
 
+
+From cc5208edadd3944b2eb0dc5f8ea91af7d323b27e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?M=C3=A1ximo=20Casta=C3=B1eda?= <antiswen@yahoo.es>
+Date: Thu, 29 Oct 2020 20:57:40 +0100
+Subject: Add visible error messages
+
+
+diff --git a/Makefile.src.in b/Makefile.src.in
+index 828b32f..4de7d06 100644
+--- a/Makefile.src.in
++++ b/Makefile.src.in
+@@ -26,8 +26,9 @@ CONFIG_CACHE_SOURCE   = $(SRC_OBJS_DIR)/!!CONFIG_CACHE_SOURCE!!
+ CONFIG_CACHE_VERSION  = $(SRC_OBJS_DIR)/!!CONFIG_CACHE_VERSION!!
+ 
+ OBJS_C   := !!OBJS_C!!
++OBJS_CXX := !!OBJS_CXX!!
+ OBJS_S   := !!OBJS_S!!
+-OBJS     := $(OBJS_C) $(OBJS_S)
++OBJS     := $(OBJS_C) $(OBJS_CXX) $(OBJS_S)
+ SRCS     := !!SRCS!!
+ 
+ # All C-files depend on those 3 files
+@@ -79,7 +80,7 @@ RES := $(shell if [ "`cat $(CONFIG_CACHE_VERSION) 2>/dev/null`" != "$(REV) $(MOD
+ ifndef MAKEDEPEND
+ # The slow, but always correct, dep-check
+ DEP_MASK := %.d
+-DEPS     := $(OBJS_C:%.o=%.d)
++DEPS     := $(OBJS_C:%.o=%.d) $(OBJS_CXX:%.o=%.d)
+ 
+ # Only include the deps if we are compiling everything
+ ifeq ($(filter %.o clean mrproper, $(MAKECMDGOALS)),)
+@@ -98,6 +99,10 @@ $(OBJS_C:%.o=%.d): %.d: $(SRC_DIR)/%.c $(FILE_DEP)
+ 	$(E) '$(STAGE) DEP $(<:$(SRC_DIR)/%.c=%.c)'
+ 	$(Q)$(CC_HOST) $(CFLAGS) -MM $< | sed 's@^$(@F:%.d=%.o):@$@ $(@:%.d=%.o):@' > $@
+ 
++$(OBJS_CXX:%.o=%.d): %.d: $(SRC_DIR)/%.cpp $(FILE_DEP)
++	$(E) '$(STAGE) DEP $(<:$(SRC_DIR)/%.cpp=%.cpp)'
++	$(Q)$(CC_HOST) $(CFLAGS) -MM $< | sed 's@^$(@F:%.d=%.o):@$@ $(@:%.d=%.o):@' > $@
++
+ else
+ # The much faster, but can be wrong, dep-check
+ DEP_MASK :=
+@@ -178,6 +183,10 @@ $(OBJS_C): %.o: $(SRC_DIR)/%.c $(DEP_MASK) $(FILE_DEP)
+ 	$(E) '$(STAGE) Compiling $(<:$(SRC_DIR)/%.c=%.c)'
+ 	$(Q)$(CC_HOST) $(CFLAGS) -c -o $@ $<
+ 
++$(OBJS_CXX): %.o: $(SRC_DIR)/%.cpp $(DEP_MASK) $(FILE_DEP)
++	$(E) '$(STAGE) Compiling $(<:$(SRC_DIR)/%.cpp=%.cpp)'
++	$(Q)$(CC_HOST) $(CFLAGS) -c -o $@ $<
++
+ $(OBJS_S): %.o: $(SRC_DIR)/%.s
+ 	$(E) '$(STAGE) Assembling $(<:$(SRC_DIR)/%.s=%.s)'
+ 	$(Q)$(AS_HOST) $(ASFLAGS) -o $@ $<
+diff --git a/config.lib b/config.lib
+index 09bd456..0cadf2b 100644
+--- a/config.lib
++++ b/config.lib
+@@ -1872,6 +1872,7 @@ make_sed() {
+ 		s@!!CONFIG_CACHE_VERSION!!@config.cache.version@g;
+ 		s@!!CONFIG_CACHE_SOURCE_LIST!!@config.cache.source.list@g;
+ 		s@!!CONFIG_CACHE_PWD!!@config.cache.pwd@g;
++		s@!!OBJS_CXX!!@$OBJS_CXX@g;
+ 		s@!!OBJS_C!!@$OBJS_C@g;
+ 		s@!!OBJS_S!!@$OBJS_S@g;
+ 		s@!!SRCS!!@$SRCS@g;
+diff --git a/configure b/configure
+index 4619b0b..986a0c8 100755
+--- a/configure
++++ b/configure
+@@ -125,6 +125,7 @@ AWKCOMMAND='
+ SRCS="`< $ROOT_DIR/source.list tr '\r' '\n' | $awk \"$AWKCOMMAND\" | $PIPE_SORT`"
+ 
+ OBJS_C="`  echo \"$SRCS\" | $awk ' { ORS = \" \" } /\.c$/   { gsub(\".c$\",   \".o\", $0); print $0; }'`"
++OBJS_CXX="`  echo \"$SRCS\" | $awk ' { ORS = \" \" } /\.cpp$/   { gsub(\".cpp$\",   \".o\", $0); print $0; }'`"
+ OBJS_S="`  echo \"$SRCS\" | $awk ' { ORS = \" \" } /\.s$/   { gsub(\".s$\",   \".o\", $0); print $0; }'`"
+ SRCS="`    echo \"$SRCS\" | $awk ' { ORS = \" \" } { print $0; }'`"
+ 
+diff --git a/source.list b/source.list
+index 58a5a38..f6aa25c 100644
+--- a/source.list
++++ b/source.list
+@@ -97,7 +97,11 @@ os/endian.c
+ 	#if OSX
+ 		os/error_osx.c
+ 	#else
+-		os/error.c
++		#if HAIKU
++			os/error_haiku.cpp
++		#else
++			os/error.c
++		#endif
+ 	#endif
+ 	#if TOS
+ 		os/readdir_atari.c
+diff --git a/src/os/error_haiku.cpp b/src/os/error_haiku.cpp
+new file mode 100644
+index 0000000..22875de
+--- /dev/null
++++ b/src/os/error_haiku.cpp
+@@ -0,0 +1,79 @@
++/** @file src/os/error_haiku.c System dependent error messages for Haiku. */
++
++#include <Alert.h>
++#include <AppFileInfo.h>
++#include <Application.h>
++#include <File.h>
++#include <image.h>
++
++extern "C" {
++
++#include <stdio.h>
++#include <string.h>
++#include <stdarg.h>
++#include "strings.h"
++
++#include "error.h"
++
++static void AppInit(void) {
++	image_info info;
++	int32 cookie = 0;
++	while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
++		if (info.type == B_APP_IMAGE) {
++			BFile me(info.name, O_RDONLY);
++			if (me.InitCheck() == B_OK) {
++				BAppFileInfo app_info(&me);
++				if (app_info.InitCheck() == B_OK) {
++					char signature[B_MIME_TYPE_LENGTH];
++					if (app_info.GetSignature(signature) == B_OK) {
++						new BApplication(signature);
++						return;
++					}
++				}
++			}
++		}
++	}
++	new BApplication("application/x-vnd.opendune");
++}
++
++void Error(const char *format, ...) {
++	char message[512];
++	va_list ap;
++
++	va_start(ap, format);
++	vsnprintf(message, sizeof(message), format, ap);
++	vfprintf(stderr, format, ap);
++	va_end(ap);
++
++	// Some checks are done before initializing SDL, so we may not have SDL
++	// nor a BApplication to show the alert
++	if (be_app == NULL) {
++		AppInit();
++	}
++	BAlert* alert = new BAlert("Error - OpenDUNE", message, "OK", NULL, NULL,
++		B_WIDTH_AS_USUAL, B_STOP_ALERT);
++	alert->SetShortcut(0, B_ESCAPE);
++	alert->Go();
++}
++
++void Warning(const char *format, ...) {
++	char message[512];
++	va_list ap;
++
++	va_start(ap, format);
++	vsnprintf(message, sizeof(message), format, ap);
++	vfprintf(stderr, format, ap);
++	va_end(ap);
++}
++
++#ifdef _DEBUG
++void Debug(const char *format, ...) {
++	va_list ap;
++
++	va_start(ap, format);
++	vfprintf(stdout, format, ap);
++	va_end(ap);
++}
++#endif
++
++}
+-- 
+2.28.0
+
