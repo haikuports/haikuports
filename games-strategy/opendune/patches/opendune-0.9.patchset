@@ -497,13 +497,13 @@ index 475331d..1abade9 100644
 +void SleepAndProcessBackgroundTasks(void)
 +{
 +	static bigtime_t next_trigger = 0;
++	int dont_callonce = 0;
 +	if (next_trigger == 0) next_trigger = system_time();
 +
 +	while (snooze_until(next_trigger, B_SYSTEM_TIMEBASE) != B_OK)
 +		/* We were interrupted, snooze again */
 +		;
 +
-+	int dont_callonce = 0;
 +	do {
 +		next_trigger += s_timerSpeed;
 +		Timer_InterruptRun(dont_callonce);
@@ -595,17 +595,18 @@ index 0b1004e..f0c6d31 100644
  	s_spec.channels = 1;
  	s_spec.samples  = 512;
  	s_spec.callback = DSP_Callback;
-@@ -126,10 +126,29 @@ static void DSP_ConvertAudio(uint32 freq)
+@@ -126,10 +126,30 @@ static void DSP_ConvertAudio(uint32 freq)
  	s_bufferLen = newlen;
  }
  
 +static void DSP_ReConvertAudio()
 +{
++	uint32 newlen;
 +	SDL_AudioCVT cvt;
 +	if (!SDL_BuildAudioCVT(&cvt, AUDIO_U8, 1, s_spec.freq, s_spec.format, s_spec.channels, s_spec.freq)) {
 +		printf("BACVT ERROR\n");
 +	}
-+	uint32 newlen = s_bufferLen * cvt.len_mult;
++	newlen = s_bufferLen * cvt.len_mult;
 +
 +	if (s_dataLen < newlen) {
 +		s_data = realloc(s_data, newlen);
@@ -626,7 +627,7 @@ index 0b1004e..f0c6d31 100644
  	data += READ_LE_UINT16(data + 20);
  
  	if (*data != 1) return;
-@@ -143,6 +162,7 @@ void DSP_Play(const uint8 *data)
+@@ -143,6 +163,7 @@ void DSP_Play(const uint8 *data)
  
  	memcpy(s_data, data + 6, s_bufferLen);
  	DSP_ConvertAudio(1000000 / (256 - data[4]));
@@ -804,6 +805,109 @@ index e623ebd..d8489ae 100644
  assert_compile(sizeof(uint8 ) == 1);
  assert_compile(sizeof( int8 ) == 1);
  assert_compile(sizeof(uint16) == 2);
+-- 
+2.28.0
+
+
+From e024e6011ead3592355840d1d2913557fdeb1d8a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?M=C3=A1ximo=20Casta=C3=B1eda?= <antiswen@yahoo.es>
+Date: Sat, 14 Nov 2020 21:53:49 +0100
+Subject: Make old gcc versions happy
+
+
+diff --git a/config.lib b/config.lib
+index c41a604..b221fa3 100644
+--- a/config.lib
++++ b/config.lib
+@@ -735,11 +735,6 @@ make_compiler_cflags() {
+ 			cc_version="${cc_version}0"
+ 		fi
+ 
+-		if [ $cc_version -lt 33 ]; then
+-			log 1 "configure: error: gcc older than 3.3 can't compile OpenDUNE because of its poor template support"
+-			exit 1
+-		fi
+-
+ 		if [ "$os" != "TOS" ] && [ "$os" != "DOS" ] && [ $cc_version -lt 70 ] ; then
+ 			flags="$flags -ansi -pedantic"
+ 		fi
+@@ -752,7 +747,9 @@ make_compiler_cflags() {
+ 
+ 		if [ $enable_assert -eq 0 ]; then
+ 			# Do not warn about unused variables when building without asserts
+-			flags="$flags -Wno-unused-variable"
++			if [ $cc_version -ge 30 ]; then
++				flags="$flags -Wno-unused-variable"
++			fi
+ 			if [ $cc_version -ge 46 ]; then
+ 				# GCC 4.6 gives more warnings, disable them too
+ 				flags="$flags -Wno-unused-but-set-variable"
+@@ -855,6 +852,9 @@ make_cflags_and_ldflags() {
+ 
+ 		if [ "$os" = "TOS" ] ; then
+ 			CFLAGS="-Ofast -fomit-frame-pointer $CFLAGS"
++		elif [ "$os" = "HAIKU" ] ; then
++			# Wvariadic-macros is not available for gcc < 4
++			CFLAGS="-O2 -fomit-frame-pointer $CFLAGS"
+ 		else
+ 			CFLAGS="-O2 -fomit-frame-pointer -Wno-variadic-macros $CFLAGS"
+ 		fi
+diff --git a/src/crashlog/crashlog.c b/src/crashlog/crashlog.c
+index 39bc69c..0c3c40a 100644
+--- a/src/crashlog/crashlog.c
++++ b/src/crashlog/crashlog.c
+@@ -5,6 +5,10 @@
+ #include "crashlog.h"
+ #include "../rev.h"
+ 
++#if defined(__GNUC__) && !defined(__GNUC_PATCHLEVEL__)
++#define __GNUC_PATCHLEVEL__ 0
++#endif
++
+ static void CrashLog_LogCompiler(char *buffer)
+ {
+ 			sprintf(buffer + strlen(buffer), " Compiler: "
+diff --git a/src/os/error.h b/src/os/error.h
+index b039021..bfc2e04 100644
+--- a/src/os/error.h
++++ b/src/os/error.h
+@@ -11,8 +11,11 @@ extern void Error(const char *format, ...);
+ extern void Warning(const char *format, ...);
+ #ifdef _DEBUG
+ extern void Debug(const char *format, ...);
+-#else
++#elif !defined(__GNUC__) || __GNUC__ > 3 \
++	|| (__GNUC__ == 3 && __GNUC_MINOR__ >= 3)
+ #define Debug(...)
++#else
++#define Debug(args...)
+ #endif
+ 
+ #if defined(TOS) || defined(DOS)
+diff --git a/src/video/video_sdl.c b/src/video/video_sdl.c
+index af9c209..721eaef 100644
+--- a/src/video/video_sdl.c
++++ b/src/video/video_sdl.c
+@@ -10,7 +10,9 @@
+ #include "types.h"
+ #include "../os/error.h"
+ 
+-#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
++#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__)) \
++	&& (__GNUC__ > 3 || (__GNUC__ == 3 && __GNUC_MINOR__ >= 1))
++#define WITHMMX 1
+ #include <mmintrin.h>
+ #endif /* i386 / x86_64 */
+ 
+@@ -440,7 +442,7 @@ static void Video_DrawScreen_Nearest_Neighbor(const struct dirty_area * area)
+ 				*((__m128i *)gfx2) = mh;
+ 				gfx2 += 16;
+ 			}
+-#elif defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
++#elif defined(WITHMMX)
+ 			/* MMX code */
+ 			for (x = SCREEN_WIDTH / 4; x > 0; x--) {
+ 				__m64 m;
 -- 
 2.28.0
 
