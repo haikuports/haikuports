@@ -1,0 +1,809 @@
+From f185f3c2a797666ce339aaf79b9742c7b948b495 Mon Sep 17 00:00:00 2001
+From: Gabriele Baldassarre <gabriele@gabrielebaldassarre.com>
+Date: Mon, 22 Oct 2018 23:00:12 +0200
+Subject: initial set of defines for Haiku
+
+
+diff --git a/src/os/strings.h b/src/os/strings.h
+index daac831..bdea121 100644
+--- a/src/os/strings.h
++++ b/src/os/strings.h
+@@ -84,13 +84,13 @@
+ 
+ 	#if !defined(__MINGW32__) && defined(__GNUC__) && !defined(snprintf)
+ 		/* (v)snprintf is in fact C99, but we like to use it over (v)sprintf for the obvious reasons */
+-		#if !defined(__APPLE__) && !defined(TOS) && !defined(__FreeBSD__) && !defined(__DJGPP__)
++		#if !defined(__APPLE__) && !defined(TOS) && !defined(__FreeBSD__) && !defined(__DJGPP__) && !defined(__HAIKU__)
+ 			extern int snprintf (char *__restrict __s, size_t __maxlen, __const char *__restrict __format, ...) __THROW __attribute__ ((__format__ (__printf__, 3, 4)));
+ 			extern int vsnprintf (char *__restrict __s, size_t __maxlen, __const char *__restrict __format, va_list __arg) __THROW __attribute__ ((__format__ (__printf__, 3, 0)));
+ 		#endif /* __APPLE__ */
+ 	#endif /* __GCC__ */
+ 	
+-	#if !defined(__MINGW32__) && defined(__GNUC__) && !defined(strdup) && !defined(__APPLE__) && !defined(TOS) && !defined(__FreeBSD__) && !defined(__DJGPP__)
++	#if !defined(__MINGW32__) && defined(__GNUC__) && !defined(strdup) && !defined(__APPLE__) && !defined(TOS) && !defined(__FreeBSD__) && !defined(__DJGPP__) && !defined(__HAIKU__)
+ 		/* strdup is not ANSI-C, but our own implemention would only be slower */
+ 		extern char *strdup (__const char *__s);
+ 	#endif /* __GCC__ */
+-- 
+2.28.0
+
+
+From 2f50b43feb955e7d7d0159a3227973452137ed9d Mon Sep 17 00:00:00 2001
+From: Gabriele Baldassarre <gabriele@gabrielebaldassarre.com>
+Date: Tue, 23 Oct 2018 00:23:24 +0200
+Subject: added support for Haiku paths
+
+
+diff --git a/src/file.c b/src/file.c
+index 4d3f4dc..0b08d60 100644
+--- a/src/file.c
++++ b/src/file.c
+@@ -25,6 +25,10 @@
+ #include "config.h"
+ #include "inifile.h"
+ 
++#ifdef __HAIKU__
++#include <StorageDefs.h>
++#endif /* HAIKU */
++
+ /* Set DUNE_DATA_DIR at compile time.  e.g. */
+ /* #define DUNE_DATA_DIR "/usr/local/share/opendune" */
+ 
+@@ -36,8 +40,13 @@
+ #endif
+ #endif
+ 
++#ifdef __HAIKU__
++static char g_dune_data_dir[B_PATH_NAME_LENGTH] = DUNE_DATA_DIR;
++static char g_personal_data_dir[B_PATH_NAME_LENGTH] = ".";
++#else
+ static char g_dune_data_dir[1024] = DUNE_DATA_DIR;
+ static char g_personal_data_dir[1024] = ".";
++#endif
+ 
+ /* In order to avoid to open/close the same .PAK file multiple time
+  * in a row, we cache the last opened PAK file.
+diff --git a/src/inifile.c b/src/inifile.c
+index d51996a..6633c92 100644
+--- a/src/inifile.c
++++ b/src/inifile.c
+@@ -3,6 +3,11 @@
+ #ifdef OSX
+ #include <CoreFoundation/CoreFoundation.h>
+ #endif /* OSX */
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#include <StorageDefs.h>
++#include <unistd.h>
++#endif /* HAIKU */
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -40,7 +45,9 @@ bool Load_IniFile(void)
+ 	   1) %APPDATA%/OpenDUNE (win32)
+ 	      ~/Library/Application Support/OpenDUNE (Mac OS X)
+ 	      ~/.config/opendune (Linux)
+-	   2) current directory
++	      B_USER_SETTINGS_DIRECTORY (Haiku)
++	   2) B_SYSTEM_SETTINGS_DIRECTORY (Haiku)
++	      current directory
+ 	   3) data/ dir
+ 	   4) parent of bundle dir (Mac OS X)
+ 	*/
+@@ -53,18 +60,40 @@ bool Load_IniFile(void)
+ 		f = fopen(path, "rb");
+ 	}
+ #elif !defined(TOS) && !defined(DOS)  /* _WIN32 */
++	#if defined(__HAIKU__)
++	char path[B_PATH_NAME_LENGTH];
++	char buffer[B_PATH_NAME_LENGTH];
++	#else
+ 	char path[PATH_MAX];
++	#endif
+ 	char * homeDir;
+ 	homeDir = getenv("HOME");
+ 	if (homeDir != NULL) {
+ #if defined(__APPLE__)
+ 		snprintf(path, sizeof(path), "%s/Library/Application Support/OpenDUNE/opendune.ini", homeDir);
+-#else /* __APPLE__ */
++#elif defined(__HAIKU__) /* __APPLE__ */
++		if(find_directory(B_USER_SETTINGS_DIRECTORY, 0, true, buffer, sizeof(buffer)) == B_OK){
++			snprintf(path, sizeof(path), "%s/opendune/opendune.ini", buffer);
++		}
++#else /* __HAIKU__ */
+ 		snprintf(path, sizeof(path), "%s/.config/opendune/opendune.ini", homeDir);
+-#endif /* __APPLE__ */
++#endif
+ 		f = fopen(path, "rb");
+ 	}
+ #endif /* not TOS, not _WIN32 */
++	
++#if defined(__HAIKU__)
++	/* B_SYSTEM_SETTINGS_DIRECTORY */
++	if (f == NULL) {
++		char haiku_msg[B_PATH_NAME_LENGTH + 50];
++		snprintf(haiku_msg, sizeof(haiku_msg), "%s not found; using default one...\n", path);
++		Warning(haiku_msg);
++		if(find_directory(B_SYSTEM_SETTINGS_DIRECTORY, 0, true, buffer, sizeof(buffer)) == B_OK){
++			snprintf(path, sizeof(path), "%s/opendune.ini", buffer);
++			f = fopen(path, "rb");
++		}
++	}
++#endif	
+ 	if (f == NULL) {
+ 		/* current directory */
+ 		f = fopen("opendune.ini", "rb");
+-- 
+2.28.0
+
+
+From c4f1da75651c9a359d65a0ea7e708265a1c6e857 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?M=C3=A1ximo=20Casta=C3=B1eda?= <antiswen@yahoo.es>
+Date: Wed, 28 Oct 2020 14:32:14 +0100
+Subject: Use the correct endian.h
+
+
+diff --git a/src/os/endian.h b/src/os/endian.h
+index f8e9361..f8e3e86 100644
+--- a/src/os/endian.h
++++ b/src/os/endian.h
+@@ -26,6 +26,8 @@
+ 	#define __LITTLE_ENDIAN 1234
+ 	#define __BIG_ENDIAN 4321
+ 	#define __BYTE_ORDER __LITTLE_ENDIAN
++#elif defined(__HAIKU__)
++	#include <posix/endian.h>
+ #else
+ 	#include <endian.h>
+ #endif /* _WIN32 */
+-- 
+2.28.0
+
+
+From a08cb09c074355a9d6d46f38ab6a3ef50f11782a Mon Sep 17 00:00:00 2001
+From: Thomas Bernard <miniupnp@free.fr>
+Date: Thu, 9 Apr 2020 22:21:46 +0200
+Subject: -Fix: Tile_PackTile() is now a macro
+
+we should avoid to call Tile_MoveByRandom() several times
+fixes #331
+
+Bug introduced by 9c34a82b30df6dca449549d9d7a76acbbae333af
+https://github.com/OpenDUNE/OpenDUNE/releases/tag/0.9
+
+diff --git a/src/map.c b/src/map.c
+index 234b08e..3f97403 100644
+--- a/src/map.c
++++ b/src/map.c
+@@ -984,7 +984,8 @@ uint16 Map_FindLocationTile(uint16 locationID, uint8 houseID)
+ 				s = Structure_Find(&find);
+ 
+ 				if (s != NULL) {
+-					ret = Tile_PackTile(Tile_MoveByRandom(s->o.position, 120, true));
++					tile32 unpacked = Tile_MoveByRandom(s->o.position, 120, true);
++					ret = Tile_PackTile(unpacked);
+ 				} else {
+ 					Unit *u;
+ 
+@@ -995,7 +996,8 @@ uint16 Map_FindLocationTile(uint16 locationID, uint8 houseID)
+ 					u = Unit_Find(&find);
+ 
+ 					if (u != NULL) {
+-						ret = Tile_PackTile(Tile_MoveByRandom(u->o.position, 120, true));
++						tile32 unpacked = Tile_MoveByRandom(u->o.position, 120, true);
++						ret = Tile_PackTile(unpacked);
+ 					} else {
+ 						ret = Tile_PackXY(mapInfo->minX + Tools_RandomLCG_Range(0, mapInfo->sizeX), mapInfo->minY + Tools_RandomLCG_Range(0, mapInfo->sizeY));
+ 					}
+@@ -1588,7 +1590,8 @@ void Map_CreateLandscape(uint32 seed)
+ 		j = Tools_Random_256() & 0x1F;
+ 		while (j-- != 0) {
+ 			while (true) {
+-				packed = Tile_PackTile(Tile_MoveByRandom(tile, Tools_Random_256() & 0x3F, true));
++				tile32 unpacked = Tile_MoveByRandom(tile, Tools_Random_256() & 0x3F, true);
++				packed = Tile_PackTile(unpacked);
+ 
+ 				if (!Tile_IsOutOfMap(packed)) break;
+ 			}
+-- 
+2.28.0
+
+
+From 72418d134aa04cc9f03bfec38a8cbdcd1d74cb01 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?M=C3=A1ximo=20Casta=C3=B1eda?= <antiswen@yahoo.es>
+Date: Wed, 28 Oct 2020 16:11:07 +0100
+Subject: Remove keyboard scancode magic
+
+
+diff --git a/src/video/video_sdl.c b/src/video/video_sdl.c
+index 5cfebc0..af9c209 100644
+--- a/src/video/video_sdl.c
++++ b/src/video/video_sdl.c
+@@ -635,7 +635,7 @@ void Video_Tick(void)
+ 					/* use "translated" KeySym */
+ 					sym = sdlkey_map[event.key.keysym.scancode];
+ 				}
+-#else /* defined(__APPLE__) */
++#elif !defined(__APPLE__) && !defined(__HAIKU__)
+ 				if (event.key.keysym.scancode == 0) {
+ #endif /* defined(__APPLE__) */
+ 					/* scancode 0 : retrieve from sym */
+@@ -645,15 +645,15 @@ void Video_Tick(void)
+ 						continue;
+ 					}
+ 					scancode = s_SDL_keymap[sym];
+-#if !defined(__APPLE__)
++#if !defined(__APPLE__) && !defined(__HAIKU__)
+ 				} else {
+ 					scancode = (uint8)event.key.keysym.scancode;
+-#if !defined(_WIN32) && !defined(__APPLE__)
++#if !defined(_WIN32) && !defined(__APPLE__) && !defined(__HAIKU__)
+ 					/* Linux adds 8 to all scancodes */
+ 					scancode -= 8;
+-#endif /* !defined(_WIN32) && !defined(__APPLE__) */
++#endif /* !defined(_WIN32) && !defined(__APPLE__) && !defined(__HAIKU__) */
+ 				}
+-#endif /* defined(__APPLE__) */
++#endif /* !defined(__APPLE__) && !defined(__HAIKU__) */
+ 				if (scancode & 0x80) {
+ 					Video_Key_Callback(0xe0);
+ 					scancode &= 0x7f;
+-- 
+2.28.0
+
+
+From c647b8b95190ca68126f89d8654569489ada00ff Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?M=C3=A1ximo=20Casta=C3=B1eda?= <antiswen@yahoo.es>
+Date: Sun, 1 Nov 2020 20:19:20 +0100
+Subject: Fix: solve CTRL key disabling keyboard
+
+
+diff --git a/src/input/input.c b/src/input/input.c
+index f0d3cc6..4a1b510 100644
+--- a/src/input/input.c
++++ b/src/input/input.c
+@@ -206,7 +206,7 @@ void Input_EventHandler(uint8 key)
+ 		key = s_keyTranslate[key & 0x7F];
+ 	}
+ 
+-	if ((s_activeInputMap[7] & 0x4) != 0) return;	/* 0x3a : LCTRL */
++	/*if ((s_activeInputMap[7] & 0x4) != 0) return;*/	/* 0x3a : LCTRL */
+ 	if ((s_activeInputMap[7] & 0x50) != 0) state |= 0x04;	/* 0x3c 0x3e : LALT RALT => ALT */
+ 
+ 	key = Input_Keyboard_Translate(key) & 0xFF;
+-- 
+2.28.0
+
+
+From 829379097c26a9be768152a92ce0309065f28fee Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?M=C3=A1ximo=20Casta=C3=B1eda?= <antiswen@yahoo.es>
+Date: Thu, 29 Oct 2020 20:57:40 +0100
+Subject: Add visible error messages
+
+
+diff --git a/Makefile.src.in b/Makefile.src.in
+index 828b32f..e95454d 100644
+--- a/Makefile.src.in
++++ b/Makefile.src.in
+@@ -26,8 +26,9 @@ CONFIG_CACHE_SOURCE   = $(SRC_OBJS_DIR)/!!CONFIG_CACHE_SOURCE!!
+ CONFIG_CACHE_VERSION  = $(SRC_OBJS_DIR)/!!CONFIG_CACHE_VERSION!!
+ 
+ OBJS_C   := !!OBJS_C!!
++OBJS_CXX := !!OBJS_CXX!!
+ OBJS_S   := !!OBJS_S!!
+-OBJS     := $(OBJS_C) $(OBJS_S)
++OBJS     := $(OBJS_C) $(OBJS_CXX) $(OBJS_S)
+ SRCS     := !!SRCS!!
+ 
+ # All C-files depend on those 3 files
+@@ -79,7 +80,7 @@ RES := $(shell if [ "`cat $(CONFIG_CACHE_VERSION) 2>/dev/null`" != "$(REV) $(MOD
+ ifndef MAKEDEPEND
+ # The slow, but always correct, dep-check
+ DEP_MASK := %.d
+-DEPS     := $(OBJS_C:%.o=%.d)
++DEPS     := $(OBJS_C:%.o=%.d) $(OBJS_CXX:%.o=%.d)
+ 
+ # Only include the deps if we are compiling everything
+ ifeq ($(filter %.o clean mrproper, $(MAKECMDGOALS)),)
+@@ -98,6 +99,10 @@ $(OBJS_C:%.o=%.d): %.d: $(SRC_DIR)/%.c $(FILE_DEP)
+ 	$(E) '$(STAGE) DEP $(<:$(SRC_DIR)/%.c=%.c)'
+ 	$(Q)$(CC_HOST) $(CFLAGS) -MM $< | sed 's@^$(@F:%.d=%.o):@$@ $(@:%.d=%.o):@' > $@
+ 
++$(OBJS_CXX:%.o=%.d): %.d: $(SRC_DIR)/%.cpp $(FILE_DEP)
++	$(E) '$(STAGE) DEP $(<:$(SRC_DIR)/%.cpp=%.cpp)'
++	$(Q)$(CC_HOST) $(CFLAGS) -MM $< | sed 's@^$(@F:%.d=%.o):@$@ $(@:%.d=%.o):@' > $@
++
+ else
+ # The much faster, but can be wrong, dep-check
+ DEP_MASK :=
+@@ -178,6 +183,10 @@ $(OBJS_C): %.o: $(SRC_DIR)/%.c $(DEP_MASK) $(FILE_DEP)
+ 	$(E) '$(STAGE) Compiling $(<:$(SRC_DIR)/%.c=%.c)'
+ 	$(Q)$(CC_HOST) $(CFLAGS) -c -o $@ $<
+ 
++$(OBJS_CXX): %.o: $(SRC_DIR)/%.cpp $(DEP_MASK) $(FILE_DEP)
++	$(E) '$(STAGE) Compiling $(<:$(SRC_DIR)/%.cpp=%.cpp)'
++	$(Q)$(CC_HOST) $(CFLAGS) -c -o $@ $<
++
+ $(OBJS_S): %.o: $(SRC_DIR)/%.s
+ 	$(E) '$(STAGE) Assembling $(<:$(SRC_DIR)/%.s=%.s)'
+ 	$(Q)$(AS_HOST) $(ASFLAGS) -o $@ $<
+diff --git a/config.lib b/config.lib
+index 09bd456..c41a604 100644
+--- a/config.lib
++++ b/config.lib
+@@ -1872,6 +1872,7 @@ make_sed() {
+ 		s@!!CONFIG_CACHE_VERSION!!@config.cache.version@g;
+ 		s@!!CONFIG_CACHE_SOURCE_LIST!!@config.cache.source.list@g;
+ 		s@!!CONFIG_CACHE_PWD!!@config.cache.pwd@g;
++		s@!!OBJS_CXX!!@$OBJS_CXX@g;
+ 		s@!!OBJS_C!!@$OBJS_C@g;
+ 		s@!!OBJS_S!!@$OBJS_S@g;
+ 		s@!!SRCS!!@$SRCS@g;
+diff --git a/configure b/configure
+index 4619b0b..783c340 100755
+--- a/configure
++++ b/configure
+@@ -125,6 +125,7 @@ AWKCOMMAND='
+ SRCS="`< $ROOT_DIR/source.list tr '\r' '\n' | $awk \"$AWKCOMMAND\" | $PIPE_SORT`"
+ 
+ OBJS_C="`  echo \"$SRCS\" | $awk ' { ORS = \" \" } /\.c$/   { gsub(\".c$\",   \".o\", $0); print $0; }'`"
++OBJS_CXX="`  echo \"$SRCS\" | $awk ' { ORS = \" \" } /\.cpp$/   { gsub(\".cpp$\",   \".o\", $0); print $0; }'`"
+ OBJS_S="`  echo \"$SRCS\" | $awk ' { ORS = \" \" } /\.s$/   { gsub(\".s$\",   \".o\", $0); print $0; }'`"
+ SRCS="`    echo \"$SRCS\" | $awk ' { ORS = \" \" } { print $0; }'`"
+ 
+diff --git a/source.list b/source.list
+index 58a5a38..f6aa25c 100644
+--- a/source.list
++++ b/source.list
+@@ -97,7 +97,11 @@ os/endian.c
+ 	#if OSX
+ 		os/error_osx.c
+ 	#else
+-		os/error.c
++		#if HAIKU
++			os/error_haiku.cpp
++		#else
++			os/error.c
++		#endif
+ 	#endif
+ 	#if TOS
+ 		os/readdir_atari.c
+diff --git a/src/os/error_haiku.cpp b/src/os/error_haiku.cpp
+new file mode 100644
+index 0000000..40b2e62
+--- /dev/null
++++ b/src/os/error_haiku.cpp
+@@ -0,0 +1,79 @@
++/** @file src/os/error_haiku.c System dependent error messages for Haiku. */
++
++#include <Alert.h>
++#include <AppFileInfo.h>
++#include <Application.h>
++#include <File.h>
++#include <image.h>
++
++extern "C" {
++
++#include <stdio.h>
++#include <string.h>
++#include <stdarg.h>
++#include "strings.h"
++
++#include "error.h"
++
++static void AppInit(void) {
++	image_info info;
++	int32 cookie = 0;
++	while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
++		if (info.type == B_APP_IMAGE) {
++			BFile me(info.name, O_RDONLY);
++			if (me.InitCheck() == B_OK) {
++				BAppFileInfo app_info(&me);
++				if (app_info.InitCheck() == B_OK) {
++					char signature[B_MIME_TYPE_LENGTH];
++					if (app_info.GetSignature(signature) == B_OK) {
++						new BApplication(signature);
++						return;
++					}
++				}
++			}
++		}
++	}
++	new BApplication("application/x-vnd.opendune");
++}
++
++void Error(const char *format, ...) {
++	char message[512];
++	va_list ap;
++
++	va_start(ap, format);
++	vsnprintf(message, sizeof(message), format, ap);
++	vfprintf(stderr, format, ap);
++	va_end(ap);
++
++	// Some checks are done before initializing SDL, so we may not have SDL
++	// nor a BApplication to show the alert
++	if (be_app == NULL) {
++		AppInit();
++	}
++	BAlert* alert = new BAlert("Error - OpenDUNE", message, "OK", NULL, NULL,
++		B_WIDTH_AS_USUAL, B_STOP_ALERT);
++	alert->SetShortcut(0, B_ESCAPE);
++	alert->Go();
++}
++
++void Warning(const char *format, ...) {
++	char message[512];
++	va_list ap;
++
++	va_start(ap, format);
++	vsnprintf(message, sizeof(message), format, ap);
++	vfprintf(stderr, format, ap);
++	va_end(ap);
++}
++
++#ifdef _DEBUG
++void Debug(const char *format, ...) {
++	va_list ap;
++
++	va_start(ap, format);
++	vfprintf(stdout, format, ap);
++	va_end(ap);
++}
++#endif
++
++}
+-- 
+2.28.0
+
+
+From fc3de30f66054de72b8fdb685af11f2a66346166 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?M=C3=A1ximo=20Casta=C3=B1eda?= <antiswen@yahoo.es>
+Date: Fri, 30 Oct 2020 12:42:28 +0100
+Subject: snooze-based timer loop
+
+Couldn't make the volatile counter in the SIGALRM handler work as it's
+supposed to. May be due to bad assumptions, bad code, bad compiler or
+a multitude of reasons. So just ditch it and use snooze and system_time.
+It's smooth now and doesn't hog the CPU.
+
+diff --git a/src/timer.c b/src/timer.c
+index 475331d..1abade9 100644
+--- a/src/timer.c
++++ b/src/timer.c
+@@ -16,6 +16,8 @@
+ 	#include <mint/sysvars.h>
+ #elif defined(__WATCOMC__)
+ 	#include <time.h>
++#elif defined(__HAIKU__)
++	#include <OS.h>
+ #else
+ 	/* Linux / Mac OS X / etc. */
+ 	#if !defined(__USE_POSIX)
+@@ -52,7 +54,7 @@ typedef struct TimerNode {
+ static HANDLE s_timerMainThread = NULL;
+ static HANDLE s_timerThread = NULL;
+ static int s_timerTime;
+-#elif !defined(TOS) && !defined(DOS)
++#elif !defined(TOS) && !defined(DOS) && !defined(__HAIKU__)
+ static struct itimerval s_timerTime;
+ #endif /* _WIN32 */
+ 
+@@ -137,6 +139,24 @@ void SleepAndProcessBackgroundTasks(void)
+ 	Timer_InterruptRun(0);
+ }
+ 
++#elif defined(__HAIKU__)
++void SleepAndProcessBackgroundTasks(void)
++{
++	static bigtime_t next_trigger = 0;
++	if (next_trigger == 0) next_trigger = system_time();
++
++	while (snooze_until(next_trigger, B_SYSTEM_TIMEBASE) != B_OK)
++		/* We were interrupted, snooze again */
++		;
++
++	int dont_callonce = 0;
++	do {
++		next_trigger += s_timerSpeed;
++		Timer_InterruptRun(dont_callonce);
++		dont_callonce = 1;
++	} while (system_time() - next_trigger > 0);
++}
++
+ #elif !defined(_WIN32) || defined(WITH_SDL) || defined(WITH_SDL2)
+ #if defined(_WIN32)
+ static volatile int s_timer_count = 0;
+@@ -195,7 +215,7 @@ void CALLBACK Timer_InterruptWindows(LPVOID arg, BOOLEAN TimerOrWaitFired) {
+ }
+ #endif /* _WIN32 */
+ 
+-#if !defined(TOS) && !defined(DOS)
++#if !defined(TOS) && !defined(DOS) && !defined(__HAIKU__)
+ 
+ /**
+  * Suspend the timer interrupt handling.
+@@ -241,7 +261,7 @@ void Timer_Init(void)
+ #if 0
+ 	Xbtimer(0/* Timer A */, 1/* divider = 4 */, s_timerSpeed * 6144 / 10000, Timer_Handler);
+ #endif
+-#elif defined(DOS)
++#elif defined(DOS) || defined(__HAIKU__)
+ 	/* */
+ #else
+ 	s_timerTime.it_value.tv_sec = 0;
+@@ -258,7 +278,7 @@ void Timer_Init(void)
+ 		sigaction(SIGALRM, &timerSignal, NULL);
+ 	}
+ #endif /* _WIN32 */
+-#if !defined(TOS) && !defined(DOS)
++#if !defined(TOS) && !defined(DOS) && !defined(__HAIKU__)
+ 	Timer_InterruptResume();
+ #endif /* !defined(TOS) && !defined(DOS) */
+ }
+@@ -268,7 +288,7 @@ void Timer_Init(void)
+  */
+ void Timer_Uninit(void)
+ {
+-#if !defined(TOS) && !defined(DOS)
++#if !defined(TOS) && !defined(DOS) && !defined(__HAIKU__)
+ 	Timer_InterruptSuspend();
+ #endif /* !defined(TOS) && !defined(DOS) */
+ #if defined(_WIN32)
+-- 
+2.28.0
+
+
+From 56675fce4d121dfc328ac8f6908ef7edacf5a7de Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?M=C3=A1ximo=20Casta=C3=B1eda?= <antiswen@yahoo.es>
+Date: Sun, 1 Nov 2020 16:26:50 +0100
+Subject: Add sound
+
+For some reason my system, SDL or whatever does not like U8 format.
+Change to a format that does produce sound, use the existing conversion for the frequency, as the SDL function only converts for integer (and maybe only powers of two) relations, and let SDL convert the format.
+
+diff --git a/src/audio/dsp_sdl.c b/src/audio/dsp_sdl.c
+index 0b1004e..f0c6d31 100644
+--- a/src/audio/dsp_sdl.c
++++ b/src/audio/dsp_sdl.c
+@@ -22,7 +22,7 @@ static void DSP_Callback(void *userdata, Uint8 *stream, int len)
+ 
+ 	if (s_status == 0 || s_bufferLen == 0 || s_buffer == NULL) {
+ 		/* no more sample to play : */
+-		memset(stream, 0x80, len);	/* fill buffer with silence */
++		memset(stream, s_spec.silence, len);	/* fill buffer with silence */
+ 		SDL_PauseAudio(1);	/* stop playback */
+ 		return;
+ 	}
+@@ -33,7 +33,7 @@ static void DSP_Callback(void *userdata, Uint8 *stream, int len)
+ 		s_buffer += len;
+ 	} else {
+ 		memcpy(stream, s_buffer, s_bufferLen);
+-		memset(stream + s_bufferLen, 0x80, len - s_bufferLen);	/* fill buffer end with silence */
++		memset(stream + s_bufferLen, s_spec.silence, len - s_bufferLen);	/* fill buffer end with silence */
+ 		s_bufferLen = 0;
+ 		s_buffer = NULL;
+ 		s_status = 0;
+@@ -66,8 +66,8 @@ bool DSP_Init(void)
+ {
+ 	if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) return false;
+ 
+-	s_spec.freq     = 22050;
+-	s_spec.format   = AUDIO_U8;
++	s_spec.freq     = 44100;
++	s_spec.format   = AUDIO_S16;
+ 	s_spec.channels = 1;
+ 	s_spec.samples  = 512;
+ 	s_spec.callback = DSP_Callback;
+@@ -126,10 +126,29 @@ static void DSP_ConvertAudio(uint32 freq)
+ 	s_bufferLen = newlen;
+ }
+ 
++static void DSP_ReConvertAudio()
++{
++	SDL_AudioCVT cvt;
++	if (!SDL_BuildAudioCVT(&cvt, AUDIO_U8, 1, s_spec.freq, s_spec.format, s_spec.channels, s_spec.freq)) {
++		printf("BACVT ERROR\n");
++	}
++	uint32 newlen = s_bufferLen * cvt.len_mult;
++
++	if (s_dataLen < newlen) {
++		s_data = realloc(s_data, newlen);
++		s_dataLen = newlen;
++	}
++
++	cvt.buf = s_data;
++	cvt.len = s_bufferLen;
++
++	SDL_ConvertAudio(&cvt);
++	s_bufferLen = cvt.len_cvt;
++}
++
+ void DSP_Play(const uint8 *data)
+ {
+ 	DSP_Stop();
+-
+ 	data += READ_LE_UINT16(data + 20);
+ 
+ 	if (*data != 1) return;
+@@ -143,6 +162,7 @@ void DSP_Play(const uint8 *data)
+ 
+ 	memcpy(s_data, data + 6, s_bufferLen);
+ 	DSP_ConvertAudio(1000000 / (256 - data[4]));
++	DSP_ReConvertAudio();
+ 
+ 	s_buffer = s_data;
+ 	s_status = 2;
+-- 
+2.28.0
+
+
+From 9df3fac82533ba02538f7d9ae8f94dce036da524 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?M=C3=A1ximo=20Casta=C3=B1eda?= <antiswen@yahoo.es>
+Date: Mon, 2 Nov 2020 12:43:36 +0100
+Subject: Add MIDI music
+
+
+diff --git a/source.list b/source.list
+index f6aa25c..7bf42da 100644
+--- a/source.list
++++ b/source.list
+@@ -46,7 +46,11 @@ audio/midi_atari.c
+ 		#if OSX
+ 			audio/midi_osx.c
+ 		#else
+-			audio/midi_none.c
++			#if HAIKU
++				audio/midi_haiku.cpp
++			#else
++				audio/midi_none.c
++			#endif
+ 		#endif
+ 	#endif
+ 	#endif
+diff --git a/src/audio/midi_haiku.cpp b/src/audio/midi_haiku.cpp
+new file mode 100644
+index 0000000..a2c678f
+--- /dev/null
++++ b/src/audio/midi_haiku.cpp
+@@ -0,0 +1,110 @@
++#include <midi/MidiSynth.h>
++
++extern "C" {
++#include "midi.h"
++#include "../os/error.h"
++
++static BMidiSynth *s_synth = NULL;
++
++bool midi_init(void)
++{
++	s_synth = new BMidiSynth();
++	if (s_synth == NULL) {
++		midi_uninit();
++		return false;
++	}
++	if (s_synth->EnableInput(true, true) != B_OK || !s_synth->IsInputEnabled()) {
++		midi_uninit();
++		return false;
++	}
++	return true;
++}
++
++void midi_uninit(void)
++{
++	delete s_synth;
++	s_synth = NULL;
++}
++
++void midi_send(uint32 data)
++{
++	if (s_synth == NULL) return;
++
++	uchar byte1 = data & 0xFF;
++	uchar byte2 = (data >> 8) & 0xFF;
++	uchar byte3 = (data >> 16) & 0xFF;
++	uchar channel = (byte1 & 0x0F) + 1;
++
++	switch (byte1 & 0xF0) {
++		case B_NOTE_OFF:
++			s_synth->NoteOff(channel, byte2, byte3);
++			return;
++
++		case B_NOTE_ON:
++			s_synth->NoteOn(channel, byte2, byte3);
++			return;
++
++		case B_KEY_PRESSURE:
++			s_synth->KeyPressure(channel, byte2, byte3);
++			return;
++
++		case B_CONTROL_CHANGE:
++			s_synth->ControlChange(channel, byte2, byte3);
++			return;
++
++		case B_PROGRAM_CHANGE:
++			s_synth->ProgramChange(channel, byte2);
++			return;
++
++		case B_CHANNEL_PRESSURE:
++			s_synth->ChannelPressure(channel, byte2);
++			return;
++
++		case B_PITCH_BEND:
++			s_synth->PitchBend(channel, byte2, byte3);
++			return;
++
++		case 0xF0:
++			switch (byte1) {
++				case B_SYS_EX_START:
++					/* We don't do this here */
++					Warning("Sysex MIDI through midi_send(%u)\n", data);
++					return;
++
++				case B_MIDI_TIME_CODE:
++				case B_SONG_POSITION:
++				case B_SONG_SELECT:
++				case B_CABLE_MESSAGE:
++				case B_TUNE_REQUEST:
++				case B_SYS_EX_END:
++					s_synth->SystemCommon(byte1, byte2, byte3);
++					return;
++
++				case B_TIMING_CLOCK:
++				case B_START:
++				case B_CONTINUE:
++				case B_STOP:
++				case B_ACTIVE_SENSING:
++				case B_SYSTEM_RESET:
++					s_synth->SystemRealTime(byte1);
++					return;
++
++			}
++			return;
++	}
++}
++
++uint16 midi_send_string(const uint8 * data, uint16 len)
++{
++	if (s_synth == NULL) return len;
++
++	/* This is only used for sysex messages */
++	s_synth->SystemExclusive((void *)data, len, true);
++	return len;
++}
++
++void midi_reset(void)
++{
++}
++
++}
+-- 
+2.28.0
+
+
+From 6ee768cc16605ff5c7d1b19f682605a593544f40 Mon Sep 17 00:00:00 2001
+From: begasus <begasus@gmail.com>
+Date: Wed, 11 Nov 2020 09:10:55 +0000
+Subject: Fix conflicting int types for 32bit
+
+
+diff --git a/include/types.h b/include/types.h
+index e623ebd..d8489ae 100644
+--- a/include/types.h
++++ b/include/types.h
+@@ -81,8 +81,12 @@ typedef unsigned char  uint8;
+ typedef   signed char   int8;
+ typedef unsigned short uint16;
+ typedef   signed short  int16;
++#if defined(__HAIKU__)
++#include <SupportDefs.h>
++#else
+ typedef unsigned int   uint32;
+ typedef   signed int    int32;
++#endif
+ assert_compile(sizeof(uint8 ) == 1);
+ assert_compile(sizeof( int8 ) == 1);
+ assert_compile(sizeof(uint16) == 2);
+-- 
+2.28.0
+
