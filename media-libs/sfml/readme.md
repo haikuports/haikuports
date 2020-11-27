@@ -14,3 +14,9 @@ While the graphics module is one of the main features of SFML, developers who ar
 in OpenGL can do so by using the Window module on its own without the graphics module. 
 
 Similarly, the other modules can also be used independently of each other, except for the System module which is used by all of the modules. 
+
+Currently, this port is a continual Work-In-Progress by:
+ _  _        _  _          _ __            _              ___                  _       _ __                    _          _____                   
+| || | __ _ (_)| |__ _  _ | '_ \ ___  _ _ | |_  ___      |   \  ___ __ __ ___ | | ___ | '_ \ _ __   ___  _ _  | |_       |_   _| ___  __ _  _ __  
+| __ |/ _` || || / /| || || .__// _ \| '_||  _|(_-/      | |) |/ -_)\ V // -_)| |/ _ \| .__/| '  \ / -_)| ' \ |  _|        | |  / -_)/ _` || '  \ 
+|_||_|\__/_||_||_\_\ \_._||_|   \___/|_|   \__|/__/      |___/ \___| \_/ \___||_|\___/|_|   |_|_|_|\___||_||_| \__|        |_|  \___|\__/_||_|_|_|
