@@ -4,11 +4,11 @@ in C++ with bindings available for C, Crystal, D, Euphoria, Go, Java, Julia, .NE
 
 SFML consists of various modules:
 
+    Audio – hardware-accelerated spatialised audio playback and recording
+    Graphics – hardware acceleration of 2D graphics including sprites, polygons and text rendering
+    Network – TCP and UDP network sockets, data encapsulation facilities, HTTP and FTP classes
     System – vector and Unicode string classes, portable threading and timer facilities
     Window – window and input device management including support for joysticks, OpenGL context management
-    Graphics – hardware acceleration of 2D graphics including sprites, polygons and text rendering
-    Audio – hardware-accelerated spatialised audio playback and recording
-    Network – TCP and UDP network sockets, data encapsulation facilities, HTTP and FTP classes
 
 While the graphics module is one of the main features of SFML, developers who are interested in only creating an environment to program directly
 in OpenGL can do so by using the Window module on its own without the graphics module. 
@@ -16,7 +16,6 @@ in OpenGL can do so by using the Window module on its own without the graphics m
 Similarly, the other modules can also be used independently of each other, except for the System module which is used by all of the modules. 
 
 Currently, this port is a continual Work-In-Progress by:
- _  _        _  _          _ __            _              ___                  _       _ __                    _          _____                   
-| || | __ _ (_)| |__ _  _ | '_ \ ___  _ _ | |_  ___      |   \  ___ __ __ ___ | | ___ | '_ \ _ __   ___  _ _  | |_       |_   _| ___  __ _  _ __  
-| __ |/ _` || || / /| || || .__// _ \| '_||  _|(_-/      | |) |/ -_)\ V // -_)| |/ _ \| .__/| '  \ / -_)| ' \ |  _|        | |  / -_)/ _` || '  \ 
-|_||_|\__/_||_||_\_\ \_._||_|   \___/|_|   \__|/__/      |___/ \___| \_/ \___||_|\___/|_|   |_|_|_|\___||_||_| \__|        |_|  \___|\__/_||_|_|_|
+
+The HaikuPorts Development Team
+Mailing list: https://www.freelists.org/list/haikuports
