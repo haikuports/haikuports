@@ -18,4 +18,5 @@ Similarly, the other modules can also be used independently of each other, excep
 Currently, this port is a continual Work-In-Progress by:
 
 The HaikuPorts Development Team
+
 Mailing list: https://www.freelists.org/list/haikuports
