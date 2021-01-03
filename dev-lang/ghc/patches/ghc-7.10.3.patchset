@@ -1,0 +1,225 @@
+From f4ce8e73a9b8c2ea8f10131e8610083c6ed9f5e6 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Mon, 28 Dec 2020 22:50:57 +0100
+Subject: Rebase the patches from ghc 7.8.3.
+
+
+diff --git a/compiler/main/DriverPipeline.hs b/compiler/main/DriverPipeline.hs
+index ff71cb4..513d671 100644
+--- a/compiler/main/DriverPipeline.hs
++++ b/compiler/main/DriverPipeline.hs
+@@ -2198,6 +2198,9 @@ joinObjectFiles dflags o_files output_fn = do
+                        SysTools.Option "-nostdlib",
+                        SysTools.Option "-Wl,-r"
+                      ]
++                     ++ (if osInfo == OSHaiku
++                          then [SysTools.Option "-r"]
++                          else [])
+                      ++ (if any (cc ==) [Clang, AppleClang, AppleClang51]
+                           then []
+                           else [SysTools.Option "-nodefaultlibs"])
+diff --git a/compiler/main/DynFlags.hs b/compiler/main/DynFlags.hs
+index 42ac14e..e497b03 100644
+--- a/compiler/main/DynFlags.hs
++++ b/compiler/main/DynFlags.hs
+@@ -3223,6 +3223,7 @@ default_PIC :: Platform -> [GeneralFlag]
+ default_PIC platform =
+   case (platformOS platform, platformArch platform) of
+     (OSDarwin, ArchX86_64) -> [Opt_PIC]
++    (OSHaiku, _) -> [Opt_PIC]
+     (OSOpenBSD, ArchX86_64) -> [Opt_PIC] -- Due to PIE support in
+                                          -- OpenBSD since 5.3 release
+                                          -- (1 May 2013) we need to
+diff --git a/libraries/Cabal/Cabal/Distribution/Simple/InstallDirs.hs b/libraries/Cabal/Cabal/Distribution/Simple/InstallDirs.hs
+index 1fd1dc8..f3ca3fe 100644
+--- a/libraries/Cabal/Cabal/Distribution/Simple/InstallDirs.hs
++++ b/libraries/Cabal/Cabal/Distribution/Simple/InstallDirs.hs
+@@ -196,10 +196,13 @@ defaultInstallDirs :: CompilerFlavor -> Bool -> Bool -> IO InstallDirTemplates
+ defaultInstallDirs comp userInstall _hasLibs = do
+   installPrefix <-
+       if userInstall
+-      then getAppUserDataDirectory "cabal"
++      then case buildOS of
++          Haiku -> return "/boot/home/config/settings/cabal"
++          _ -> getAppUserDataDirectory "cabal"
+       else case buildOS of
+            Windows -> do windowsProgramFilesDir <- getWindowsProgramFilesDir
+                          return (windowsProgramFilesDir </> "Haskell")
++           Haiku -> return "/boot/system/non-packaged"
+            _       -> return "/usr/local"
+   installLibDir <-
+       case buildOS of
+@@ -219,17 +222,22 @@ defaultInstallDirs comp userInstall _hasLibs = do
+       dynlibdir    = "$libdir",
+       libexecdir   = case buildOS of
+         Windows   -> "$prefix" </> "$libname"
++        Haiku     -> "$libdir"
+         _other    -> "$prefix" </> "libexec",
+       includedir   = "$libdir" </> "$libsubdir" </> "include",
+       datadir      = case buildOS of
+         Windows   -> "$prefix"
+         _other    -> "$prefix" </> "share",
+       datasubdir   = "$abi" </> "$pkgid",
+-      docdir       = "$datadir" </> "doc" </> "$abi" </> "$pkgid",
+-      mandir       = "$datadir" </> "man",
++      docdir       = case buildOS of
++        Haiku -> "$prefix" </> "documentation" </> "ghc"
++        _ -> "$datadir" </> "doc" </> "$abi" </> "$pkgid",
++      mandir       = "$docdir" </> "man",
+       htmldir      = "$docdir"  </> "html",
+       haddockdir   = "$htmldir",
+-      sysconfdir   = "$prefix" </> "etc"
++      sysconfdir   = case buildOS of
++        Haiku -> "boot" </> "home" </> "config" </> "settings"
++        _ -> "$prefix" </> "etc"
+   }
+ 
+ -- ---------------------------------------------------------------------------
+diff --git a/libraries/Cabal/Cabal/Distribution/Simple/PreProcess.hs b/libraries/Cabal/Cabal/Distribution/Simple/PreProcess.hs
+index 5064270..9641048 100644
+--- a/libraries/Cabal/Cabal/Distribution/Simple/PreProcess.hs
++++ b/libraries/Cabal/Cabal/Distribution/Simple/PreProcess.hs
+@@ -556,6 +556,7 @@ platformDefines lbi =
+       HPUX      -> ["hpux"]
+       IRIX      -> ["irix"]
+       HaLVM     -> []
++      Haiku     -> ["haiku"]
+       IOS       -> ["ios"]
+       Ghcjs     -> ["ghcjs"]
+       OtherOS _ -> []
+diff --git a/libraries/Cabal/Cabal/Distribution/System.hs b/libraries/Cabal/Cabal/Distribution/System.hs
+index 56dd838..aab801d 100644
+--- a/libraries/Cabal/Cabal/Distribution/System.hs
++++ b/libraries/Cabal/Cabal/Distribution/System.hs
+@@ -73,6 +73,7 @@ data OS = Linux | Windows | OSX        -- tier 1 desktop OSs
+         | Solaris | AIX | HPUX | IRIX  -- ageing Unix OSs
+         | HaLVM                        -- bare metal / VMs / hypervisors
+         | IOS                          -- iOS
++        | Haiku
+         | Ghcjs
+         | OtherOS String
+   deriving (Eq, Generic, Ord, Show, Read, Typeable, Data)
+@@ -90,6 +91,7 @@ knownOSs = [Linux, Windows, OSX
+            ,Solaris, AIX, HPUX, IRIX
+            ,HaLVM
+            ,IOS
++           ,Haiku
+            ,Ghcjs]
+ 
+ osAliases :: ClassificationStrictness -> OS -> [String]
+@@ -100,6 +102,7 @@ osAliases Permissive FreeBSD = ["kfreebsdgnu"]
+ osAliases Compat     FreeBSD = ["kfreebsdgnu"]
+ osAliases Permissive Solaris = ["solaris2"]
+ osAliases Compat     Solaris = ["solaris2"]
++osAliases _          Haiku   = ["haiku"]
+ osAliases _          _       = []
+ 
+ instance Text OS where
+diff --git a/libraries/directory/System/Directory.hs b/libraries/directory/System/Directory.hs
+index be8379d..bf074bc 100644
+--- a/libraries/directory/System/Directory.hs
++++ b/libraries/directory/System/Directory.hs
+@@ -1183,8 +1183,9 @@ Note: the directory may not actually exist, and may need to be created
+ first.  It is expected that the parent directory exists and is
+ writable.
+ 
+-On Unix, this function returns @$HOME\/.appName@.  On Windows, a
+-typical path might be
++On Unix, this function returns @$HOME\/.appName@.  On Haiku, this
++function returns @$HOME/config/settings/\/appName@. On Windows,
++a typical path might be
+ 
+ > C:/Users/user/AppData/Roaming/appName
+ 
+@@ -1203,6 +1204,9 @@ getAppUserDataDirectory appName = do
+ #if defined(mingw32_HOST_OS)
+     s <- Win32.sHGetFolderPath nullPtr Win32.cSIDL_APPDATA nullPtr 0
+     return (s++'\\':appName)
++#elif defined(haiku_HOST_OS)
++  path <- getEnv "HOME"
++  return (path ++ "/config/settings/" ++ appName)
+ #else
+     path <- getEnv "HOME"
+     return (path++'/':'.':appName)
+diff --git a/libraries/unix/cbits/HsUnix.c b/libraries/unix/cbits/HsUnix.c
+index 60f19bc..6ae759e 100644
+--- a/libraries/unix/cbits/HsUnix.c
++++ b/libraries/unix/cbits/HsUnix.c
+@@ -14,7 +14,7 @@ int __hsunix_wifsignaled (int stat) { return WIFSIGNALED(stat); }
+ int __hsunix_wtermsig    (int stat) { return WTERMSIG(stat); }
+ int __hsunix_wifstopped  (int stat) { return WIFSTOPPED(stat); }
+ int __hsunix_wstopsig    (int stat) { return WSTOPSIG(stat); }
+-int __hsunix_wcoredump   (int stat) { return WCOREDUMP(stat); }
++int __hsunix_wcoredump   (int stat) { return 0; }
+ 
+ #ifdef HAVE_RTLDNEXT
+ void *__hsunix_rtldNext (void) {return RTLD_NEXT;} 
+diff --git a/rts/Linker.c b/rts/Linker.c
+index a939e35..6b8d6f6 100644
+--- a/rts/Linker.c
++++ b/rts/Linker.c
+@@ -104,7 +104,7 @@
+ #define USE_CONTIGUOUS_MMAP 0
+ #endif
+ 
+-#if defined(linux_HOST_OS) || defined(solaris2_HOST_OS) || defined(freebsd_HOST_OS) || defined(kfreebsdgnu_HOST_OS) || defined(dragonfly_HOST_OS) || defined(netbsd_HOST_OS) || defined(openbsd_HOST_OS) || defined(gnu_HOST_OS)
++#if defined(linux_HOST_OS) || defined(solaris2_HOST_OS) || defined(freebsd_HOST_OS) || defined(kfreebsdgnu_HOST_OS) || defined(dragonfly_HOST_OS) || defined(netbsd_HOST_OS) || defined(openbsd_HOST_OS) || defined(gnu_HOST_OS) || defined(haiku_HOST_OS)
+ #  define OBJFORMAT_ELF
+ #  include <regex.h>    // regex is already used by dlopen() so this is OK
+                         // to use here without requiring an additional lib
+@@ -4876,6 +4876,26 @@ ocRunInit_PEi386 ( ObjectCode *oc )
+ #  define R_386_PC32  RELOC_PC32
+ #endif
+ 
++#  ifndef SHT_INIT_ARRAY
++#    define SHT_INIT_ARRAY 14
++#  endif
++
++#ifndef R_386_NONE
++#define R_386_NONE		0
++#define R_386_32		1	/* add symbol value */
++#define R_386_PC32		2	/* add PC relative symbol value */
++#define R_386_GOT32		3	/* add PC relative GOT offset */
++#define R_386_PLT32		4	/* add PC relative PLT offset */
++#define R_386_COPY		5	/* copy data from shared object */
++#define R_386_GLOB_DAT	6	/* set GOT entry to data address */
++#define R_386_JMP_SLOT	7	/* set GOT entry to code address */
++#define R_386_RELATIVE	8	/* add load address of shared object */
++#define R_386_GOTOFF	9	/* add GOT relative symbol address */
++#define R_386_GOTPC		10	/* add PC relative GOT table address */
++#define R_386_TLS_DTPMOD32	35
++#define R_386_TLS_DTPOFF32	36
++#endif
++
+ /* If elf.h doesn't define it */
+ #  ifndef R_X86_64_PC64
+ #    define R_X86_64_PC64 24
+diff --git a/rts/posix/OSMem.c b/rts/posix/OSMem.c
+index 359df70..22938cf 100644
+--- a/rts/posix/OSMem.c
++++ b/rts/posix/OSMem.c
+@@ -139,6 +139,8 @@ my_mmap (void *addr, W_ size)
+ #else
+     ret = mmap(addr, size, PROT_READ | PROT_WRITE,
+                MAP_ANON | MAP_PRIVATE, -1, 0);
++    if (ret == (void *)-1 && errno == EFAULT)
++        ret = mmap(0, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+ #endif
+ 
+     if (ret == (void *)-1) {
+diff --git a/rules/library-path.mk b/rules/library-path.mk
+index 5dd5588..12a160c 100644
+--- a/rules/library-path.mk
++++ b/rules/library-path.mk
+@@ -15,6 +15,8 @@ ifeq "$(TargetOS_CPP)" "mingw32"
+ prependLibraryPath = $(error Do not know how to prependLibraryPath on Windows)
+ else ifeq "$(TargetOS_CPP)" "darwin"
+ prependLibraryPath = export DYLD_LIBRARY_PATH="$1:$$DYLD_LIBRARY_PATH"
++else ifeq "$(TargetOS_CPP)" "haiku"
++prependLibraryPath = export LIBRARY_PATH="$1:$$LIBRARY_PATH"
+ else
+ prependLibraryPath = export LD_LIBRARY_PATH="$1:$$LD_LIBRARY_PATH"
+ endif
+-- 
+2.28.0
+
