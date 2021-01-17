@@ -1,0 +1,466 @@
+From 56556730def233b69fdfbb07a98a7bb79e9c77c8 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sat, 26 Dec 2020 16:00:08 +1000
+Subject: Remove sanitizers for haiku, fix bindir
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c6c3309..f037cf5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -22,7 +22,7 @@ set(CMAKE_C_STANDARD 99)
+ set(CMAKE_CXX_STANDARD 11)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ 
+-if(NOT COMMAND add_sanitizers)
++if(NOT COMMAND add_sanitizers AND NOT HAIKU)
+   list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/sanitizers-cmake/cmake")
+   find_package(Sanitizers)
+   if(NOT COMMAND add_sanitizers)
+@@ -83,7 +83,9 @@ target_compile_definitions(cubeb PRIVATE FLOATING_POINT)
+ target_compile_definitions(cubeb PRIVATE EXPORT=)
+ target_compile_definitions(cubeb PRIVATE RANDOM_PREFIX=speex)
+ 
++if(NOT HAIKU)
+ add_sanitizers(cubeb)
++endif()
+ 
+ include(GenerateExportHeader)
+ generate_export_header(cubeb EXPORT_FILE_NAME ${CMAKE_BINARY_DIR}/exports/cubeb_export.h)
+@@ -322,8 +324,10 @@ if(BUILD_TESTS)
+     target_include_directories(test_${NAME} PRIVATE src)
+     target_link_libraries(test_${NAME} PRIVATE cubeb gtest_main)
+     add_test(${NAME} test_${NAME})
++if(NOT HAIKU)
+     add_sanitizers(test_${NAME})
+-    install(TARGETS test_${NAME} DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR})
++endif()
++    install(TARGETS test_${NAME} DESTINATION ${CMAKE_INSTALL_BINDIR})
+   endmacro(cubeb_add_test)
+ 
+   cubeb_add_test(sanity)
+@@ -342,8 +346,10 @@ if(BUILD_TESTS)
+   target_compile_definitions(test_resampler PRIVATE RANDOM_PREFIX=speex)
+   target_link_libraries(test_resampler PRIVATE cubeb gtest_main)
+   add_test(resampler test_resampler)
++if(NOT HAIKU)
+   add_sanitizers(test_resampler)
+-  install(TARGETS test_resampler DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR})
++endif()
++  install(TARGETS test_resampler DESTINATION ${CMAKE_INSTALL_BINDIR})
+ 
+   cubeb_add_test(duplex)
+ 
+@@ -364,6 +370,8 @@ if(BUILD_TOOLS)
+   add_executable(cubeb-test tools/cubeb-test.cpp)
+   target_include_directories(cubeb-test PRIVATE src)
+   target_link_libraries(cubeb-test PRIVATE cubeb)
++if(NOT HAIKU)
+   add_sanitizers(cubeb-test)
+-  install(TARGETS cubeb-test DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR})
++endif()
++  install(TARGETS cubeb-test DESTINATION ${CMAKE_INSTALL_BINDIR})
+ endif()
+-- 
+2.28.0
+
+
+From 96258033f42c422f2cc2c72da9c36cb9a025df1a Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sat, 26 Dec 2020 16:03:40 +1000
+Subject: Add haiku backend
+
+
+diff --git a/src/cubeb_haiku.cpp b/src/cubeb_haiku.cpp
+new file mode 100644
+index 0000000..7bfbc3b
+--- /dev/null
++++ b/src/cubeb_haiku.cpp
+@@ -0,0 +1,320 @@
++/*
++ * Copyright © 2020 Gerasim Troeglazov
++ *
++ * This program is made available under an ISC-style license.  See the
++ * accompanying file LICENSE for details.
++ */
++
++#include <stdio.h>
++#include <string.h>
++#include <math.h>
++
++#include <SoundPlayer.h>
++
++#include "cubeb/cubeb.h"
++#include "cubeb-internal.h"
++
++#define DEFAULT_RATE 48000
++#define MAX_CHANNELS 32
++#define FRAME_SIZE 2048
++
++extern "C" {	
++int haiku_init(cubeb ** context, char const * context_name);
++}
++
++static char const *haiku_get_backend_id(cubeb * ctx);
++static int haiku_get_max_channel_count(cubeb * ctx, uint32_t * max_channels);
++static int haiku_get_min_latency(cubeb * ctx, cubeb_stream_params params, uint32_t * latency);
++static int haiku_get_preferred_sample_rate(cubeb * ctx, uint32_t * rate);
++static void haiku_destroy(cubeb * ctx);
++static void haiku_stream_destroy(cubeb_stream * stm);
++static int haiku_stream_init(cubeb * context, cubeb_stream ** stream,
++                char const * stream_name,
++                cubeb_devid input_device,
++                cubeb_stream_params * input_stream_params,
++                cubeb_devid output_device,
++                cubeb_stream_params * output_stream_params,
++                unsigned int latency, cubeb_data_callback data_callback,
++                cubeb_state_callback state_callback, void * user_ptr);
++static int haiku_stream_start(cubeb_stream * stm);
++static int haiku_stream_stop(cubeb_stream * stm);
++static int haiku_stream_get_position(cubeb_stream * stm, uint64_t * position);
++static int haiku_stream_get_latency(cubeb_stream * stm, uint32_t * latency);
++static int haiku_enumerate_devices(cubeb *context, cubeb_device_type type,
++				cubeb_device_collection *collection);
++static int haiku_device_collection_destroy(cubeb * context,
++				cubeb_device_collection * collection);
++static int haiku_stream_set_volume(cubeb_stream * stm, float volume);
++
++struct cubeb_stream_item {
++  cubeb_stream * stream;
++};
++
++static struct cubeb_ops const haiku_ops = {
++  /*.init =*/ haiku_init,
++  /*.get_backend_id =*/ haiku_get_backend_id,
++  /*.get_max_channel_count=*/ haiku_get_max_channel_count,
++  /*.get_min_latency=*/ haiku_get_min_latency,
++  /*.get_preferred_sample_rate =*/ haiku_get_preferred_sample_rate,
++  /*.enumerate_devices =*/ haiku_enumerate_devices,
++  /*.device_collection_destroy =*/ haiku_device_collection_destroy,
++  /*.destroy =*/ haiku_destroy,
++  /*.stream_init =*/ haiku_stream_init,
++  /*.stream_destroy =*/ haiku_stream_destroy,
++  /*.stream_start =*/ haiku_stream_start,
++  /*.stream_stop =*/ haiku_stream_stop,
++  /*.stream_reset_default_device =*/ NULL,
++  /*.stream_get_position =*/ haiku_stream_get_position,
++  /*.stream_get_latency = */ haiku_stream_get_latency,
++  /*.stream_get_input_latency = */ NULL,
++  /*.stream_set_volume =*/ haiku_stream_set_volume,
++  /*.stream_set_name =*/ NULL,
++  /*.stream_get_current_device =*/ NULL,
++  /*.stream_device_destroy =*/ NULL,
++  /*.stream_register_device_changed_callback=*/ NULL,
++  /*.register_device_collection_changed=*/ NULL
++};
++
++struct cubeb {
++  struct cubeb_ops const * ops;
++};
++
++struct cubeb_stream {
++  cubeb * context;
++  cubeb_stream_params params;
++  cubeb_data_callback data_callback;
++  cubeb_state_callback state_callback;
++  void * user_ptr;
++
++  BSoundPlayer *player;
++  uint64_t total_frames;
++  float float_buffer[FRAME_SIZE * MAX_CHANNELS];
++};
++
++int
++haiku_init(cubeb ** context, char const * context_name)
++{
++  cubeb * ctx;
++
++  XASSERT(context);
++  *context = NULL;
++
++  ctx = (cubeb*)calloc(1, sizeof(*ctx));
++  XASSERT(ctx);
++
++  ctx->ops = &haiku_ops;
++
++  *context = ctx;
++
++  return CUBEB_OK;
++}
++
++static char const *
++haiku_get_backend_id(cubeb * ctx)
++{
++  return "haiku";
++}
++
++static void
++haiku_destroy(cubeb * ctx)
++{
++  free(ctx);
++}
++
++static void
++haiku_callback(void *cookie, void *buffer, size_t len, const media_raw_audio_format &format)
++{
++  cubeb_stream * stm = (cubeb_stream*)cookie;
++  int framesize = stm->params.format == CUBEB_SAMPLE_FLOAT32NE ? sizeof(float) : sizeof(int16_t);
++  long wanted_frames = len / framesize / stm->params.channels;
++  long frames = stm->data_callback(stm, stm->user_ptr, NULL, buffer, wanted_frames);
++
++  stm->total_frames += frames;
++
++  if (frames < wanted_frames)
++    stm->state_callback(stm, stm->user_ptr, CUBEB_STATE_DRAINED);
++}
++
++static int
++haiku_stream_init(cubeb * context, cubeb_stream ** stream,
++                char const * stream_name,
++                cubeb_devid input_device,
++                cubeb_stream_params * input_stream_params,
++                cubeb_devid output_device,
++                cubeb_stream_params * output_stream_params,
++                unsigned int latency, cubeb_data_callback data_callback,
++                cubeb_state_callback state_callback, void * user_ptr)
++{
++  cubeb_stream * stm;
++
++  if (input_device || output_device)
++    return CUBEB_ERROR_DEVICE_UNAVAILABLE;
++
++  if (output_stream_params
++     && (output_stream_params->format != CUBEB_SAMPLE_FLOAT32NE &&
++         output_stream_params->format != CUBEB_SAMPLE_S16NE)
++     ) {
++    return CUBEB_ERROR_INVALID_FORMAT;
++  }
++
++  if (output_stream_params->channels < 1 ||
++      output_stream_params->channels > MAX_CHANNELS)
++    return CUBEB_ERROR_INVALID_FORMAT;
++
++  XASSERT(context);
++  XASSERT(stream);
++
++  *stream = NULL;
++
++  stm = (cubeb_stream*)calloc(1, sizeof(*stm));
++  XASSERT(stm);
++
++  stm->context = context;
++  stm->params = *output_stream_params;
++  stm->data_callback = data_callback;
++  stm->state_callback = state_callback;
++  stm->user_ptr = user_ptr;
++  
++  int framesize = output_stream_params->format == CUBEB_SAMPLE_FLOAT32NE ? sizeof(float) : sizeof(int16_t);
++
++  media_raw_audio_format mediaKitFormat = {
++	(float)stm->params.rate,
++	(uint32)stm->params.channels,
++	framesize == sizeof(float) ? (media_raw_audio_format::B_AUDIO_FLOAT) : (media_raw_audio_format::B_AUDIO_SHORT),
++	B_MEDIA_LITTLE_ENDIAN,
++	(uint32)(FRAME_SIZE * framesize * output_stream_params->channels)
++  };
++	
++  stm->player = new BSoundPlayer(&mediaKitFormat, "cubeb", haiku_callback, NULL, (void*)stm);
++
++  if(stm->player->InitCheck() != B_OK) {
++	delete stm->player;
++	free(stm);
++	return CUBEB_ERROR;
++  }
++
++  *stream = stm;
++
++  return CUBEB_OK;
++}
++
++static void
++haiku_stream_destroy(cubeb_stream * stm)
++{
++  stm->player->Stop();
++  stm->player->SetHasData(false);
++
++  delete stm->player;
++  free(stm);
++}
++
++static int
++haiku_get_max_channel_count(cubeb * ctx, uint32_t * max_channels)
++{
++  XASSERT(ctx && max_channels);
++  *max_channels = MAX_CHANNELS;
++  return CUBEB_OK;
++}
++
++static int
++haiku_get_min_latency(cubeb * ctx, cubeb_stream_params params, uint32_t * latency)
++{
++  *latency = FRAME_SIZE;
++  return CUBEB_OK;
++}
++
++static int
++haiku_get_preferred_sample_rate(cubeb * ctx, uint32_t * rate)
++{
++  *rate = DEFAULT_RATE;
++  return CUBEB_OK;
++}
++
++static int
++haiku_enumerate_devices(cubeb *context, cubeb_device_type type,
++	cubeb_device_collection *collection)
++{
++  static char dev[] = "MediaKit";
++  static char vendor[] = "Haiku";
++  cubeb_device_info *device;
++
++  device = (cubeb_device_info*)malloc(sizeof(cubeb_device_info));
++  if (device == NULL)
++    return CUBEB_ERROR;
++
++  device->devid = dev;
++  device->device_id = dev;
++  device->friendly_name = dev;
++  device->group_id = dev;
++  device->vendor_name = vendor;
++  device->type = type;
++  device->state = CUBEB_DEVICE_STATE_ENABLED;
++  device->preferred = CUBEB_DEVICE_PREF_ALL;
++  device->format = CUBEB_DEVICE_FMT_S16NE;
++  device->default_format = CUBEB_DEVICE_FMT_S16NE;
++  device->max_channels = MAX_CHANNELS;
++  device->default_rate = DEFAULT_RATE;
++  device->min_rate = 4000;
++  device->max_rate = 192000;
++  device->latency_lo = 480;
++  device->latency_hi = 9600;
++  collection->device = device;
++  collection->count = 1;
++  return CUBEB_OK;
++}
++
++static int
++haiku_device_collection_destroy(cubeb * context,
++	cubeb_device_collection * collection)
++{
++  free(collection->device);
++  return CUBEB_OK;
++}
++
++static int
++haiku_stream_start(cubeb_stream * stm)
++{
++  stm->player->Start();
++  stm->player->SetHasData(true);
++
++  stm->state_callback(stm, stm->user_ptr, CUBEB_STATE_STARTED);
++
++  return CUBEB_OK;
++}
++
++static int
++haiku_stream_stop(cubeb_stream * stm)
++{
++  stm->player->Stop();
++  stm->player->SetHasData(false);
++
++  stm->state_callback(stm, stm->user_ptr, CUBEB_STATE_STOPPED);
++
++  return CUBEB_OK;
++}
++
++static int
++haiku_stream_get_position(cubeb_stream * stm, uint64_t * position)
++{
++  *position = stm->total_frames;
++  return CUBEB_OK;
++}
++
++static int
++haiku_stream_get_latency(cubeb_stream * stm, uint32_t * latency)
++{
++  *latency = stm->player->Latency();
++  return CUBEB_OK;
++}
++
++static int
++haiku_stream_set_volume(cubeb_stream * stm, float volume)
++{
++  float dbMin = -40;
++  float dbMax = 18;
++  float logBase = 10;
++  float dbVol = log((volume * (logBase - 1)) / 2) / log(logBase) * (dbMax - dbMin) + dbMin;
++  stm->player->SetVolumeDB(dbVol);
++  return CUBEB_OK;
++}
++
+-- 
+2.28.0
+
+
+From 2439418440412340f6a5e249b201b53798662461 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sat, 26 Dec 2020 16:08:46 +1000
+Subject: Enable Haiku backend
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f037cf5..5bd31a1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -268,6 +268,14 @@ if(USE_KAI)
+   target_link_libraries(cubeb PRIVATE kai)
+ endif()
+ 
++check_include_files(os/media/MediaDefs.h USE_HAIKU)
++if(USE_HAIKU)
++  target_sources(cubeb PRIVATE
++    src/cubeb_haiku.cpp)
++  target_compile_definitions(cubeb PRIVATE USE_HAIKU)
++  target_link_libraries(cubeb PRIVATE media)
++endif()
++
+ if(USE_PULSE AND USE_PULSE_RUST)
+   include(ExternalProject)
+   set_directory_properties(PROPERTIES EP_PREFIX ${CMAKE_BINARY_DIR}/rust)
+diff --git a/src/cubeb.c b/src/cubeb.c
+index 8757440..bba1256 100644
+--- a/src/cubeb.c
++++ b/src/cubeb.c
+@@ -72,6 +72,9 @@ int audiotrack_init(cubeb ** context, char const * context_name);
+ #if defined(USE_KAI)
+ int kai_init(cubeb ** context, char const * context_name);
+ #endif
++#if defined(USE_HAIKU)
++int haiku_init(cubeb ** context, char const * context_name);
++#endif
+ 
+ static int
+ validate_stream_params(cubeb_stream_params * input_stream_params,
+@@ -187,6 +190,10 @@ cubeb_init(cubeb ** context, char const * context_name, char const * backend_nam
+     } else if (!strcmp(backend_name, "kai")) {
+ #if defined(USE_KAI)
+       init_oneshot = kai_init;
++#endif
++    } else if (!strcmp(backend_name, "haiku")) {
++#if defined(USE_HAIKU)
++      init_oneshot = haiku_init;
+ #endif
+     } else {
+       /* Already set */
+@@ -245,6 +252,9 @@ cubeb_init(cubeb ** context, char const * context_name, char const * backend_nam
+ #endif
+ #if defined(USE_KAI)
+     kai_init,
++#endif
++#if defined(USE_HAIKU)
++    haiku_init,
+ #endif
+   };
+   int i;
+-- 
+2.28.0
+
