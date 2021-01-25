@@ -1,0 +1,193 @@
+From 8dabf0752e23efc3a6723274a7262e318c041cd9 Mon Sep 17 00:00:00 2001
+From: Francois Revol <revol@free.fr>
+Date: Mon, 11 Aug 2014 19:20:13 +0200
+Subject: Work around ugly return -EFOO constructs
+
+
+diff --git a/libusb/core.c b/libusb/core.c
+index 3bc9c25..b709d98 100644
+--- a/libusb/core.c
++++ b/libusb/core.c
+@@ -72,7 +72,12 @@ enum usbi_log_level {
+ 
+ API_EXPORTED struct usb_bus *usb_busses = NULL;
+ 
+-#define compat_err(e) -(errno=libusb_to_errno(e))
++#if (EINVAL < 0)
++#define ret_err(e) (e)
++#else
++#define ret_err(e) -(e)
++#endif
++#define compat_err(e) (ret_err(errno=libusb_to_errno(e)))
+ 
+ #ifdef LIBUSB_1_0_SONAME
+ static void __attribute__ ((constructor)) _usb_init (void)
+@@ -233,8 +238,8 @@ static int find_busses(struct usb_bus **ret)
+ 
+ 		/* if we already know about it, continue */
+ 		if (busses) {
+-			bus = busses;
+ 			int found = 0;
++			bus = busses;
+ 			do {
+ 				if (bus_num == bus->location) {
+ 					found = 1;
+@@ -267,7 +272,7 @@ err:
+ 		free(bus);
+ 		bus = tbus;
+ 	}
+-	return -ENOMEM;
++	return ret_err(ENOMEM);
+ }
+ 
+ API_EXPORTED int usb_find_busses(void)
+@@ -375,7 +380,7 @@ err:
+ 		free(dev);
+ 		dev = tdev;
+ 	}
+-	return -ENOMEM;
++	return ret_err(ENOMEM);
+ }
+ 
+ static void clear_endpoint_descriptor(struct usb_endpoint_descriptor *ep)
+@@ -434,7 +439,7 @@ static int copy_endpoint_descriptor(struct usb_endpoint_descriptor *dest,
+ 	if (src->extra_length) {
+ 		dest->extra = malloc(src->extra_length);
+ 		if (!dest->extra)
+-			return -ENOMEM;
++			return ret_err(ENOMEM);
+ 		memcpy(dest->extra, src->extra, src->extra_length);
+ 	}
+ 
+@@ -451,7 +456,7 @@ static int copy_interface_descriptor(struct usb_interface_descriptor *dest,
+ 	memcpy(dest, src, USB_DT_INTERFACE_SIZE);
+ 	dest->endpoint = malloc(alloc_size);
+ 	if (!dest->endpoint)
+-		return -ENOMEM;
++		return ret_err(ENOMEM);
+ 	memset(dest->endpoint, 0, alloc_size);
+ 
+ 	for (i = 0; i < num_endpoints; i++) {
+@@ -467,7 +472,7 @@ static int copy_interface_descriptor(struct usb_interface_descriptor *dest,
+ 		dest->extra = malloc(src->extra_length);
+ 		if (!dest->extra) {
+ 			clear_interface_descriptor(dest);
+-			return -ENOMEM;
++			return ret_err(ENOMEM);
+ 		}
+ 		memcpy(dest->extra, src->extra, src->extra_length);
+ 	}
+@@ -486,7 +491,7 @@ static int copy_interface(struct usb_interface *dest,
+ 	dest->num_altsetting = num_altsetting;
+ 	dest->altsetting = malloc(alloc_size);
+ 	if (!dest->altsetting)
+-		return -ENOMEM;
++		return ret_err(ENOMEM);
+ 	memset(dest->altsetting, 0, alloc_size);
+ 
+ 	for (i = 0; i < num_altsetting; i++) {
+@@ -511,7 +516,7 @@ static int copy_config_descriptor(struct usb_config_descriptor *dest,
+ 	memcpy(dest, src, USB_DT_CONFIG_SIZE);
+ 	dest->interface = malloc(alloc_size);
+ 	if (!dest->interface)
+-		return -ENOMEM;
++		return ret_err(ENOMEM);
+ 	memset(dest->interface, 0, alloc_size);
+ 
+ 	for (i = 0; i < num_interfaces; i++) {
+@@ -527,7 +532,7 @@ static int copy_config_descriptor(struct usb_config_descriptor *dest,
+ 		dest->extra = malloc(src->extra_length);
+ 		if (!dest->extra) {
+ 			clear_config_descriptor(dest);
+-			return -ENOMEM;
++			return ret_err(ENOMEM);
+ 		}
+ 		memcpy(dest->extra, src->extra, src->extra_length);
+ 	}
+@@ -555,7 +560,7 @@ static int initialize_device(struct usb_device *dev)
+ 	alloc_size = sizeof(struct usb_config_descriptor) * num_configurations;
+ 	dev->config = malloc(alloc_size);
+ 	if (!dev->config)
+-		return -ENOMEM;
++		return ret_err(ENOMEM);
+ 	memset(dev->config, 0, alloc_size);
+ 
+ 	/* even though structures are identical, we can't just use libusb-1.0's
+@@ -684,9 +689,10 @@ API_EXPORTED struct usb_bus *usb_get_busses(void)
+ API_EXPORTED usb_dev_handle *usb_open(struct usb_device *dev)
+ {
+ 	int r;
++	usb_dev_handle *udev;
+ 	usbi_dbg("");
+ 
+-	usb_dev_handle *udev = malloc(sizeof(*udev));
++	udev = malloc(sizeof(*udev));
+ 	if (!udev)
+ 		return NULL;
+ 
+@@ -756,7 +762,7 @@ API_EXPORTED int usb_set_altinterface(usb_dev_handle *dev, int alternate)
+ {
+ 	usbi_dbg("alternate %d", alternate);
+ 	if (dev->last_claimed_interface < 0)
+-		return -(errno=EINVAL);
++		return ret_err(errno=EINVAL);
+ 	
+ 	return compat_err(libusb_set_interface_alt_setting(dev->handle,
+ 		dev->last_claimed_interface, alternate));
+@@ -941,7 +947,7 @@ API_EXPORTED int usb_get_driver_np(usb_dev_handle *dev, int interface,
+ 		snprintf(name, namelen, "dummy");
+ 		return 0;
+ 	} else if (r == 0) {
+-		return -(errno=ENODATA);
++		return ret_err(errno=ENODATA);
+ 	} else {
+ 		return compat_err(r);
+ 	}
+@@ -954,17 +960,17 @@ API_EXPORTED int usb_detach_kernel_driver_np(usb_dev_handle *dev, int interface)
+ 	case LIBUSB_SUCCESS:
+ 		return 0;
+ 	case LIBUSB_ERROR_NOT_FOUND:
+-		return -ENODATA;
++		return ret_err(ENODATA);
+ 	case LIBUSB_ERROR_INVALID_PARAM:
+-		return -EINVAL;
++		return ret_err(EINVAL);
+ 	case LIBUSB_ERROR_NO_DEVICE:
+-		return -ENODEV;
++		return ret_err(ENODEV);
+ 	case LIBUSB_ERROR_OTHER:
+-		return -errno;
++		return ret_err(errno);
+ 	/* default can be reached only in non-Linux implementations,
+ 	 * mostly with LIBUSB_ERROR_NOT_SUPPORTED. */
+ 	default:
+-		return -ENOSYS;
++		return ret_err(ENOSYS);
+ 	}
+ }
+ 
+-- 
+2.30.0
+
+
+From 12f2c6869b129ea00f84addc4c96f0593f5155ec Mon Sep 17 00:00:00 2001
+From: Francois Revol <revol@free.fr>
+Date: Sun, 9 Nov 2014 01:51:32 +0100
+Subject: Add stdint.h so we get u_int*_t
+
+
+diff --git a/libusb/usb.h b/libusb/usb.h
+index fa0e6c6..9774902 100644
+--- a/libusb/usb.h
++++ b/libusb/usb.h
+@@ -27,6 +27,7 @@
+ #define USB_H
+ 
+ #include <unistd.h>
++#include <stdint.h>
+ #include <stdlib.h>
+ #include <limits.h>
+ 
+-- 
+2.30.0
+
