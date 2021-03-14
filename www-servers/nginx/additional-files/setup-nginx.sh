@@ -18,11 +18,11 @@ fi
 mkdir -p var/www/nginx
 
 if [ ! -e var/www/nginx/index.nginx.html ]; then
-	ln -s /system/documentation/packages/nginx/html/index.html var/www/nginx/index.nginx.html
+	ln -s @DOCDIR@/html/index.html var/www/nginx/index.nginx.html
 fi
 
 if [ ! -e var/www/nginx/50x.html ]; then
-	ln -s /system/documentation/packages/nginx/html/50x.html var/www/nginx
+	ln -s @DOCDIR@/html/50x.html var/www/nginx
 fi
 
 chmod -R 775 var/www/nginx
