@@ -3,7 +3,7 @@
 source ~/config/settings/haikuports.conf
 cd "$TREE_PATH"/kde-frameworks/
 
-old_version=5.77
+old_version=5.80
 new_version=5.80
 
 # bump recipe filenames
@@ -21,9 +21,6 @@ sed -i "/^REVISION=/s/=.*/=\"1\"/" */*.recipe
 # print SOURCE_URI recipe file name 
 find . -maxdepth 2 -name "*$new_version*.recipe" | while read FNAME; do \
 portVersion=$new_version.0 ; source $FNAME ; echo $SOURCE_URI $FNAME ;
-
-# get sha256sum for each
-echo `curl -s -L $SOURCE_URI | sha256sum | head -c 64`
 
 # replace CHECKSUM_SHA256 with new once
 sed -i "s/$CHECKSUM_SHA256/`curl -s -L $SOURCE_URI | sha256sum | head -c 64`/" $FNAME ; done
@@ -74,6 +71,7 @@ hp knotifyconfig
 hp kparts
 hp kactivities
 hp kded
+hp kplotting
 hp kdesignerplugin
 hp breeze_icons
 hp kdelibs4support
@@ -91,4 +89,8 @@ hp knewstuff
 hp ksyntax_highlighting
 hp ktexteditor
 hp phonon_gstreamer
+
 #hp oxygen-icons
+hp kirigami
+hp kpty
+hp plasma
