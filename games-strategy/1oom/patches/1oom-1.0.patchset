@@ -1,0 +1,526 @@
+From c1423f41d7c20f05f6aec103a0ba018069b5f025 Mon Sep 17 00:00:00 2001
+From: Craig Watson <watsoncraigjohn@gmail.com>
+Date: Wed, 14 Apr 2021 17:54:01 +0000
+Subject: Fixes to exported timing in XMID conversion
+
+
+diff --git a/src/fmt_mus.c b/src/fmt_mus.c
+index 37040b0..192bc20 100644
+--- a/src/fmt_mus.c
++++ b/src/fmt_mus.c
+@@ -118,6 +118,7 @@ static int xmid_convert_evnt(const uint8_t *data_in, uint32_t len_in, const uint
+     struct noteoffs_s s[1];
+     int rc = -1, noteons = 0, looppoint = -1;
+     uint32_t len_out = 0, t_now = 0, delta_time = 0;
++    unsigned qnlen = 500000;
+     bool end_found = false;
+     *tune_loops = false;
+     memset(s, 0, sizeof(s[0]));
+@@ -145,6 +146,11 @@ static int xmid_convert_evnt(const uint8_t *data_in, uint32_t len_in, const uint
+                         ++skip_extra_bytes;
+                     }
+                     dt_off |= b;
++                    uint64_t dtoff_c = (uint64_t)dt_off * 480 * 500000 * 2 / ((uint64_t)qnlen * XMID_TICKSPERQ);
++					dt_off = dtoff_c >> 1;
++					if (dtoff_c & 0x1) {
++						dt_off++;
++					}
+                     if (!xmid_add_pending_noteoff(s, data_in, t_now + delta_time, dt_off)) {
+                         goto fail;
+                     }
+@@ -253,6 +259,7 @@ static int xmid_convert_evnt(const uint8_t *data_in, uint32_t len_in, const uint
+                             /* MOO1 seems to ignore the set tempo events as not dropping them results in wrong tempo in f.ex tune 0xA */
+                             LOG_DEBUG((DEBUGLEVEL_FMTMUS, "XMID: dropping tempo %u event after %i notes\n", GET_BE_24(&data_in[3]), noteons));
+                             add_event = false;
++                         	qnlen = GET_BE_24(&data_in[3]);
+                             skip_extra_bytes = len_event;
+                         }
+                         break;
+@@ -267,13 +274,18 @@ static int xmid_convert_evnt(const uint8_t *data_in, uint32_t len_in, const uint
+                     delta_time += *data_in++;
+                     --len_in;
+                 }
++                uint64_t delta_c = (uint64_t)delta_time * 480 * 500000 * 2 / ((uint64_t)qnlen * XMID_TICKSPERQ);
++				delta_time = delta_c >> 1;
++				if (delta_c & 0x1) {
++					delta_time++;
++				}
+                 break;
+         }
+ 
+         if (add_event) {
+             uint32_t len_delta_time;
+             uint8_t buf_delta_time[4];
+-
++		
+             while ((s->top >= 0) && ((t_now + delta_time) >= s->tbl[s->top].t)) {
+                 noteoff_t *n = &(s->tbl[s->top]);
+                 uint32_t delay_noff = n->t - t_now;
+@@ -398,7 +410,7 @@ bool fmt_mus_convert_xmid(const uint8_t *data_in, uint32_t len_in, uint8_t **dat
+             /*00*/ 'M', 'T', 'h', 'd',
+             /*04*/ 0, 0, 0, 6,
+             /*08*/ 0, 0, 0, 1,
+-            /*0c*/ (XMID_TICKSPERQ >> 8) & 0xff, XMID_TICKSPERQ & 0xff,
++            /*0c*/ (480 >> 8) & 0xff, 480 & 0xff,
+             /*0e*/ 'M', 'T', 'r', 'k'
+             /*12*/ /* length, big endian */
+         };
+-- 
+2.30.2
+
+
+From 65b60d9556ea2a8a977226b45e6e0cd2fb633d28 Mon Sep 17 00:00:00 2001
+From: Craig Watson <watsoncraigjohn@gmail.com>
+Date: Mon, 19 Apr 2021 10:51:26 +0000
+Subject: Add Haiku specific OS support Fix timing calculations in XMID
+ conversion to work correctly with Haiku Native Midi
+
+
+diff --git a/configure.ac b/configure.ac
+index 4e0ef24..dc63fc7 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -100,6 +100,16 @@ else
+     is_msdos=false
+ fi
+ 
++dnl - check for haiku
++
++case $host in
++	*-*-haiku*)
++		is_haiku=yes
++		;;
++	*)
++		is_haiku=no
++		;;
++esac
+ 
+ dnl - optional features
+ 
+@@ -537,6 +547,8 @@ AC_SUBST(HW_X11_CFLAGS)
+ 
+ dnl - setup the system-specific object files
+ 
++
++
+ if test x"$is_win32" = "xyes"; then
+     OS_DIR="\$(top_builddir)/src/os/win32"
+     OS_SRC_DIR="\$(top_srcdir)/src/os/win32"
+@@ -544,6 +556,7 @@ if test x"$is_win32" = "xyes"; then
+     AM_CONDITIONAL(COMPILE_UNIX, false)
+     AM_CONDITIONAL(COMPILE_WIN32, true)
+     AM_CONDITIONAL(COMPILE_MSDOS, false)
++    AM_CONDITIONAL(COMPILE_HAIKU, false)
+ elif test x"$is_msdos" = "xyes"; then
+     OS_DIR="\$(top_builddir)/src/os/msdos"
+     OS_SRC_DIR="\$(top_srcdir)/src/os/msdos"
+@@ -551,6 +564,15 @@ elif test x"$is_msdos" = "xyes"; then
+     AM_CONDITIONAL(COMPILE_UNIX, false)
+     AM_CONDITIONAL(COMPILE_WIN32, false)
+     AM_CONDITIONAL(COMPILE_MSDOS, true)
++    AM_CONDITIONAL(COMPILE_HAIKU, false)
++elif test x"$is_haiku" = "xyes"; then
++    OS_DIR="\$(top_builddir)/src/os/haiku"
++    OS_SRC_DIR="\$(top_srcdir)/src/os/haiku"
++    BINDIST_SCRIPT="\$(top_srcdir)/make-bindist_install.sh"
++    AM_CONDITIONAL(COMPILE_UNIX, false)
++    AM_CONDITIONAL(COMPILE_WIN32, false)
++    AM_CONDITIONAL(COMPILE_MSDOS, false)
++    AM_CONDITIONAL(COMPILE_HAIKU, true)
+ else
+     OS_DIR="\$(top_builddir)/src/os/unix"
+     OS_SRC_DIR="\$(top_srcdir)/src/os/unix"
+@@ -558,6 +580,7 @@ else
+     AM_CONDITIONAL(COMPILE_UNIX, true)
+     AM_CONDITIONAL(COMPILE_WIN32, false)
+     AM_CONDITIONAL(COMPILE_MSDOS, false)
++    AM_CONDITIONAL(COMPILE_HAIKU, false)
+ fi
+ OS_LIBS="$OS_DIR/libos.a"
+ OS_INCLUDES="-I$OS_SRC_DIR"
+diff --git a/src/fmt_mus.c b/src/fmt_mus.c
+index 192bc20..4912205 100644
+--- a/src/fmt_mus.c
++++ b/src/fmt_mus.c
+@@ -36,6 +36,8 @@ struct noteoffs_s {
+ };
+ 
+ #define XMID_TICKSPERQ  60
++#define XMID_FREQ 480
++#define XMID_DEFAULT_QNLEN 500000
+ /*#define XMID_USE_BANKS*/
+ 
+ /* -------------------------------------------------------------------------- */
+@@ -118,7 +120,8 @@ static int xmid_convert_evnt(const uint8_t *data_in, uint32_t len_in, const uint
+     struct noteoffs_s s[1];
+     int rc = -1, noteons = 0, looppoint = -1;
+     uint32_t len_out = 0, t_now = 0, delta_time = 0;
+-    unsigned qnlen = 500000;
++    uint64_t delta_c;
++    unsigned qnlen = XMID_DEFAULT_QNLEN;
+     bool end_found = false;
+     *tune_loops = false;
+     memset(s, 0, sizeof(s[0]));
+@@ -137,6 +140,7 @@ static int xmid_convert_evnt(const uint8_t *data_in, uint32_t len_in, const uint
+             case 0x90:
+                 {
+                     uint32_t dt_off;
++                    uint64_t dtoff_c;
+                     uint8_t b;
+                     dt_off = 0;
+                     skip_extra_bytes = 1;
+@@ -146,7 +150,7 @@ static int xmid_convert_evnt(const uint8_t *data_in, uint32_t len_in, const uint
+                         ++skip_extra_bytes;
+                     }
+                     dt_off |= b;
+-                    uint64_t dtoff_c = (uint64_t)dt_off * 480 * 500000 * 2 / ((uint64_t)qnlen * XMID_TICKSPERQ);
++                    dtoff_c = (uint64_t)dt_off * XMID_FREQ * XMID_DEFAULT_QNLEN * 2 / ((uint64_t)qnlen * XMID_TICKSPERQ);
+ 					dt_off = dtoff_c >> 1;
+ 					if (dtoff_c & 0x1) {
+ 						dt_off++;
+@@ -274,7 +278,7 @@ static int xmid_convert_evnt(const uint8_t *data_in, uint32_t len_in, const uint
+                     delta_time += *data_in++;
+                     --len_in;
+                 }
+-                uint64_t delta_c = (uint64_t)delta_time * 480 * 500000 * 2 / ((uint64_t)qnlen * XMID_TICKSPERQ);
++                delta_c = (uint64_t)delta_time * XMID_FREQ * XMID_DEFAULT_QNLEN * 2 / ((uint64_t)qnlen * XMID_TICKSPERQ);
+ 				delta_time = delta_c >> 1;
+ 				if (delta_c & 0x1) {
+ 					delta_time++;
+@@ -285,10 +289,11 @@ static int xmid_convert_evnt(const uint8_t *data_in, uint32_t len_in, const uint
+         if (add_event) {
+             uint32_t len_delta_time;
+             uint8_t buf_delta_time[4];
++            uint32_t delay_noff;
+ 		
+             while ((s->top >= 0) && ((t_now + delta_time) >= s->tbl[s->top].t)) {
+                 noteoff_t *n = &(s->tbl[s->top]);
+-                uint32_t delay_noff = n->t - t_now;
++                delay_noff = n->t - t_now;
+                 len_delta_time = xmid_encode_delta_time(buf_delta_time, delay_noff);
+                 for (int i = 0; i < len_delta_time; ++i) {
+                     *p++ = buf_delta_time[i];
+@@ -410,7 +415,7 @@ bool fmt_mus_convert_xmid(const uint8_t *data_in, uint32_t len_in, uint8_t **dat
+             /*00*/ 'M', 'T', 'h', 'd',
+             /*04*/ 0, 0, 0, 6,
+             /*08*/ 0, 0, 0, 1,
+-            /*0c*/ (480 >> 8) & 0xff, 480 & 0xff,
++            /*0c*/ (XMID_FREQ >> 8) & 0xff, XMID_FREQ & 0xff,
+             /*0e*/ 'M', 'T', 'r', 'k'
+             /*12*/ /* length, big endian */
+         };
+diff --git a/src/os/Makefile.am b/src/os/Makefile.am
+index 3f3948b..95a4c78 100644
+--- a/src/os/Makefile.am
++++ b/src/os/Makefile.am
+@@ -10,4 +10,8 @@ if COMPILE_MSDOS
+ SUBDIRS = msdos
+ endif
+ 
+-DIST_SUBDIRS = unix win32 msdos
++if COMPILE_HAIKU
++SUBDIRS = haiku
++endif
++
++DIST_SUBDIRS = unix win32 msdos haiku
+diff --git a/src/os/haiku/Makefile.am b/src/os/haiku/Makefile.am
+new file mode 100644
+index 0000000..ea47512
+--- /dev/null
++++ b/src/os/haiku/Makefile.am
+@@ -0,0 +1,9 @@
++AM_CPPFLAGS = \
++    @OS_INCLUDES@ \
++    -I$(top_srcdir)/src
++
++noinst_LIBRARIES = libos.a
++
++libos_a_SOURCES = \
++    os.c \
++    osdefs.h
+diff --git a/src/os/haiku/os.c b/src/os/haiku/os.c
+new file mode 100644
+index 0000000..7097bf3
+--- /dev/null
++++ b/src/os/haiku/os.c
+@@ -0,0 +1,190 @@
++#include "config.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++#include "os.h"
++#include "options.h"
++#include "lib.h"
++#include "util.h"
++#include "types.h"
++
++/* -------------------------------------------------------------------------- */
++
++const struct cmdline_options_s os_cmdline_options[] = {
++    { NULL, 0, NULL, NULL, NULL, NULL }
++};
++
++/* -------------------------------------------------------------------------- */
++
++static char *data_path = NULL;
++static char *user_path = NULL;
++static char *all_data_paths[] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
++static int num_data_paths = 0;
++
++/* -------------------------------------------------------------------------- */
++
++const char *idstr_os = "unix";
++
++int os_early_init(void)
++{
++    return 0;
++}
++
++int os_init(void)
++{
++    return 0;
++}
++
++void os_shutdown(void)
++{
++    lib_free(user_path);
++    user_path = NULL;
++    lib_free(data_path);
++    data_path = NULL;
++    for (int i = 0; i < num_data_paths; ++i) {
++        lib_free(all_data_paths[i]);
++        all_data_paths[i] = NULL;
++    }
++    num_data_paths = 0;
++}
++
++const char **os_get_paths_data(void)
++{
++    if (num_data_paths == 0) {
++        char *p;
++        int i = 0;
++        bool got_xdg = false;
++
++        if (data_path) {
++            all_data_paths[i++] = lib_stralloc(data_path);
++        }
++        p = getenv("XDG_DATA_HOME");
++        if (p) {
++            all_data_paths[i++] = util_concat(p, "/1oom", NULL);
++            got_xdg = true;
++        }
++        p = getenv("XDG_DATA_DIRS");
++        if (p) {
++            all_data_paths[i++] = util_concat(p, "/1oom", NULL);;
++            got_xdg = true;
++        }
++        if (!got_xdg) {
++            p = getenv("HOME");
++            if (p) {
++                all_data_paths[i++] = util_concat(p, "/config/non-packaged/data/1oom", NULL);;
++            }
++        }
++        all_data_paths[i++] = lib_stralloc(".");
++        all_data_paths[i] = NULL;
++        num_data_paths = i;
++    }
++    return (const char **)all_data_paths;
++}
++
++const char *os_get_path_data(void)
++{
++    return data_path;
++}
++
++void os_set_path_data(const char *path)
++{
++    if (data_path) {
++        lib_free(data_path);
++        data_path = NULL;
++    }
++    data_path = lib_stralloc(path);
++}
++
++const char *os_get_path_user(void)
++{
++    if (user_path == NULL) {
++        char *xdg_config_home = getenv("XDG_CONFIG_HOME");
++        if (xdg_config_home != NULL) {
++            user_path = util_concat(xdg_config_home, "/1oom", NULL);
++        } else {
++            char *home = getenv("HOME");
++            if (home != NULL) {
++                user_path = util_concat(home, "/config/settings/1oom", NULL);
++            } else {
++                user_path = lib_stralloc(".");
++            }
++        }
++    }
++    return user_path;
++}
++
++void os_set_path_user(const char *path)
++{
++    if (user_path) {
++        lib_free(user_path);
++        user_path = NULL;
++    }
++    user_path = lib_stralloc(path);
++}
++
++int os_make_path(const char *path)
++{
++    if ((path == NULL) || ((path[0] == '.') && (path[1] == '\0'))) {
++        return 0;
++    }
++    if (access(path, F_OK)) {
++        return mkdir(path, 0700);
++    }
++    return 0;
++}
++
++int os_make_path_user(void)
++{
++    return os_make_path(os_get_path_user());
++}
++
++int os_make_path_for(const char *filename)
++{
++    int res = 0;
++    char *path;
++    util_fname_split(filename, &path, NULL);
++    if (path != NULL) {
++        res = os_make_path(path);
++        lib_free(path);
++    }
++    return res;
++}
++
++const char *os_get_fname_save_slot(char *buf, size_t bufsize, int savei/*1..9*/)
++{
++    return NULL;
++}
++
++const char *os_get_fname_save_year(char *buf, size_t bufsize, int year/*2300..*/)
++{
++    return NULL;
++}
++
++const char *os_get_fname_cfg(char *buf, size_t bufsize, const char *gamestr, const char *uistr, const char *hwstr)
++{
++    return NULL;
++}
++
++const char *os_get_fname_log(char *buf, size_t bufsize)
++{
++    if (buf) {
++        lib_strcpy(buf, "1oom_log.txt", bufsize);
++        return buf;
++    }
++    return "1oom_log.txt";
++}
++
++const char *os_get_fname_screenshot(char *buf, size_t bufsize, const char *extension)
++{
++    char *fmt = lib_malloc(FSDEV_PATH_MAX);
++    lib_sprintf(fmt, FSDEV_PATH_MAX, "%s/1oom_pic_%%03i.%s", os_get_path_user(), extension);
++    util_get_fname_unused(buf, bufsize, fmt, 999);
++    lib_free(fmt);
++    fmt = NULL;
++    return buf;
++}
+diff --git a/src/os/haiku/osdefs.h b/src/os/haiku/osdefs.h
+new file mode 100644
+index 0000000..0318cc4
+--- /dev/null
++++ b/src/os/haiku/osdefs.h
+@@ -0,0 +1,10 @@
++#ifndef INC_1OOM_OSDEFS_H
++#define INC_1OOM_OSDEFS_H
++
++#define FSDEV_PATH_MAX  2048
++#define FSDEV_DIR_SEP_STR    "/"
++#define FSDEV_DIR_SEP_CHR    '/'
++#define FSDEV_EXT_SEP_STR    "."
++#define FSDEV_EXT_SEP_CHR    '.'
++
++#endif
+-- 
+2.30.2
+
+
+From afdb687f327ac6a4f5faf8da2b86da36ef1ca27a Mon Sep 17 00:00:00 2001
+From: Craig Watson <watsoncraigjohn@gmail.com>
+Date: Mon, 19 Apr 2021 11:20:38 +0000
+Subject: Fix Haiku OS build makefile include
+
+
+diff --git a/configure.ac b/configure.ac
+index dc63fc7..4983925 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -681,6 +681,7 @@ AC_CONFIG_FILES([Makefile
+                  src/os/unix/Makefile
+                  src/os/win32/Makefile
+                  src/os/msdos/Makefile
++                 src/os/haiku/Makefile
+                  src/ui/Makefile
+                  src/ui/cmdline/Makefile
+                  src/ui/classic/Makefile
+-- 
+2.30.2
+
+
+From f630a0228d5bb8365a96803baa5741c6867bc4ab Mon Sep 17 00:00:00 2001
+From: Craig Watson <watsoncraigjohn@gmail.com>
+Date: Mon, 19 Apr 2021 14:51:08 +0000
+Subject: Set some sensible defaults on Haiku, fix OS description
+
+
+diff --git a/src/hw/sdl/hwsdl_opt.c b/src/hw/sdl/hwsdl_opt.c
+index 4777674..6607eac 100644
+--- a/src/hw/sdl/hwsdl_opt.c
++++ b/src/hw/sdl/hwsdl_opt.c
+@@ -12,7 +12,7 @@ int hw_opt_screen_winh = 0;
+ int hw_opt_screen_fsw = 0;
+ int hw_opt_screen_fsh = 0;
+ int hw_opt_mousespd = 100;
+-bool hw_opt_relmouse = true;
++bool hw_opt_relmouse = false;
+ #ifdef FEATURE_MODEBUG
+ int hw_opt_overlay_pal = 0;
+ #endif
+diff --git a/src/options.c b/src/options.c
+index fd349da..76b4457 100644
+--- a/src/options.c
++++ b/src/options.c
+@@ -38,7 +38,7 @@ bool opt_sfx_init_parallel = true;
+ int opt_music_volume = 64;
+ int opt_sfx_volume = 100;
+ int opt_audiorate = 48000;
+-int opt_audioslice_ms = 50;
++int opt_audioslice_ms = 100;
+ #ifdef HAVE_SAMPLERATE
+ bool opt_use_libsamplerate = true;
+ int opt_libsamplerate_scale = 65;
+diff --git a/src/os/haiku/os.c b/src/os/haiku/os.c
+index 7097bf3..9081897 100644
+--- a/src/os/haiku/os.c
++++ b/src/os/haiku/os.c
+@@ -28,7 +28,7 @@ static int num_data_paths = 0;
+ 
+ /* -------------------------------------------------------------------------- */
+ 
+-const char *idstr_os = "unix";
++const char *idstr_os = "haiku";
+ 
+ int os_early_init(void)
+ {
+-- 
+2.30.2
+
