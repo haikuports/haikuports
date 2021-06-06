@@ -1,10 +1,10 @@
 selected_scheme scheme-full
-TEXDIR $dataDir/texlive
+TEXDIR dataDir/texlive
 TEXMFCONFIG /boot/home/config/settings/texmf/config
 TEXMFHOME /boot/home/config/settings/texmf-dist
 TEXMFLOCAL /boot/system/non-packaged/data/texlive/texmf-dist
-TEXMFSYSCONFIG $sysconfDir/texlive
-TEXMFSYSVAR $sharedStateDir/texlive
+TEXMFSYSCONFIG sysconfDir/texlive
+TEXMFSYSVAR sharedStateDir/texlive
 TEXMFVAR /boot/home/config/var/texmf
 instopt_adjustpath 0
 instopt_adjustrepo 1
