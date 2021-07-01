@@ -1,0 +1,152 @@
+From ec9e8290603dbc170ce03d32932abe700d907960 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Thu, 1 Jul 2021 19:32:34 +1000
+Subject: Fixes for Haiku
+
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 301f933..23db76b 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -72,6 +72,10 @@ if(NOT TARGET SDL2::SDL2)
+                INTERFACE_INCLUDE_DIRECTORIES ${SDL2_INCLUDE_DIRS})
+ endif()
+ 
++if(HAIKU)
++	include_directories(${SDL2_INCLUDE_DIR})
++endif()
++
+ ## imgui ##
+ # note: in the future there may be integrated CMake support into imgui
+ # see: https://github.com/ocornut/imgui/pull/1713
+@@ -127,7 +131,7 @@ target_link_libraries(imgui
+ )
+ else()
+ target_link_libraries(imgui
+-	SDL2::SDL2
++	SDL2
+ )
+ endif()
+ 
+diff --git a/src/openboardview/CMakeLists.txt b/src/openboardview/CMakeLists.txt
+index 44d172a..b71fdc0 100644
+--- a/src/openboardview/CMakeLists.txt
++++ b/src/openboardview/CMakeLists.txt
+@@ -28,6 +28,7 @@ find_package(PkgConfig REQUIRED)
+ 			add_definitions(-DENABLE_FONTCONFIG)
+ 		endif()
+ 
++		if(NOT HAIKU)
+ 		pkg_search_module(GTK REQUIRED gtk+-3.0 gtk+-2.0) # gtk2 fallback if gtk3 not found
+ 		if(GTK_FOUND)
+ 			message(STATUS "Found GTK version ${GTK_VERSION}")
+@@ -37,6 +38,7 @@ find_package(PkgConfig REQUIRED)
+ 		else()
+ 			message(WARNING "GTK not found, file picker will be unavailable.")
+ 		endif()
++		endif()
+ 	endif(APPLE)
+ endif()
+ 
+@@ -150,12 +152,23 @@ target_link_libraries(${PROJECT_NAME_LOWER}
+ )
+ else()
+ target_link_libraries(${PROJECT_NAME_LOWER}
+-	SDL2::SDL2
++	SDL2
+ )
+ endif()
++if(NOT HAIKU)
+ target_link_libraries(${PROJECT_NAME_LOWER}
+ 	SDL2::SDL2main
+ )
++endif()
++
++if(HAIKU)
++target_link_libraries(${PROJECT_NAME_LOWER}
++	be tracker
++)
++include_directories(
++	${SDL2_INCLUDE_DIR}
++)
++endif(HAIKU)
+ 
+ install(TARGETS
+ 	${PROJECT_NAME_LOWER}
+diff --git a/src/openboardview/main_opengl.cpp b/src/openboardview/main_opengl.cpp
+index f298722..9872af6 100644
+--- a/src/openboardview/main_opengl.cpp
++++ b/src/openboardview/main_opengl.cpp
+@@ -301,7 +301,7 @@ int main(int argc, char **argv) {
+ 
+ 	// Font selection
+ 	std::deque<std::string> fontList(
+-	    {"Liberation Sans", "DejaVu Sans", "Arial", "Helvetica", ""}); // Empty string = use system default font
++	    {"Noto Sans", "Liberation Sans", "DejaVu Sans", "Arial", "Helvetica", ""}); // Empty string = use system default font
+ 	std::string customFont(app.obvconfig.ParseStr("fontName", ""));
+ 
+ 	if (!customFont.empty()) fontList.push_front(customFont);
+diff --git a/src/openboardview/unix.cpp b/src/openboardview/unix.cpp
+index bc25523..17b91e7 100644
+--- a/src/openboardview/unix.cpp
++++ b/src/openboardview/unix.cpp
+@@ -17,6 +17,13 @@
+ #include <fontconfig/fontconfig.h>
+ #endif
+ 
++#ifdef __HAIKU__
++#include <Path.h>
++#include <Entry.h>
++#include <FilePanel.h>
++#include <FindDirectory.h>
++#endif
++
+ #ifdef ENABLE_GTK
+ #define declareFunc(x) decltype(x) *x
+ #define loadFunc(x) x = reinterpret_cast<decltype(x)>(SDL_LoadFunction(lib, #x));
+@@ -148,6 +155,21 @@ const filesystem::path show_file_picker(bool filterBoards) {
+ 
+ 	return path;
+ }
++#elif defined(__HAIKU__)
++const filesystem::path show_file_picker(bool filterBoards) {
++	BFilePanel openPanel(B_OPEN_PANEL, NULL, NULL, 0, false, NULL, NULL, true, true);
++	openPanel.Show();
++	while (openPanel.IsShowing())
++		SDL_Delay(100);
++
++	entry_ref ref;
++	openPanel.Rewind();
++	if (openPanel.GetNextSelectedRef(&ref) == B_OK) {
++		BPath path(&ref);
++		return std::string(path.Path());
++	}
++	return std::string();
++}
+ #elif !defined(__APPLE__)
+ const filesystem::path show_file_picker(bool filterBoards) { // dummy function when not building for OS X and GTK not available
+ 	SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Cannot show open file dialog: not built in.");
+@@ -221,7 +243,11 @@ bool create_dirs(const std::string &path) {
+ const std::string get_user_dir(const UserDir userdir) {
+ 	std::string path;
+ 	std::string envVar;
+-
++#ifdef __HAIKU__
++	char buffer[B_PATH_NAME_LENGTH + B_FILE_NAME_LENGTH];
++	find_directory(B_USER_SETTINGS_DIRECTORY, -1, false, buffer, sizeof(buffer));
++	path = std::string(buffer);
++#else
+ 	if (userdir == UserDir::Config)
+ 		envVar = get_env_var("XDG_CONFIG_HOME");
+ 	else if (userdir == UserDir::Data)
+@@ -239,6 +265,7 @@ const std::string get_user_dir(const UserDir userdir) {
+ 	} else {
+ 		path += std::string(envVar);
+ 	}
++#endif
+ 	if (!path.empty()) {
+ 		path += "/" OBV_NAME "/";
+ 		if (create_dirs(path)) return path; // Check if dir already exists and create it otherwise
+-- 
+2.30.2
+
