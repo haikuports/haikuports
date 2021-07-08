@@ -1,0 +1,184 @@
+From 43edf22885e4144deb68b40007a031bc7cc2e2bc Mon Sep 17 00:00:00 2001
+From: Niels Sascha Reedijk <niels.reedijk@gmail.com>
+Date: Sat, 19 Jun 2021 15:36:41 +0000
+Subject: Add Haiku-specific patches for Rust 1.53.0
+
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 0939f19..a82f34d 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -879,9 +879,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "curl-sys"
+-version = "0.4.39+curl-7.74.0"
++version = "0.4.42+curl-7.76.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "07a8ce861e7b68a0b394e814d7ee9f1b2750ff8bd10372c6ad3bacc10e86f874"
++checksum = "4636d8d6109c842707018a104051436bffb8991ea20b2d1293db70b6e0ee4c7c"
+ dependencies = [
+  "cc",
+  "libc",
+@@ -1931,8 +1931,7 @@ dependencies = [
+ [[package]]
+ name = "libz-sys"
+ version = "1.1.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "602113192b08db8f38796c4e85c39e960c145965140e918018bcde1952429655"
++source = "git+https://github.com/nielx/libz-sys?tag=1.1.2-haiku#15004cb938fd0d8591aea3227b71743171cd9a1e"
+ dependencies = [
+  "cc",
+  "libc",
+@@ -4853,13 +4852,12 @@ checksum = "da73c8f77aebc0e40c300b93f0a5f1bece7a248a36eee287d4e095f35c7b7d6e"
+ 
+ [[package]]
+ name = "socket2"
+-version = "0.3.16"
++version = "0.3.19"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "7fd8b795c389288baa5f355489c65e71fd48a02104600d15c4cfbc561e9e429d"
++checksum = "122e570113d28d773067fab24266b66753f6ea915758651696b6e35e49f88d6e"
+ dependencies = [
+- "cfg-if 0.1.10",
++ "cfg-if 1.0.0",
+  "libc",
+- "redox_syscall 0.1.57",
+  "winapi 0.3.9",
+ ]
+ 
+diff --git a/Cargo.toml b/Cargo.toml
+index 327afe3..aead8d1 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -110,5 +110,8 @@ rustc-std-workspace-core = { path = 'library/rustc-std-workspace-core' }
+ rustc-std-workspace-alloc = { path = 'library/rustc-std-workspace-alloc' }
+ rustc-std-workspace-std = { path = 'library/rustc-std-workspace-std' }
+ 
++# Build fix for cross-compiling Rust for Haiku
++libz-sys = { git = 'https://github.com/nielx/libz-sys', tag = "1.1.2-haiku" }
++
+ [patch."https://github.com/rust-lang/rust-clippy"]
+ clippy_lints = { path = "src/tools/clippy/clippy_lints" }
+diff --git a/library/std/src/sys/unix/thread.rs b/library/std/src/sys/unix/thread.rs
+index b8f43ca..00a7912 100644
+--- a/library/std/src/sys/unix/thread.rs
++++ b/library/std/src/sys/unix/thread.rs
+@@ -176,7 +176,7 @@ impl Thread {
+         unsafe {
+             let ret = libc::pthread_join(self.id, ptr::null_mut());
+             mem::forget(self);
+-            assert!(ret == 0, "failed to join thread: {}", io::Error::from_raw_os_error(ret));
++            debug_assert_eq!(ret, 0);
+         }
+     }
+ 
+diff --git a/library/std/src/sys/windows/c.rs b/library/std/src/sys/windows/c.rs
+index 3e4176e..6580b82 100644
+--- a/library/std/src/sys/windows/c.rs
++++ b/library/std/src/sys/windows/c.rs
+@@ -270,7 +270,6 @@ pub const FILE_END: DWORD = 2;
+ 
+ pub const WAIT_OBJECT_0: DWORD = 0x00000000;
+ pub const WAIT_TIMEOUT: DWORD = 258;
+-pub const WAIT_FAILED: DWORD = 0xFFFFFFFF;
+ 
+ pub const PIPE_ACCESS_INBOUND: DWORD = 0x00000001;
+ pub const PIPE_ACCESS_OUTBOUND: DWORD = 0x00000002;
+diff --git a/library/std/src/sys/windows/thread.rs b/library/std/src/sys/windows/thread.rs
+index 38839ea..7bb8c95 100644
+--- a/library/std/src/sys/windows/thread.rs
++++ b/library/std/src/sys/windows/thread.rs
+@@ -70,10 +70,7 @@ impl Thread {
+     }
+ 
+     pub fn join(self) {
+-        let rc = unsafe { c::WaitForSingleObject(self.handle.raw(), c::INFINITE) };
+-        if rc == c::WAIT_FAILED {
+-            panic!("failed to join on thread: {}", io::Error::last_os_error());
+-        }
++        unsafe { c::WaitForSingleObject(self.handle.raw(), c::INFINITE); }
+     }
+ 
+     pub fn yield_now() {
+diff --git a/library/std/src/thread/mod.rs b/library/std/src/thread/mod.rs
+index 30d8c2a..83d4266 100644
+--- a/library/std/src/thread/mod.rs
++++ b/library/std/src/thread/mod.rs
+@@ -1375,11 +1375,6 @@ impl<T> JoinHandle<T> {
+     /// [`Err`]: crate::result::Result::Err
+     /// [atomic memory orderings]: crate::sync::atomic
+     ///
+-    /// # Panics
+-    ///
+-    /// This function may panic on some platforms if a thread attempts to join
+-    /// itself or otherwise may create a deadlock with joining threads.
+-    ///
+     /// # Examples
+     ///
+     /// ```
+diff --git a/src/llvm-project/llvm/lib/Support/CMakeLists.txt b/src/llvm-project/llvm/lib/Support/CMakeLists.txt
+index cdee114..1c805e3 100644
+--- a/src/llvm-project/llvm/lib/Support/CMakeLists.txt
++++ b/src/llvm-project/llvm/lib/Support/CMakeLists.txt
+@@ -36,6 +36,10 @@ elseif( CMAKE_HOST_UNIX )
+   if( FUCHSIA )
+     set(system_libs ${system_libs} zircon)
+   endif()
++  if ( HAIKU )
++    add_definitions(-D_BSD_SOURCE)
++    set(system_libs ${system_libs} bsd)
++  endif()
+ endif( MSVC OR MINGW )
+ 
+ # Delay load shell32.dll if possible to speed up process startup.
+diff --git a/src/llvm-project/llvm/lib/Support/Unix/Program.inc b/src/llvm-project/llvm/lib/Support/Unix/Program.inc
+index fb56fa4..d42681f 100644
+--- a/src/llvm-project/llvm/lib/Support/Unix/Program.inc
++++ b/src/llvm-project/llvm/lib/Support/Unix/Program.inc
+@@ -452,8 +452,12 @@ ProcessInfo llvm::sys::Wait(const ProcessInfo &PI, unsigned SecondsToWait,
+   if (ProcStat) {
+     std::chrono::microseconds UserT = toDuration(Info.ru_utime);
+     std::chrono::microseconds KernelT = toDuration(Info.ru_stime);
++#ifndef __HAIKU__
+     uint64_t PeakMemory = static_cast<uint64_t>(Info.ru_maxrss);
+     *ProcStat = ProcessStatistics{UserT + KernelT, UserT, PeakMemory};
++#else
++    *ProcStat = ProcessStatistics{UserT + KernelT, UserT, 0};
++#endif
+   }
+ 
+   // Return the proper exit status. Detect error conditions
+diff --git a/src/llvm-project/llvm/tools/llvm-jitlink/CMakeLists.txt b/src/llvm-project/llvm/tools/llvm-jitlink/CMakeLists.txt
+index 90b4ca6..c9f9a53 100644
+--- a/src/llvm-project/llvm/tools/llvm-jitlink/CMakeLists.txt
++++ b/src/llvm-project/llvm/tools/llvm-jitlink/CMakeLists.txt
+@@ -24,6 +24,10 @@ add_llvm_tool(llvm-jitlink
+   llvm-jitlink-macho.cpp
+   )
+ 
++if(${CMAKE_SYSTEM_NAME} MATCHES "Haiku")
++  target_link_libraries(llvm-jitlink PRIVATE network)
++endif()
++
+ if(${CMAKE_SYSTEM_NAME} MATCHES "SunOS")
+   target_link_libraries(llvm-jitlink PRIVATE socket nsl)
+ endif()
+diff --git a/src/llvm-project/llvm/tools/llvm-jitlink/llvm-jitlink-executor/CMakeLists.txt b/src/llvm-project/llvm/tools/llvm-jitlink/llvm-jitlink-executor/CMakeLists.txt
+index a183857..37af9a5 100644
+--- a/src/llvm-project/llvm/tools/llvm-jitlink/llvm-jitlink-executor/CMakeLists.txt
++++ b/src/llvm-project/llvm/tools/llvm-jitlink/llvm-jitlink-executor/CMakeLists.txt
+@@ -12,6 +12,10 @@ add_llvm_utility(llvm-jitlink-executor
+ )
+ 
+ message(${CMAKE_SYSTEM_NAME})
++if(${CMAKE_SYSTEM_NAME} MATCHES "Haiku")
++  target_link_libraries(llvm-jitlink-executor PRIVATE network)
++endif()
++
+ if(${CMAKE_SYSTEM_NAME} MATCHES "SunOS")
+   target_link_libraries(llvm-jitlink-executor PRIVATE socket)
+ endif()
+-- 
+2.30.0
+

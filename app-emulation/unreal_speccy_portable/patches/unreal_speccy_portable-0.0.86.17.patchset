@@ -1,0 +1,4455 @@
+From e0eb2e98f0aebc5abae2e7fe7153eb7be7b6bb29 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 25 Jun 2021 23:44:52 +1000
+Subject: Add Haiku support
+
+
+diff --git a/build/cmake/CMakeLists.txt b/build/cmake/CMakeLists.txt
+index bc341f7..1c44a48 100644
+--- a/build/cmake/CMakeLists.txt
++++ b/build/cmake/CMakeLists.txt
+@@ -13,6 +13,7 @@ set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
+ option(USE_WX_WIDGETS "wxWidgets + OpenAL + OpenGL version" OFF)
+ option(USE_SDL "SDL version" ON)
+ option(USE_SDL2 "SDL2 version" OFF)
++option(USE_HAIKU "Haiku version" OFF)
+ option(USE_BENCHMARK "benchmark mode (console)" OFF)
+ option(USE_LIBRARY "library mode" OFF)
+ option(USE_WEB "use web sources (SDL or iOS versions)" ON)
+@@ -58,7 +59,7 @@ source_group("devices\\sound" FILES ${SRCCXX_DEVICES_SOUND} ${SRCH_DEVICES_SOUND
+ 
+ #3rdparty libs
+ 
+-if(NOT APPLE_IOS AND NOT ANDROID AND (USE_SDL OR USE_SDL2) AND USE_WEB AND NOT EMSCRIPTEN)
++if(NOT APPLE_IOS AND NOT ANDROID AND (USE_SDL OR USE_SDL2 OR USE_HAIKU) AND USE_WEB AND NOT EMSCRIPTEN)
+ find_package(CURL REQUIRED)
+ if(CURL_FOUND)
+ 	include_directories(${CURL_INCLUDE_DIRS})
+@@ -142,7 +143,7 @@ source_group("platform\\oal" FILES ${SRCCXX_PLATFORM_OPENAL})
+ 
+ endif(USE_WX_WIDGETS OR APPLE_IOS)
+ 
+-if(NOT ANDROID AND (USE_SDL OR USE_SDL2 OR APPLE_IOS))
++if(NOT ANDROID AND (USE_SDL OR USE_SDL2 OR APPLE_IOS OR USE_HAIKU))
+ 
+ file(GLOB SRCCXX_UI "../../ui/*.cpp")
+ file(GLOB SRCH_UI "../../ui/*.h")
+@@ -167,7 +168,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=gnu++11")
+ endif(NOT MSVC)
+ endif(USE_WEB)
+ 
+-endif(NOT ANDROID AND (USE_SDL OR USE_SDL2 OR APPLE_IOS))
++endif(NOT ANDROID AND (USE_SDL OR USE_SDL2 OR APPLE_IOS OR USE_HAIKU))
+ 
+ if(USE_SDL2 OR APPLE_IOS OR ANDROID)
+ 
+@@ -355,6 +356,22 @@ add_executable(${PROJECT} WIN32 ${SRCCXX} ${SRCC} ${SRCH} ${SRCRES})
+ target_link_libraries(${PROJECT} wx::core wx::base wx::adv wx::aui wx::gl)
+ target_link_libraries(${PROJECT} ${OPENGL_LIBRARIES})
+ 
++elseif(USE_HAIKU)
++
++#Haiku
++file(GLOB SRCCXX_PLATFORM_HAIKU "../../platform/haiku/*.cpp")
++add_definitions(-DAPP_SIGNATURE="application/x-vnd.unreal-speccy-portable" -DUSE_HAIKU -DUSE_PNG -DUSE_UI -DUSE_CONFIG -DUSE_ZIP)
++if(USE_WEB)
++add_definitions(-DUSE_WEB)
++endif(USE_WEB)
++list(APPEND SRCCXX ${SRCCXX_PLATFORM_HAIKU})
++source_group("platform\\haiku" FILES ${SRCCXX_PLATFORM_HAIKU})
++
++add_platform_io_stuff()
++
++add_executable(${PROJECT} WIN32 ${SRCCXX} ${SRCC} ${SRCH})
++target_link_libraries(${PROJECT} -lbe -lmedia -ldevice -lgame -ltracker -lpng)
++
+ elseif(USE_SDL)
+ 
+ #SDL
+@@ -498,6 +515,24 @@ endif(APPLE_IOS)
+ 
+ target_link_libraries(${PROJECT} ${THIRDPARTY_LIBRARIES})
+ 
++if(HAIKU)
++add_custom_target(Resources ALL
++	DEPENDS ${PROJECT}
++	SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/../../platform/haiku/resources.rdef)
++add_custom_command(TARGET Resources
++	COMMAND rc -o resources.rsrc ${CMAKE_CURRENT_SOURCE_DIR}/../../platform/haiku/resources.rdef
++	COMMENT "${P} Compiling resource file."
++	VERBATIM)
++add_custom_command(TARGET Resources
++	COMMAND xres -o ${PROJECT} resources.rsrc
++	COMMENT "${P} Adding compiled resources to '${PROJECT}' executable."
++	VERBATIM)
++add_custom_command(TARGET Resources
++	COMMAND mimeset --all ${PROJECT}
++	COMMENT "${P} Updating MIME types for '${PROJECT}' executable."
++	VERBATIM)
++endif(HAIKU)
++
+ if(MSVC)
+ set_target_properties(${PROJECT} PROPERTIES LINK_FLAGS "/MANIFEST:NO /LARGEADDRESSAWARE")
+ endif(MSVC)
+diff --git a/platform/haiku/haiku.cpp b/platform/haiku/haiku.cpp
+new file mode 100644
+index 0000000..6b11b13
+--- /dev/null
++++ b/platform/haiku/haiku.cpp
+@@ -0,0 +1,139 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include "../platform.h"
++#include "../../options_common.h"
++#include "../../tools/tick.h"
++#include "../io.h"
++
++#include <AppKit.h>
++#include <StorageKit.h>
++#include <FindDirectory.h>
++
++#include "haiku_app.h"
++
++namespace xPlatform
++{
++
++void InitAudio();
++void DoneAudio();
++void UpdateAudio();
++
++bool InitVideo();
++void DoneVideo();
++void UpdateScreen();
++
++bool InitJoystick();
++void DoneJoystick();
++void ProcessJoystick();
++
++static int32 appThreadFunc(void *data)
++{
++	USPApplication *application = new USPApplication(APP_SIGNATURE);
++
++	app_info theInfo;
++	application->GetAppInfo(&theInfo);
++	BPath appPath(&theInfo.ref);
++	BPath dirPath;
++	appPath.GetParent(&dirPath);
++	chdir(dirPath.Path());
++
++	application->Run();
++
++	return 0;
++}
++
++static bool Init()
++{
++	thread_id appThreadId = spawn_thread(appThreadFunc, "USPApplication", B_NORMAL_PRIORITY, NULL);
++	resume_thread(appThreadId);
++	
++	while(true) {
++		if (be_app) {
++			if (!be_app->IsLaunching())
++				break;
++		}
++		snooze(1000);
++	}
++
++    BPath settings_path;
++    if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
++    	settings_path.Append("USP");
++    	BString usp_home_path(settings_path.Path());
++    	usp_home_path += "/";
++		xIo::PathCreate(usp_home_path.String());
++		xIo::SetProfilePath(usp_home_path.String());
++		OpLastFile(usp_home_path.String());
++ 	}
++
++	Handler()->OnInit();
++
++	InitJoystick();
++	InitAudio();
++	InitVideo();
++
++	return true;
++}
++
++static void Done()
++{
++	DoneJoystick();
++	DoneAudio();
++	DoneVideo();
++
++	Handler()->OnDone();
++}
++
++static bool quit = false;
++
++void Loop()
++{
++	eTick last_tick;
++	last_tick.SetCurrent();
++	while(!quit) {
++		Handler()->OnLoop();
++		UpdateScreen();
++		ProcessJoystick();
++		UpdateAudio();
++
++		while(last_tick.Passed().Ms() < 15)
++			snooze(3000);
++
++		last_tick.SetCurrent();
++		if(OpQuit())
++			quit = true;
++	}
++}
++
++}
++
++int main(int argc, char* argv[])
++{
++	if(!xPlatform::Init()) {
++		xPlatform::Done();
++		return -1;
++	}
++
++	if(argc > 1)
++		xPlatform::Handler()->OnOpenFile(argv[1]);
++
++	xPlatform::Loop();	
++	xPlatform::Done();
++
++	return 0;
++}
+diff --git a/platform/haiku/haiku_app.cpp b/platform/haiku/haiku_app.cpp
+new file mode 100644
+index 0000000..52d2d12
+--- /dev/null
++++ b/platform/haiku/haiku_app.cpp
+@@ -0,0 +1,47 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include "../platform.h"
++#include "../../tools/options.h"
++#include "../../options_common.h"
++
++#include "haiku_app.h"
++#include "haiku_window.h"
++
++namespace xPlatform
++{
++
++USPApplication::USPApplication(const char *signature) : BApplication(signature),
++	refsReceived(NULL)
++{
++}
++
++void
++USPApplication::RefsReceived(BMessage* message)
++{
++	refsReceived = new BMessage(*message);
++	for (int i = 0; i < CountWindows(); i++) {
++		HaikuPlatformWindow *window = dynamic_cast <HaikuPlatformWindow*>(WindowAt(i));
++		if (window) {
++			window->PostMessage(refsReceived);
++			break;
++		}
++	}
++}
++
++}
+diff --git a/platform/haiku/haiku_app.h b/platform/haiku/haiku_app.h
+new file mode 100644
+index 0000000..17e8421
+--- /dev/null
++++ b/platform/haiku/haiku_app.h
+@@ -0,0 +1,40 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef _HAIKU_APPLICATION_H
++#define _HAIKU_APPLICATION_H
++
++#include <Application.h>
++#include <Message.h>
++
++namespace xPlatform
++{
++
++class USPApplication : public BApplication {
++	public:
++						USPApplication(const char *signature);
++		virtual void 	RefsReceived(BMessage* message);
++
++		BMessage*		GetRefsMessage() { return refsReceived; }
++	private:
++		BMessage*		refsReceived;
++};
++
++}
++
++#endif
+diff --git a/platform/haiku/haiku_filters.cpp b/platform/haiku/haiku_filters.cpp
+new file mode 100644
+index 0000000..95c7c55
+--- /dev/null
++++ b/platform/haiku/haiku_filters.cpp
+@@ -0,0 +1,339 @@
++/*
++ * XBR filter extracted from FFmpeg into a separate library.
++ *
++ *
++ * Copyright (c) 2011, 2012 Hyllian/Jararaca <sergiogdb@gmail.com>
++ * Copyright (c) 2014 Arwa Arif <arwaarif1994@gmail.com>
++ * Copyright (c) 2015 Treeki <treeki@gmail.com>
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/**
++ * @file
++ * XBR Filter is used for depixelization of image.
++ * This is based on Hyllian's xBR shader.
++ *
++ * @see http://www.libretro.com/forums/viewtopic.php?f=6&t=134
++ * @see https://github.com/yoyofr/iFBA/blob/master/fba_src/src/intf/video/scalers/xbr.cpp
++ */
++
++#define XBR_INTERNAL
++#include "haiku_filters.h"
++#include <stdlib.h>
++
++#define abs32(x) (x < 0 ? -x : x)
++
++#define LB_MASK       0x00FEFEFE
++#define RED_BLUE_MASK 0x00FF00FF
++#define GREEN_MASK    0x0000FF00
++#define PART_MASK     0x00FF00FF
++
++static uint32 pixel_diff(uint32 x, uint32 y, const uint32 *r2y)
++{
++#define YMASK 0xff0000
++#define UMASK 0x00ff00
++#define VMASK 0x0000ff
++
++    uint32 yuv1 = r2y[x & 0xffffff];
++    uint32 yuv2 = r2y[y & 0xffffff];
++
++    return (abs32((x >> 24) - (y >> 24))) +
++           (abs32((yuv1 & YMASK) - (yuv2 & YMASK)) >> 16) +
++           (abs32((yuv1 & UMASK) - (yuv2 & UMASK)) >>  8) +
++           abs32((yuv1 & VMASK) - (yuv2 & VMASK));
++}
++
++#define ALPHA_BLEND_BASE(a, b, m, s) (  (PART_MASK & (((a) & PART_MASK) + (((((b) & PART_MASK) - ((a) & PART_MASK)) * (m)) >> (s)))) \
++                                      | ((PART_MASK & ((((a) >> 8) & PART_MASK) + ((((((b) >> 8) & PART_MASK) - (((a) >> 8) & PART_MASK)) * (m)) >> (s)))) << 8))
++
++#define ALPHA_BLEND_32_W(a, b)  ALPHA_BLEND_BASE(a, b, 1, 3)
++#define ALPHA_BLEND_64_W(a, b)  ALPHA_BLEND_BASE(a, b, 1, 2)
++#define ALPHA_BLEND_128_W(a, b) ALPHA_BLEND_BASE(a, b, 1, 1)
++#define ALPHA_BLEND_192_W(a, b) ALPHA_BLEND_BASE(a, b, 3, 2)
++#define ALPHA_BLEND_224_W(a, b) ALPHA_BLEND_BASE(a, b, 7, 3)
++
++
++
++#define df(A, B) pixel_diff(A, B, r2y)
++#define eq(A, B) (df(A, B) < 155)
++
++#define FILT2(PE, PI, PH, PF, PG, PC, PD, PB, PA, G5, C4, G0, D0, C1, B1, F4, I4, H5, I5, A0, A1,   \
++              N0, N1, N2, N3) do {                                                                  \
++    if (PE != PH && PE != PF) {                                                                     \
++        const unsigned e = df(PE,PC) + df(PE,PG) + df(PI,H5) + df(PI,F4) + (df(PH,PF)<<2);          \
++        const unsigned i = df(PH,PD) + df(PH,I5) + df(PF,I4) + df(PF,PB) + (df(PE,PI)<<2);          \
++        if (e <= i) {                                                                               \
++            const unsigned px = df(PE,PF) <= df(PE,PH) ? PF : PH;                                   \
++            if (e < i && (!eq(PF,PB) && !eq(PH,PD) || eq(PE,PI)                                     \
++                          && (!eq(PF,I4) && !eq(PH,I5))                                             \
++                          || eq(PE,PG) || eq(PE,PC))) {                                             \
++                const unsigned ke = df(PF,PG);                                                      \
++                const unsigned ki = df(PH,PC);                                                      \
++                const int left    = ke<<1 <= ki && PE != PG && PD != PG;                            \
++                const int up      = ke >= ki<<1 && PE != PC && PB != PC;                            \
++                if (left && up) {                                                                   \
++                    E[N3] = ALPHA_BLEND_224_W(E[N3], px);                                           \
++                    E[N2] = ALPHA_BLEND_64_W( E[N2], px);                                           \
++                    E[N1] = E[N2];                                                                  \
++                } else if (left) {                                                                  \
++                    E[N3] = ALPHA_BLEND_192_W(E[N3], px);                                           \
++                    E[N2] = ALPHA_BLEND_64_W( E[N2], px);                                           \
++                } else if (up) {                                                                    \
++                    E[N3] = ALPHA_BLEND_192_W(E[N3], px);                                           \
++                    E[N1] = ALPHA_BLEND_64_W( E[N1], px);                                           \
++                } else { /* diagonal */                                                             \
++                    E[N3] = ALPHA_BLEND_128_W(E[N3], px);                                           \
++                }                                                                                   \
++            } else {                                                                                \
++                E[N3] = ALPHA_BLEND_128_W(E[N3], px);                                               \
++            }                                                                                       \
++        }                                                                                           \
++    }                                                                                               \
++} while (0)
++
++#define FILT3(PE, PI, PH, PF, PG, PC, PD, PB, PA, G5, C4, G0, D0, C1, B1, F4, I4, H5, I5, A0, A1,   \
++              N0, N1, N2, N3, N4, N5, N6, N7, N8) do {                                              \
++    if (PE != PH && PE != PF) {                                                                     \
++        const unsigned e = df(PE,PC) + df(PE,PG) + df(PI,H5) + df(PI,F4) + (df(PH,PF)<<2);          \
++        const unsigned i = df(PH,PD) + df(PH,I5) + df(PF,I4) + df(PF,PB) + (df(PE,PI)<<2);          \
++        if (e <= i) {                                                                               \
++            const unsigned px = df(PE,PF) <= df(PE,PH) ? PF : PH;                                   \
++            if (e < i && (!eq(PF,PB) && !eq(PF,PC) || !eq(PH,PD) && !eq(PH,PG) || eq(PE,PI)         \
++                          && (!eq(PF,F4) && !eq(PF,I4) || !eq(PH,H5) && !eq(PH,I5))                 \
++                          || eq(PE,PG) || eq(PE,PC))) {                                             \
++                const unsigned ke = df(PF,PG);                                                      \
++                const unsigned ki = df(PH,PC);                                                      \
++                const int left    = ke<<1 <= ki && PE != PG && PD != PG;                            \
++                const int up      = ke >= ki<<1 && PE != PC && PB != PC;                            \
++                if (left && up) {                                                                   \
++                    E[N7] = ALPHA_BLEND_192_W(E[N7], px);                                           \
++                    E[N6] = ALPHA_BLEND_64_W( E[N6], px);                                           \
++                    E[N5] = E[N7];                                                                  \
++                    E[N2] = E[N6];                                                                  \
++                    E[N8] = px;                                                                     \
++                } else if (left) {                                                                  \
++                    E[N7] = ALPHA_BLEND_192_W(E[N7], px);                                           \
++                    E[N5] = ALPHA_BLEND_64_W( E[N5], px);                                           \
++                    E[N6] = ALPHA_BLEND_64_W( E[N6], px);                                           \
++                    E[N8] = px;                                                                     \
++                } else if (up) {                                                                    \
++                    E[N5] = ALPHA_BLEND_192_W(E[N5], px);                                           \
++                    E[N7] = ALPHA_BLEND_64_W( E[N7], px);                                           \
++                    E[N2] = ALPHA_BLEND_64_W( E[N2], px);                                           \
++                    E[N8] = px;                                                                     \
++                } else { /* diagonal */                                                             \
++                    E[N8] = ALPHA_BLEND_224_W(E[N8], px);                                           \
++                    E[N5] = ALPHA_BLEND_32_W( E[N5], px);                                           \
++                    E[N7] = ALPHA_BLEND_32_W( E[N7], px);                                           \
++                }                                                                                   \
++            } else {                                                                                \
++                E[N8] = ALPHA_BLEND_128_W(E[N8], px);                                               \
++            }                                                                                       \
++        }                                                                                           \
++    }                                                                                               \
++} while (0)
++
++#define FILT4(PE, PI, PH, PF, PG, PC, PD, PB, PA, G5, C4, G0, D0, C1, B1, F4, I4, H5, I5, A0, A1,   \
++              N15, N14, N11, N3, N7, N10, N13, N12, N9, N6, N2, N1, N5, N8, N4, N0) do {            \
++    if (PE != PH && PE != PF) {                                                                     \
++        const unsigned e = df(PE,PC) + df(PE,PG) + df(PI,H5) + df(PI,F4) + (df(PH,PF)<<2);          \
++        const unsigned i = df(PH,PD) + df(PH,I5) + df(PF,I4) + df(PF,PB) + (df(PE,PI)<<2);          \
++        if (e <= i) {                                                                               \
++            const unsigned px = df(PE,PF) <= df(PE,PH) ? PF : PH;                                   \
++            if (e < i && (!eq(PF,PB) && !eq(PH,PD) || eq(PE,PI)                                     \
++                          && (!eq(PF,I4) && !eq(PH,I5))                                             \
++                          || eq(PE,PG) || eq(PE,PC))) {                                             \
++                const unsigned ke = df(PF,PG);                                                      \
++                const unsigned ki = df(PH,PC);                                                      \
++                const int left    = ke<<1 <= ki && PE != PG && PD != PG;                            \
++                const int up      = ke >= ki<<1 && PE != PC && PB != PC;                            \
++                if (left && up) {                                                                   \
++                    E[N13] = ALPHA_BLEND_192_W(E[N13], px);                                         \
++                    E[N12] = ALPHA_BLEND_64_W( E[N12], px);                                         \
++                    E[N15] = E[N14] = E[N11] = px;                                                  \
++                    E[N10] = E[N3]  = E[N12];                                                       \
++                    E[N7]  = E[N13];                                                                \
++                } else if (left) {                                                                  \
++                    E[N11] = ALPHA_BLEND_192_W(E[N11], px);                                         \
++                    E[N13] = ALPHA_BLEND_192_W(E[N13], px);                                         \
++                    E[N10] = ALPHA_BLEND_64_W( E[N10], px);                                         \
++                    E[N12] = ALPHA_BLEND_64_W( E[N12], px);                                         \
++                    E[N14] = px;                                                                    \
++                    E[N15] = px;                                                                    \
++                } else if (up) {                                                                    \
++                    E[N14] = ALPHA_BLEND_192_W(E[N14], px);                                         \
++                    E[N7 ] = ALPHA_BLEND_192_W(E[N7 ], px);                                         \
++                    E[N10] = ALPHA_BLEND_64_W( E[N10], px);                                         \
++                    E[N3 ] = ALPHA_BLEND_64_W( E[N3 ], px);                                         \
++                    E[N11] = px;                                                                    \
++                    E[N15] = px;                                                                    \
++                } else { /* diagonal */                                                             \
++                    E[N11] = ALPHA_BLEND_128_W(E[N11], px);                                         \
++                    E[N14] = ALPHA_BLEND_128_W(E[N14], px);                                         \
++                    E[N15] = px;                                                                    \
++                }                                                                                   \
++            } else {                                                                                \
++                E[N15] = ALPHA_BLEND_128_W(E[N15], px);                                             \
++            }                                                                                       \
++        }                                                                                           \
++    }                                                                                               \
++} while (0)
++
++static XBR_INLINE void xbr_filter(const xbr_params *params, int n)
++{
++    int x, y;
++    const uint32 *r2y = params->data->rgbtoyuv;
++    const int nl = params->outPitch >> 2;
++    const int nl1 = nl + nl;
++    const int nl2 = nl1 + nl;
++
++    for (y = 0; y < params->inHeight; y++) {
++
++        uint32 *E = (uint32 *)(params->output + y * params->outPitch * n);
++        const uint32 *sa2 = (uint32 *)(params->input + y * params->inPitch - 8); /* center */
++        const uint32 *sa1 = sa2 - (params->inPitch>>2); /* up x1 */
++        const uint32 *sa0 = sa1 - (params->inPitch>>2); /* up x2 */
++        const uint32 *sa3 = sa2 + (params->inPitch>>2); /* down x1 */
++        const uint32 *sa4 = sa3 + (params->inPitch>>2); /* down x2 */
++
++        if (y <= 1) {
++            sa0 = sa1;
++            if (y == 0) {
++                sa0 = sa1 = sa2;
++            }
++        }
++
++        if (y >= params->inHeight - 2) {
++            sa4 = sa3;
++            if (y == params->inHeight - 1) {
++                sa4 = sa3 = sa2;
++            }
++        }
++
++        for (x = 0; x < params->inWidth; x++) {
++            const uint32 B1 = sa0[2];
++            const uint32 PB = sa1[2];
++            const uint32 PE = sa2[2];
++            const uint32 PH = sa3[2];
++            const uint32 H5 = sa4[2];
++
++            const int pprev = 2 - (x > 0);
++            const uint32 A1 = sa0[pprev];
++            const uint32 PA = sa1[pprev];
++            const uint32 PD = sa2[pprev];
++            const uint32 PG = sa3[pprev];
++            const uint32 G5 = sa4[pprev];
++
++            const int pprev2 = pprev - (x > 1);
++            const uint32 A0 = sa1[pprev2];
++            const uint32 D0 = sa2[pprev2];
++            const uint32 G0 = sa3[pprev2];
++
++            const int pnext = 3 - (x == params->inWidth - 1);
++            const uint32 C1 = sa0[pnext];
++            const uint32 PC = sa1[pnext];
++            const uint32 PF = sa2[pnext];
++            const uint32 PI = sa3[pnext];
++            const uint32 I5 = sa4[pnext];
++
++            const int pnext2 = pnext + 1 - (x >= params->inWidth - 2);
++            const uint32 C4 = sa1[pnext2];
++            const uint32 F4 = sa2[pnext2];
++            const uint32 I4 = sa3[pnext2];
++
++            if (n == 2) {
++                E[0]  = E[1]      =     // 0, 1
++                E[nl] = E[nl + 1] = PE; // 2, 3
++
++                FILT2(PE, PI, PH, PF, PG, PC, PD, PB, PA, G5, C4, G0, D0, C1, B1, F4, I4, H5, I5, A0, A1, 0, 1, nl, nl+1);
++                FILT2(PE, PC, PF, PB, PI, PA, PH, PD, PG, I4, A1, I5, H5, A0, D0, B1, C1, F4, C4, G5, G0, nl, 0, nl+1, 1);
++                FILT2(PE, PA, PB, PD, PC, PG, PF, PH, PI, C1, G0, C4, F4, G5, H5, D0, A0, B1, A1, I4, I5, nl+1, nl, 1, 0);
++                FILT2(PE, PG, PD, PH, PA, PI, PB, PF, PC, A0, I5, A1, B1, I4, F4, H5, G5, D0, G0, C1, C4, 1, nl+1, 0, nl);
++            } else if (n == 3) {
++                E[0]   = E[1]     = E[2]     =     // 0, 1, 2
++                E[nl]  = E[nl+1]  = E[nl+2]  =     // 3, 4, 5
++                E[nl1] = E[nl1+1] = E[nl1+2] = PE; // 6, 7, 8
++
++                FILT3(PE, PI, PH, PF, PG, PC, PD, PB, PA, G5, C4, G0, D0, C1, B1, F4, I4, H5, I5, A0, A1, 0, 1, 2, nl, nl+1, nl+2, nl1, nl1+1, nl1+2);
++                FILT3(PE, PC, PF, PB, PI, PA, PH, PD, PG, I4, A1, I5, H5, A0, D0, B1, C1, F4, C4, G5, G0, nl1, nl, 0, nl1+1, nl+1, 1, nl1+2, nl+2, 2);
++                FILT3(PE, PA, PB, PD, PC, PG, PF, PH, PI, C1, G0, C4, F4, G5, H5, D0, A0, B1, A1, I4, I5, nl1+2, nl1+1, nl1, nl+2, nl+1, nl, 2, 1, 0);
++                FILT3(PE, PG, PD, PH, PA, PI, PB, PF, PC, A0, I5, A1, B1, I4, F4, H5, G5, D0, G0, C1, C4, 2, nl+2, nl1+2, 1, nl+1, nl1+1, 0, nl, nl1);
++            } else if (n == 4) {
++                E[0]   = E[1]     = E[2]     = E[3]     =     //  0,  1,  2,  3
++                E[nl]  = E[nl+1]  = E[nl+2]  = E[nl+3]  =     //  4,  5,  6,  7
++                E[nl1] = E[nl1+1] = E[nl1+2] = E[nl1+3] =     //  8,  9, 10, 11
++                E[nl2] = E[nl2+1] = E[nl2+2] = E[nl2+3] = PE; // 12, 13, 14, 15
++
++                FILT4(PE, PI, PH, PF, PG, PC, PD, PB, PA, G5, C4, G0, D0, C1, B1, F4, I4, H5, I5, A0, A1, nl2+3, nl2+2, nl1+3, 3, nl+3, nl1+2, nl2+1, nl2, nl1+1, nl+2, 2, 1, nl+1, nl1, nl, 0);
++                FILT4(PE, PC, PF, PB, PI, PA, PH, PD, PG, I4, A1, I5, H5, A0, D0, B1, C1, F4, C4, G5, G0, 3, nl+3, 2, 0, 1, nl+2, nl1+3, nl2+3, nl1+2, nl+1, nl, nl1, nl1+1, nl2+2, nl2+1, nl2);
++                FILT4(PE, PA, PB, PD, PC, PG, PF, PH, PI, C1, G0, C4, F4, G5, H5, D0, A0, B1, A1, I4, I5, 0, 1, nl, nl2, nl1, nl+1, 2, 3, nl+2, nl1+1, nl2+1, nl2+2, nl1+2, nl+3, nl1+3, nl2+3);
++                FILT4(PE, PG, PD, PH, PA, PI, PB, PF, PC, A0, I5, A1, B1, I4, F4, H5, G5, D0, G0, C1, C4, nl2, nl1, nl2+1, nl2+3, nl2+2, nl1+1, nl, 0, nl+1, nl1+2, nl1+3, nl+3, nl+2, 1, 2, 3);
++            }
++
++            sa0 += 1;
++            sa1 += 1;
++            sa2 += 1;
++            sa3 += 1;
++            sa4 += 1;
++
++            E += n;
++        }
++    }
++}
++
++#define XBR_FUNC(size) \
++void xbr_filter_xbr##size##x(const xbr_params *params) \
++{ \
++    xbr_filter(params, size); \
++}
++
++XBR_FUNC(2)
++XBR_FUNC(3)
++XBR_FUNC(4)
++
++
++static XBR_INLINE int _max(int a, int b)
++{
++	return (a > b) ? a : b;
++}
++
++static XBR_INLINE int _min(int a, int b)
++{
++	return (a < b) ? a : b;
++}
++
++
++void xbr_init_data(xbr_data *data)
++{
++    uint32 c;
++    int bg, rg, g;
++
++    for (bg = -255; bg < 256; bg++) {
++        for (rg = -255; rg < 256; rg++) {
++            const uint32 u = (uint32)((-169*rg + 500*bg)/1000) + 128;
++            const uint32 v = (uint32)(( 500*rg -  81*bg)/1000) + 128;
++            int startg = _max(-bg, _max(-rg, 0));
++            int endg = _min(255-bg, _min(255-rg, 255));
++            uint32 y = (uint32)(( 299*rg + 1000*startg + 114*bg)/1000);
++            c = bg + (rg<<16) + 0x010101 * startg;
++            for (g = startg; g <= endg; g++) {
++                data->rgbtoyuv[c] = ((y++) << 16) + (u << 8) + v;
++                c+= 0x010101;
++            }
++        }
++    }
++}
++
+diff --git a/platform/haiku/haiku_filters.h b/platform/haiku/haiku_filters.h
+new file mode 100644
+index 0000000..a06f0ef
+--- /dev/null
++++ b/platform/haiku/haiku_filters.h
+@@ -0,0 +1,65 @@
++/*
++ * XBR filter: from the FFmpeg project
++ *
++ * Copyright (c) 2011, 2012 Hyllian/Jararaca <sergiogdb@gmail.com>
++ * Copyright (c) 2014 Arwa Arif <arwaarif1994@gmail.com>
++ * Copyright (c) 2015 Treeki <treeki@gmail.com>
++ *
++ *
++ * hqx filter: from the hqx project
++ * Copyright (C) 2003 Maxim Stepin ( maxst@hiend3d.com )
++ * Copyright (C) 2010 Cameron Zemek ( grom@zeminvaders.net)
++ * Copyright (c) 2015 Treeki <treeki@gmail.com>
++ *
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
++ */
++
++#ifndef __LIBXBR_FILTERS_H_INCLUDED
++#define __LIBXBR_FILTERS_H_INCLUDED
++
++#include <SupportDefs.h>
++
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define XBR_INLINE inline
++
++typedef struct {
++    uint32 rgbtoyuv[1<<24];
++} xbr_data;
++
++typedef struct {
++    const uint8 *input;
++    uint8 *output;
++    int inWidth, inHeight;
++    int inPitch, outPitch;
++    const xbr_data *data;
++} xbr_params;
++
++void xbr_filter_xbr2x(const xbr_params *ctx);
++void xbr_filter_xbr3x(const xbr_params *ctx);
++void xbr_filter_xbr4x(const xbr_params *ctx);
++
++void xbr_init_data(xbr_data *data);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
++
+diff --git a/platform/haiku/haiku_joystick.cpp b/platform/haiku/haiku_joystick.cpp
+new file mode 100644
+index 0000000..ddc3bda
+--- /dev/null
++++ b/platform/haiku/haiku_joystick.cpp
+@@ -0,0 +1,213 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include "../platform.h"
++#include "../../tools/options.h"
++#include "../../options_common.h"
++
++#include <Joystick.h>
++
++namespace xPlatform
++{
++
++enum { AXES_COUNT = 8 };
++enum ePadButton
++{
++	PB_A, PB_B, PB_X, PB_Y,
++	PB_LTRIGGER, PB_RTRIGGER,
++	PB_LSHIFT, PB_RSHIFT,
++	PB_SELECT, PB_START,
++	PB_STICK1, PB_STICK2,
++	PB_UP, PB_DOWN,
++	PB_LEFT, PB_RIGHT,
++	PB_SYSTEM, PB_COUNT
++};
++enum eHatButton
++{
++	HAT_CENTERED, HAT_UP,
++	HAT_RIGHT_UP, HAT_RIGHT,
++	HAT_RIGHT_DOWN, HAT_DOWN,
++	HAT_LEFT_DOWN, HAT_LEFT,
++	HAT_LEFT_UP, HAT_COUNT
++};
++
++static BJoystick *joystick = NULL;
++static uint32 lastButtonValues = 0;
++static uint32 lastHatBitValues = 0;
++static float lastAxisValues[AXES_COUNT];
++
++static uint32 HatToBitValues(uint8 hat)
++{
++	uint32 bits[] = { 0x00, 0x01, 0x03, 0x02, 0x06, 0x04, 0x0A, 0x08, 0x09 };
++	if (hat > 8)
++		return 0;
++	return bits[hat];
++}
++
++static void ProcessKey(bool state, bool state_prev, byte key)
++{
++	if(state == state_prev)
++		return;
++	if(state)
++		Handler()->OnKey(key, KF_DOWN | OpJoyKeyFlags());
++	else
++		Handler()->OnKey(key, OpJoyKeyFlags());
++}
++
++static void ProcessAxis(float value, float lastValue, byte key1, byte key2)
++{
++	bool b0 = lastValue > 0.5f;
++	bool b1 = value > 0.5f;
++	ProcessKey(b1, b0, key1);
++	b0 = lastValue < -0.5f;
++	b1 = value < -0.5f;
++	ProcessKey(b1, b0, key2);
++}
++
++bool InitJoystick()
++{
++	joystick = new BJoystick();
++	if (joystick->CountDevices() > 0) {
++		char devName[B_OS_NAME_LENGTH];
++		memset(devName, 0, B_OS_NAME_LENGTH);
++		joystick->GetDeviceName(0, devName);
++		if (joystick->Open(devName) != B_ERROR)
++			return true;
++	}
++	delete joystick;
++	joystick = NULL;
++	return false;
++}
++
++void DoneJoystick()
++{
++	if (joystick != NULL)
++		delete joystick;
++}
++
++bool CheckJoystick()
++{
++	return (joystick != NULL);
++}
++
++void ProcessJoystick()
++{
++	if (joystick == NULL)
++		return;
++
++	joystick->Update();
++
++	uint32 buttonValues = joystick->ButtonValues();
++	for (int buttonIdx = 0; buttonIdx < joystick->CountButtons(); buttonIdx++) {
++		bool buttonValue = buttonValues & (1 << buttonIdx);
++		bool lastButtonValue = lastButtonValues & (1 << buttonIdx);
++		if (buttonValue != lastButtonValue) {
++			switch (buttonIdx) {
++				case PB_UP:
++					ProcessKey(buttonValue, lastButtonValue, 'u');
++					break;
++				case PB_DOWN:
++					ProcessKey(buttonValue, lastButtonValue, 'd');
++					break;
++				case PB_LEFT:
++					ProcessKey(buttonValue, lastButtonValue, 'l');
++					break;
++				case PB_RIGHT:
++					ProcessKey(buttonValue, lastButtonValue, 'r');
++					break;
++				case PB_A:
++					ProcessKey(buttonValue, lastButtonValue, 'f');
++					break;
++				case PB_B:
++					ProcessKey(buttonValue, lastButtonValue, 'e');
++					break;
++				case PB_X:
++					ProcessKey(buttonValue, lastButtonValue, '1');
++					break;
++				case PB_Y:
++					ProcessKey(buttonValue, lastButtonValue, ' ');
++					break;
++				case PB_LSHIFT:
++					ProcessKey(buttonValue, lastButtonValue, 'm');
++					break;
++				case PB_RSHIFT:
++					ProcessKey(buttonValue, lastButtonValue, 'k');
++					break;
++				case PB_SELECT:
++					Handler()->OnAction(A_RESET);
++					break;
++				case PB_START:
++					if(!buttonValue) {
++						using namespace xOptions;
++						eOptionB* o = eOptionB::Find("pause");
++						SAFE_CALL(o)->Change();
++					}
++					break;
++			}
++		}
++	}
++	lastButtonValues = buttonValues;
++	
++	int hatsCount = joystick->CountHats();
++	uint8 hatsValues[hatsCount];
++	joystick->GetHatValues(hatsValues, 0);
++	
++	if (hatsCount > 0) {
++		uint32 hatBitValues = HatToBitValues(hatsValues[0]);
++		for (int hatButtonIdx = 0; hatButtonIdx < joystick->CountButtons(); hatButtonIdx++) {
++			bool hatValue = hatBitValues & (1 << hatButtonIdx);
++			bool lastHatValue = lastHatBitValues & (1 << hatButtonIdx);
++			if (hatValue != lastHatValue) {
++				switch (hatButtonIdx) {
++					case 0:
++						ProcessKey(hatValue, lastHatValue, 'u');
++						break;
++					case 1:
++						ProcessKey(hatValue, lastHatValue, 'r');
++						break;
++					case 2:
++						ProcessKey(hatValue, lastHatValue, 'd');
++						break;
++					case 3:
++						ProcessKey(hatValue, lastHatValue, 'l');
++						break;
++				}
++			}
++		}
++		lastHatBitValues = hatBitValues;
++	}
++
++	int16 axes[joystick->CountAxes()];
++	joystick->GetAxisValues(axes);
++	for (int axesIdx = 0; axesIdx < joystick->CountAxes() && axesIdx < AXES_COUNT; axesIdx++) {
++		double value = 0;
++		if (axes[axesIdx] >= 0)
++			value = axes[axesIdx] / 32767.0;
++		else
++			value = axes[axesIdx] / 32768.0;
++		
++		if (axesIdx == 0 || axesIdx == 3 || axesIdx == 6)
++			ProcessAxis(value, lastAxisValues[axesIdx], 'r', 'l');
++
++		if (axesIdx == 1 || axesIdx == 4 || axesIdx == 7)
++			ProcessAxis(value, lastAxisValues[axesIdx], 'd', 'u');
++		lastAxisValues[axesIdx] = value;
++	}
++}
++
++}
+diff --git a/platform/haiku/haiku_keyboard_window.cpp b/platform/haiku/haiku_keyboard_window.cpp
+new file mode 100644
+index 0000000..28943d1
+--- /dev/null
++++ b/platform/haiku/haiku_keyboard_window.cpp
+@@ -0,0 +1,363 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include "haiku_keyboard_window.h"
++
++static zxbutton zxkeymap[] = {
++	{100,	ZXB_BUTTON,		"BREAK",		NULL,		NULL,		-1,	NULL,	NULL,	0x01 },
++	{100,	ZXB_SEPARATOR,	NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x00 },
++	{100,	ZXB_BUTTON,		"ABOUT",		"F1",		NULL,		-1,	NULL,	NULL,	0x02 },
++	{100,	ZXB_BUTTON,		"SAVE",			"F2",		NULL,		-1,	NULL,	NULL,	0x03 },
++	{100,	ZXB_BUTTON,		"OPEN",			"F3",		NULL,		-1,	NULL,	NULL,	0x04 },
++	{100,	ZXB_BUTTON,		"WEB\nOPEN",	"F4",		NULL,		-1,	NULL,	NULL,	0x05 },
++	{25,	ZXB_SEPARATOR,	NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x00 },
++	{100,	ZXB_BUTTON,		"TAPE",			"F5",		NULL,		-1,	NULL,	NULL,	0x06 },
++	{100,	ZXB_BUTTON,		"QUICK\nSAVE",	"F6",		NULL,		-1,	NULL,	NULL,	0x07 },
++	{100,	ZXB_BUTTON,		"QUICK\nLOAD",	"F7",		NULL,		-1,	NULL,	NULL,	0x08 },
++	{100,	ZXB_BUTTON,		"VIRT.\nKEYB.",	"F8",		NULL,		-1,	NULL,	NULL,	0x09 },
++	{25,	ZXB_SEPARATOR,	NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x00 },
++	{100,	ZXB_BUTTON,		"OSD\nKEYB.",	"F9",		NULL,		-1,	NULL,	NULL,	0x0A },
++	{100,	ZXB_BUTTON,		"OSD\nMENU",	"F10",		NULL,		-1,	NULL,	NULL,	0x0B },
++	{100,	ZXB_BUTTON,		"48K\n128K",	"F11",		NULL,		-1,	NULL,	NULL,	0x0C },
++	{100,	ZXB_BUTTON,		"RESET",		"F12",		NULL,		-1,	NULL,	NULL,	0x0D },
++	{25,	ZXB_SEPARATOR,	NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x00 },
++	{100,	ZXB_BUTTON,		NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x0E },
++	{100,	ZXB_BUTTON,		NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x0F },
++	{100,	ZXB_BUTTON,		"PAUSE",		NULL,		NULL,		-1,	NULL,	NULL,	0x10 },
++	{140,	ZXB_NEWLINE,	NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x00 },
++	{100,	ZXB_BUTTON,		"`",			NULL,		NULL,		-1,	NULL,	NULL,	0x11 },
++	{100,	ZXB_BUTTON,		"1",			"EDIT",		"DEF FN",	2,	"!",	NULL,	0x12 },
++	{100,	ZXB_BUTTON,		"2",			"C.LOCK",	"FN",		1,	"@",	NULL,	0x13 },
++	{100,	ZXB_BUTTON,		"3",			"TR.VIDEO",	"LINE",		3,	"#",	NULL,	0x14 },
++	{100,	ZXB_BUTTON,		"4",			"IN.VIDEO",	"OPEN#",	8,	"$",	NULL,	0x15 },
++	{100,	ZXB_BUTTON,		"5",			"←",		"CLOSE#",	10,	"%",	NULL,	0x16 },
++	{100,	ZXB_BUTTON,		"6",			"↓",		"MOVE",		9,	"&",	NULL,	0x17 },
++	{100,	ZXB_BUTTON,		"7",			"↑",		"ERASE",	11,	"`",	NULL,	0x18 },
++	{100,	ZXB_BUTTON,		"8",			"→",		"POINT",	0,	"(",	NULL,	0x19 },
++	{100,	ZXB_BUTTON,		"9",			"GRAPHICS",	"CAT",		-1,	")",	NULL,	0x1A },
++	{100,	ZXB_BUTTON,		"0",			"DELETE",	"FORMAT",	-1,	"_",	NULL,	0x1B },
++	{100,	ZXB_BUTTON,		"_\n-",			NULL,		NULL,		-1,	NULL,	NULL,	0x1C },
++	{100,	ZXB_BUTTON,		"+\n=",			NULL,		NULL,		-1,	NULL,	NULL,	0x1D },
++	{150,	ZXB_BUTTON,		"DELETE",		NULL,		NULL,		-1,	NULL,	NULL,	0x1E },
++	{25,	ZXB_SEPARATOR,	NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x00 },
++	{100,	ZXB_BUTTON,		"EDIT",			NULL,		NULL,		-1,	NULL,	NULL,	0x1F },
++	{100,	ZXB_BUTTON,		"TRUE\nVIDEO",	NULL,		NULL,		-1,	NULL,	NULL,	0x20 },
++	{100,	ZXB_BUTTON,		"VOL+",			NULL,		NULL,		-1,	NULL,	NULL,	0x21 },
++	{100,	ZXB_NEWLINE,	NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x00 },
++	{150,	ZXB_BUTTON,		"EXTENDED",		NULL,		NULL,		-1,	NULL,	NULL,	0x26 },
++	{100,	ZXB_BUTTON,		"Q",			"SIN",		"ASN",		-1,	"<=",	"PLOT",	0x27 },
++	{100,	ZXB_BUTTON,		"W",			"COS",		"ACS",		-1,	"<>",	"DRAW",	0x28 },
++	{100,	ZXB_BUTTON,		"E",			"TAN",		"ATN",		-1,	">=",	"REM",	0x29 },
++	{100,	ZXB_BUTTON,		"R",			"INT",		"VERIFY",	-1,	"<",	"RUN",	0x2A },
++	{100,	ZXB_BUTTON,		"T",			"RND",		"MERGE",	-1,	">",	"RAND",	0x2B },
++	{100,	ZXB_BUTTON,		"Y",			"STR$",		"[",		-1,	"AND",	"RETURN",0x2C},
++	{100,	ZXB_BUTTON,		"U",			"CHR$",		"]",		-1,	"OR",	"IF",	0x2D },
++	{100,	ZXB_BUTTON,		"I",			"CODE",		"IN",		-1,	"AT",	"INPUT",0x2E },
++	{100,	ZXB_BUTTON,		"O",			"PEEK",		"OUT",		-1,	";",	"POKE",	0x2F },
++	{100,	ZXB_BUTTON,		"P",			"TAB",		"©",		-1,	"\"",	"PRINT",0x30 },
++	{100,	ZXB_BUTTON,		"{\n[",			NULL,		NULL,		-1,	NULL,	NULL,	0x31 },
++	{100,	ZXB_BUTTON,		"}\n]",			NULL,		NULL,		-1,	NULL,	NULL,	0x32 },
++	{100,	ZXB_BUTTON,		"\\",			NULL,		NULL,		-1,	NULL,	NULL,	0x33 },
++	{25,	ZXB_SEPARATOR,	NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x00 },
++	{100,	ZXB_BUTTON,		"DELETE",		NULL,		NULL,		-1,	NULL,	NULL,	0x34 },
++	{100,	ZXB_BUTTON,		"INV.\nVIDEO",	NULL,		NULL,		-1,	NULL,	NULL,	0x35 },
++	{100,	ZXB_BUTTON,		"VOL-",			NULL,		NULL,		-1,	NULL,	NULL,	0x36 },
++	{100,	ZXB_NEWLINE,	NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x00 },
++	{180,	ZXB_BUTTON,		"CAPS LOCK",	NULL,		NULL,		-1,	NULL,	NULL,	0x3B },
++	{100,	ZXB_BUTTON,		"A",			"READ",		"~",		-1,	"STOP",	"NEW",	0x3C },
++	{100,	ZXB_BUTTON,		"S",			"RESTORE",	"|",		-1,	"NOT",	"SAVE",	0x3D },
++	{100,	ZXB_BUTTON,		"D",			"DATA",		"\\",		-1,	"STEP",	"DIM",	0x3E },
++	{100,	ZXB_BUTTON,		"F",			"SGN",		"{",		-1,	"TO",	"FOR",	0x3F },
++	{100,	ZXB_BUTTON,		"G",			"ABS",		"}",		-1,	"THEN",	"GOTO",	0x40 },
++	{100,	ZXB_BUTTON,		"H",			"SQR",		"CIRCLE",	-1,	"^",	"GOSUB",0x41 },
++	{100,	ZXB_BUTTON,		"J",			"VAL",		"VAL$",		-1,	"-",	"LOAD",	0x42 },
++	{100,	ZXB_BUTTON,		"K",			"LEN",		"SCREEN$",	-1,	"+",	"LIST",	0x43 },
++	{100,	ZXB_BUTTON,		"L",			"USR",		"ATTR",		-1,	"=",	"LET",	0x44 },
++	{100,	ZXB_BUTTON,		":\n;",			NULL,		NULL,		-1,	NULL,	NULL,	0x45 },
++	{100,	ZXB_BUTTON,		"\"\n'",		NULL,		NULL,		-1,	NULL,	NULL,	0x46 },
++	{170,	ZXB_BUTTON,		"ENTER",		NULL,		NULL,		-1,	NULL,	NULL,	0x47 },
++	{100,	ZXB_NEWLINE,	NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x00 },
++	{225,	ZXB_BUTTON,		"CAPS SHIFT",	NULL,		NULL,		-1,	NULL,	NULL,	0x4B },
++	{100,	ZXB_BUTTON,		"Z",			"LN",		"BEEP",		-1,	":",	"COPY",	0x4C },
++	{100,	ZXB_BUTTON,		"X",			"EXP",		"INK",		-1,	"₤",	"CLEAR",0x4D },
++	{100,	ZXB_BUTTON,		"C",			"LPRINT",	"PAPER",	-1,	"?",	"COUNT",0x4E },
++	{100,	ZXB_BUTTON,		"V",			"LLIST",	"FLASH",	-1,	"/",	"CLS",	0x4F },
++	{100,	ZXB_BUTTON,		"B",			"BIN",		"BRIGHT",	-1,	"*",	"BORDER",0x50},
++	{100,	ZXB_BUTTON,		"N",			"INKEY$",	"OVER",		-1,	",",	"NEXT",	0x51 },
++	{100,	ZXB_BUTTON,		"M",			"PI",		"INVERSE",	-1,	".",	"PAUSE",0x52 },
++	{100,	ZXB_BUTTON,		"<\n,",			NULL,		NULL,		-1,	NULL,	NULL,	0x53 },
++	{100,	ZXB_BUTTON,		">\n.",			NULL,		NULL,		-1,	NULL,	NULL,	0x54 },
++	{100,	ZXB_BUTTON,		"?\n/",			NULL,		NULL,		-1,	NULL,	NULL,	0x55 },
++	{225,	ZXB_BUTTON,		"CAPS SHIFT",	NULL,		NULL,		-1,	NULL,	NULL,	0x56 },
++	{125,	ZXB_SEPARATOR,	NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x00 },
++	{100,	ZXB_BUTTON,		"↑",			NULL,		NULL,		-1,	NULL,	NULL,	0x57 },	
++	{100,	ZXB_NEWLINE,	NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x00 },
++	{125,	ZXB_BUTTON,		"SYMBOL\nSHIFT",NULL,		NULL,		-1,	NULL,	NULL,	0x5C },
++	{125,	ZXB_BUTTON,		"GRAPH.",		NULL,		NULL,		-1,	NULL,	NULL,	0x66 },
++	{125,	ZXB_BUTTON,		"ALT",			NULL,		NULL,		-1,	NULL,	NULL,	0x5D },
++	{575,	ZXB_BUTTON,		"BREAK SPACE",	NULL,		NULL,		-1,	NULL,	NULL,	0x5E },
++	{125,	ZXB_BUTTON,		"ALT",			NULL,		NULL,		-1,	NULL,	NULL,	0x5F },
++	{125,	ZXB_BUTTON,		"GRAPH.",		NULL,		NULL,		-1,	NULL,	NULL,	0x67 },
++	{125,	ZXB_BUTTON,		"OSD\nMENU",	NULL,		NULL,		-1,	NULL,	NULL,	0x68 },
++	{125,	ZXB_BUTTON,		"SYMBOL\nSHIFT",NULL,		NULL,		-1,	NULL,	NULL,	0x60 },
++	{25,	ZXB_SEPARATOR,	NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x00 },
++	{100,	ZXB_BUTTON,		"←",			NULL,		NULL,		-1,	NULL,	NULL,	0x61 },
++	{100,	ZXB_BUTTON,		"↓",			NULL,		NULL,		-1,	NULL,	NULL,	0x62 },
++	{100,	ZXB_BUTTON,		"→",			NULL,		NULL,		-1,	NULL,	NULL,	0x63 },
++	{0,		ZXB_END,		NULL,			NULL,		NULL,		-1,	NULL,	NULL,	0x00 },
++};
++
++ZXButton::ZXButton(BRect rect, zxbutton *button)
++: BButton(rect, button->label, NULL, NULL, 0, 0),
++	fButtonData(button),
++	fButtonHighlight(false)
++{
++	BFont font;
++	GetFont(&font);
++	fLabelFont = font;
++	fCommandFont = font;
++	fExtendFont = font;
++
++	fLabelFont.SetSize(11);
++	fLabelFont.SetFamilyAndFace("Noto Sans", B_BOLD_FACE);
++
++	fCommandFont.SetSize(8);
++	fCommandFont.SetFamilyAndFace("Noto Sans", B_REGULAR_FACE);
++
++	fExtendFont.SetSize(8);
++	fExtendFont.SetFamilyAndFace("Noto Sans", B_REGULAR_FACE);
++}
++
++void
++ZXButton::SetHighlight(bool enable)
++{
++	fButtonHighlight = enable;
++	Invalidate();
++}
++
++void 
++ZXButton::Draw(BRect rect)
++{
++	BButton::Draw(rect);
++
++	bool simpleButton = fButtonData->label &&
++		!fButtonData->bottom &&
++		!fButtonData->command &&
++		!fButtonData->symbol;
++
++	if (fButtonHighlight) {
++		SetDrawingMode(B_OP_ALPHA);
++		rgb_color color = ui_color(B_CONTROL_HIGHLIGHT_COLOR);
++		color.alpha = 80;
++		SetHighColor(color);
++		FillRect(Bounds());
++		SetDrawingMode(B_OP_COPY);
++	}
++
++	if (fButtonData->label) {
++		if (simpleButton) {
++			SetHighColor(ui_color(B_CONTROL_TEXT_COLOR));
++			SetFont(&fLabelFont);
++			font_height heighdata;
++			fLabelFont.GetHeight(&heighdata);
++			BStringList lines;
++			BString label(fButtonData->label);
++			label.Split("\n", false, lines);
++			float height = heighdata.ascent + heighdata.descent - 3;
++			float totalHeight = lines.CountStrings() * height;		
++			for (int i = 0; i < lines.CountStrings(); i++) {
++				float width = fLabelFont.StringWidth(lines.StringAt(i).String());
++				BPoint pos((Bounds().Width() - width) / 2,
++					(Bounds().Height() - totalHeight) / 2 + heighdata.ascent + (height * i));
++				DrawString(lines.StringAt(i).String(), pos);
++			}
++		} else {
++			SetHighColor(ui_color(B_CONTROL_TEXT_COLOR));
++			SetFont(&fLabelFont);
++			font_height heighdata;
++			fLabelFont.GetHeight(&heighdata);
++			float height = heighdata.ascent + heighdata.descent;
++			BPoint pos(Bounds().left + 4, ((Bounds().Height() - height) / 2) + heighdata.ascent);
++			DrawString(fButtonData->label, pos);
++		}
++	}
++
++	if (fButtonData->top) {
++		SetHighColor(0, 100, 0);
++		SetFont(&fExtendFont);
++		font_height heighdata;
++		fExtendFont.GetHeight(&heighdata);
++		float height = heighdata.ascent + heighdata.descent;
++		float width = fExtendFont.StringWidth(fButtonData->top);
++		BPoint pos((Bounds().Width() - width) / 2, Bounds().top + heighdata.ascent + 3);
++		DrawString(fButtonData->top, pos);
++	}
++
++	if (fButtonData->bottom) {
++		SetHighColor(0, 0, 100);
++		SetFont(&fExtendFont);
++		font_height heighdata;
++		fExtendFont.GetHeight(&heighdata);
++		float height = heighdata.ascent + heighdata.descent;
++		float width = fExtendFont.StringWidth(fButtonData->bottom);
++		BPoint pos((Bounds().Width() - width) / 2, Bounds().bottom - (heighdata.descent + 2));
++		DrawString(fButtonData->bottom, pos);
++	}
++
++	if (fButtonData->command) {
++		SetHighColor(ui_color(B_CONTROL_TEXT_COLOR));
++		SetFont(&fCommandFont);
++		font_height heighdata;
++		fCommandFont.GetHeight(&heighdata);
++		float height = heighdata.ascent + heighdata.descent;
++		float width = fCommandFont.StringWidth(fButtonData->command);
++		BPoint pos(Bounds().Width() - (width + 3), ((Bounds().Height() - height) / 2) + height + 4);
++		DrawString(fButtonData->command, pos);
++	}
++
++	if (fButtonData->symbol) {
++		SetHighColor(100, 0, 0);
++		SetFont(&fCommandFont);
++		font_height heighdata;
++		fCommandFont.GetHeight(&heighdata);
++		float height = heighdata.ascent + heighdata.descent;
++		float width = fCommandFont.StringWidth(fButtonData->symbol);
++		BPoint pos(Bounds().Width() - (width + 3), ((Bounds().Height() - height) / 2) + heighdata.ascent - (heighdata.descent + 2));
++		DrawString(fButtonData->symbol, pos);
++	}
++
++	if (fButtonData->udg >= 0) {
++		SetHighColor(ui_color(B_CONTROL_TEXT_COLOR));
++		SetFont(&fLabelFont);
++		font_height heighdata;
++		fLabelFont.GetHeight(&heighdata);
++		int size = ((heighdata.ascent + heighdata.descent) / 2) - 3;
++		BPoint point(Bounds().Width() / 2, Bounds().Height() /2);
++		StrokeRect(BRect(point.x - size, point.y - size, point.x + size, point.y + size));
++		if (fButtonData->udg & 0x01)
++			FillRect(BRect(point.x - size, point.y - size, point.x, point.y));
++		if (fButtonData->udg & 0x02)
++			FillRect(BRect(point.x, point.y - size, point.x + size, point.y));
++		if (fButtonData->udg & 0x04)
++			FillRect(BRect(point.x - size, point.y, point.x, point.y + size));
++		if (fButtonData->udg & 0x08)
++			FillRect(BRect(point.x, point.y, point.x + size, point.y + size));			
++	}
++}
++
++void
++ZXButton::MouseDown(BPoint where)
++{
++	BMessage *message = new BMessage(B_KEY_DOWN);
++	message->AddInt32("key", fButtonData->key);
++	Window()->PostMessage(message);
++	BButton::MouseDown(where);
++}
++
++void
++ZXButton::MouseUp(BPoint where)
++{
++	BMessage *message = new BMessage(B_KEY_UP);
++	message->AddInt32("key", fButtonData->key);
++	Window()->PostMessage(message);
++	BButton::MouseUp(where);
++}
++
++KeyboardWindow::KeyboardWindow(BRect frame, BWindow *win)
++: BWindow(frame, "Keyboard layout", B_FLOATING_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
++	B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_WILL_ACCEPT_FIRST_CLICK),
++	fButtonSize(48),
++	fButtonSpace(1),
++	fMainWindow(win)
++{
++	fView = new BView(Bounds(), "view", B_FOLLOW_ALL, B_WILL_DRAW);
++	fView->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));
++	AddChild(fView);
++	fButtonPosition = BPoint(10, 10);
++	int buttonIndex = 0;
++	while (zxkeymap[buttonIndex].type != ZXB_END)
++		AddButton(&zxkeymap[buttonIndex++]);
++
++	fButtonPosition.x += 10;
++	fButtonPosition.y += fButtonSize + 10;
++	ResizeTo(fButtonPosition.x, fButtonPosition.y);
++}
++
++void
++KeyboardWindow::AddButton(zxbutton *buttonData)
++{
++	if (buttonData->type == ZXB_BUTTON ) {
++		BRect rect(fButtonPosition.x,
++			fButtonPosition.y,
++			fButtonPosition.x + (fButtonSize * buttonData->size) / 100,
++			fButtonPosition.y + fButtonSize);
++		rect.InsetBy(fButtonSpace, fButtonSpace);
++		ZXButton *button = new ZXButton(rect, buttonData);
++		button->SetTarget(this);
++		if (!buttonData->label)
++			button->SetEnabled(false);
++		fView->AddChild(button);
++		fButtonPosition.x += (fButtonSize * buttonData->size) / 100;
++	} else if (buttonData->type == ZXB_SEPARATOR ) {
++		fButtonPosition.x += (fButtonSize * buttonData->size) / 100;
++	} else if (buttonData->type == ZXB_NEWLINE ) {
++		fButtonPosition.x = 10;
++		fButtonPosition.y += (fButtonSize * buttonData->size) / 100;
++	}
++}
++
++void
++KeyboardWindow::MessageReceived(BMessage *msg)
++{
++	switch(msg->what) {
++		case kKeyHighlight:
++		{
++			uint32 key = msg->FindInt32("key");
++			bool highlight = msg->FindBool("highlight");
++			for (int i = 0; i < fView->CountChildren(); i++) {
++				ZXButton *button = dynamic_cast<ZXButton*>(fView->ChildAt(i));
++				if (button) {
++					if (button->ButtonData()->key != 0 &&
++						button->ButtonData()->key == key) {
++						button->SetHighlight(highlight);
++						break;
++					}
++				}
++			}
++			break;
++		}
++		case B_UNMAPPED_KEY_UP:
++		case B_KEY_UP:
++		case B_UNMAPPED_KEY_DOWN:
++		case B_KEY_DOWN:
++		{
++			fMainWindow->PostMessage(msg);
++			break;
++		}
++	default:
++		BWindow::MessageReceived(msg);
++		break;
++	}
++}
++
++bool
++KeyboardWindow::QuitRequested()
++{
++	fMainWindow->PostMessage(kHelpKeyboardLayout);
++	return false;
++}
+diff --git a/platform/haiku/haiku_keyboard_window.h b/platform/haiku/haiku_keyboard_window.h
+new file mode 100644
+index 0000000..5ba8fdf
+--- /dev/null
++++ b/platform/haiku/haiku_keyboard_window.h
+@@ -0,0 +1,81 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef _KEYBOARD_WINDOW_H
++#define _KEYBOARD_WINDOW_H
++
++#include <stdio.h>
++
++#include <AppKit.h>
++#include <InterfaceKit.h>
++#include <StringList.h>
++
++#define ZXB_BUTTON		0
++#define ZXB_SEPARATOR	1
++#define ZXB_NEWLINE		2
++#define ZXB_END			3
++
++const uint32 kHelpKeyboardLayout = 'HKBD';
++const uint32 kKeyHighlight = 'HGLT';
++
++typedef struct {
++	int32 size;
++	int32 type;
++	const char *label;
++	const char *top;
++	const char *bottom;
++	int8 udg;
++	const char *symbol;
++	const char *command;
++	uint32 key;
++} zxbutton;
++
++class ZXButton : public BButton
++{
++public:
++					ZXButton(BRect rect, zxbutton *button);
++	virtual void	Draw(BRect r);
++	virtual	void	MouseDown(BPoint where);
++	virtual	void	MouseUp(BPoint where);
++	void			SetHighlight(bool enable);
++	zxbutton*		ButtonData(void) { return fButtonData; }
++private:
++	zxbutton*		fButtonData;
++	bool			fButtonHighlight;
++	BFont			fLabelFont;
++	BFont			fCommandFont;
++	BFont			fExtendFont;
++};
++
++class KeyboardWindow : public BWindow
++{
++public:
++					KeyboardWindow(BRect frame, BWindow *win);
++	virtual void	MessageReceived(BMessage *msg);
++	virtual bool	QuitRequested();
++
++	void			AddButton(zxbutton *button);
++private:
++	BView*			fView;
++	BWindow*		fMainWindow;
++	BPoint			fButtonPosition;
++	float			fButtonSize;
++	float			fButtonSpace;
++};
++//------------------------------------------------------------------------------
++#endif
+diff --git a/platform/haiku/haiku_list_item.cpp b/platform/haiku/haiku_list_item.cpp
+new file mode 100644
+index 0000000..0ce9812
+--- /dev/null
++++ b/platform/haiku/haiku_list_item.cpp
+@@ -0,0 +1,75 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include "haiku_list_item.h"
++
++IconListItem::IconListItem(BBitmap *icon,const char *text, uint32 data, int level, bool expanded) :
++	BListItem(level, expanded),
++	fIcon(icon),
++	fLabel(text),
++	fExtraDate(data)
++{
++	BFont font(be_plain_font);
++	font_height heighdata;
++	font.GetHeight(&heighdata);
++	SetHeight(heighdata.ascent + heighdata.descent + 2);
++	SetWidth(font.StringWidth(text));
++}
++
++void
++IconListItem::DrawItem(BView *owner, BRect frame, bool complete)
++{
++	owner->SetDrawingMode(B_OP_OVER);
++
++	owner->SetHighColor((IsSelected() || complete ) ? ui_color(B_LIST_SELECTED_BACKGROUND_COLOR) : owner->ViewColor());
++	owner->FillRect(frame);
++
++	if (fIcon) {
++		owner->MovePenTo(fIcon->Bounds().Width(), frame.top);
++		owner->SetDrawingMode(B_OP_ALPHA);
++		owner->DrawBitmap(fIcon);
++	}
++
++	owner->MovePenTo(frame.left + ((fIcon == NULL) ? 0 : fIcon->Bounds().Width() * 2 ) + 8,
++		(frame.bottom + frame.top) / 2.0 + 4.0);
++	owner->SetHighColor(ui_color(IsSelected() ? B_LIST_SELECTED_ITEM_TEXT_COLOR : B_LIST_ITEM_TEXT_COLOR));
++	owner->DrawString(fLabel.String());
++} 
++
++
++IconMenuListItem::IconMenuListItem(BBitmap *icon,const char *label, BMessage *message) :
++	BMenuItem(label, message),
++	fIcon(icon)
++{
++}
++
++void
++IconMenuListItem::DrawContent(void)
++{
++	if (fIcon) {
++		Menu()->MovePenTo(fIcon->Bounds().Width(), Frame().top);
++		Menu()->SetDrawingMode(B_OP_ALPHA);
++		Menu()->DrawBitmap(fIcon);
++	}
++
++	Menu()->SetDrawingMode(B_OP_OVER);
++	Menu()->MovePenTo(Frame().left + ((fIcon == NULL) ? 0 : fIcon->Bounds().Width() * 2 ) + 8,
++		(Frame().bottom + Frame().top) / 2.0 + 4.0);
++	Menu()->SetHighColor(ui_color(IsSelected() ? B_MENU_SELECTED_ITEM_TEXT_COLOR : B_MENU_ITEM_TEXT_COLOR));
++	Menu()->DrawString(Label());
++} 
+diff --git a/platform/haiku/haiku_list_item.h b/platform/haiku/haiku_list_item.h
+new file mode 100644
+index 0000000..346eb75
+--- /dev/null
++++ b/platform/haiku/haiku_list_item.h
+@@ -0,0 +1,51 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef _ICON_LIST_ITEM_H
++#define _ICON_LIST_ITEM_H
++
++#include <InterfaceKit.h>
++
++class IconListItem : public BListItem
++{ 
++	public:
++						IconListItem(BBitmap *icon, const char *text, uint32 data, int level, bool expanded); 
++		virtual 		~IconListItem() { };
++		const char*		GetLabel() { return fLabel.String(); }
++		const uint32	GetData() { return fExtraDate; }
++
++		virtual void 	DrawItem(BView *owner, BRect frame, bool complete = false); 
++		virtual void 	Update(BView *owner, const BFont *font) { };
++
++	private:
++		BBitmap*		fIcon;
++		BString			fLabel;
++		uint32			fExtraDate;
++};
++
++class IconMenuListItem : public BMenuItem
++{ 
++	public:
++						IconMenuListItem(BBitmap *icon, const char *label, BMessage* message);
++		virtual void	DrawContent();
++	private:
++		BBitmap*		fIcon;
++};
++
++
++#endif
+diff --git a/platform/haiku/haiku_sound.cpp b/platform/haiku/haiku_sound.cpp
+new file mode 100644
+index 0000000..31cd2b0
+--- /dev/null
++++ b/platform/haiku/haiku_sound.cpp
+@@ -0,0 +1,102 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include <Locker.h>
++#include <SoundPlayer.h>
++
++#include "../platform.h"
++#include "../../options_common.h"
++#include "../../tools/options.h"
++#include "../../tools/sound_mixer.h"
++
++namespace xPlatform
++{
++#define HAIKU_SOUND_BUFFER_SIZE (3528 * 4)
++
++static BSoundPlayer *sound_player;
++static BLocker sound_locker("sound_locker");
++static eSoundMixer sound_mixer;
++
++static void AudioCallback(void *cookie, void *buf, size_t length, const media_raw_audio_format &format)
++{
++	sound_locker.Lock();
++
++	if(length <= sound_mixer.Ready()) {
++		memcpy(buf, sound_mixer.Ptr(), length);
++		sound_mixer.Use(length);
++	} else {
++		memcpy(buf, sound_mixer.Ptr(), sound_mixer.Ready());
++		memset((byte*)buf + sound_mixer.Ready(), 0, length - sound_mixer.Ready());
++		sound_mixer.Use(sound_mixer.Ready());
++	}
++	
++	sound_locker.Unlock();
++}
++
++void InitAudio()
++{
++	using namespace xOptions;
++	struct eOptionBX : public eOptionB
++	{
++		void Unuse() { customizable = false; storeable = false; }
++	};
++	eOptionBX* o = (eOptionBX*)eOptionB::Find("sound");
++	SAFE_CALL(o)->Unuse();
++
++	media_raw_audio_format spec = {
++		44100,
++		2,
++		media_raw_audio_format::B_AUDIO_SHORT,
++		B_MEDIA_LITTLE_ENDIAN,
++		HAIKU_SOUND_BUFFER_SIZE
++	};
++
++	sound_player = new BSoundPlayer(&spec, "USP", AudioCallback);
++	sound_player->Start();
++	sound_player->SetHasData(true);
++}
++
++void VolumeAudio(float volume)
++{
++	float db = 20 * log(volume / 10.0);
++	sound_player->SetVolumeDB(db);
++}
++
++void UpdateAudio()
++{
++	sound_locker.Lock();
++	sound_mixer.Update();
++
++	static bool audio_filled = false;
++	bool audio_filled_new = sound_mixer.Ready() > HAIKU_SOUND_BUFFER_SIZE;
++	if(audio_filled != audio_filled_new)
++	{
++		audio_filled = audio_filled_new;
++		Handler()->VideoPaused(audio_filled);
++	}
++	
++	sound_locker.Unlock();
++}
++
++void DoneAudio()
++{
++	sound_player->SetHasData(false);
++	delete sound_player;
++}
++
++}
+diff --git a/platform/haiku/haiku_surface.cpp b/platform/haiku/haiku_surface.cpp
+new file mode 100644
+index 0000000..cd0538a
+--- /dev/null
++++ b/platform/haiku/haiku_surface.cpp
+@@ -0,0 +1,303 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include "../platform.h"
++#include "../../tools/point.h"
++#include "../../ui/ui.h"
++
++#include "haiku_surface.h"
++
++namespace xPlatform
++{
++static void OpZoomGet(float* sx, float* sy, const ePoint& org_size, const ePoint& size)
++{
++	*sx = ((float)org_size.x) / size.x;
++	*sy = ((float)org_size.y) / size.y;
++}
++
++struct eMouseDelta
++{
++	eMouseDelta() : x(0.0f), y(0.0f) {}
++	eMouseDelta(const ePoint& d, float sx, float sy)
++	{
++		x = sx*d.x;
++		y = sy*d.y;
++	}
++	eMouseDelta& operator+=(const eMouseDelta& d) { x += d.x; y += d.y; return *this; }
++	float x;
++	float y;
++};
++
++static eMouseDelta mouse_delta;
++
++static uint32* memset32(uint32 *buf, uint32 val, size_t count)
++{
++	while(count--) *buf++ = val;
++		return buf;
++}
++
++SurfaceView::SurfaceView(BRect rect, int width, int height) :
++	BView(rect, "SurfaceView", B_FOLLOW_ALL, B_WILL_DRAW | B_PULSE_NEEDED),
++	fBilinear(false),
++	fXBRFiltering(false),
++	fSmartBorder(false),
++	fMouseGrab(false),
++	fLastMouseButtons(0),
++	fTimerMessageRunner(NULL)
++{
++	fPixelBufferWidth = width;
++	fPixelBufferHeight = height;
++
++	fBufferBitmap = new BBitmap(BRect(0, 0, width - 1, height - 1), B_RGB32);
++	width = fPixelBufferWidth * 2;	height = fPixelBufferHeight * 2;
++	fBufferBitmap2x = new BBitmap(BRect(0, 0, width - 1, height - 1), B_RGB32);
++	width = fPixelBufferWidth * 3;	height = fPixelBufferHeight * 3;
++	fBufferBitmap3x = new BBitmap(BRect(0, 0, width - 1, height - 1), B_RGB32);
++	width = fPixelBufferWidth * 4;	height = fPixelBufferHeight * 4;
++	fBufferBitmap4x = new BBitmap(BRect(0, 0, width - 1, height - 1), B_RGB32);
++
++	fXbrData = (xbr_data*)malloc(sizeof(xbr_data));
++	xbr_init_data(fXbrData);
++
++	fXbrParams.data = fXbrData;
++	fXbrParams.input = (uint8*)fBufferBitmap->Bits();
++	fXbrParams.output = (uint8*)fBufferBitmap2x->Bits();
++	fXbrParams.inWidth = fPixelBufferWidth;
++	fXbrParams.inHeight = fPixelBufferHeight;
++	fXbrParams.inPitch = fBufferBitmap->BytesPerRow();
++	fXbrParams.outPitch = fBufferBitmap2x->BytesPerRow();
++
++	fBufferOffscreenView = new BView(Bounds(), "bufferOffscreenView", B_FOLLOW_ALL_SIDES, 0);
++	fBufferOffscreenBitmap = new BBitmap(Bounds(), B_RGB32, true);
++	fBufferOffscreenBitmap->AddChild(fBufferOffscreenView);
++	fBufferOffscreenView->SetDrawingMode(B_OP_COPY);
++	SetDrawingMode(B_OP_COPY);
++}
++
++SurfaceView::~SurfaceView()
++{
++	if (fTimerMessageRunner)
++		delete fTimerMessageRunner;
++	if (fBufferBitmap)
++		delete fBufferBitmap;
++	if (fBufferBitmap2x)
++		delete fBufferBitmap2x;
++	if (fBufferBitmap3x)
++		delete fBufferBitmap3x;
++	if (fBufferBitmap4x)
++		delete fBufferBitmap4x;
++	if (fBufferOffscreenBitmap)
++		delete fBufferOffscreenBitmap;
++}
++
++void
++SurfaceView::AttachedToWindow()
++{
++	BMessenger messenger(this, Window());
++	BMessage message(kRepaintEvent);
++	fTimerMessageRunner = new BMessageRunner(messenger, &message, 1000000 / 50);
++}
++
++void
++SurfaceView::MessageReceived(BMessage *message)
++{
++	switch (message->what) {
++		case kRepaintEvent:
++		{
++			Repaint();
++			return;
++		}
++		default:
++			break;
++	}
++	BView::MessageReceived(message);
++}
++
++void 
++SurfaceView::Draw(BRect rect)
++{
++	DrawBitmap(fBufferOffscreenBitmap, rect, rect);
++}
++
++void 
++SurfaceView::MouseMoved(BPoint p, uint32 transit, const BMessage *message)
++{
++	if (fMouseGrab) {
++		ePoint size;
++		size.x = Bounds().Width();
++		size.y = Bounds().Height();
++
++		float sx, sy;
++		OpZoomGet(&sx, &sy, ePoint(xUi::WIDTH, xUi::HEIGHT), size);
++
++		BPoint center(Bounds().Width() / 2, Bounds().Height() / 2);
++		BPoint shift = p - center;
++
++		float scale_x = float(xUi::WIDTH) / size.x / sx;
++		float scale_y = float(xUi::HEIGHT) / size.y / sy;
++		mouse_delta += eMouseDelta(ePoint(shift.x, shift.y), scale_x, scale_y);
++
++		int dx = mouse_delta.x;
++		int dy = mouse_delta.y;
++		if(dx || dy) {
++			mouse_delta.x -= dx;
++			mouse_delta.y -= dy;
++			Handler()->OnMouse(MA_MOVE, dx, -dy);
++			center = ConvertToScreen(center);
++			set_mouse_position(center.x, center.y);
++		}
++	}
++}
++
++void
++SurfaceView::MouseDown(BPoint p)
++{
++	if (fMouseGrab) {
++		uint32 buttons = Window()->CurrentMessage()->FindInt32("buttons");
++		Handler()->OnMouse(MA_BUTTON, buttons & B_PRIMARY_MOUSE_BUTTON ? 0 : 1, 1);
++		fLastMouseButtons = buttons;
++	}
++}
++
++void
++SurfaceView::MouseUp(BPoint p)
++{	
++	if (fMouseGrab) {
++		uint32 buttons = 0;
++		GetMouse(&p, &buttons, false);
++		Handler()->OnMouse(MA_BUTTON,
++			((fLastMouseButtons & B_PRIMARY_MOUSE_BUTTON) &&
++			!(buttons & B_PRIMARY_MOUSE_BUTTON)) ? 0 : 1, 0);
++	}
++}
++
++void
++SurfaceView::EnableMouseGrab(bool enabled)
++{
++	fMouseGrab = enabled;
++	if (enabled) {
++		BPoint center(Bounds().Width() / 2, Bounds().Height() / 2);
++		center = ConvertToScreen(center);
++		set_mouse_position(center.x, center.y);
++	}
++}
++
++void 
++SurfaceView::Repaint()
++{
++	ResizeOffscreenBitmap(Bounds().Width(), Bounds().Height());
++	fBufferOffscreenBitmap->Lock();
++
++	BRect rect = Bounds();
++	BRect bmpRect = fBufferOffscreenBitmap->Bounds();
++
++	float kx = rect.Width() / (float)fPixelBufferWidth;
++	float ky = rect.Height() / (float)fPixelBufferHeight;
++
++	BRect dstRect = rect;
++	if (kx >= ky) {
++		float w = fPixelBufferWidth * ky;
++		float h = fPixelBufferHeight * ky;
++		dstRect.left = (rect.Width() - w) / 2 - 1;
++		dstRect.top = 0;
++		dstRect.right = dstRect.left + w + 3;
++		dstRect.bottom = h;
++	} else {
++		float w = fPixelBufferWidth * kx;
++		float h = fPixelBufferHeight * kx;
++		dstRect.left = 0;
++		dstRect.top = (rect.Height() - h) / 2;
++		dstRect.right = w;
++		dstRect.bottom = dstRect.top + h;
++	}
++
++	bool scale1x = bmpRect.Width() - 1 <= xUi::WIDTH && bmpRect.Height() - 1 <= xUi::HEIGHT;
++
++	if (!fSmartBorder)
++		memset(fBufferOffscreenBitmap->Bits(), 0, fBufferOffscreenBitmap->BitsLength());
++
++	int multiplyIndex = ceilf(bmpRect.Width() / xUi::WIDTH) - 1;
++
++	if (fXBRFiltering && multiplyIndex > 1) {
++		if (multiplyIndex == 2) {
++			fXbrParams.output = (uint8*)fBufferBitmap2x->Bits();
++			fXbrParams.outPitch = fBufferBitmap2x->BytesPerRow();
++			xbr_filter_xbr2x(&fXbrParams);
++			fBufferOffscreenView->DrawBitmap(fBufferBitmap2x, fBufferBitmap2x->Bounds(),
++				dstRect, (fBilinear && !scale1x) ? B_FILTER_BITMAP_BILINEAR : 0);
++		} else if (multiplyIndex == 3) {
++			fXbrParams.output = (uint8*)fBufferBitmap3x->Bits();
++			fXbrParams.outPitch = fBufferBitmap3x->BytesPerRow();
++			xbr_filter_xbr3x(&fXbrParams);
++			fBufferOffscreenView->DrawBitmap(fBufferBitmap3x, fBufferBitmap3x->Bounds(),
++				dstRect, (fBilinear && !scale1x) ? B_FILTER_BITMAP_BILINEAR : 0);
++		} else {
++			fXbrParams.output = (uint8*)fBufferBitmap4x->Bits();
++			fXbrParams.outPitch = fBufferBitmap4x->BytesPerRow();
++			xbr_filter_xbr4x(&fXbrParams);
++			fBufferOffscreenView->DrawBitmap(fBufferBitmap4x, fBufferBitmap4x->Bounds(),
++				dstRect, (fBilinear && !scale1x) ? B_FILTER_BITMAP_BILINEAR : 0);
++		}
++	} else {
++		fBufferOffscreenView->DrawBitmap(fBufferBitmap, fBufferBitmap->Bounds(),
++			dstRect, (fBilinear && !scale1x) ? B_FILTER_BITMAP_BILINEAR : 0);
++	}
++
++	if (fSmartBorder) {
++		uint32 *bmp = (uint32*)fBufferOffscreenBitmap->Bits();
++		uint32 *endBuffer = bmp + (fBufferOffscreenBitmap->BitsLength() / 4);
++		int32 rowSize = fBufferOffscreenBitmap->BytesPerRow() / 4;
++		if (kx > ky) {
++			for (int y = 0; y < bmpRect.Height() + 1; y++) {
++				uint32 value = bmp[y * rowSize + (uint32)dstRect.left + 1];
++				uint32 *dst = bmp + y * rowSize;
++				memset32(dst, value, MIN((uint32)dstRect.left + 1, endBuffer - dst));
++				value = bmp[y * rowSize + (uint32)dstRect.right - 1];
++				dst = bmp + y * rowSize + (uint32)dstRect.right;
++				memset32(dst, value, MIN(rowSize - (uint32)dstRect.right, endBuffer - dst));
++			}
++		} else {
++			uint32 topColor = bmp[int32(dstRect.top + 0.5) * rowSize];
++			uint32 bottomColor = bmp[int32(dstRect.bottom - 0.5) * rowSize];
++			memset32(bmp, topColor, int32(dstRect.top + 0.5) * rowSize);
++			uint32 *dst = bmp + int32(dstRect.bottom + 0.5) * rowSize;
++			memset32(dst, bottomColor, MIN(int32(rect.bottom - dstRect.bottom + 1) * rowSize, endBuffer - dst));
++		}
++	}
++
++	DrawBitmap(fBufferOffscreenBitmap);
++	fBufferOffscreenBitmap->Unlock();
++}
++
++void
++SurfaceView::ResizeOffscreenBitmap(int width, int height)
++{
++	if (((int)fBufferOffscreenBitmap->Bounds().Width()) == width &&
++		((int)fBufferOffscreenBitmap->Bounds().Height()) == height) {
++		return;
++	}
++
++	fBufferOffscreenBitmap->RemoveChild(fBufferOffscreenView);
++	delete fBufferOffscreenBitmap;
++
++	fBufferOffscreenView->ResizeTo(width, height);
++	fBufferOffscreenBitmap = new BBitmap(BRect(0, 0, width, height), B_RGB32, true);
++	fBufferOffscreenBitmap->AddChild(fBufferOffscreenView);
++}
++
++}
+diff --git a/platform/haiku/haiku_surface.h b/platform/haiku/haiku_surface.h
+new file mode 100644
+index 0000000..84d5993
+--- /dev/null
++++ b/platform/haiku/haiku_surface.h
+@@ -0,0 +1,91 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef _HAIKU_SURFACE_VIEW_H
++#define _HAIKU_SURFACE_VIEW_H
++
++#include <stdio.h>
++
++#include <AppKit.h>
++#include <KernelKit.h>
++#include <InterfaceKit.h>
++#include <Cursor.h>
++#include <game/WindowScreen.h>
++
++#include "haiku_filters.h"
++
++namespace xPlatform
++{
++
++const uint32 kRepaintEvent = 'RPNT';
++
++class SurfaceView : public BView 
++{
++ public:
++							SurfaceView(BRect rect, int width, int height);
++							~SurfaceView();
++
++		virtual void		MouseDown(BPoint point);
++		virtual void		MouseUp(BPoint point);
++		virtual void		MouseMoved(BPoint p, uint32 transit, const BMessage *message);
++		virtual void		MessageReceived(BMessage *msg);
++		virtual	void		AttachedToWindow();
++		virtual void		Draw(BRect r);
++
++		void				LockBuffer() { fBufferBitmap->Lock(); }
++		void				UnlockBuffer() { fBufferBitmap->Unlock(); }
++		uint32*				GetBuffer() { return (uint32*)fBufferBitmap->Bits(); }
++		uint32				GetBufferSize() { return fBufferBitmap->BitsLength(); }
++
++		void				EnableBilinear(bool enabled) {fBilinear = enabled; }
++		void				EnableXBR(bool enabled) {fXBRFiltering = enabled; }
++		void				EnableSmartBorder(bool enabled) {fSmartBorder = enabled; }
++		void				EnableMouseGrab(bool enabled);
++
++		int					Width() { return fPixelBufferWidth; }
++		int					Height() { return fPixelBufferHeight; }
++
++ private:
++		void				ResizeOffscreenBitmap(int width, int height);
++ 		void 				Repaint();
++
++ 		BMessageRunner*		fTimerMessageRunner;
++
++ 		BView*				fBufferOffscreenView;
++		BBitmap*			fBufferOffscreenBitmap;
++		BBitmap*			fBufferBitmap;
++		BBitmap*			fBufferBitmap2x;
++		BBitmap*			fBufferBitmap3x;
++		BBitmap*			fBufferBitmap4x;
++
++ 		int					fPixelBufferWidth;
++ 		int					fPixelBufferHeight;
++
++ 		bool				fBilinear;
++ 		bool				fXBRFiltering;
++ 		bool				fSmartBorder;
++ 		bool				fMouseGrab;
++
++ 		uint32				fLastMouseButtons;
++
++		xbr_data*			fXbrData;
++		xbr_params 			fXbrParams;
++};
++
++}
++#endif
+diff --git a/platform/haiku/haiku_video.cpp b/platform/haiku/haiku_video.cpp
+new file mode 100644
+index 0000000..55ffe57
+--- /dev/null
++++ b/platform/haiku/haiku_video.cpp
+@@ -0,0 +1,96 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include "../platform.h"
++#include "../../ui/ui.h"
++
++#include "haiku_window.h"
++
++namespace xPlatform
++{
++
++static HaikuPlatformWindow* window = NULL;
++static bigtime_t lastRepaintTime;
++
++static inline dword BGRX(byte r, byte g, byte b)
++{
++	return (r << 16) | (g << 8) | b;
++}
++
++static struct eCachedColors
++{
++	eCachedColors()
++	{
++		const byte brightness = 200;
++		const byte bright_intensity = 55;
++		for(int c = 0; c < 16; ++c) {
++			byte i = c & 8 ? brightness + bright_intensity : brightness;
++			byte b = c & 1 ? i : 0;
++			byte r = c & 2 ? i : 0;
++			byte g = c & 4 ? i : 0;
++			items[c] = BGRX(r, g, b);
++		}
++	} dword items[16];
++} color_cache;
++
++bool InitVideo()
++{
++	window = new HaikuPlatformWindow(BRect(100, 100, 100 + 640, 100 + 515), xUi::WIDTH, xUi::HEIGHT,
++		Handler()->WindowCaption(), B_TITLED_WINDOW, 0);
++	window->Show();
++
++	lastRepaintTime = system_time();
++
++	return true;
++}
++
++void DoneVideo()
++{
++	window->Lock();
++	window->Quit();
++}
++
++void UpdateScreen()
++{
++	if (system_time() - lastRepaintTime < 1000000 / 50)
++		return;
++
++	window->View()->LockBuffer();
++
++	byte* data = (byte*)Handler()->VideoData();	
++	dword* hscr = (dword*)window->View()->GetBuffer(); 
++	byte* data_ui = (byte*)Handler()->VideoDataUI();
++
++	if(data_ui)	{
++		for(int y = 0; y < xUi::HEIGHT; ++y)
++			for(int x = 0; x < xUi::WIDTH; ++x) {
++				xUi::eRGBAColor c_ui = xUi::palette[*data_ui++];
++				xUi::eRGBAColor c = color_cache.items[*data++];
++				*hscr++ = BGRX((c.b >> c_ui.a) + c_ui.r, (c.g >> c_ui.a) + c_ui.g, (c.r >> c_ui.a) + c_ui.b);
++			}
++	} else {
++		for(int y = 0; y < xUi::HEIGHT; ++y)
++			for(int x = 0; x < xUi::WIDTH; ++x)
++				*hscr++ = color_cache.items[*data++];
++	}
++
++	window->View()->UnlockBuffer();
++	lastRepaintTime = system_time();
++}
++
++}
+diff --git a/platform/haiku/haiku_web_window.cpp b/platform/haiku/haiku_web_window.cpp
+new file mode 100644
+index 0000000..0f3e89f
+--- /dev/null
++++ b/platform/haiku/haiku_web_window.cpp
+@@ -0,0 +1,288 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include "../platform.h"
++#include "../io.h"
++#include "../../tools/options.h"
++#include "../../options_common.h"
++#include "../../tools/io_select.h"
++
++#include "haiku_web_window.h"
++#include "haiku_list_item.h"
++
++namespace xIo
++{
++	eFileSelect* FileSelectWEB(const char* path);
++	const char* FileSelectWEB_Open(const char* name);
++}
++
++namespace xPlatform
++{
++
++WebWindow::WebWindow(BRect frame, BWindow *win)
++: BWindow(frame, "Open file from web...", B_DOCUMENT_WINDOW_LOOK, B_MODAL_APP_WINDOW_FEEL, B_CLOSE_ON_ESCAPE),
++	fMainWindow(win)
++{
++	BFont font(be_plain_font);
++	font_height heighdata;
++	font.GetHeight(&heighdata);
++	float height = heighdata.ascent + heighdata.descent;
++
++	BMimeType folder("application/x-vnd.Be-directory");
++	BMimeType script("text/x-makefile");
++	BMimeType regular("application/octet-stream");
++	BMimeType zip("application/zip");
++
++	fFolderIcon = new BBitmap(BRect(0, 0, height, height), B_RGBA32);
++	fScriptIcon = new BBitmap(BRect(0, 0, height, height), B_RGBA32);
++	fRegularIcon = new BBitmap(BRect(0, 0, height, height), B_RGBA32);
++	fZipIcon = new BBitmap(BRect(0, 0, height, height), B_RGBA32);
++	fUpIcon = new BBitmap(BRect(0, 0, height, height), B_RGBA32);
++
++	folder.GetIcon(fFolderIcon, B_MINI_ICON);
++	script.GetIcon(fScriptIcon, B_MINI_ICON);
++	regular.GetIcon(fRegularIcon, B_MINI_ICON);
++	zip.GetIcon(fZipIcon, B_MINI_ICON);
++	
++	BResources trackerResource("/system/lib/libtracker.so");
++	size_t length = 0;
++	const void* data = trackerResource.LoadResource('VICN', 1044, &length);
++	BIconUtils::GetVectorIcon((uint8*)data, length, fUpIcon);
++	
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, &fLastDownloadedPath) == B_OK)
++		fLastDownloadedPath.Append("USP");
++	else
++		fLastDownloadedPath.SetTo("/boot/home/config/settings/USP");
++	
++	fMenuBar = new BMenuBar("menu_bar", B_ITEMS_IN_ROW, B_INVALIDATE_AFTER_LAYOUT);
++	BMenu* menu = new BMenu("File");
++	menu->AddItem(new BMenuItem("Open", new BMessage(kFileInvocated), 'O'));
++	menu->AddItem(new BMenuItem("Download file", new BMessage(kFileDownload), 'D'));
++	menu->AddItem(new BMenuItem("Open download folder", new BMessage(kFileOpenDowloadFolder), 'J'));
++	fMenuBar->AddItem(menu);
++	menu->SetTargetForItems(this);
++
++	fPathPopupMenu = new BPopUpMenu("Root");
++	fPathMenuField = new BMenuField("path", "", fPathPopupMenu);
++	fPathMenuField->SetDivider(0);
++
++	fListView = new BListView("list view", B_SINGLE_SELECTION_LIST);
++	fListView->SetInvocationMessage(new BMessage(kFileInvocated));
++
++	fScrollView = new BScrollView("web scroll", fListView, 0, false, true);
++
++	fUpButton = new BButton("", new BMessage(kGoToParent));
++	fUpButton->SetIcon(fUpIcon, 0);
++	fUpButton->SetFlat(true);
++
++	fCancelButton = new BButton("Cancel", new BMessage(kCancelButtonPush));
++	fOpenButton = new BButton("Open", new BMessage(kOpenButtonPush));
++	fOpenButton->MakeDefault(true);
++	
++	BFont smallFont(be_plain_font);
++	smallFont.SetSize(ceilf(font.Size() * 0.75));
++	fStatusView = new BStringView("list status", "Items");
++	fStatusView->SetFont(&smallFont, B_FONT_SIZE);
++	fStatusView->SetAlignment(B_ALIGN_LEFT);
++
++	fPath.SetTo("");
++
++	const float spacing = be_control_look->DefaultItemSpacing();
++
++	BGroupLayout* statusGroup = BLayoutBuilder::Group<>(B_VERTICAL, 0.0)
++		.Add(new BSeparatorView(B_HORIZONTAL, B_PLAIN_BORDER))
++		.Add(BLayoutBuilder::Group<>(B_HORIZONTAL, 0)
++			.Add(new BSeparatorView(B_VERTICAL, B_PLAIN_BORDER))
++			.Add(fStatusView)
++			.Add(new BSeparatorView(B_VERTICAL, B_PLAIN_BORDER))
++			.AddGlue()
++			.Add(new BSeparatorView(B_VERTICAL, B_PLAIN_BORDER))
++			.SetInsets(0, 0, 0, 0))
++		.Add(new BSeparatorView(B_HORIZONTAL, B_PLAIN_BORDER))
++		.SetInsets(1, 0, 1, 0);
++
++	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
++		.Add(fMenuBar)
++		.Add(BLayoutBuilder::Group<>(B_VERTICAL, B_USE_DEFAULT_SPACING)
++			.AddGroup(B_HORIZONTAL, 0)
++				.Add(fUpButton)
++				.Add(fPathMenuField)
++				.AddGlue()
++				.AddGlue()
++				.AddGlue()
++				.AddGlue()
++			.End()
++			.AddGroup(B_VERTICAL, 0)
++				.Add(fScrollView)
++				.Add(statusGroup)
++			.End()
++			.AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING)
++				.AddGlue()
++				.Add(fCancelButton)
++				.Add(fOpenButton)
++				.AddStrut(B_USE_DEFAULT_SPACING)
++			.End()
++			.SetInsets(B_USE_WINDOW_SPACING))
++		.End();
++
++	SetSizeLimits(512, 2048, 320, 2048);
++
++	AddShortcut(B_UP_ARROW, 0, new BMessage(kGoToParent));
++	AddShortcut(B_DOWN_ARROW, 0, new BMessage(kFileInvocated));
++
++	CenterOnScreen();
++	UpdateList();
++}
++
++static int _StrICmp(const void* item1,	const void* item2)
++{
++	IconListItem *i1 = *((IconListItem**)item1);
++	IconListItem *i2 = *((IconListItem**)item2);
++	return strcasecmp(i1->GetLabel(), i2->GetLabel());
++}
++
++void
++WebWindow::UpdateList(void)
++{
++	fListView->MakeEmpty();
++	fPathPopupMenu->RemoveItems(0, fPathPopupMenu->CountItems(), true);
++
++	BList dirs;
++	xIo::eFileSelect* fs = xIo::FileSelectWEB(fPath.String());
++	for(; fs->Valid(); fs->Next()) {
++		if(fs->IsDir())
++			dirs.AddItem(new IconListItem(fFolderIcon, fs->Name(), B_DIRECTORY_NODE, 0, false));
++	}
++
++	BList files;
++	fs = xIo::FileSelectWEB(fPath.String());
++	for(; fs->Valid(); fs->Next()) {
++		if(fs->IsFile()) {
++			BString fileName(fs->Name());
++			BBitmap *icon = fRegularIcon;
++			if (fileName.IEndsWith(".zip") || fileName.IEndsWith(".rar"))
++				icon = fZipIcon;
++			if (fileName.IEndsWith(".rzx"))
++				icon = fScriptIcon;
++			files.AddItem(new IconListItem(icon, fs->Name(), B_FILE_NODE, 0, false));
++		}
++	}
++	dirs.SortItems(_StrICmp);
++	files.SortItems(_StrICmp);
++	fListView->AddList(&dirs);
++	fListView->AddList(&files);
++	
++	BStringList pathList;
++	fPath.Split("/", true, pathList);
++	BString path;
++	BMessage *message = new BMessage(kPathSelect);
++	message->AddString("path", path);
++	BMenuItem *item = new IconMenuListItem(fFolderIcon, "/", message);
++	fPathPopupMenu->AddItem(item);
++	for (int i = 0; i < pathList.CountStrings(); i++) {
++		message = new BMessage(kPathSelect);
++		path << pathList.StringAt(i) << "/";
++		message->AddString("path", path);
++		item = new IconMenuListItem(fFolderIcon, pathList.StringAt(i).String(), message);
++		fPathPopupMenu->AddItem(item);
++	}
++	item->SetMarked(true);
++
++	fUpButton->SetEnabled(pathList.CountStrings() != 0);
++
++	BString statusText;
++	statusText << " " << fListView->CountItems() << " items ";
++	fStatusView->SetText(statusText);
++}
++
++void
++WebWindow::MessageReceived(BMessage *message)
++{
++	switch(message->what) {
++		case kCancelButtonPush:
++		{
++			Hide();
++			break;
++		}
++		case kGoToParent:
++		{
++			char parent[MAXPATHLEN];
++			xIo::GetPathParent(parent, fPath.String());
++			if(strlen(parent))
++				strcat(parent, "/");
++			fPath = parent;
++			UpdateList();
++			break;
++		}
++		case kPathSelect:
++		{
++			fPath = message->FindString("path");
++			UpdateList();
++			break;
++		}
++		case kFileOpenDowloadFolder:
++		{
++			BString path("open ");
++			path << "\"" << fLastDownloadedPath.Path() << "\"";
++			system(path.String());
++			break;
++		}
++		case kFileDownload:
++		case kOpenButtonPush:
++		case kFileInvocated:
++		{
++			int32 index = fListView->CurrentSelection();
++			if (index < 0)
++				break;
++			IconListItem *item = dynamic_cast<IconListItem*>(fListView->ItemAt(index));
++			if (item) {
++				if (item->GetData() == B_DIRECTORY_NODE) {
++					fPath << item->GetLabel() << "/";
++					UpdateList();
++				}
++				if (item->GetData() == B_FILE_NODE) {
++					BString file = fPath;
++					file << item->GetLabel();
++					const char *selected = xIo::FileSelectWEB_Open(file.String());
++					if (selected) {
++						if (message->what != kFileDownload) {
++							Handler()->OnOpenFile(selected);
++							Hide();
++						}
++						BPath file(selected);
++						file.GetParent(&fLastDownloadedPath);
++					}
++					break;
++				}
++			}
++			break;
++		}
++	default:
++		BWindow::MessageReceived(message);
++		break;
++	}
++}
++
++bool
++WebWindow::QuitRequested()
++{
++	Hide();
++	return false;
++}
++
++}
+diff --git a/platform/haiku/haiku_web_window.h b/platform/haiku/haiku_web_window.h
+new file mode 100644
+index 0000000..2c5848b
+--- /dev/null
++++ b/platform/haiku/haiku_web_window.h
+@@ -0,0 +1,76 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef _HAIKU_WEB_WINDOW_H
++#define _HAIKU_WEB_WINDOW_H
++
++#include <stdio.h>
++
++#include <AppKit.h>
++#include <InterfaceKit.h>
++#include <SupportKit.h>
++#include <StorageKit.h>
++#include <IconUtils.h>
++#include <ControlLook.h>
++#include <LayoutBuilder.h>
++#include <SeparatorView.h>
++#include <StringList.h>
++
++const uint32 kFileInvocated = 'SINV';
++const uint32 kFileDownload = 'FDNL';
++const uint32 kFileOpenDowloadFolder = 'ODNL';
++const uint32 kGoToParent = 'GOUP';
++const uint32 kPathSelect = 'PSEL';
++const uint32 kCancelButtonPush = 'BCAN';
++const uint32 kOpenButtonPush = 'BOPN';
++
++namespace xPlatform
++{
++
++class WebWindow : public BWindow
++{
++public:
++					WebWindow(BRect frame, BWindow *win);
++	virtual void 	MessageReceived(BMessage *msg);
++	virtual bool 	QuitRequested();
++private:
++	void 			UpdateList(void);
++
++	BString			fPath;
++	BPath			fLastDownloadedPath;
++
++	BMenuBar*		fMenuBar;
++	BListView*		fListView;
++	BStringView*	fStatusView;
++	BScrollView*	fScrollView;
++	BButton*		fUpButton;
++	BButton*		fCancelButton;
++	BButton*		fOpenButton;
++	BPopUpMenu*		fPathPopupMenu;
++	BMenuField*		fPathMenuField;
++	BWindow*		fMainWindow;
++	BBitmap*		fFolderIcon;
++	BBitmap*		fZipIcon;	
++	BBitmap*		fScriptIcon;
++	BBitmap*		fRegularIcon;
++	BBitmap*		fUpIcon;
++};
++
++}
++
++#endif
+diff --git a/platform/haiku/haiku_window.cpp b/platform/haiku/haiku_window.cpp
+new file mode 100644
+index 0000000..113c223
+--- /dev/null
++++ b/platform/haiku/haiku_window.cpp
+@@ -0,0 +1,1490 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include "../platform.h"
++#include "../../tools/options.h"
++#include "../../options_common.h"
++#include "../../ui/ui.h"
++
++#include "haiku_app.h"
++#include "haiku_window.h"
++
++namespace xPlatform
++{
++
++bool CheckJoystick();
++void VolumeAudio(float volume);
++
++static struct eOptionWindowState : public xOptions::eOptionString
++{
++	eOptionWindowState() { customizable = false; }
++	virtual const char* Name() const { return "window state"; }
++	const char* FormatStr() const { return "position(%d, %d); client_size(%d, %d)"; }
++} op_window_state;
++
++static struct eOptionKeyboardWindowState : public xOptions::eOptionString
++{
++	eOptionKeyboardWindowState() { customizable = false; }
++	virtual const char* Name() const { return "keyboard window state"; }
++	const char* FormatStr() const { return "position(%d, %d)"; }
++} op_keyboard_window_state;
++
++static struct eOptionFullScreen : public xOptions::eOptionBool
++{
++	eOptionFullScreen() { customizable = false; }
++	virtual const char* Name() const { return "full screen"; }
++} op_full_screen;
++
++static struct eOptionBilinear : public xOptions::eOptionBool
++{
++	eOptionBilinear() { customizable = false; }
++	virtual const char* Name() const { return "scale bilinear"; }
++} op_scale_bilinear;
++
++static struct eOptionXBRFiltering : public xOptions::eOptionBool
++{
++	eOptionXBRFiltering() { customizable = false; }
++	virtual const char* Name() const { return "xbr scale"; }
++} op_xbr_scale;
++
++static struct eOptionVirtualKeyboard : public xOptions::eOptionBool
++{
++	eOptionVirtualKeyboard() { customizable = false; }
++	virtual const char* Name() const { return "virtual keyboard"; }
++} op_virtual_keyboard;
++
++static struct eOptionSmartBorderDisabled : public xOptions::eOptionBool
++{
++	eOptionSmartBorderDisabled() { customizable = false; }
++	virtual const char* Name() const { return "smart border disabled"; }
++} op_smart_border_disabled;
++
++static bool UpdateBoolOption(BMenuItem *item, const char* name, bool toggle)
++{
++	xOptions::eOption<bool>* op = xOptions::eOption<bool>::Find(name);
++	if(op && toggle)
++		op->Change();
++	bool on = op && *op;
++	item->SetMarked(on);
++	return on;
++}
++
++HaikuPlatformWindow::HaikuPlatformWindow(BRect frame, int w, int h, const char* title, window_type type, uint32 flags)
++	: BWindow(frame, title, type, flags),
++	fScaleFactor(-1),
++	fOpenPanel(NULL),
++	fSavePanel(NULL),
++	fSaveScreenPanel(NULL),
++	fFullscreen(false),
++	fSkipScale(false),
++	fFiltering(false),
++	fXBRFiltering(false),
++	fKempsonMouseGrab(false),
++	fKeyboardWindow(NULL),
++	fWebWindow(NULL),
++	fLastPressedKey(0),
++	fStateInfoTimer(0)
++{
++	fMenuBar = new BMenuBar("menu_bar", B_ITEMS_IN_ROW, B_INVALIDATE_AFTER_LAYOUT);
++	BMenu* menu = new BMenu("File");
++	BMenuItem *item = new BMenuItem(BRecentFilesList::NewFileListMenu("Open" B_UTF8_ELLIPSIS,
++		NULL, NULL, this, 9, true, NULL, APP_SIGNATURE),
++		new BMessage(kFileOpen));
++	item->SetShortcut('O', 0);
++	menu->AddItem(item);	
++	menu->AddItem(new BMenuItem("Open from web" B_UTF8_ELLIPSIS, new BMessage(kFileOpenWeb)));
++	menu->AddItem(new BMenuItem("Save" B_UTF8_ELLIPSIS, new BMessage(kFileSave), 'S'));
++	menu->AddSeparatorItem();
++	menu->AddItem(new BMenuItem("Save screenshot" B_UTF8_ELLIPSIS, new BMessage(kFileSaveScreen)));
++	menu->AddSeparatorItem();
++	menu->AddItem(new BMenuItem("Quick load", new BMessage(kFileQuickOpen), 'O', B_SHIFT_KEY));
++	fQuickSaveMenuItem = new BMenuItem("Quick save", new BMessage(kFileQuickSave), 'S', B_SHIFT_KEY);
++	fQuickSaveMenuItem->SetEnabled(false);
++	menu->AddItem(fQuickSaveMenuItem);
++	fQuickSaveSlotMenu = new BMenu("Save slot");
++	for (int slot = 1; slot < 10; slot++) {
++		BMessage *message =  new BMessage(kFileQuickSaveSlot);
++		message->AddInt32("slot", slot);
++		BString title;
++		title << slot;
++		fQuickSaveSlotMenu->AddItem(new BMenuItem(title, message));
++	}
++	fQuickSaveSlotMenu->SetRadioMode(true);
++	menu->AddItem(fQuickSaveSlotMenu);
++	menu->AddSeparatorItem();
++	fAutoPlayMenuItem = new BMenuItem("Auto launch programs", new BMessage(kFileAutoPlay));
++	menu->AddItem(fAutoPlayMenuItem);
++	menu->AddSeparatorItem();
++	menu->AddItem(new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED), 'Q'));
++	fMenuBar->AddItem(menu);
++	menu = new BMenu("View");
++	menu->AddItem(new BMenuItem("100% scale", new BMessage(kViewScale1x), '1'));
++	menu->AddItem(new BMenuItem("200% scale", new BMessage(kViewScale2x), '2'));
++	menu->AddItem(new BMenuItem("300% scale", new BMessage(kViewScale3x), '3'));
++	menu->AddSeparatorItem();
++	fFilteringMenu = new BMenu("Filtering");
++	fFilteringMenuItem = new BMenuItem("Bilinear", new BMessage(kViewFiltering));
++	fFilteringMenu->AddItem(fFilteringMenuItem);
++	fXBRFilteringMenuItem = new BMenuItem("XBR", new BMessage(kViewXBRFiltering));
++	fFilteringMenu->AddItem(fXBRFilteringMenuItem);
++	menu->AddItem(fFilteringMenu);
++	fSmartBorderScaleMenuItem = new BMenuItem("Smart border scale", new BMessage(kViewSmartBorder));
++	menu->AddItem(fSmartBorderScaleMenuItem);
++	menu->AddSeparatorItem();
++	fVirtualKeyboardMenuItem = new BMenuItem("Virtual keyboard", new BMessage(kHelpKeyboardLayout));
++	menu->AddItem(fVirtualKeyboardMenuItem);
++	menu->AddItem(new BMenuItem("OSD keyboard", new BMessage(kViewOnScreenKeyboard), 'K'));
++	menu->AddItem(new BMenuItem("OSD menu", new BMessage(kViewOnScreenMenu)));
++	menu->AddSeparatorItem();
++	menu->AddItem(new BMenuItem("Full screen", new BMessage(kViewFullScreen), B_ENTER));
++	fMenuBar->AddItem(menu);
++	menu = new BMenu("Device");
++	menu->AddItem(new BMenuItem("Start / Stop tape", new BMessage(kDeviceStartStopTape)));
++	fFastTapeMenuItem = new BMenuItem("Tape fast", new BMessage(kDeviceFastTape));
++	menu->AddItem(fFastTapeMenuItem);
++	menu->AddSeparatorItem();
++	fBetaDiskMenu = new BMenu("Beta disk drive");
++	fBetaDiskMenu->AddItem(new BMenuItem("A", new BMessage(kDeviceBetaDiskA)));
++	fBetaDiskMenu->AddItem(new BMenuItem("B", new BMessage(kDeviceBetaDiskB)));
++	fBetaDiskMenu->AddItem(new BMenuItem("C", new BMessage(kDeviceBetaDiskC)));
++	fBetaDiskMenu->AddItem(new BMenuItem("D", new BMessage(kDeviceBetaDiskD)));
++	menu->AddItem(fBetaDiskMenu);
++	menu->AddSeparatorItem();
++	fSoundChipMenu = new BMenu("Sound chip");
++	fSoundChipMenu->AddItem(new BMenuItem("AY-3-8910", new BMessage(kDeviceSoundChipAY)));
++	fSoundChipMenu->AddItem(new BMenuItem("YM2149F", new BMessage(kDeviceSoundChipYM)));
++	menu->AddItem(fSoundChipMenu);
++	fAYStereoMenu = new BMenu("AY Stereo");
++	fAYStereoMenu->AddItem(new BMenuItem("ABC", new BMessage(kDeviceSoundChipStereoABC)));
++	fAYStereoMenu->AddItem(new BMenuItem("ACB", new BMessage(kDeviceSoundChipStereoACB)));
++	fAYStereoMenu->AddItem(new BMenuItem("BAC", new BMessage(kDeviceSoundChipStereoBAC)));
++	fAYStereoMenu->AddItem(new BMenuItem("BCA", new BMessage(kDeviceSoundChipStereoBCA)));
++	fAYStereoMenu->AddItem(new BMenuItem("CAB", new BMessage(kDeviceSoundChipStereoCAB)));
++	fAYStereoMenu->AddItem(new BMenuItem("CBA", new BMessage(kDeviceSoundChipStereoCBA)));
++	fAYStereoMenu->AddItem(new BMenuItem("Mono", new BMessage(kDeviceSoundChipStereoMono)));
++	fAYStereoMenu->SetRadioMode(true);
++	menu->AddItem(fAYStereoMenu);
++	fSoundVolumeMenu = new BMenu("Volume");
++	for (int volume = 0; volume <= 10; volume++) {
++		BMessage *message =  new BMessage(kDeviceSoundVolume);
++		message->AddInt32("volume", volume);
++		BString title;
++		if (volume == 0)
++			title = "Mute";
++		else
++			title << (volume * 10) << " %";
++		fSoundVolumeMenu->AddItem(new BMenuItem(title, message));
++	}
++	fSoundVolumeMenu->SetRadioMode(true);
++	menu->AddItem(fSoundVolumeMenu);
++	menu->AddSeparatorItem();
++	fJoystickMenu = new BMenu("Joystick");
++	fJoystickMenu->AddItem(new BMenuItem("Cursor", new BMessage(kDeviceJoystickCursor)));
++	fJoystickMenu->AddItem(new BMenuItem("Cursor + Enter", new BMessage(kDeviceJoystickCursorEnter)));
++	fJoystickMenu->AddItem(new BMenuItem("Kempston", new BMessage(kDeviceJoystickKempston)));
++	fJoystickMenu->AddItem(new BMenuItem("Sinclair 2", new BMessage(kDeviceJoystickSinclair2)));
++	fJoystickMenu->AddItem(new BMenuItem("QAOPM", new BMessage(kDeviceJoystickQAOPM)));
++	fJoystickMenu->AddItem(new BMenuItem("QAOP + Space", new BMessage(kDeviceJoystickQAOPSpace)));
++	fJoystickMenu->SetRadioMode(true);
++	menu->AddItem(fJoystickMenu);
++	menu->AddSeparatorItem();
++	fKempstonMouseGrabMenuItem = new BMenuItem("Kempson mouse grab", new BMessage(kDeviceKempsonMouse), 'G');
++	menu->AddItem(fKempstonMouseGrabMenuItem);
++	menu->AddSeparatorItem();
++	f48kModeMenuItem = new BMenuItem("Mode 48k", new BMessage(kDeviceMode48k), 'M');
++	menu->AddItem(f48kModeMenuItem);
++	menu->AddSeparatorItem();
++	fPauseMenuItem = new BMenuItem("Pause", new BMessage(kDevicePause), 'P');
++	menu->AddItem(fPauseMenuItem);
++	fResetToServiceROMMenuItem = new BMenuItem("Reset to service ROM", new BMessage(kDeviceResetToServiceROM));
++	menu->AddItem(fResetToServiceROMMenuItem);
++	menu->AddItem(new BMenuItem("Reset", new BMessage(kDeviceReset), 'R'));
++	fMenuBar->AddItem(menu);
++	menu = new BMenu("Help");
++	menu->AddItem(new BMenuItem("Register filetypes", new BMessage(kHelpRegisterMime)));
++	menu->AddSeparatorItem();
++	menu->AddItem(new BMenuItem("About", new BMessage(B_ABOUT_REQUESTED)));
++	fMenuBar->AddItem(menu);
++
++	AddShortcut('F', B_COMMAND_KEY, new BMessage(kViewFullScreen));
++
++	fView = new SurfaceView(Bounds(), w, h);
++	fView->SetExplicitMinSize(BSize(xUi::WIDTH, xUi::HEIGHT));
++	fView->SetViewColor(B_TRANSPARENT_COLOR);
++
++	BFont font(be_plain_font);
++	font.SetSize(ceilf(font.Size() * 0.75));
++
++	fStatusMode = new BStringView("status", "128k");
++	fStatusMode->SetFont(&font, B_FONT_SIZE);
++	fStatusMode->SetAlignment(B_ALIGN_LEFT);
++
++	fStatusDisk = new BStringView("disk status", "[A] B C D");
++	fStatusDisk->SetFont(&font, B_FONT_SIZE);
++	fStatusDisk->SetAlignment(B_ALIGN_LEFT);
++
++	fStatusJoystick = new BStringView("joystick status", "Cursor");
++	fStatusJoystick->SetFont(&font, B_FONT_SIZE);
++	fStatusJoystick->SetAlignment(B_ALIGN_LEFT);
++
++	fStatusSound = new BStringView("sound status", "AY:ABC");
++	fStatusSound->SetFont(&font, B_FONT_SIZE);
++	fStatusSound->SetAlignment(B_ALIGN_LEFT);
++
++	fStatusInfo = new BStringView("status info", "Ready");
++	fStatusInfo->SetFont(&font, B_FONT_SIZE);
++	fStatusInfo->SetAlignment(B_ALIGN_LEFT);
++
++	const float kElementSpacing = 2;
++
++	BGroupLayout* statusGroup = BLayoutBuilder::Group<>(B_VERTICAL, 0.0)
++		.Add(new BSeparatorView(B_HORIZONTAL, B_PLAIN_BORDER))
++		.Add(BLayoutBuilder::Group<>(B_HORIZONTAL, kElementSpacing)
++			.Add(fStatusMode)
++			.Add(new BSeparatorView(B_VERTICAL, B_PLAIN_BORDER))
++			.Add(fStatusDisk)
++			.Add(new BSeparatorView(B_VERTICAL, B_PLAIN_BORDER))
++			.Add(fStatusJoystick)
++			.Add(new BSeparatorView(B_VERTICAL, B_PLAIN_BORDER))
++			.Add(fStatusSound)
++			.Add(new BSeparatorView(B_VERTICAL, B_PLAIN_BORDER))
++			.Add(fStatusInfo)
++			.AddGlue()
++			.SetInsets(kElementSpacing, 0, kElementSpacing, 0)
++		);
++
++	const float spacing = be_control_look->DefaultItemSpacing();
++	BGroupLayout* pathLayout;
++	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
++		.Add(fMenuBar)
++		.AddGroup(B_VERTICAL, B_USE_ITEM_SPACING)
++			.Add(fView)		
++		.End()
++		.Add(statusGroup);
++
++	VolumeAudio(OpVolume());
++	UpdateMenus();
++	UpdateCursor();
++
++	fTimerMessageRunner = new BMessageRunner(BMessenger(this), new BMessage(kPulseEvent), 1000000);
++}
++
++HaikuPlatformWindow::~HaikuPlatformWindow()
++{
++	char buf[PATH_MAX];
++
++	if (!fFullscreen) {
++		int x = Frame().left;
++		int y = Frame().top;
++		int w = Frame().Width();
++		int h = Frame().Height();
++
++		sprintf(buf, op_window_state.FormatStr(), x, y, w, h);
++		op_window_state.Value(buf);
++	}
++
++	if (fKeyboardWindow) {
++		int x = fKeyboardWindow->Frame().left;
++		int y = fKeyboardWindow->Frame().top;
++
++		sprintf(buf, op_keyboard_window_state.FormatStr(), x, y);
++		op_keyboard_window_state.Value(buf);
++
++		fKeyboardWindow->Lock();
++		fKeyboardWindow->Quit();
++	}
++	
++	delete fTimerMessageRunner;
++}
++
++void
++HaikuPlatformWindow::SetStatusInfo(const char *text, int time, color_which color)
++{
++	fStateInfoTimer = time;
++	fStatusInfo->SetHighColor(ui_color(color));
++	fStatusInfo->SetText(text);
++}
++
++void
++HaikuPlatformWindow::UpdateMenus()
++{
++	xOptions::eOption<bool>* op_reset_to_service_rom = xOptions::eOption<bool>::Find("reset to service rom");
++	xOptions::eOption<bool>* op_mode_48k = xOptions::eOption<bool>::Find("mode 48k");
++	xOptions::eOption<bool>* op_auto_play = xOptions::eOption<bool>::Find("auto play image");
++	xOptions::eOption<bool>* op_tape_fast = xOptions::eOption<bool>::Find("fast tape");
++	xOptions::eOption<int>* op_sound_chip = xOptions::eOption<int>::Find("sound chip");
++	xOptions::eOption<int>* op_ay_stereo = xOptions::eOption<int>::Find("ay stereo");
++	xOptions::eOption<int>* op_save_slot = xOptions::eOption<int>::Find("save slot");
++
++	eDrive drive = OpDrive();
++	fBetaDiskMenu->FindItem(kDeviceBetaDiskA)->SetMarked(drive == D_A);
++	fBetaDiskMenu->FindItem(kDeviceBetaDiskB)->SetMarked(drive == D_B);
++	fBetaDiskMenu->FindItem(kDeviceBetaDiskC)->SetMarked(drive == D_C);
++	fBetaDiskMenu->FindItem(kDeviceBetaDiskD)->SetMarked(drive == D_D);
++
++	f48kModeMenuItem->SetMarked(op_mode_48k && *op_mode_48k);
++	fResetToServiceROMMenuItem->SetMarked(op_reset_to_service_rom && *op_reset_to_service_rom);
++	fFilteringMenuItem->SetMarked(op_scale_bilinear);
++	fXBRFilteringMenuItem->SetMarked(op_xbr_scale);
++	fSmartBorderScaleMenuItem->SetMarked(!op_smart_border_disabled);
++	fVirtualKeyboardMenuItem->SetMarked(op_virtual_keyboard);
++	fAutoPlayMenuItem->SetMarked(op_auto_play && *op_auto_play);
++	fFastTapeMenuItem->SetMarked(op_tape_fast && *op_tape_fast);
++
++	if (op_save_slot) {
++		int index = *op_save_slot - 1;		
++		if (BMenuItem *item = fQuickSaveSlotMenu->ItemAt(index))
++			item->SetMarked(true);
++	}
++
++	if (op_sound_chip) {
++		fSoundChipMenu->FindItem(kDeviceSoundChipAY)->SetMarked(*op_sound_chip == 0);
++		fSoundChipMenu->FindItem(kDeviceSoundChipYM)->SetMarked(*op_sound_chip == 1);
++	}
++
++	if (op_ay_stereo) {
++		fAYStereoMenu->FindItem(kDeviceSoundChipStereoABC)->SetMarked(*op_ay_stereo == 0);
++		fAYStereoMenu->FindItem(kDeviceSoundChipStereoACB)->SetMarked(*op_ay_stereo == 1);
++		fAYStereoMenu->FindItem(kDeviceSoundChipStereoBAC)->SetMarked(*op_ay_stereo == 2);
++		fAYStereoMenu->FindItem(kDeviceSoundChipStereoBCA)->SetMarked(*op_ay_stereo == 3);
++		fAYStereoMenu->FindItem(kDeviceSoundChipStereoCAB)->SetMarked(*op_ay_stereo == 4);
++		fAYStereoMenu->FindItem(kDeviceSoundChipStereoCBA)->SetMarked(*op_ay_stereo == 5);
++		fAYStereoMenu->FindItem(kDeviceSoundChipStereoMono)->SetMarked(*op_ay_stereo == 6);
++	}
++
++	if (BMenuItem *item = fSoundVolumeMenu->ItemAt(OpVolume()))
++		item->SetMarked(true);
++
++	eJoystick joy = OpJoystick();
++	fJoystickMenu->FindItem(kDeviceJoystickCursor)->SetMarked(joy == J_CURSOR);
++	fJoystickMenu->FindItem(kDeviceJoystickCursorEnter)->SetMarked(joy == J_CURSORENTER);
++	fJoystickMenu->FindItem(kDeviceJoystickKempston)->SetMarked(joy == J_KEMPSTON);
++	fJoystickMenu->FindItem(kDeviceJoystickSinclair2)->SetMarked(joy == J_SINCLAIR2);
++	fJoystickMenu->FindItem(kDeviceJoystickQAOPM)->SetMarked(joy == J_QAOPM);
++	fJoystickMenu->FindItem(kDeviceJoystickQAOPSpace)->SetMarked(joy == J_QAOPSPACE);
++
++	fKempstonMouseGrabMenuItem->SetMarked(fKempsonMouseGrab);
++
++	// update status line
++	if (op_mode_48k && *op_mode_48k)
++		fStatusMode->SetText("48k");
++	else
++		fStatusMode->SetText("128k");
++
++	if (drive == D_A)fStatusDisk->SetText("[A] b c d");
++	if (drive == D_B)fStatusDisk->SetText("a [B] c d");
++	if (drive == D_C)fStatusDisk->SetText("a b [C] d");
++	if (drive == D_D)fStatusDisk->SetText("a b c [D]");
++
++	if (BMenuItem *item = fJoystickMenu->FindMarked())
++		fStatusJoystick->SetText(item->Label());
++
++	BString soundStatus;
++	soundStatus += (op_sound_chip && *op_sound_chip == 0) ? "AY: " : "YM: ";
++
++	if (BMenuItem *item = fAYStereoMenu->FindMarked())
++		soundStatus << item->Label();
++	else
++		soundStatus << "ABC";
++
++	BString volumeTxt;
++	volumeTxt << " " << (OpVolume() * 10) << "%";
++	soundStatus += OpVolume() == 0 ? " Mute" : volumeTxt;
++	fStatusSound->SetText(soundStatus);
++}
++
++void
++HaikuPlatformWindow::UpdateCursor()
++{
++	BCursor cursor((fFullscreen || fKempsonMouseGrab) ? B_CURSOR_ID_NO_CURSOR : B_CURSOR_ID_SYSTEM_DEFAULT);
++	fView->SetViewCursor(&cursor);
++}
++
++void
++HaikuPlatformWindow::ResizeToScale(int scale)
++{
++	if (scale == 0) {
++		fSkipScale = true;
++		if (fFullscreen) {
++			MoveTo(fLastRect.left, fLastRect.top);
++			ResizeTo(fLastRect.Width(), fLastRect.Height());
++		} else {
++			fLastRect = Frame();
++			BScreen scr(B_MAIN_SCREEN_ID);
++			float height = fMenuBar->Bounds().Height() + fStatusMode->Bounds().Height() + 2;
++			MoveTo(0, -(fMenuBar->Bounds().Height() + 1));
++			ResizeTo(scr.Frame().Width() + 1, scr.Frame().Height() + height + 2);
++		}
++		fScaleFactor = -1;
++		fFullscreen = !fFullscreen;
++		op_full_screen.Set(fFullscreen);
++		UpdateCursor();
++	}
++	if (scale >= 1 && scale <= 3) {
++		if (scale != fScaleFactor) {
++			fSkipScale = true;
++
++			if (fFullscreen)
++				MoveTo(fLastRect.left, fLastRect.top);
++
++			int w = xUi::WIDTH * scale;
++			int h = xUi::HEIGHT * scale;
++			h += fMenuBar->Bounds().Height() + fStatusMode->Bounds().Height() + 2;
++			ResizeTo(w + 1, h + 1);
++			fScaleFactor = scale;
++			fFullscreen = false;
++		}
++	}
++}
++
++void
++HaikuPlatformWindow::InstallMimeType(const char *_mime, const char *_icon, const char *_description, const char *_exts)
++{
++	// install mime type of document
++	BMimeType mime(_mime);
++	status_t ret = mime.InitCheck();
++	if (ret != B_OK) {
++		fprintf(stderr, "Could not init native document mime type (%s): %s.\n",
++			_mime, strerror(ret));
++		return;
++	}
++
++	ret = mime.Install();
++	if (ret != B_OK && ret != B_FILE_EXISTS) {
++		fprintf(stderr, "Could not install native document mime type (%s): %s.\n",
++			_mime, strerror(ret));
++		return;
++	}
++
++	mime.SetPreferredApp(APP_SIGNATURE);
++	mime.SetShortDescription(_description);
++
++	// set extensions
++	BString extensions(_exts);
++	BStringList extList;
++	extensions.Split(",", true, extList);
++	BMessage message;
++	for (int i = 0; i < extList.CountStrings(); i++)
++		message.AddString("extensions", extList.StringAt(i));
++	mime.SetFileExtensions(&message);
++
++	// set mime icon
++	BResources* resources = be_app->AppResources();
++	if (resources != NULL) {
++		size_t size;
++		const void* iconData = resources->LoadResource('VICN', _icon, &size);
++		if (iconData != NULL && size > 0) {
++			if (mime.SetIcon(reinterpret_cast<const uint8*>(iconData), size) != B_OK)
++				fprintf(stderr, "Could not set vector icon of mime type.\n");
++		} else {
++			fprintf(stderr, "Could not find icon in app resources (data: %p, size: %ld).\n", iconData, size);
++		}
++	} else
++		fprintf(stderr, "Could not find app resources.\n");
++}
++
++void 
++HaikuPlatformWindow::MessageReceived(BMessage *message)
++{
++	if (message->WasDropped())
++		message->what = B_REFS_RECEIVED;
++
++	switch (message->what) {
++		case kPulseEvent:
++		{
++			if (fStateInfoTimer > 0) {
++				fStateInfoTimer--;
++				if (fStateInfoTimer == 0)
++					SetStatusInfo("Ready");
++			}
++			break;
++		}
++		case kFileOpen:
++		{
++			if (!fOpenPanel) {
++				fOpenPanel = new BFilePanel(B_OPEN_PANEL, NULL, NULL, 0, true, NULL, NULL, true, true);
++				fOpenPanel->Window()->SetTitle("Open file...");
++				fOpenPanel->SetTarget(this);
++			}
++			Handler()->VideoPaused(true);
++			fOpenPanel->Show();
++			break;
++		}
++		case kFileOpenWeb:
++		{
++			if (!fWebWindow) {
++				fWebWindow = new WebWindow(BRect(100, 100, 640, 480), this);
++			}
++			if (fWebWindow->IsHidden())
++				fWebWindow->Show();
++			break;
++		}
++		case kFileQuickOpen:
++		{
++			using namespace xOptions;
++			eOption<bool>* loadState = eOption<bool>::Find("load state");
++			if(loadState)
++				loadState->Change();
++			if (*loadState) {
++				SetStatusInfo("Quick load OK", STATUS_TIME_DEFAULT);
++				fQuickSaveMenuItem->SetEnabled(true);
++			} else
++				SetStatusInfo("Quick load FAILED", STATUS_TIME_DEFAULT, B_FAILURE_COLOR);
++			break;
++		}
++		case kFileQuickSave:
++		{
++			using namespace xOptions;
++			eOption<bool>* saveState = eOption<bool>::Find("save state");
++			if(saveState) {
++				Handler()->VideoPaused(true);
++				saveState->Change();
++				Handler()->VideoPaused(false);
++			}
++			if (*saveState)
++				SetStatusInfo("Quick save OK", STATUS_TIME_DEFAULT);
++			else
++				SetStatusInfo("Quick save FAILED", STATUS_TIME_DEFAULT, B_FAILURE_COLOR);
++			break;
++		}
++		case kFileQuickSaveSlot:
++		{
++			using namespace xOptions;
++			eOption<int>* saveStateSlot = eOption<int>::Find("save slot");
++			int32 slot = message->FindInt32("slot");
++			if(saveStateSlot)
++				saveStateSlot->Set(slot);
++			UpdateMenus();
++			break;
++		}
++		case kFileSave:
++		{
++			if (!fSavePanel) {
++				fSavePanel = new BFilePanel(B_SAVE_PANEL, NULL, NULL, 0, true, NULL, NULL, true, true);
++				fSavePanel->Window()->SetTitle("Save SNA snapshot...");
++				fSavePanel->SetTarget(this);
++			}
++			Handler()->VideoPaused(true);
++			fSavePanel->Show();
++			break;
++		}
++		case kFileSaveScreen:
++		{
++			if (!fSaveScreenPanel) {
++				fSaveScreenPanel = new BFilePanel(B_SAVE_PANEL, NULL, NULL, 0, true, NULL, NULL, true, true);
++				fSaveScreenPanel->SetMessage(new BMessage(B_SAVE_SCREEN_REQUESTED));
++				fSaveScreenPanel->Window()->SetTitle("Save screenshot...");
++				fSaveScreenPanel->SetTarget(this);
++			}
++			Handler()->VideoPaused(true);
++			fSaveScreenPanel->Show();
++			break;
++		}
++		case kFileAutoPlay:
++		{
++			if(UpdateBoolOption(fAutoPlayMenuItem, "auto play image", true)) {
++				SetStatusInfo("Auto launch on", STATUS_TIME_DEFAULT);
++			} else {
++				SetStatusInfo("Auto launch off", STATUS_TIME_DEFAULT);
++			}
++			UpdateMenus();
++			break;
++		}
++		case B_REFS_RECEIVED:
++		{
++			entry_ref ref;
++			if (message->FindRef("refs", 0, &ref) == B_OK) {
++				BEntry entry(&ref, true);
++				if (!entry.Exists())
++					break;
++				BPath path;
++				if (entry.GetPath(&path) != B_OK)
++					break;
++
++				BString text;
++				bool status = Handler()->OnOpenFile(path.Path());
++				if (status) {
++					text << "File was successfully opened";
++					fQuickSaveMenuItem->SetEnabled(true);
++				} else
++					text << "Could not open file";
++
++				SetStatusInfo(text.String(), STATUS_TIME_DEFAULT, status ? B_PANEL_TEXT_COLOR : B_FAILURE_COLOR);
++			}
++			break;
++		}
++		case B_SAVE_REQUESTED:
++		{
++			entry_ref dir;
++			BDirectory directory;
++			if (message->FindRef("directory", &dir) == B_OK) {
++				BString name = message->FindString("name");
++				directory.SetTo(&dir);
++				if (directory.InitCheck() == B_NO_ERROR) {
++					BPath pathname(&dir);
++					if (!name.IEndsWith(".sna"))
++						name += ".sna";
++					pathname.Append(name);
++					if(Handler()->OnSaveFile(pathname.Path()))
++						SetStatusInfo("File save OK", STATUS_TIME_DEFAULT);
++					else
++						SetStatusInfo("File save FAILED", STATUS_TIME_DEFAULT, B_FAILURE_COLOR);
++				}
++			}
++			break;
++		}
++		case B_SAVE_SCREEN_REQUESTED:
++		{
++			entry_ref dir;
++			BDirectory directory;
++			if (message->FindRef("directory", &dir) == B_OK) {
++				BString name = message->FindString("name");
++				directory.SetTo(&dir);
++				if (directory.InitCheck() == B_NO_ERROR) {
++					BPath pathname(&dir);
++					if (!name.IEndsWith(".png"))
++						name += ".png";
++					pathname.Append(name);
++					if (Handler()->OnSaveFile(pathname.Path()))
++						SetStatusInfo("Screenshot save OK", STATUS_TIME_DEFAULT);
++					else
++						SetStatusInfo("Screenshot save FAILED", STATUS_TIME_DEFAULT, B_FAILURE_COLOR);
++				}
++			}
++			break;
++		}
++		case B_OK:
++		case B_CANCEL:
++		{
++			Handler()->VideoPaused(false);
++			break;
++		}
++		case kViewScale1x:
++		{
++			ResizeToScale(1);
++			break;
++		}
++		case kViewScale2x:
++		{
++			ResizeToScale(2);
++			break;
++		}
++		case kViewScale3x:
++		{
++			ResizeToScale(3);
++			break;
++		}
++		case kViewFullScreen:
++		{
++			ResizeToScale(0);
++			break;
++		}		
++		case kViewFiltering:
++		{
++			fFiltering = !fFiltering;
++			fView->EnableBilinear(fFiltering);
++			op_scale_bilinear.Set(fFiltering);
++			SetStatusInfo(fFiltering ? "Filtering enabled" : "Filtering disabled", STATUS_TIME_DEFAULT);
++			UpdateMenus();
++			break;
++		}
++		case kViewXBRFiltering:
++		{
++			fXBRFiltering = !fXBRFiltering;
++			fView->EnableXBR(fXBRFiltering);
++			op_xbr_scale.Set(fXBRFiltering);
++			SetStatusInfo(fXBRFiltering ? "XBR Filtering enabled" : "XBR Filtering disabled", STATUS_TIME_DEFAULT);
++			UpdateMenus();
++			break;
++		}
++		case kViewSmartBorder:
++		{
++			op_smart_border_disabled.Set(!op_smart_border_disabled);
++			fView->EnableSmartBorder(!op_smart_border_disabled);
++			SetStatusInfo(op_smart_border_disabled ? "Smart border disabled" : "Smart border enabled", STATUS_TIME_DEFAULT);
++			UpdateMenus();
++			break;
++		}
++		case kViewOnScreenKeyboard:
++		{
++			Handler()->OnKey('k', KF_DOWN);
++			Handler()->OnKey('k', 0);
++			break;
++		}
++		case kViewOnScreenMenu:
++		{
++			Handler()->OnKey('m', KF_DOWN);
++			Handler()->OnKey('m', 0);
++			break;
++		}
++		case kDeviceStartStopTape:
++		{
++			switch(Handler()->OnAction(A_TAPE_TOGGLE))
++			{
++				case AR_TAPE_STARTED:
++					SetStatusInfo("Tape started", STATUS_TIME_DEFAULT);
++					break;
++				case AR_TAPE_STOPPED:
++					SetStatusInfo("Tape stopped", STATUS_TIME_DEFAULT);
++					break;
++				case AR_TAPE_NOT_INSERTED:
++					SetStatusInfo("Tape not inserted", STATUS_TIME_DEFAULT);
++					break;
++				default:
++					SetStatusInfo("Ready");
++					break;
++			}
++			break;
++		}
++		case kDeviceFastTape:
++		{
++			using namespace xOptions;
++			eOption<bool>* op_tape_fast = eOption<bool>::Find("fast tape");
++			SAFE_CALL(op_tape_fast)->Change();
++			bool tape_fast = op_tape_fast && *op_tape_fast;
++			SetStatusInfo(tape_fast ? "Fast tape on" : "Fast tape off", STATUS_TIME_DEFAULT);
++			UpdateMenus();
++			break;
++		}
++		case kDeviceBetaDiskA:
++		{
++			OpDrive(D_A);
++			UpdateMenus();
++			break;
++		}
++		case kDeviceBetaDiskB:
++		{
++			OpDrive(D_B);
++			UpdateMenus();
++			break;
++		}
++		case kDeviceBetaDiskC:
++		{
++			OpDrive(D_C);
++			UpdateMenus();
++			break;
++		}
++		case kDeviceBetaDiskD:
++		{
++			OpDrive(D_D);
++			UpdateMenus();
++			break;
++		}
++		case kDeviceSoundVolume:
++		{
++			using namespace xOptions;
++			eOption<int>* op_volume = xOptions::eOption<int>::Find("volume");
++			uint32 volume = message->FindInt32("volume");
++			op_volume->Set(volume);
++			VolumeAudio(volume);
++			UpdateMenus();
++			break;
++		}
++		case kDeviceSoundChipAY:
++		{
++			using namespace xOptions;
++			eOption<int>* op_sound_chip = eOption<int>::Find("sound chip");
++			op_sound_chip->Set(0);
++			UpdateMenus();
++			break;
++		}
++		case kDeviceSoundChipYM:
++		{
++			using namespace xOptions;
++			eOption<int>* op_sound_chip = eOption<int>::Find("sound chip");
++			op_sound_chip->Set(1);
++			UpdateMenus();
++			break;
++		}
++		case kDeviceSoundChipStereoABC:
++		{
++			using namespace xOptions;
++			eOption<int>* op_ay_stereo = eOption<int>::Find("ay stereo");
++			op_ay_stereo->Set(0);
++			op_ay_stereo->Apply();
++			UpdateMenus();
++			break;
++		}		
++		case kDeviceSoundChipStereoACB:
++		{
++			using namespace xOptions;
++			eOption<int>* op_ay_stereo = eOption<int>::Find("ay stereo");
++			op_ay_stereo->Set(1);
++			op_ay_stereo->Apply();
++			UpdateMenus();
++			break;
++		}		
++		case kDeviceSoundChipStereoBAC:
++		{
++			using namespace xOptions;
++			eOption<int>* op_ay_stereo = eOption<int>::Find("ay stereo");
++			op_ay_stereo->Set(2);
++			op_ay_stereo->Apply();
++			UpdateMenus();
++			break;
++		}		
++		case kDeviceSoundChipStereoBCA:
++		{
++			using namespace xOptions;
++			eOption<int>* op_ay_stereo = eOption<int>::Find("ay stereo");
++			op_ay_stereo->Set(3);
++			op_ay_stereo->Apply();
++			UpdateMenus();
++			break;
++		}		
++		case kDeviceSoundChipStereoCAB:
++		{
++			using namespace xOptions;
++			eOption<int>* op_ay_stereo = eOption<int>::Find("ay stereo");
++			op_ay_stereo->Set(4);
++			op_ay_stereo->Apply();
++			UpdateMenus();
++			break;
++		}		
++		case kDeviceSoundChipStereoCBA:
++		{
++			using namespace xOptions;
++			eOption<int>* op_ay_stereo = eOption<int>::Find("ay stereo");
++			op_ay_stereo->Set(5);
++			op_ay_stereo->Apply();
++			UpdateMenus();
++			break;
++		}		
++		case kDeviceSoundChipStereoMono:
++		{
++			using namespace xOptions;
++			eOption<int>* op_ay_stereo = eOption<int>::Find("ay stereo");
++			op_ay_stereo->Set(6);
++			op_ay_stereo->Apply();
++			UpdateMenus();
++			break;
++		}
++		case kDeviceJoystickCursor:
++		{
++			OpJoystick(J_CURSOR);
++			UpdateMenus();
++			break;
++		}
++		case kDeviceJoystickCursorEnter:
++		{
++			OpJoystick(J_CURSORENTER);
++			UpdateMenus();
++			break;
++		}
++		case kDeviceJoystickKempston:
++		{
++			OpJoystick(J_KEMPSTON);
++			UpdateMenus();
++			break;
++		}
++		case kDeviceJoystickSinclair2:
++		{
++			OpJoystick(J_SINCLAIR2);
++			UpdateMenus();
++			break;
++		}
++		case kDeviceJoystickQAOPM:
++		{
++			OpJoystick(J_QAOPM);
++			UpdateMenus();
++			break;
++		}
++		case kDeviceJoystickQAOPSpace:
++		{
++			OpJoystick(J_QAOPSPACE);
++			UpdateMenus();
++			break;
++		}
++		case kDeviceKempsonMouse:
++		{
++			fKempsonMouseGrab = !fKempsonMouseGrab;
++			fView->EnableMouseGrab(fKempsonMouseGrab);
++			SetStatusInfo(fKempsonMouseGrab ? "Mouse grabbed (Alt+G)" : "Ready");
++			UpdateMenus();
++			UpdateCursor();
++			break;
++		}
++		case kDevicePause:
++		{
++			bool marked = fPauseMenuItem->IsMarked();
++			fPauseMenuItem->SetMarked(!marked);
++			Handler()->VideoPaused(!marked);
++			SetStatusInfo(marked ? "Ready" : "Paused");
++			break;
++		}
++		case kDeviceReset:
++		{
++			SetStatusInfo("Reset", STATUS_TIME_DEFAULT);
++			Handler()->OnAction(A_RESET);
++			break;
++		}
++		case kDeviceMode48k:
++		{
++			if (UpdateBoolOption(f48kModeMenuItem, "mode 48k", true))
++				SetStatusInfo("48k mode enabled", STATUS_TIME_DEFAULT);
++			else
++				SetStatusInfo("128k mode enabled", STATUS_TIME_DEFAULT);
++			UpdateMenus();
++			break;
++		}
++		case kDeviceResetToServiceROM:
++		{
++			if (UpdateBoolOption(fResetToServiceROMMenuItem, "reset to service rom", true))
++				SetStatusInfo("Reset to service ROM", STATUS_TIME_DEFAULT);
++			else
++				SetStatusInfo("Reset to usual ROM", STATUS_TIME_DEFAULT);
++			break;
++		}
++		case kHelpKeyboardLayout:
++		{
++			if (!fKeyboardWindow) {
++				int x, y;
++				BRect rect(100, 100, 950, 450);
++				if (sscanf(op_keyboard_window_state, op_keyboard_window_state.FormatStr(), &x, &y) == 2)
++					rect.OffsetTo(x, y);	
++				fKeyboardWindow = new KeyboardWindow(rect, this);
++			}
++			if (fKeyboardWindow->IsHidden()) {
++				fKeyboardWindow->Show();
++				Activate(true);
++				op_virtual_keyboard.Set(true);
++			} else {
++				fKeyboardWindow->Hide();
++				op_virtual_keyboard.Set(false);
++			}
++			UpdateMenus();
++			break;
++		}
++		case kHelpRegisterMime:
++		{
++			InstallMimeType("application/x-spectrum-sna", "snapshot_icon", "ZX-Spectrum emulator snapshot (SNA)", "sna");
++			InstallMimeType("application/x-spectrum-z80", "snapshot_icon", "ZX-Spectrum emulator snapshot (Z80)", "z80");
++			InstallMimeType("application/x-spectrum-trd", "disk_icon", "TR-DOS floppy disk image (TRD)", "trd");
++			InstallMimeType("application/x-spectrum-udi", "disk_icon", "TR-DOS floppy disk image (UDI)", "udi");
++			InstallMimeType("application/x-spectrum-fdi", "disk_icon", "TR-DOS floppy disk image (FDI)", "fdi");
++			InstallMimeType("application/x-spectrum-scl", "disk_icon", "TR-DOS floppy disk image (SCL)", "scl");
++			InstallMimeType("application/x-spectrum-tap", "tape_icon", "ZX-Spectrum emulator tape data (TAP)", "tap");
++			InstallMimeType("application/x-spectrum-tzx", "tape_icon", "ZX-Spectrum emulator tape data (TZX)", "tzx");
++			BAlert *alert = new BAlert("Register filetypes", "Filetypes registered!", "OK");
++			alert->Go(NULL);
++			break;
++		}
++		case B_ABOUT_REQUESTED:
++		{
++			BAboutWindow* wind = new BAboutWindow("Unreal Speccy Portable", "application/x-vnd.unreal-speccy-portable");
++			const char *backendCopyrights[]={"2021 Haiku UI by Gerasim Troeglazov (3dEyes**)\n", NULL};
++			wind->AddCopyright(2021, "SMT, Dexus, Alone Coder, deathsoft, djdron, scor.", (const char**)&backendCopyrights);
++			wind->SetVersion("0.0.86.17");
++			wind->AddDescription("Portable ZX Spectrum emulator.");
++			wind->AddExtraInfo(
++"This program is free software: you can redistribute it and/or modify\n\
++it under the terms of the GNU General Public License as published by\n\
++the Free Software Foundation, either version 3 of the License, or\n\
++(at your option) any later version.\n\
++\n\
++This program is distributed in the hope that it will be useful,\n\
++but WITHOUT ANY WARRANTY; without even the implied warranty of\n\
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n\
++GNU General Public License for more details.\n\
++\n\
++You should have received a copy of the GNU General Public License\n\
++along with this program.  If not, see <http://www.gnu.org/licenses/>.\n");
++			wind->ResizeTo(wind->Frame().Width() * 1.4, wind->Frame().Height() * 1.8);
++			wind->CenterOnScreen();
++			wind->Show();
++			break;
++		}
++		case B_UNMAPPED_KEY_UP:
++		case B_KEY_UP:
++		{
++			int32 key, mod;
++			message->FindInt32("key", &key);
++			message->FindInt32("modifiers", &mod);
++
++			if (fKeyboardWindow) {
++				message->AddBool("highlight", false);
++				message->what = kKeyHighlight;
++				fKeyboardWindow->PostMessage(message);
++			}
++
++			dword flags = 0;
++			if(mod & B_CONTROL_KEY)
++				flags |= KF_ALT;
++			if(mod & B_SHIFT_KEY)
++				flags |= KF_SHIFT;
++			if (key == 0x26) {
++				Handler()->OnKey('c', 0);
++				Handler()->OnKey('s', 0);
++			} else if (key == 0x31) {
++				SEND_EXTEND_KEY('F', 'Y', flags);
++			} else if (key == 0x32) {
++				SEND_EXTEND_KEY('G', 'U', flags);
++			} else if (key == 0x33) {
++				SEND_EXTEND_KEY('S', 'D', flags);
++			} else {
++				if (!CheckFuncKey(key, flags)) {
++					byte keycode = TranslateKey(key, fLastPressedKey, flags);
++					Handler()->OnKey(keycode, flags);
++					if ((keycode >= '0' && keycode <= '9') || (keycode >= 'A' && keycode <= 'Z'))
++						fLastPressedKey = 0;
++					if (keycode == 'm' || (keycode == 'e' && !Handler()->VideoDataUI()))
++						UpdateMenus();
++				}
++			}
++			break;
++		}
++		case B_UNMAPPED_KEY_DOWN:
++		case B_KEY_DOWN:
++		{
++			int32 key, mod;
++			message->FindInt32("key", &key);
++			message->FindInt32("modifiers", &mod);
++			printf("key: %x\n", key);
++
++			if (fKeyboardWindow) {
++				message->AddBool("highlight", true);
++				message->what = kKeyHighlight;
++				fKeyboardWindow->PostMessage(message);
++			}
++
++			dword flags = KF_DOWN;
++			if(mod & B_CONTROL_KEY)
++				flags |= KF_ALT;
++			if(mod & B_SHIFT_KEY)
++				flags |= KF_SHIFT;			
++			if (key == 0x26 || key == 0x31 || key == 0x32 || key == 0x33) {
++				Handler()->OnKey('c', KF_DOWN | KF_ALT | KF_SHIFT);
++				Handler()->OnKey('s', KF_DOWN | KF_ALT | KF_SHIFT);
++			} else {
++				if (!CheckFuncKey(key, flags)) {
++					byte keycode = TranslateKey(key, fLastPressedKey, flags);
++					Handler()->OnKey(keycode, flags);
++					if ((keycode >= '0' && keycode <= '9') || (keycode >= 'A' && keycode <= 'Z'))
++						fLastPressedKey = keycode;
++				}
++			}
++			break;
++		}
++		default:
++			break;
++	}
++	BWindow::MessageReceived(message);
++}
++
++byte
++HaikuPlatformWindow::TranslateKey(uint32 _key, byte _last, dword& _flags)
++{
++	byte* data_ui = (byte*)Handler()->VideoDataUI();
++
++	switch(_key)
++	{
++	case 0x4B:	// Left Shift
++	case 0x56:	// Right Shift
++		return 'c';
++	case 0x5c:	// Left Control
++	case 0x60:	// Right Control
++		return 's';
++	case 0x47:	// Enter
++		return 'e';
++	case 0x34:	// Delete
++	case 0x1E:	// Backspace
++		if (_flags & KF_DOWN)
++			_flags |= KF_SHIFT;
++		return '0';
++	case 0x1F:	// Insert
++		if (_flags & KF_DOWN)
++			_flags |= KF_SHIFT;
++		return '1';
++	case 0x20:	// Home
++		if (_flags & KF_DOWN)
++			_flags |= KF_SHIFT;
++		return '3';
++	case 0x35:	// End
++		if (_flags & KF_DOWN)
++			_flags |= KF_SHIFT;
++		return '4';
++	case 0x66:	// Left Win
++	case 0x67:	// Right Win
++		if (_flags & KF_DOWN)
++			_flags |= KF_SHIFT;
++		return '9';
++	case 0x46:	//	'"
++		if (_flags & KF_DOWN)
++			_flags |= KF_ALT;
++		if(_flags & KF_SHIFT || _last == 'P') {
++			_flags &= ~KF_SHIFT;
++			return 'P';
++		} else
++			return '7';
++	case 0x53:	// ,<
++		if (_flags & KF_DOWN)
++			_flags |= KF_ALT;
++		if(_flags & KF_SHIFT || _last == 'R')
++		{
++			_flags &= ~KF_SHIFT;
++			return 'R';
++		}
++		else
++			return 'N';
++	case 0x54:	// .>
++		if (_flags & KF_DOWN)
++			_flags |= KF_ALT;
++		if(_flags & KF_SHIFT || _last == 'T')
++		{
++			_flags &= ~KF_SHIFT;
++			return 'T';
++		}
++		else
++			return 'M';
++	case 0x55:	// ?/
++		if (_flags & KF_DOWN)
++			_flags |= KF_ALT;
++		if(_flags & KF_SHIFT || _last == 'C')
++		{
++			_flags &= ~KF_SHIFT;
++			return 'C';
++		}
++		else
++			return 'V';
++	case 0x45:	// :;
++		if (_flags & KF_DOWN)
++			_flags |= KF_ALT;
++		if(_flags & KF_SHIFT || _last == 'Z')
++		{
++			_flags &= ~KF_SHIFT;
++			return 'Z';
++		}
++		else
++			return 'O';
++	case 0x1C:	// -_
++		if (_flags & KF_DOWN)
++			_flags |= KF_ALT;
++		if(_flags & KF_SHIFT || _last == '0')
++		{
++			_flags &= ~KF_SHIFT;
++			return '0';
++		}
++		else
++			return 'J';
++	case 0x1D:	// +=
++		if (_flags & KF_DOWN)
++			_flags |= KF_ALT;
++		if(_flags & KF_SHIFT || _last == 'K')
++		{
++			_flags &= ~KF_SHIFT;
++			return 'K';
++		}
++		else
++			return 'L';
++	case 0x3b:	// Caps Lock
++		if (_flags & KF_DOWN)
++			_flags |= KF_SHIFT;
++		return '2';
++	case 0x11:	// `
++		if (_flags & KF_DOWN)
++			_flags |= KF_ALT;
++		return '7';
++
++	case 0x23:	// NumPad /
++		if (_flags & KF_DOWN)
++			_flags |= KF_ALT;
++		return 'V';
++	case 0x24:	// NumPad *
++		if (_flags & KF_DOWN)
++			_flags |= KF_ALT;
++		return 'B';
++	case 0x25:	// NumPad -
++		if (_flags & KF_DOWN)
++			_flags |= KF_ALT;
++		return 'J';
++	case 0x3a:	// NumPad +
++		if (_flags & KF_DOWN)
++			_flags |= KF_ALT;
++		return 'K';
++	case 0x65:	// NumPad .
++		if (_flags & KF_DOWN)
++			_flags |= KF_ALT;
++		return 'M';
++
++	case 0x27: return 'Q';
++	case 0x28: return 'W';
++	case 0x29: return 'E';
++	case 0x2A: return 'R';
++	case 0x2B: return 'T';
++	case 0x2C: return 'Y';
++	case 0x2D: return 'U';
++	case 0x2E: return 'I';
++	case 0x2F: return 'O';
++	case 0x30: return 'P';
++
++	case 0x3C: return 'A';
++	case 0x3D: return 'S';
++	case 0x3E: return 'D';
++	case 0x3F: return 'F';
++	case 0x40: return 'G';
++	case 0x41: return 'H';
++	case 0x42: return 'J';
++	case 0x43: return 'K';
++	case 0x44: return 'L';
++
++	case 0x4C: return 'Z';
++	case 0x4D: return 'X';
++	case 0x4E: return 'C';
++	case 0x4F: return 'V';
++	case 0x50: return 'B';
++	case 0x51: return 'N';
++	case 0x52: return 'M';
++
++	default:
++		break;		
++	}
++	// Cursor
++	if (data_ui) {
++		switch(_key) {
++			case 0x01:
++				if (_flags & KF_DOWN)
++					PostMessage(kViewOnScreenMenu);
++				return 0;
++			case 0x61:		return 'l';
++			case 0x63:		return 'r';
++			case 0x57:		return 'u';
++			case 0x62:		return 'd';
++			default:
++				break;
++		}
++	} else {
++		switch(_key) {
++			case 0x01:	// ESC
++				if (_flags & KF_DOWN)
++					_flags |= KF_SHIFT;
++				return ' ';
++			case 0x61:  // Cursor Left
++				if (_flags & KF_DOWN)
++					_flags |= KF_SHIFT;
++				return '5';
++			case 0x63:  // Cursor Right
++				if (_flags & KF_DOWN)
++					_flags |= KF_SHIFT;
++				return '8';
++			case 0x57:  // Cursor Up
++				if (_flags & KF_DOWN)
++					_flags |= KF_SHIFT;
++				return '7';
++			case 0x62:  // Cursor Down
++				if (_flags & KF_DOWN)
++					_flags |= KF_SHIFT;
++				return '6';
++			default:
++				break;
++		}
++	}
++	// 0
++	if(_key == 0x1B)
++		return '0';
++	// 1-9
++	if(_key >= 0x12 && _key <= 0x1A)
++		return (_key - 0x12) + '1';	
++	// Space
++	if(_key == 0x5E)
++		return ' ';
++
++	// NumPad
++	if (modifiers() & B_NUM_LOCK) {
++		switch (_key) {
++			case 0x64:	// 0
++				return '0';
++			case 0x58:	// 1
++				return '1';
++			case 0x59:	// 2
++				return '2';
++			case 0x5a:	// 3
++				return '3';
++			case 0x48:	// 4
++				return '4';
++			case 0x49:	// 5
++				return '5';
++			case 0x4a:	// 6
++				return '6';
++			case 0x37:	// 7
++				return '7';
++			case 0x38:	// 8
++				return '8';
++			case 0x39:	// 9
++				return '9';
++			case 0x5b:	// Enter
++				return 'e';
++			default:
++				break;
++		}
++	} else {
++		switch (_key) {
++			case 0x64:	// 0
++			case 0x49:	// 5
++			case 0x5b:	// Enter
++				_flags |= OpJoyKeyFlags();
++				return 'f';
++			case 0x59:	// 2
++				_flags |= OpJoyKeyFlags();
++				return 'd';
++			case 0x48:	// 4
++				_flags |= OpJoyKeyFlags();
++				return 'l';
++			case 0x4a:	// 6
++				_flags |= OpJoyKeyFlags();
++				return 'r';
++			case 0x38:	// 8
++				_flags |= OpJoyKeyFlags();
++				return 'u';
++			default:
++				break;
++		}
++	}
++
++	return 0;
++}
++
++bool
++HaikuPlatformWindow::CheckFuncKey(uint32 key, dword flags)
++{
++	if (!(flags & KF_DOWN))
++		return false;
++
++	switch(key) {
++		case B_F1_KEY:	// F1
++			PostMessage(B_ABOUT_REQUESTED);
++			break;
++		case B_F2_KEY:	// F2
++			PostMessage(kFileSave);
++			break;
++		case B_F3_KEY:	// F3
++			PostMessage(kFileOpen);
++			break;
++		case B_F4_KEY:	// F4
++			PostMessage(kFileOpenWeb);
++			break;
++		case B_F5_KEY:	// F5
++			PostMessage(kDeviceStartStopTape);
++			break;
++		case B_F6_KEY:	// F6
++			PostMessage(kFileQuickSave);
++			break;
++		case B_F7_KEY:	// F7
++			PostMessage(kFileQuickOpen);
++			break;
++		case B_F8_KEY:	// F7
++			PostMessage(kHelpKeyboardLayout);
++			break;
++		case B_F9_KEY:
++			PostMessage(kViewOnScreenKeyboard);
++			break;
++		case 0x68:		// Menu
++		case B_F10_KEY: // F10
++			PostMessage(kViewOnScreenMenu);
++			break;
++		case B_F11_KEY:	// F11
++			PostMessage(kDeviceMode48k);
++			break;
++		case B_F12_KEY:	// F12
++			PostMessage(kDeviceReset);
++			break;
++		case 0x10:		// Pause
++			PostMessage(kDevicePause);
++			break;
++		case 0x21:		// PgUp
++		{
++			BMessage *message = new BMessage(kDeviceSoundVolume);
++			int volume = OpVolume() > 9 ? 10 : OpVolume() + 1;
++			message->AddInt32("volume", volume);
++			PostMessage(message);
++			break;
++		}
++		case 0x36:		// PgDown
++		{
++			BMessage *message = new BMessage(kDeviceSoundVolume);
++			int volume = OpVolume() < 1 ? 0 : OpVolume() - 1;
++			message->AddInt32("volume", volume);
++			PostMessage(message);
++			break;
++		}
++		default:
++			return false;
++	}
++	return true;
++}
++
++void
++HaikuPlatformWindow::FrameResized(float width, float height)
++{
++	BWindow::FrameResized(width, height);
++	if (fSkipScale)
++		fSkipScale = false;
++	else
++		fScaleFactor = -1;
++
++	int multiplyIndex = ceilf(fView->Bounds().Width() / xUi::WIDTH) - 1;
++	fXBRFilteringMenuItem->SetEnabled(multiplyIndex > 1);
++}
++
++void
++HaikuPlatformWindow::WindowActivated(bool active)
++{
++}
++
++void
++HaikuPlatformWindow::Show()
++{
++	int w = xUi::WIDTH;
++	int h = xUi::HEIGHT;
++	fMenuBar->ResizeToPreferred();
++	fStatusMode->ResizeToPreferred();	
++	h += fMenuBar->Bounds().Height() + fStatusMode->Bounds().Height() + 2;
++	SetSizeLimits(w, 4096, h, 4096);
++
++	int x, y;
++	if (sscanf(op_window_state, op_window_state.FormatStr(), &x, &y, &w, &h) == 4) {
++		MoveTo(x, y);
++		ResizeTo(w, h);
++	} else
++		PostMessage(kViewScale2x);
++
++	if (op_scale_bilinear)
++		PostMessage(kViewFiltering);
++	if (op_xbr_scale)
++		PostMessage(kViewXBRFiltering);
++	if (op_full_screen)
++		ResizeToScale(0);
++	if (op_virtual_keyboard)
++		PostMessage(kHelpKeyboardLayout);
++	
++	BMessage *refsMessage = ((USPApplication*)be_app)->GetRefsMessage();
++	if (refsMessage)
++		PostMessage(refsMessage);
++
++	fView->EnableSmartBorder(!op_smart_border_disabled);
++
++	BWindow::Show();
++}
++
++bool
++HaikuPlatformWindow::QuitRequested()
++{
++	OpQuit(true);
++	return false;
++}
++
++}
+diff --git a/platform/haiku/haiku_window.h b/platform/haiku/haiku_window.h
+new file mode 100644
+index 0000000..ef6b679
+--- /dev/null
++++ b/platform/haiku/haiku_window.h
+@@ -0,0 +1,173 @@
++/*
++Portable ZX-Spectrum emulator.
++Copyright (C) 2001-2021 SMT, Dexus, Alone Coder, deathsoft, djdron, scor, 3dEyes
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef _HAIKU_PLATFORM_WINDOW_H
++#define _HAIKU_PLATFORM_WINDOW_H
++
++#include <stdio.h>
++
++#include <AppKit.h>
++#include <InterfaceKit.h>
++#include <SupportKit.h>
++#include <StorageKit.h>
++#include <ControlLook.h>
++#include <LayoutBuilder.h>
++#include <SeparatorView.h>
++#include <StringList.h>
++#include <RecentItems.h>
++#include <private/interface/AboutWindow.h>
++
++#include "haiku_surface.h"
++#include "haiku_keyboard_window.h"
++#include "haiku_web_window.h"
++
++const uint32 kFileOpen = 'FOPN';
++const uint32 kFileSave = 'FSVE';
++const uint32 kFileOpenWeb = 'FWEB';
++const uint32 kFileQuickOpen = 'QOPN';
++const uint32 kFileQuickSave = 'QSAV';
++const uint32 kFileQuickSaveSlot = 'QSSL';
++const uint32 kFileSaveScreen = 'QSVS';
++const uint32 kFileAutoPlay = 'APLA';
++const uint32 kViewScale1x = 'S100';
++const uint32 kViewScale2x = 'S200';
++const uint32 kViewScale3x = 'S300';
++const uint32 kViewFullScreen = 'FULL';
++const uint32 kViewFiltering = 'SFIL';
++const uint32 kViewXBRFiltering = 'SXBR';
++const uint32 kViewSmartBorder = 'SBRD';
++const uint32 kViewOnScreenKeyboard = 'OKBD';
++const uint32 kViewOnScreenMenu = 'OMNU';
++const uint32 kDeviceStartStopTape = 'SSTP';
++const uint32 kDeviceFastTape = 'FSTP';
++const uint32 kDeviceJoystickCursor = 'JCUR';
++const uint32 kDeviceJoystickCursorEnter = 'JCEN';
++const uint32 kDeviceJoystickKempston = 'JKEM';
++const uint32 kDeviceJoystickSinclair2 = 'JSN2';
++const uint32 kDeviceJoystickQAOPM = 'JQAM';
++const uint32 kDeviceJoystickQAOPSpace = 'JQAS';
++const uint32 kDeviceMode48k = 'M48K';
++const uint32 kDevicePause = 'PAUS';
++const uint32 kDeviceReset = 'REST';
++const uint32 kDeviceResetToServiceROM = 'RROM';
++const uint32 kDeviceSoundChipAY = 'SCAY';
++const uint32 kDeviceSoundChipYM = 'SCYM';
++const uint32 kDeviceSoundChipStereoABC = 'SABC';
++const uint32 kDeviceSoundChipStereoACB = 'SACB';
++const uint32 kDeviceSoundChipStereoBAC = 'SBAC';
++const uint32 kDeviceSoundChipStereoBCA = 'SBCA';
++const uint32 kDeviceSoundChipStereoCAB = 'SCAB';
++const uint32 kDeviceSoundChipStereoCBA = 'SCBA';
++const uint32 kDeviceSoundChipStereoMono = 'SMON';
++const uint32 kDeviceSoundVolume = 'SVOL';
++const uint32 kDeviceBetaDiskA = 'BD_A';
++const uint32 kDeviceBetaDiskB = 'BD_B';
++const uint32 kDeviceBetaDiskC = 'BD_C';
++const uint32 kDeviceBetaDiskD = 'BD_D';
++const uint32 kDeviceKempsonMouse = 'KMOU';
++const uint32 kHelpRegisterMime = 'RMIM';
++const uint32 kPulseEvent = 'TIME';
++const uint32 B_SAVE_SCREEN_REQUESTED = 'SSRQ';
++
++#define STATUS_TIME_INFINITE	-1
++#define STATUS_TIME_DEFAULT		4
++
++#define SEND_EXTEND_KEY(key, shifted, flags) \
++	Handler()->OnKey('c', 0); \
++	Handler()->OnKey('s', 0); \
++	snooze(25000); \
++	Handler()->OnKey(flags & KF_SHIFT ? key : shifted, KF_DOWN | KF_ALT); \
++	snooze(25000); \
++	Handler()->OnKey(flags & KF_SHIFT ? key : shifted, 0)
++
++namespace xPlatform
++{
++
++class HaikuPlatformWindow : public BWindow {
++	public:
++						HaikuPlatformWindow(BRect frame, int w, int h,
++							const char* title, window_type type, uint32 flags);
++		virtual			~HaikuPlatformWindow();
++
++		virtual void	MessageReceived(BMessage *msg);
++		virtual	bool	QuitRequested();
++		virtual void	FrameResized(float width, float height);
++		virtual void	WindowActivated(bool active);
++		virtual void	Show();
++
++		SurfaceView*	View(void) { return fView; }
++
++	private:
++		bool			CheckFuncKey(uint32 key, dword flags);
++		byte			TranslateKey(uint32 key, byte last, dword& flags);
++		void 			ResizeToScale(int scale);
++		void			InstallMimeType(const char *_mime, const char *_icon, const char *_description, const char *_exts);
++		void			SetStatusInfo(const char *text, int time = STATUS_TIME_INFINITE, color_which color = B_PANEL_TEXT_COLOR);
++		void 			UpdateMenus();
++		void			UpdateCursor();
++
++		BMenuBar*		fMenuBar;
++		BMenu*			fBetaDiskMenu;
++		BMenu*			fSoundChipMenu;
++		BMenu*			fSoundVolumeMenu;
++		BMenu*			fAYStereoMenu;
++		BMenu*			fJoystickMenu;
++		BMenu*			fQuickSaveSlotMenu;
++		BMenu*			fFilteringMenu;
++		BMenuItem*		fFastTapeMenuItem;
++		BMenuItem*		fQuickSaveMenuItem;
++		BMenuItem*		fVirtualKeyboardMenuItem;
++		BMenuItem*		fFilteringMenuItem;
++		BMenuItem*		fXBRFilteringMenuItem;
++		BMenuItem*		fSmartBorderScaleMenuItem;
++		BMenuItem*		fPauseMenuItem;
++		BMenuItem*		f48kModeMenuItem;
++		BMenuItem*		fResetToServiceROMMenuItem;
++		BMenuItem*		fKempstonMouseGrabMenuItem;
++		BMenuItem*		fAutoPlayMenuItem;
++
++		BStringView*	fStatusMode;
++		BStringView*	fStatusDisk;
++		BStringView*	fStatusJoystick;
++		BStringView*	fStatusSound;
++		BStringView*	fStatusInfo;
++
++		BFilePanel*		fOpenPanel;
++		BFilePanel*		fSavePanel;
++		BFilePanel*		fSaveScreenPanel;
++		
++		BMessageRunner* fTimerMessageRunner;
++
++		KeyboardWindow*	fKeyboardWindow;
++		WebWindow*		fWebWindow;
++		SurfaceView*	fView;
++
++		BRect 			fLastRect;
++		bool 			fFullscreen;
++		bool			fFiltering;
++		bool			fXBRFiltering;
++		bool			fKempsonMouseGrab;
++		bool			fSkipScale;
++		int				fScaleFactor;
++		byte			fLastPressedKey;
++		int				fStateInfoTimer;
++};
++
++}
++
++#endif
+diff --git a/platform/haiku/resources.rdef b/platform/haiku/resources.rdef
+new file mode 100644
+index 0000000..bd831f3
+--- /dev/null
++++ b/platform/haiku/resources.rdef
+@@ -0,0 +1,120 @@
++resource app_flags B_SINGLE_LAUNCH;
++
++resource app_signature "application/x-vnd.unreal-speccy-portable";
++
++resource app_version {
++	major  = 0,
++	middle = 0,
++	minor  = 86,
++	variety = 17,
++	internal = 0,
++	short_info = "Unreal Speccy Portable",
++	long_info = "Portable ZX-Spectrum emulator"
++};
++
++resource file_types message {
++	"types" = "application/x-spectrum-sna",
++	"types" = "application/x-spectrum-z80",
++	"types" = "application/x-spectrum-trd",
++	"types" = "application/x-spectrum-udi",
++	"types" = "application/x-spectrum-fdi",
++	"types" = "application/x-spectrum-scl",
++	"types" = "application/x-spectrum-tap",
++	"types" = "application/x-spectrum-tzx"
++};
++
++resource vector_icon {
++	$"6E6369660A050003FF000003FFE9000335FF000377C9F6020016033A7CA23D5A"
++	$"7DBEF0223C2DC34B1DB3499FBD000136EEFF4602001602BCFDFBBDC23F3DB9F8"
++	$"BCF765472A854C1EE00001FF46020016023DB67E3DE576BC38853C1DC048E572"
++	$"402EE000FFFF2705FF0401690D0208303530BA6430BDCF304B30C1AD30C51A35"
++	$"50BA5D50BDDC504B50C1BB50C50A50504B50C51A50C1B7503550BDD750BA554B"
++	$"30C52130C1AF303530BDCF30BA5D300A04234E235A6647663A0A042D383B3157"
++	$"4648500804373B34393A363D380802383839390804383D3F393B3F423B080242"
++	$"3C473F0802453D3E4208044546424448404B4208024542484404053A0146484D"
++	$"434E464F454C484A4B0A04485548505646564B0A042E38484F48552E3D0C0A09"
++	$"01000241A71A00000000000041971AC8EE34C8BE340A0501000241671A000000"
++	$"00000041671AC8EE34C8EE340A010101023F381B0000000000003EA0CA41072A"
++	$"BEA70C0A020101023F381B0000000000003E81CF3F64FC4616710A030101023F"
++	$"381B0000000000003E62D43FF3BD4814BC0A040101023F381B0000000000003E"
++	$"154D4242494944690A00010012418615000000000000418615C92C2AC92C2A01"
++	$"178200040A070102024059E8000000000000403489C65D18C604D30A00080403"
++	$"05070608090A124070D6000000000000406B28C695A0C7251D01178103040A08"
++	$"08040305070608090A124059E8000000000000403489C65D18C604D301178103"
++	$"040A06010C024059E8000000000000403489C65D18C604D30A00010B024059E8"
++	$"000000000000403489C65D18C604D3"
++};
++
++resource(0, "disk_icon") #'VICN' array {
++	$"6E636966070101000069050102001602386AE138EB85B8EB85386AE1498F854A"
++	$"0B99007AFF1C0200160239C66636A7AEB6A7AE39C6664B6D5C48CB0A003AFF5D"
++	$"02001602B715C2BA87FF3A87FFB715C24567AE4A563D0175FEC402000602371F"
++	$"433A82A6BD80923A2D884BFDA5487CE900FFFFFFFFE8E6B60200060831F0F537"
++	$"B9D9BB38D23568794B3BC84AF95A00FF000025FF000033FFAA0062FF94007167"
++	$"FF44A435FF06B100AAFFFF00AAFF0C0605FF00424042C334C400405E40C83F40"
++	$"5E405E455E45C8C84C495AC64153C2AB5A420608FF7F43584358C400C6645A42"
++	$"C70DC3775AC0475A405AC004C5FE3C3B34C1DF38BAB6BD5FB49FC22DB7AABFC6"
++	$"B49CC2B12449B49AC2D1B8B6C5324358BCD3C7734358580607FF1F425642564A"
++	$"C5985A4052C2ABC5FE3C3B34C1DF38BAB6BD5FB49FC22DB7AABFC6B491C286B4"
++	$"77C33AB484C2E0B87EC4FD4256BC85C6C04256560606FF074258425838C77324"
++	$"492EC5322448244724482EC443425538C66442C8A5425842C8C84258580606FF"
++	$"07425942594AC6A75A4252C39A5AC0045A405AC04852C2AB42564AC59842C92E"
++	$"425942C90B4259590A04523E4C4336393B350606BA0E374D3A4A39473C48BC6D"
++	$"C25C3648334B334E314DBB94C5D508023B36463B080239383F3B0802413C483F"
++	$"020441454343BF84C25F3B463E4738453A413942BDFDBF8440403E3F42410A03"
++	$"35504D4C4356090A00010002401A05000000000000407152C0333BC6BB0D0A01"
++	$"02010A12401A05000000000000407152C0333BC6BB0D01178400040A0402020A"
++	$"02401A05000000000000407152C0333BC6BB0D0A03010402401A050000000000"
++	$"00407152C0333BC6BB0D0A02010302402B16000000000000407152C0777FC67B"
++	$"0D0A05010502401A05000000000000407152C0333BC6BB0D0A02010602401A05"
++	$"000000000000407152C0333BC6BB0D0A010309080712401A0500000000000040"
++	$"7152C0333BC6BB0D01178100040A06010B02401A05000000000000407152C033"
++	$"3BC6BB0D"
++};
++
++resource(1, "tape_icon") #'VICN' array {
++	$"6E636966090101000070030100000200160239C6663B870ABB870A39C666499A"
++	$"8F4A45700068FF3902001602B85851B787AE3787AEB858514A6A664BA1470050"
++	$"FF2202001602390B853BB2E1BBB2E1390B854AC58549117000AEFF7C02001602"
++	$"3AF23D3AB4CCBAB4CC3AF23D4A3828497614008EFF5A02001603BA2D6ABA1981"
++	$"38806BB898234A141B4A559E00C9ED73FF21020006082D6C4836BE03BB3F5E32"
++	$"06DF4AFFBE4A42EA00FFF8E333FF000047FFAA0071FF94008167FF44B035FF06"
++	$"C400AAFFFF00AAFF01603D0FBD0E0607FF1F465A465AC2CE5A4B5AC3775A52C7"
++	$"30604459C443CB6FC0D05840CA60C047524046404C4046C334465A46C6A7465A"
++	$"5A060ABFA207352EB8D7BAB4C047BA6F5A3EC532BD185AC0035A445AC047C773"
++	$"C400465740543D294A28482245224522C0AD3E0A0E46563F533D542A4A274722"
++	$"45223F27412A413D4A3F4D46504656465606049F465646C73046565A445A445A"
++	$"3F3E46500608BEAA223F352EB923BA73C047BA6F5A3EC532BD18C7C4C10F4750"
++	$"3F4D3D4A2A4128420A04303E41463F4C2A410606FF0737363736BB8036343834"
++	$"BC1E34BD00373ABB803ABCD23A3A383ABD003ABC1E3736BCD2363736360606FF"
++	$"0748BEB448BEB4C246BEB445BF8045BF0F45BFF048C04CC246C04CC398C04C4B"
++	$"BF804BBFF04BBF0F48BEB4C398BEB448BEB4BEB40A044140393C3D38453C0802"
++	$"3633503F0A0423412C462C4923440A042E47394D39502E4A0A043B4E45534556"
++	$"3B5102062E3B303C293932332E36372F393237313B334F3C4D3B513D5440573E"
++	$"51434B484D494B480E0A000100000A0101011001178422040A020102000A0301"
++	$"03000A040104000A050105000A07010D000A010106000A010107000A06010800"
++	$"0A0001091001178100040A08030A0B0C000A000106023EAAAA0000000000003E"
++	$"000041555548C0000A000106023EAAAA0000000000003E000046EAAA496000"
++};
++
++resource(2, "snapshot_icon") #'VICN' array {
++	$"6E6369660703010000010100006A0533020006023A5D2B39F8B0B9DBF03A4C0F"
++	$"48AEEA4A809100747474FF3E3D3D020016023C40A33251B1B294FA3C81FE4956"
++	$"204903D700B0FF830200160336EDEB36B94ABA0AF63A326E4A79EF4AC3E7005A"
++	$"38DCFF7E0200060A358A6B399462BB27AC371EE44AEDD24A159800D3D3D326A5"
++	$"A5A548FF060662FF000073FFAA0098FF9400B067FF44CD35FF06DC00AAFFFF00"
++	$"AAFF050A043C565A385A323C4E0A0422493C563C4E22430607AA3F422A22433C"
++	$"4E5A32512F512F50304B2F4D30492E492C482D492C0608FAFA424C3E5040513F"
++	$"C65341C6B942C7B742C74142C8A8C0F15945C8E946C61F46C71046C5A9444D45"
++	$"C52143C4BB0A073C584058425A485A4A5846564547100A010104023FCA1A0000"
++	$"00000000406BCA4906BCCA035E0A010104023FCA1A0000000000004000004814"
++	$"35C780000A010104023FCA1A00000000000040000046435EC500000A01010402"
++	$"3FCA1A00000000000040000040F2860000000A00030201001001178422040A02"
++	$"0100000A030101000A060102000A000103123FC7130000000000003F9C004907"
++	$"28C7E05901178422040A050103023FC7130000000000003F9C00490728C7E059"
++	$"0A000103123FC7130000000000003F9C00481563C6125801178422040A050103"
++	$"023FC7130000000000003F9C00481563C612580A000103123FC7130000000000"
++	$"003F9C0046473DC022C301178422040A050103023FC7130000000000003F9C00"
++	$"46473DC022C30A000103123FC7130000000000003F9C00411D99451350011784"
++	$"22040A050103023FC7130000000000003F9C00411D99451350"
++};
+diff --git a/platform/linux/io_select_linux.cpp b/platform/linux/io_select_linux.cpp
+old mode 100755
+new mode 100644
+index cb3d1f0..58070b7
+--- a/platform/linux/io_select_linux.cpp
++++ b/platform/linux/io_select_linux.cpp
+@@ -25,7 +25,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ #include <dirent.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
++#ifdef __HAIKU__
++#include <errno.h>
++#else
+ #include <sys/errno.h>
++#endif
+ 
+ namespace xIo
+ {
+@@ -73,6 +77,11 @@ bool PathIsRoot(const char* path) {	return !strcmp(path, root_path); }
+ 
+ bool MkDir(const char* path)
+ {
++#ifdef __HAIKU__
++	struct stat st;
++	if (stat(path, &st) == 0)
++		return true;
++#endif
+ 	if(mkdir(path, 0777) != 0)
+ 	{
+ 		if(errno != EEXIST)
+diff --git a/platform/platform.h b/platform/platform.h
+index 63a179a..3fb042b 100644
+--- a/platform/platform.h
++++ b/platform/platform.h
+@@ -24,7 +24,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ #pragma once
+ 
+ 
+-#if defined(_WINDOWS) || defined(_LINUX) || defined(_MAC)
++#if defined(_WINDOWS) || defined(_LINUX) || defined(_MAC) || defined(_HAIKU)
+ 
+ #ifndef USE_BENCHMARK
+ #ifndef USE_LIBRARY
+diff --git a/platform/symbian/tick.h b/platform/symbian/tick.h
+old mode 100755
+new mode 100644
+diff --git a/platform/win/tick_qpc.h b/platform/win/tick_qpc.h
+old mode 100755
+new mode 100644
+diff --git a/unreal_speccy_portable.rdef b/unreal_speccy_portable.rdef
+new file mode 100644
+index 0000000..20c1207
+--- /dev/null
++++ b/unreal_speccy_portable.rdef
+@@ -0,0 +1,38 @@
++
++resource app_flags B_SINGLE_LAUNCH;
++
++resource app_version {
++	major  = 0,
++	middle = 0,
++	minor  = 86,
++
++	variety = B_APPV_FINAL,
++	internal = 0,
++
++	short_info = "Unreal Speccy Portable",
++	long_info = "A portable ZX-Spectrum emulator"
++};
++
++resource app_signature "application/x-vnd.unreal-speccy-portable";
++
++resource vector_icon {
++	$"6E6369660A050003FF000003FFE9000335FF000377C9F6020016033A7CA23D5A"
++	$"7DBEF0223C2DC34B1DB3499FBD000136EEFF4602001602BCFDFBBDC23F3DB9F8"
++	$"BCF765472A854C1EE00001FF46020016023DB67E3DE576BC38853C1DC048E572"
++	$"402EE000FFFF2705FF0401690D0208303530BA6430BDCF304B30C1AD30C51A35"
++	$"50BA5D50BDDC504B50C1BB50C50A50504B50C51A50C1B7503550BDD750BA554B"
++	$"30C52130C1AF303530BDCF30BA5D300A04234E235A6647663A0A042D383B3157"
++	$"4648500804373B34393A363D380802383839390804383D3F393B3F423B080242"
++	$"3C473F0802453D3E4208044546424448404B4208024542484404053A0146484D"
++	$"434E464F454C484A4B0A04485548505646564B0A042E38484F48552E3D0C0A09"
++	$"01000241A71A00000000000041971AC8EE34C8BE340A0501000241671A000000"
++	$"00000041671AC8EE34C8EE340A010101023F381B0000000000003EA0CA41072A"
++	$"BEA70C0A020101023F381B0000000000003E81CF3F64FC4616710A030101023F"
++	$"381B0000000000003E62D43FF3BD4814BC0A040101023F381B0000000000003E"
++	$"154D4242494944690A00010012418615000000000000418615C92C2AC92C2A01"
++	$"178200040A070102024059E8000000000000403489C65D18C604D30A00080403"
++	$"05070608090A124070D6000000000000406B28C695A0C7251D01178103040A08"
++	$"08040305070608090A124059E8000000000000403489C65D18C604D301178103"
++	$"040A06010C024059E8000000000000403489C65D18C604D30A00010B024059E8"
++	$"000000000000403489C65D18C604D3"
++};
+-- 
+2.30.2
+

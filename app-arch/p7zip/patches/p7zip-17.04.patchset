@@ -1,0 +1,195 @@
+From b0f81cbba1b9014d4770841c124683de9aa20268 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sun, 14 Feb 2016 10:08:25 +0100
+Subject: applying patch p7zip-9.20.1.patch
+
+
+diff --git a/CPP/Windows/System.cpp b/CPP/Windows/System.cpp
+index 322fce2..69a9f43 100644
+--- a/CPP/Windows/System.cpp
++++ b/CPP/Windows/System.cpp
+@@ -15,7 +15,7 @@
+ #include <sys/sysinfo.h>
+ #endif
+ 
+-#if defined(ENV_BEOS)
++#if defined(ENV_BEOS) || defined(ENV_HAIKU)
+ #include <be/kernel/OS.h>
+ #endif
+ 
+@@ -79,7 +79,7 @@ namespace NWindows
+ 			if (nbcpu < 1) nbcpu = 1;
+ 			return nbcpu;
+ 		}
+-		#elif defined(ENV_BEOS)
++		#elif defined(ENV_BEOS) || defined(ENV_HAIKU)
+ 		UInt32 GetNumberOfProcessors() {
+ 			system_info info;
+ 			get_system_info(&info);
+-- 
+2.30.0
+
+
+From 3371112ba4216088da75d9219c418496f4dfa9d8 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sun, 14 Feb 2016 10:15:58 +0100
+Subject: Fix detection of RAM size.
+
+
+diff --git a/CPP/Windows/System.cpp b/CPP/Windows/System.cpp
+index 69a9f43..5b4e0d9 100644
+--- a/CPP/Windows/System.cpp
++++ b/CPP/Windows/System.cpp
+@@ -154,7 +154,7 @@ namespace NWindows
+ 			if ( pstat( PSTAT_STATIC, pu, (size_t)sizeof(pst), (size_t)0, 0 ) != -1 ) {
+ 				size = ((UInt64)pst.physical_memory)*pst.page_size;
+ 			}
+-#elif defined(ENV_BEOS)
++#elif defined(ENV_BEOS) || defined(ENV_HAIKU)
+ 			system_info info;
+ 			get_system_info(&info);
+ 			size = info.max_pages;
+-- 
+2.30.0
+
+
+From cf62c205d25d73372f92625068e873bbf4362c9a Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Mon, 4 Jan 2021 12:29:26 +0100
+Subject: haiku: uses libiconv
+
+
+diff --git a/makefile.haiku b/makefile.haiku
+index a6e71c2..99d781a 100644
+--- a/makefile.haiku
++++ b/makefile.haiku
+@@ -11,7 +11,7 @@ CXX=g++
+ CC=gcc
+ LINK_SHARED=-nostart
+ 
+-LOCAL_LIBS=-lbe
++LOCAL_LIBS=-lbe -liconv
+ LOCAL_LIBS_DLL=$(LOCAL_LIBS)
+ 
+ OBJ_CRC32=$(OBJ_CRC32_C)
+-- 
+2.30.0
+
+
+From 78d3cc427e57013ae6cc047c885c430a09304142 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Thu, 15 Apr 2021 18:54:32 +0200
+Subject: Haiku: fix 7z and 7zr build on x86_64
+
+
+diff --git a/C/hashes/hash.h b/C/hashes/hash.h
+index 3abf275..e3074ef 100644
+--- a/C/hashes/hash.h
++++ b/C/hashes/hash.h
+@@ -39,6 +39,11 @@
+ #define __hash_h__
+ 
+ #include <string.h>
++#ifdef __HAIKU__
++#include <stdint.h>
++#define _UINT32_T_DECLARED
++#define _UINT64_T_DECLARED
++#endif
+ 
+ #include "../7zTypes.h"
+ 
+diff --git a/CPP/Windows/DLL.cpp b/CPP/Windows/DLL.cpp
+index 744af1f..796c7b4 100644
+--- a/CPP/Windows/DLL.cpp
++++ b/CPP/Windows/DLL.cpp
+@@ -37,7 +37,7 @@ TRACEN((printf("CLibrary::Free(this=%p,%p)\n",(void *)this,(void *)_module)))
+ #ifdef __APPLE_CC__
+   int ret = NSUnLinkModule ((NSModule)_module, 0);
+ #elif ENV_BEOS
+-  int ret = unload_add_on((image_id)_module);
++  int ret = unload_add_on((image_id)(uintptr_t)_module);
+ #else
+   int ret = dlclose(_module);
+ #endif
+@@ -65,7 +65,7 @@ static FARPROC local_GetProcAddress(HMODULE module,LPCSTR lpProcName)
+       ptr = 0;
+     }
+ #elif ENV_BEOS
+-    if (get_image_symbol((image_id)module, lpProcName, B_SYMBOL_TYPE_TEXT, &ptr) != B_OK)
++    if (get_image_symbol((image_id)(uintptr_t)module, lpProcName, B_SYMBOL_TYPE_TEXT, &ptr) != B_OK)
+       ptr = 0;
+ #else
+     ptr = dlsym (module, lpProcName);
+@@ -122,11 +122,11 @@ bool CLibrary::Load(LPCTSTR lpLibFileName)
+   image_id image = load_add_on(p.Path());
+ TRACEN((printf("load_add_on(%s)=%d\n",p.Path(),(int)image)))
+   if (image < 0) {
+-    err = (image_id)handler;
++    err = (image_id)(uintptr_t)handler;
+     handler = 0;
+   } else {
+     err = 0;
+-    handler = (HMODULE)image;
++    handler = (HMODULE)(uintptr_t)image;
+   }
+ #else
+   int options_dlopen = 0;
+diff --git a/makefile.haiku b/makefile.haiku
+index 99d781a..9321912 100644
+--- a/makefile.haiku
++++ b/makefile.haiku
+@@ -1,7 +1,7 @@
+ 
+ OPTFLAGS=-O -s
+ 
+-ALLFLAGS=${OPTFLAGS} \
++ALLFLAGS=${OPTFLAGS} -pipe \
+ 	-DENV_BEOS -DENV_HAIKU \
+     	-D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE \
+ 	-DNDEBUG -D_REENTRANT -DENV_UNIX \
+@@ -9,7 +9,8 @@ ALLFLAGS=${OPTFLAGS} \
+ 
+ CXX=g++
+ CC=gcc
+-LINK_SHARED=-nostart
++CC_SHARED=-fPIC
++LINK_SHARED=-fPIC -shared
+ 
+ LOCAL_LIBS=-lbe -liconv
+ LOCAL_LIBS_DLL=$(LOCAL_LIBS)
+diff --git a/makefile.machine b/makefile.machine
+index a89b568..d7169cd 100644
+--- a/makefile.machine
++++ b/makefile.machine
+@@ -1,14 +1,11 @@
+-#
+-# makefile for Linux (x86, PPC, alpha ...)
+-#
+ 
+-OPTFLAGS=-O2 -s
+-#OPTFLAGS=-O0 -ggdb
++OPTFLAGS=-O -s
+ 
+ ALLFLAGS=${OPTFLAGS} -pipe \
++	-DENV_BEOS -DENV_HAIKU \
+     	-D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE \
+ 	-DNDEBUG -D_REENTRANT -DENV_UNIX \
+-	-D_7ZIP_LARGE_PAGES \
++	-D_UINT64_T_DECLARED \
+ 	$(LOCAL_FLAGS)
+ 
+ CXX=g++
+@@ -16,8 +13,8 @@ CC=gcc
+ CC_SHARED=-fPIC
+ LINK_SHARED=-fPIC -shared
+ 
+-LOCAL_LIBS=-lpthread
+-LOCAL_LIBS_DLL=$(LOCAL_LIBS) -ldl
++LOCAL_LIBS=-lbe -liconv
++LOCAL_LIBS_DLL=$(LOCAL_LIBS)
+ 
+ OBJ_CRC32=$(OBJ_CRC32_C)
+ OBJ_AES=
+-- 
+2.30.0
+

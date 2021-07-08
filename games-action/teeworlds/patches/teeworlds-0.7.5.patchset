@@ -1,0 +1,172 @@
+From 7a12e331f2f9f46df9983796f71d5104ff045c08 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Tue, 13 Apr 2021 12:49:21 +1000
+Subject: Add haiku support
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+old mode 100755
+new mode 100644
+index 65dfdd3..9cf07fb
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -60,6 +60,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+   set(TARGET_OS "windows")
+ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+   set(TARGET_OS "linux")
++elseif(CMAKE_SYSTEM_NAME STREQUAL "Haiku")
++  set(TARGET_OS "haiku")
+ elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+   set(TARGET_OS "mac")
+ endif()
+@@ -149,7 +151,7 @@ function(add_c_compiler_flag_if_supported VARIABLE FLAG)
+   endif()
+ endfunction()
+ 
+-if(NOT MSVC)
++if(NOT MSVC AND NOT HAIKU)
+   # Protect the stack pointer.
+   # -fstack-protector-all doesn't work on MinGW.
+   add_c_compiler_flag_if_supported(OUR_FLAGS -fstack-protector-strong)
+@@ -409,6 +411,10 @@ elseif(TARGET_OS STREQUAL "mac")
+   )
+   set(PLATFORM_CLIENT_LIBS ${COCOA} ${OPENGL})
+   set(PLATFORM_LIBS ${CARBON})
++elseif(TARGET_OS STREQUAL "haiku")
++  set(PLATFORM_CLIENT)
++  find_package(OpenGL)
++  set(PLATFORM_LIBS GL network)
+ else()
+   set(PLATFORM_CLIENT)
+   find_package(OpenGL)
+diff --git a/src/base/detect.h b/src/base/detect.h
+old mode 100755
+new mode 100644
+index 5093162..9d68fb8
+--- a/src/base/detect.h
++++ b/src/base/detect.h
+@@ -82,6 +82,13 @@
+ 	#define CONF_PLATFORM_STRING "beos"
+ #endif
+ 
++#if defined(__HAIKU__)
++	#define CONF_FAMILY_UNIX 1
++	#define CONF_FAMILY_STRING "unix"
++	#define CONF_PLATFORM_HAIKU 1
++	#define CONF_PLATFORM_STRING "haiku"
++#endif
++
+ 
+ /* use gcc endianness definitions when available */
+ #if defined(__GNUC__) && !defined(__APPLE__) && !defined(__MINGW32__) && !defined(__sun)
+diff --git a/src/base/system.c b/src/base/system.c
+old mode 100755
+new mode 100644
+index 9a1a042..16c9013
+--- a/src/base/system.c
++++ b/src/base/system.c
+@@ -1541,6 +1541,11 @@ int fs_storage_path(const char *appname, char *path, int max)
+ 	if(!home)
+ 		return -1;
+ 
++#if defined(CONF_PLATFORM_HAIKU)
++	str_format(path, max, "%s/config/settings/%s", home, appname);
++	return 0;
++#endif
++
+ #if defined(CONF_PLATFORM_MACOSX)
+ 	str_format(path, max, "%s/Library/Application Support/%s", home, appname);
+ 	return 0;
+@@ -1588,6 +1593,11 @@ int fs_makedir(const char *path)
+ 		return 0;
+ 	return -1;
+ #else
++#ifdef CONF_PLATFORM_HAIKU
++	struct stat st;
++	if (stat(path, &st) == 0)
++		return 0;
++#endif
+ 	if(mkdir(path, 0755) == 0)
+ 		return 0;
+ 	if(errno == EEXIST)
+diff --git a/src/base/system.h b/src/base/system.h
+old mode 100755
+new mode 100644
+index f08a9e3..a91e611
+--- a/src/base/system.h
++++ b/src/base/system.h
+@@ -503,7 +503,11 @@ void lock_unlock(LOCK lock);
+ /* if compiled with -pedantic-errors it will complain about long
+ 	not being a C90 thing.
+ */
++#ifdef CONF_PLATFORM_HAIKU
++#include <SupportDefs.h>
++#else
+ __extension__ typedef long long int64;
++#endif
+ #else
+ typedef long long int64;
+ #endif
+diff --git a/src/engine/client/backend_sdl.cpp b/src/engine/client/backend_sdl.cpp
+old mode 100755
+new mode 100644
+index 5f92d58..064d65d
+--- a/src/engine/client/backend_sdl.cpp
++++ b/src/engine/client/backend_sdl.cpp
+@@ -698,7 +698,7 @@ int CGraphicsBackend_SDL_OpenGL::Init(const char *pName, int *pScreen, int *pWin
+ 	if(Flags&IGraphicsBackend::INITFLAG_BORDERLESS)
+ 		SdlFlags |= SDL_WINDOW_BORDERLESS;
+ 	if(Flags&IGraphicsBackend::INITFLAG_FULLSCREEN)
+-#if defined(CONF_PLATFORM_MACOSX)	// Todo SDL: remove this when fixed (game freezes when losing focus in fullscreen)
++#if defined(CONF_PLATFORM_MACOSX) || defined(CONF_PLATFORM_HAIKU)	// Todo SDL: remove this when fixed (game freezes when losing focus in fullscreen)
+ 		SdlFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;	// always use "fake" fullscreen
+ 	*pWindowWidth = *pDesktopWidth;
+ 	*pWindowHeight = *pDesktopHeight;
+@@ -829,7 +829,7 @@ void CGraphicsBackend_SDL_OpenGL::Maximize()
+ 
+ bool CGraphicsBackend_SDL_OpenGL::Fullscreen(bool State)
+ {
+-#if defined(CONF_PLATFORM_MACOSX)	// Todo SDL: remove this when fixed (game freezes when losing focus in fullscreen)
++#if defined(CONF_PLATFORM_MACOSX) || defined(CONF_PLATFORM_HAIKU)	// Todo SDL: remove this when fixed (game freezes when losing focus in fullscreen)
+ 	return SDL_SetWindowFullscreen(m_pWindow, State ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) == 0;
+ #else
+ 	return SDL_SetWindowFullscreen(m_pWindow, State ? SDL_WINDOW_FULLSCREEN : 0) == 0;
+diff --git a/src/engine/shared/storage.cpp b/src/engine/shared/storage.cpp
+old mode 100755
+new mode 100644
+index f646f3e..632c895
+--- a/src/engine/shared/storage.cpp
++++ b/src/engine/shared/storage.cpp
+@@ -5,6 +5,9 @@
+ #include <engine/storage.h>
+ #include "linereader.h"
+ #include <zlib.h>
++#ifdef CONF_PLATFORM_HAIKU
++#include <stdlib.h>
++#endif
+ 
+ // compiled-in data-dir path
+ #define DATA_DIR "data"
+@@ -216,6 +219,9 @@ public:
+ 
+ 	void FindAppDir(const char *pArgv0)
+ 	{
++#ifdef CONF_PLATFORM_HAIKU
++		pArgv0 = realpath(pArgv0, NULL);
++#endif
+ 		// check for usable path in argv[0]
+ 		unsigned int Pos = ~0U;
+ 		for(unsigned i = 0; pArgv0[i]; ++i)
+@@ -228,6 +234,9 @@ public:
+ 			if(!fs_is_dir(m_aAppDir))
+ 				m_aAppDir[0] = 0;
+ 		}
++#ifdef CONF_PLATFORM_HAIKU
++		free((void*)pArgv0);
++#endif
+ 	}
+ 
+ 	void FindDataDir()
+-- 
+2.30.2
+

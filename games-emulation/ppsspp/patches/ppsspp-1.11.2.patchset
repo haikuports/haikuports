@@ -1,0 +1,382 @@
+From 10bc7bc9486a5bfb3e1d4fd004b01d3dda5f3dec Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 28 Feb 2021 20:30:33 +1000
+Subject: Fixes for Haiku
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f71e066..aae4a10 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -86,7 +86,7 @@ if(${CMAKE_SYSTEM_NAME} MATCHES "Android")
+ endif()
+ 
+ # We only support Vulkan on Unix, macOS (by MoltenVK), Android and Windows.
+-if(ANDROID OR WIN32 OR (UNIX AND NOT ARM_NO_VULKAN))
++if(ANDROID OR WIN32 OR (UNIX AND NOT HAIKU AND NOT ARM_NO_VULKAN))
+ 	set(VULKAN ON)
+ endif()
+ 
+@@ -137,7 +137,7 @@ option(USE_SYSTEM_LIBZIP "Dynamically link against system libzip" ${USE_SYSTEM_L
+ option(USE_ASAN "Use address sanitizer" OFF)
+ option(USE_UBSAN "Use undefined behaviour sanitizer" OFF)
+ 
+-if(UNIX AND NOT (APPLE OR ANDROID) AND VULKAN)
++if(UNIX AND NOT (APPLE OR ANDROID OR HAIKU) AND VULKAN)
+ 	if(USING_X11_VULKAN)
+ 		message("Using X11 for Vulkan")
+ 		add_definitions(-DVK_USE_PLATFORM_XLIB_KHR)
+@@ -1113,7 +1113,7 @@ add_library(native STATIC
+ 	ext/jpge/jpge.h
+ )
+ 
+-if(LINUX AND NOT ANDROID)
++if(LINUX AND NOT ANDROID AND NOT HAIKU)
+ 	set(RT_LIB rt)
+ endif()
+ 
+@@ -1131,6 +1131,8 @@ if(ANDROID)
+ 	target_link_libraries(native log EGL OpenSLES)
+ elseif(WIN32)
+ 	target_link_libraries(native ws2_32 winmm)
++elseif(HAIKU)
++	target_link_libraries(native network)
+ elseif(${CMAKE_SYSTEM_NAME} MATCHES "^(DragonFly|FreeBSD|NetBSD)$")
+ 	target_link_libraries(native execinfo)
+ endif()
+@@ -1855,12 +1857,15 @@ if(FFmpeg_FOUND)
+ endif()
+ 
+ # Discord integration
+-if(USE_DISCORD AND NOT IOS AND NOT LIBRETRO)
++if(USE_DISCORD AND NOT IOS AND NOT LIBRETRO AND NOT HAIKU)
+ 	add_definitions(-DUSE_DISCORD=1)
+ 	target_link_libraries(${CoreLibName} discord-rpc)
+ endif()
+ 
+ # miniUPnPc integration (MiniUPnPc supposed to works on any POSIX system, not sure if some of these are redundant/not needed tho)
++if(HAIKU)
++	target_link_libraries(${CoreLibName} miniupnpc)
++else()
+ if(USE_MINIUPNPC)
+ 	set (MINIUPNPC_VERSION 2.1) # used by miniupnpcstrings.h.cmake
+ 	set (MINIUPNPC_API_VERSION 17)
+@@ -1931,6 +1936,7 @@ if(USE_MINIUPNPC)
+ 		endif()
+ 	endif()
+ endif()
++endif()
+ 
+ setup_target_project(${CoreLibName} Core)
+ 
+@@ -2053,6 +2059,10 @@ set(WindowsFiles
+ 
+ list(APPEND LinkCommon ${CoreLibName} ${CMAKE_THREAD_LIBS_INIT})
+ 
++if(HAIKU)
++    list(APPEND LinkCommon network)
++endif()
++
+ if(WIN32)
+ 	list(APPEND LinkCommon kernel32 user32 gdi32 shell32 comctl32 dsound xinput d3d9 winmm dinput8 ole32 winspool ksuser mf mfplat mfreadwrite mfuuid shlwapi)
+ 	#setup_target_project(${TargetBin} Windows)
+diff --git a/Common/Swap.h b/Common/Swap.h
+index 3a5d8ac..f68142f 100644
+--- a/Common/Swap.h
++++ b/Common/Swap.h
+@@ -68,6 +68,8 @@ inline unsigned short bswap16(unsigned short x) { return _byteswap_ushort(x); }
+ #elif defined(__DragonFly__) || defined(__FreeBSD__) || \
+       defined(__NetBSD__) || defined(__OpenBSD__)
+ #include <sys/endian.h>
++#elif defined(__HAIKU__)
++#include <endian.h>
+ # ifdef __OpenBSD__
+ #define bswap16 swap16
+ #define bswap32 swap32
+diff --git a/Core/Config.cpp b/Core/Config.cpp
+index 1c53e8e..c1758bc 100644
+--- a/Core/Config.cpp
++++ b/Core/Config.cpp
+@@ -534,7 +534,7 @@ static ConfigSetting cpuSettings[] = {
+ 
+ static int DefaultInternalResolution() {
+ 	// Auto on Windows and Linux, 2x on large screens, 1x elsewhere.
+-#if defined(USING_WIN_UI) || defined(USING_QT_UI)
++#if defined(USING_WIN_UI) || defined(USING_QT_UI) || defined(__HAIKU__)
+ 	return 0;
+ #else
+ 	int longestDisplaySide = std::max(System_GetPropertyInt(SYSPROP_DISPLAY_XRES), System_GetPropertyInt(SYSPROP_DISPLAY_YRES));
+@@ -761,7 +761,11 @@ static ConfigSetting graphicsSettings[] = {
+ 	ReportedConfigSetting("InternalResolution", &g_Config.iInternalResolution, &DefaultInternalResolution, true, true),
+ 	ReportedConfigSetting("AndroidHwScale", &g_Config.iAndroidHwScale, &DefaultAndroidHwScale),
+ 	ReportedConfigSetting("HighQualityDepth", &g_Config.bHighQualityDepth, true, true, true),
++#ifdef __HAIKU__
++	ReportedConfigSetting("FrameSkip", &g_Config.iFrameSkip, 2, true, true),
++#else
+ 	ReportedConfigSetting("FrameSkip", &g_Config.iFrameSkip, 0, true, true),
++#endif
+ 	ReportedConfigSetting("FrameSkipType", &g_Config.iFrameSkipType, 0, true, true),
+ 	ReportedConfigSetting("AutoFrameSkip", &g_Config.bAutoFrameSkip, false, true, true),
+ 	ConfigSetting("FrameRate", &g_Config.iFpsLimit1, 0, true, true),
+@@ -772,10 +776,17 @@ static ConfigSetting graphicsSettings[] = {
+ #endif
+ 
+ 	// Most low-performance (and many high performance) mobile GPUs do not support aniso anyway so defaulting to 4 is fine.
++#ifdef __HAIKU__
++	ConfigSetting("AnisotropyLevel", &g_Config.iAnisotropyLevel, 0, true, true),
++#else
+ 	ConfigSetting("AnisotropyLevel", &g_Config.iAnisotropyLevel, 4, true, true),
+-
++#endif
+ 	ReportedConfigSetting("VertexDecCache", &g_Config.bVertexCache, &DefaultVertexCache, true, true),
++#ifdef __HAIKU__
++	ReportedConfigSetting("TextureBackoffCache", &g_Config.bTextureBackoffCache, true, true, true),
++#else
+ 	ReportedConfigSetting("TextureBackoffCache", &g_Config.bTextureBackoffCache, false, true, true),
++#endif
+ 	ReportedConfigSetting("TextureSecondaryCache", &g_Config.bTextureSecondaryCache, false, true, true),
+ 	ReportedConfigSetting("VertexDecJit", &g_Config.bVertexDecoderJit, &DefaultCodeGen, false),
+ 
+@@ -810,7 +821,11 @@ static ConfigSetting graphicsSettings[] = {
+ 	ConfigSetting("ShaderChainRequires60FPS", &g_Config.bShaderChainRequires60FPS, false, true, true),
+ 
+ 	ReportedConfigSetting("MemBlockTransferGPU", &g_Config.bBlockTransferGPU, true, true, true),
++#ifdef __HAIKU__
++	ReportedConfigSetting("DisableSlowFramebufEffects", &g_Config.bDisableSlowFramebufEffects, true, true, true),
++#else
+ 	ReportedConfigSetting("DisableSlowFramebufEffects", &g_Config.bDisableSlowFramebufEffects, false, true, true),
++#endif
+ 	ReportedConfigSetting("FragmentTestCache", &g_Config.bFragmentTestCache, true, true, true),
+ 
+ 	ConfigSetting("GfxDebugOutput", &g_Config.bGfxDebugOutput, false, false, false),
+diff --git a/Core/HLE/proAdhoc.cpp b/Core/HLE/proAdhoc.cpp
+index dda1f66..8ce8b22 100644
+--- a/Core/HLE/proAdhoc.cpp
++++ b/Core/HLE/proAdhoc.cpp
+@@ -2013,7 +2013,7 @@ int setUDPConnReset(int udpsock, bool enabled) {
+ 	return -1;
+ }
+ 
+-#if !defined(TCP_KEEPIDLE)
++#if !defined(TCP_KEEPIDLE) && !defined(__HAIKU__)
+ #define TCP_KEEPIDLE	TCP_KEEPALIVE //TCP_KEEPIDLE on Linux is equivalent to TCP_KEEPALIVE on macOS
+ #endif
+ // VS 2017 compatibility
+@@ -2032,12 +2032,14 @@ int setSockKeepAlive(int sock, bool keepalive, const int keepinvl, const int kee
+ 	if (result == 0 && keepalive) {
+ 		if (getsockopt(sock, SOL_SOCKET, SO_TYPE, (char*)&optval, (socklen_t*)&optlen) == 0 && optval == SOCK_STREAM) {
+ 			optlen = sizeof(optval);
++#ifndef __HAIKU__
+ 			optval = keepidle; //180 sec
+-			setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, (char*)&optval, optlen);		
++			setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, (char*)&optval, optlen);
+ 			optval = keepinvl; //60 sec
+ 			setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, (char*)&optval, optlen);
+ 			optval = keepcnt; //20
+ 			setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, (char*)&optval, optlen);
++#endif
+ 		}
+ 	}
+ 	return result;
+diff --git a/Core/Util/PortManager.h b/Core/Util/PortManager.h
+index a4c7df6..78bcf01 100644
+--- a/Core/Util/PortManager.h
++++ b/Core/Util/PortManager.h
+@@ -26,9 +26,9 @@
+ #define MINIUPNP_STATICLIB
+ #endif
+ 
+-#include "ext/miniupnp/miniupnpc/miniwget.h"
+-#include "ext/miniupnp/miniupnpc/miniupnpc.h"
+-#include "ext/miniupnp/miniupnpc/upnpcommands.h"
++#include "miniupnpc/miniwget.h"
++#include "miniupnpc/miniupnpc.h"
++#include "miniupnpc/upnpcommands.h"
+ 
+ #include <string>
+ #include <deque>
+diff --git a/SDL/SDLMain.cpp b/SDL/SDLMain.cpp
+index 98b56fe..a175b4b 100644
+--- a/SDL/SDLMain.cpp
++++ b/SDL/SDLMain.cpp
+@@ -209,7 +209,7 @@ void LaunchBrowser(const char *url) {
+ #elif defined(_WIN32)
+ 	std::wstring wurl = ConvertUTF8ToWString(url);
+ 	ShellExecute(NULL, L"open", wurl.c_str(), NULL, NULL, SW_SHOWNORMAL);
+-#elif defined(__APPLE__)
++#elif defined(__APPLE__) || defined(__HAIKU__)
+ 	std::string command = std::string("open ") + url;
+ 	system(command.c_str());
+ #else
+@@ -232,7 +232,7 @@ void LaunchMarket(const char *url) {
+ #elif defined(_WIN32)
+ 	std::wstring wurl = ConvertUTF8ToWString(url);
+ 	ShellExecute(NULL, L"open", wurl.c_str(), NULL, NULL, SW_SHOWNORMAL);
+-#elif defined(__APPLE__)
++#elif defined(__APPLE__) || defined(__HAIKU__)
+ 	std::string command = std::string("open ") + url;
+ 	system(command.c_str());
+ #else
+@@ -250,7 +250,7 @@ void LaunchEmail(const char *email_address) {
+ #elif defined(_WIN32)
+ 	std::wstring mailto = std::wstring(L"mailto:") + ConvertUTF8ToWString(email_address);
+ 	ShellExecute(NULL, L"open", mailto.c_str(), NULL, NULL, SW_SHOWNORMAL);
+-#elif defined(__APPLE__)
++#elif defined(__APPLE__) || defined(__HAIKU__)
+ 	std::string command = std::string("open mailto:") + email_address;
+ 	system(command.c_str());
+ #else
+@@ -269,6 +269,8 @@ std::string System_GetProperty(SystemProperty prop) {
+ 		return "SDL:Windows";
+ #elif __linux__
+ 		return "SDL:Linux";
++#elif __HAIKU__
++		return "SDL:Haiku";
+ #elif __APPLE__
+ 		return "SDL:macOS";
+ #elif PPSSPP_PLATFORM(SWITCH)
+@@ -489,6 +491,16 @@ int main(int argc, char *argv[]) {
+ 	nxlinkStdio();
+ #endif // HAVE_LIBNX
+ 
++#ifdef __HAIKU__
++	char *binpath = realpath(argv[0], NULL);
++	if (binpath != NULL) {
++		char *appdir = strrchr(binpath, '/');
++		*appdir = '\0';
++		chdir(binpath);
++		free(binpath);
++	}
++#endif
++
+ 	glslang::InitializeProcess();
+ 
+ #if PPSSPP_PLATFORM(RPI)
+diff --git a/UI/NativeApp.cpp b/UI/NativeApp.cpp
+index f7b7b13..9addbc7 100644
+--- a/UI/NativeApp.cpp
++++ b/UI/NativeApp.cpp
+@@ -507,6 +507,9 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
+ 			g_Config.memStickDirectory = memstickDir + "/";
+ 		}
+ 	}
++#elif defined(__HAIKU__)
++	g_Config.memStickDirectory = getenv("HOME") + std::string("/config/settings/ppsspp/");
++	g_Config.flash0Directory = File::GetExeDirectory() + "/assets/flash0/";
+ #elif defined(IOS)
+ 	g_Config.memStickDirectory = user_data_path;
+ 	g_Config.flash0Directory = std::string(external_dir) + "/flash0/";
+diff --git a/cmake/Modules/FindFFmpeg.cmake b/cmake/Modules/FindFFmpeg.cmake
+index 648c0ba..03bcac6 100644
+--- a/cmake/Modules/FindFFmpeg.cmake
++++ b/cmake/Modules/FindFFmpeg.cmake
+@@ -33,7 +33,6 @@ set(_FFmpeg_ALL_COMPONENTS
+   avfilter
+   avformat
+   avutil
+-  postproc
+   swresample
+   swscale
+ )
+@@ -42,7 +41,6 @@ set(_FFmpeg_DEPS_avcodec avutil)
+ set(_FFmpeg_DEPS_avdevice avcodec avformat avutil)
+ set(_FFmpeg_DEPS_avfilter avutil)
+ set(_FFmpeg_DEPS_avformat avcodec avutil)
+-set(_FFmpeg_DEPS_postproc avutil)
+ set(_FFmpeg_DEPS_swresample avutil)
+ set(_FFmpeg_DEPS_swscale avutil)
+ 
+@@ -68,6 +66,8 @@ function(find_ffmpeg LIBNAME)
+       ${FFMPEG_DIR}/include/lib${LIBNAME}
+       ${FFMPEG_DIR}/include/ffmpeg
+       ${FFMPEG_DIR}/include
++      ${FFMPEG_DIR}/headers/x86
++      ${FFMPEG_DIR}/headers
+       NO_DEFAULT_PATH
+       NO_CMAKE_FIND_ROOT_PATH
+     )
+diff --git a/ext/CMakeLists.txt b/ext/CMakeLists.txt
+index 16b4adb..92c723d 100644
+--- a/ext/CMakeLists.txt
++++ b/ext/CMakeLists.txt
+@@ -17,6 +17,6 @@ add_subdirectory(glslang EXCLUDE_FROM_ALL)
+ add_subdirectory(snappy)
+ add_subdirectory(udis86)
+ add_subdirectory(SPIRV-Cross-build)
+-if(USE_DISCORD AND NOT IOS AND NOT LIBRETRO)
++if(USE_DISCORD AND NOT IOS AND NOT LIBRETRO AND NOT HAIKU)
+ 	add_subdirectory(discord-rpc-build)
+ endif()
+-- 
+2.30.0
+
+
+From 0fb58396e5cd386a8fbe44b542db4b387b8c865c Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 28 Feb 2021 21:05:19 +1000
+Subject: Disable mlock for haiku
+
+
+diff --git a/Core/Instance.cpp b/Core/Instance.cpp
+index 4353641..d611078 100644
+--- a/Core/Instance.cpp
++++ b/Core/Instance.cpp
+@@ -79,7 +79,7 @@ static bool UpdateInstanceCounter(void (*callback)(volatile InstanceInfo *)) {
+ 	UnmapViewOfFile(buf);
+ 
+ 	return result;
+-#elif PPSSPP_PLATFORM(ANDROID) || defined(__LIBRETRO__)
++#elif PPSSPP_PLATFORM(ANDROID) || defined(__LIBRETRO__) || defined(__HAIKU__)
+ 	// TODO: replace shm_open & shm_unlink with ashmem or android-shmem
+ 	return false;
+ #else
+-- 
+2.30.0
+
+
+From eb656603be77ac73511673b899c320529afbaae4 Mon Sep 17 00:00:00 2001
+From: begasus <begasus@gmail.com>
+Date: Sun, 28 Feb 2021 19:23:53 +0000
+Subject: Fix 32bit build
+
+
+diff --git a/cmake/Modules/FindFFmpeg.cmake b/cmake/Modules/FindFFmpeg.cmake
+index 03bcac6..cf5bd49 100644
+--- a/cmake/Modules/FindFFmpeg.cmake
++++ b/cmake/Modules/FindFFmpeg.cmake
+@@ -66,7 +66,7 @@ function(find_ffmpeg LIBNAME)
+       ${FFMPEG_DIR}/include/lib${LIBNAME}
+       ${FFMPEG_DIR}/include/ffmpeg
+       ${FFMPEG_DIR}/include
+-      ${FFMPEG_DIR}/headers/x86
++      ${FFMPEG_DIR}/headers/x86/${LIBNAME}
+       ${FFMPEG_DIR}/headers
+       NO_DEFAULT_PATH
+       NO_CMAKE_FIND_ROOT_PATH
+@@ -75,6 +75,7 @@ function(find_ffmpeg LIBNAME)
+       ${FFMPEG_DIR}
+       ${FFMPEG_DIR}/lib
+       ${FFMPEG_DIR}/lib${LIBNAME}
++      ${FFMPEG_DIR}/lib/x86/${LIBNAME}
+       NO_DEFAULT_PATH
+       NO_CMAKE_FIND_ROOT_PATH
+     )
+diff --git a/ext/cityhash/city.h b/ext/cityhash/city.h
+index 94499ce..1b80a5e 100644
+--- a/ext/cityhash/city.h
++++ b/ext/cityhash/city.h
+@@ -67,7 +67,11 @@
+ #include <utility>
+ 
+ typedef uint8_t uint8;
++#if defined(__HAIKU__)
++#include <SupportDefs.h>
++#else
+ typedef uint32_t uint32;
++#endif // Haiku
+ typedef uint64_t uint64;
+ typedef std::pair<uint64, uint64> uint128;
+ 
+-- 
+2.30.0
+

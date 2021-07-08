@@ -1,0 +1,632 @@
+From 191875a030e72e75da3c85c80890544f10b4c258 Mon Sep 17 00:00:00 2001
+From: Calvin Hill <calvin@hakobaito.co.uk>
+Date: Wed, 22 May 2019 11:23:37 +0000
+Subject: Initial Haiku support for Node.js
+
+
+diff --git a/common.gypi b/common.gypi
+index aa4279d..e81a699 100644
+--- a/common.gypi
++++ b/common.gypi
+@@ -257,6 +257,9 @@
+           '_target_name!="<(node_core_target_name)")', {
+         'cflags!': ['-Werror'],
+       }],
++      ['OS=="haiku"', {
++        'clang%': 0,
++      }],
+     ],
+     'msvs_settings': {
+       'VCCLCompilerTool': {
+@@ -285,6 +288,10 @@
+           ['target_arch=="arm64"', {
+             'TargetMachine' : 0,              # NotSet. MACHINE:ARM64 is inferred from the input files.
+           }],
++          ['OS == "haiku"', {
++            'cflags': [ '-fPIC' ],
++            'ldflags': [ '-fPIC']
++          }],
+         ],
+         'GenerateDebugInformation': 'true',
+         'SuppressStartupBanner': 'true',
+@@ -345,6 +352,10 @@
+           ['_type!="static_library"', {
+             'xcode_settings': {'OTHER_LDFLAGS': ['-fsanitize=address']},
+           }],
++          ['OS == "haiku"', {
++            'cflags': [ '-fPIC' ],
++            'ldflags': [ '-fPIC']
++          }],
+         ],
+       }],
+       ['v8_enable_pointer_compression == 1', {
+@@ -372,7 +383,7 @@
+         'cflags': [ '-pthread' ],
+         'ldflags': [ '-pthread' ],
+       }],
+-      [ 'OS in "linux freebsd openbsd solaris android aix cloudabi"', {
++      [ 'OS in "linux freebsd openbsd solaris android aix cloudabi haiku"', {
+         'cflags': [ '-Wall', '-Wextra', '-Wno-unused-parameter', ],
+         'cflags_cc': [ '-fno-rtti', '-fno-exceptions', '-std=gnu++1y' ],
+         'defines': [ '__STDC_FORMAT_MACROS' ],
+@@ -386,6 +397,10 @@
+             'cflags': [ '-I/usr/local/include' ],
+             'ldflags': [ '-Wl,-z,wxneeded' ],
+           }],
++          ['OS=="haiku"', {
++            'cflags': [ '-fPIC' ],
++            'ldflags': [ '-fPIC' ],
++          }],
+         ],
+         'conditions': [
+           [ 'target_arch=="ia32"', {
+@@ -545,6 +560,12 @@
+           'OPENSSL_NO_PINSHARED'
+         ],
+       }],
++      ['OS=="haiku"', {
++          'ldflags': [ '-lroot', '-lbsd', '-lstdc++', '-lnetwork', '-Wl,-Bsymbolic', '-Wl,--export-dynamic', '-fPIC' ],
++          'ldflags!': [ '-pthreads',  '-pthread', '-rdynamic' ],
++          'clang%': 0,
++          '%v8_use_snapshot':0,
++      }],
+       ['node_shared_openssl!="true"', {
+         # `OPENSSL_THREADS` is defined via GYP for openSSL for all architectures.
+         'defines': [
+diff --git a/configure.py b/configure.py
+index a477bd1..32b5601 100755
+--- a/configure.py
++++ b/configure.py
+@@ -48,7 +48,7 @@ from fetch_deps import FetchDeps
+ parser = optparse.OptionParser()
+ 
+ valid_os = ('win', 'mac', 'solaris', 'freebsd', 'openbsd', 'linux',
+-            'android', 'aix', 'cloudabi')
++            'android', 'aix', 'cloudabi', 'haiku')
+ valid_arch = ('arm', 'arm64', 'ia32', 'mips', 'mipsel', 'mips64el', 'ppc',
+               'ppc64', 'x32','x64', 'x86', 'x86_64', 's390x')
+ valid_arm_float_abi = ('soft', 'softfp', 'hard')
+diff --git a/deps/openssl/config/archs/linux-x86_64/no-asm/openssl-cl.gypi b/deps/openssl/config/archs/linux-x86_64/no-asm/openssl-cl.gypi
+index 76984d4..eda4459 100644
+--- a/deps/openssl/config/archs/linux-x86_64/no-asm/openssl-cl.gypi
++++ b/deps/openssl/config/archs/linux-x86_64/no-asm/openssl-cl.gypi
+@@ -8,11 +8,9 @@
+     ],
+     'openssl_cflags_linux-x86_64': [
+       '-Wall -O3',
+-      '-pthread -m64',
+-      '-Wall -O3',
++      '-m64',
+     ],
+     'openssl_ex_libs_linux-x86_64': [
+-      '-ldl -pthread',
+     ],
+     'openssl_cli_srcs_linux-x86_64': [
+       'openssl/apps/asn1pars.c',
+diff --git a/deps/openssl/config/archs/linux-x86_64/no-asm/openssl.gypi b/deps/openssl/config/archs/linux-x86_64/no-asm/openssl.gypi
+index 11d3aa6..aba5d54 100644
+--- a/deps/openssl/config/archs/linux-x86_64/no-asm/openssl.gypi
++++ b/deps/openssl/config/archs/linux-x86_64/no-asm/openssl.gypi
+@@ -692,11 +692,10 @@
+     ],
+     'openssl_cflags_linux-x86_64': [
+       '-Wall -O3',
+-      '-pthread -m64',
++      '-m64',
+       '-Wall -O3',
+     ],
+-    'openssl_ex_libs_linux-x86_64': [
+-      '-ldl -pthread',
++    'openssl_ex_libs_linux-x86_64': [ 
+     ],
+   },
+   'include_dirs': [
+diff --git a/deps/openssl/openssl/crypto/rand/rand_unix.c b/deps/openssl/openssl/crypto/rand/rand_unix.c
+index ec6be79..861f56a 100644
+--- a/deps/openssl/openssl/crypto/rand/rand_unix.c
++++ b/deps/openssl/openssl/crypto/rand/rand_unix.c
+@@ -369,7 +369,7 @@ static ssize_t syscall_random(void *buf, size_t buflen)
+      * Note: Sometimes getentropy() can be provided but not implemented
+      * internally. So we need to check errno for ENOSYS
+      */
+-#  if defined(__GNUC__) && __GNUC__>=2 && defined(__ELF__) && !defined(__hpux)
++#  if defined(__GNUC__) && __GNUC__>=2 && defined(__ELF__) && !defined(__hpux) && !defined(__HAIKU__)
+     extern int getentropy(void *buffer, size_t length) __attribute__((weak));
+ 
+     if (getentropy != NULL) {
+diff --git a/deps/openssl/openssl_common.gypi b/deps/openssl/openssl_common.gypi
+index d866630..52558d8 100644
+--- a/deps/openssl/openssl_common.gypi
++++ b/deps/openssl/openssl_common.gypi
+@@ -56,7 +56,14 @@
+         'ENGINESDIR="/dev/null"',
+         '__EXTENSIONS__'
+       ],
+-    }, {
++    },'OS=="haiku"', {
++      '!ldflags': ['-pthread', '-pthreads'],
++            'defines': [
++        'OPENSSLDIR="/boot/system/data/ssl/"',
++        'ENGINESDIR="/dev/null"',
++        'TERMIOS',
++      ],
++    },{
+       # linux and others
+       'cflags': ['-Wno-missing-field-initializers',],
+       'defines': [
+diff --git a/node.gypi b/node.gypi
+index 43dbda7..dc9933d 100644
+--- a/node.gypi
++++ b/node.gypi
+@@ -256,6 +256,16 @@
+         'NODE_PLATFORM="sunos"',
+       ],
+     }],
++    [ 'OS=="haiku"', {
++      'libraries': [
++        '-lroot',
++        '-lnetwork',
++        '-lbsd',
++      ],
++      'defines': [
++        'NODE_PLATFORM="haiku"',
++      ],
++    }],
+     [ '(OS=="freebsd" or OS=="linux") and node_shared=="false"'
+         ' and force_load=="true"', {
+       'ldflags': [
+diff --git a/src/node.cc b/src/node.cc
+index 905afd8..48ade67 100644
+--- a/src/node.cc
++++ b/src/node.cc
+@@ -607,7 +607,7 @@ inline void PlatformInit() {
+     if (nr == SIGKILL || nr == SIGSTOP)
+       continue;
+     act.sa_handler = (nr == SIGPIPE || nr == SIGXFSZ) ? SIG_IGN : SIG_DFL;
+-    CHECK_EQ(0, sigaction(nr, &act, nullptr));
++    //CHECK_EQ(0, sigaction(nr, &act, nullptr));
+   }
+ #endif  // !NODE_SHARED_MODE
+ 
+diff --git a/src/node_os.cc b/src/node_os.cc
+index 3cde809..fac4b87 100644
+--- a/src/node_os.cc
++++ b/src/node_os.cc
+@@ -34,7 +34,7 @@
+ #include <array>
+ #include <cerrno>
+ #include <cstring>
+-
++#include <iostream>
+ namespace node {
+ namespace os {
+ 
+@@ -115,7 +115,17 @@ static void GetCPUInfo(const FunctionCallbackInfo<Value>& args) {
+   std::vector<Local<Value>> result;
+   result.reserve(count * 7);
+   for (int i = 0; i < count; i++) {
++    /*
+     uv_cpu_info_t* ci = cpu_infos + i;
++
++    std::cout << ci->speed << std::endl;
++    std::cout << ci->model << std::endl;
++    std::cout << ci->cpu_times.user << std::endl;
++    std::cout << ci->cpu_times.nice << std::endl;
++    std::cout << ci->cpu_times.sys << std::endl;
++    std::cout << ci->cpu_times.idle << std::endl;
++    std::cout << ci->cpu_times.irq << std::endl;
++
+     result.emplace_back(OneByteString(isolate, ci->model));
+     result.emplace_back(Number::New(isolate, ci->speed));
+     result.emplace_back(Number::New(isolate, ci->cpu_times.user));
+@@ -123,10 +133,11 @@ static void GetCPUInfo(const FunctionCallbackInfo<Value>& args) {
+     result.emplace_back(Number::New(isolate, ci->cpu_times.sys));
+     result.emplace_back(Number::New(isolate, ci->cpu_times.idle));
+     result.emplace_back(Number::New(isolate, ci->cpu_times.irq));
++    */
+   }
+ 
+   uv_free_cpu_info(cpu_infos, count);
+-  args.GetReturnValue().Set(Array::New(isolate, result.data(), result.size()));
++//  args.GetReturnValue().Set(Array::New(isolate, result.data(), result.size()));
+ }
+ 
+ 
+diff --git a/src/node_report.cc b/src/node_report.cc
+index 13f87b1..de4455e 100644
+--- a/src/node_report.cc
++++ b/src/node_report.cc
+@@ -688,16 +688,16 @@ static void PrintSystemInformation(JSONWriter* writer) {
+     {"core_file_size_blocks", RLIMIT_CORE},
+     {"data_seg_size_kbytes", RLIMIT_DATA},
+     {"file_size_blocks", RLIMIT_FSIZE},
+-#if !(defined(_AIX) || defined(__sun))
++#if !(defined(_AIX) || defined(__sun) || defined(__HAIKU__))
+     {"max_locked_memory_bytes", RLIMIT_MEMLOCK},
+ #endif
+-#ifndef __sun
++#if !(defined(__sun) || defined(__HAIKU__))
+     {"max_memory_size_kbytes", RLIMIT_RSS},
+ #endif
+     {"open_files", RLIMIT_NOFILE},
+     {"stack_size_bytes", RLIMIT_STACK},
+     {"cpu_time_seconds", RLIMIT_CPU},
+-#ifndef __sun
++#if !(defined(__sun) || defined(__HAIKU__))
+     {"max_user_processes", RLIMIT_NPROC},
+ #endif
+ #ifndef __OpenBSD__
+diff --git a/tools/utils.py b/tools/utils.py
+index 9734836..94e4d8c 100644
+--- a/tools/utils.py
++++ b/tools/utils.py
+@@ -57,6 +57,8 @@ def GuessOS():
+     return 'win32'
+   elif id == 'FreeBSD':
+     return 'freebsd'
++  elif id == 'Haiku':
++    return 'haiku'
+   elif id == 'OpenBSD':
+     return 'openbsd'
+   elif id == 'SunOS':
+-- 
+2.30.0
+
+
+From a0f6d91f118a6f94fc276bc0e53991263b807d8c Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 27 Mar 2021 14:01:44 +0100
+Subject: Haiku v8 patches
+
+
+diff --git a/deps/v8/BUILD.gn b/deps/v8/BUILD.gn
+index eaaeadf..118a3b3 100644
+--- a/deps/v8/BUILD.gn
++++ b/deps/v8/BUILD.gn
+@@ -260,7 +260,7 @@ if (v8_enable_snapshot_native_code_counters == "") {
+ if (v8_enable_pointer_compression == "") {
+   # TODO(v8:v7703): temporarily enable pointer compression on arm64 and on x64
+   v8_enable_pointer_compression =
+-      v8_current_cpu == "arm64" || v8_current_cpu == "x64"
++      (v8_current_cpu == "arm64" || v8_current_cpu == "x64") && !is_haiku
+ }
+ if (v8_enable_fast_torque == "") {
+   v8_enable_fast_torque = v8_enable_fast_mksnapshot
+@@ -790,7 +790,7 @@ config("toolchain") {
+     }
+   }
+ 
+-  if (is_clang) {
++  if (is_clang && !is_haiku) {
+     cflags += [ "-Wmissing-field-initializers" ]
+ 
+     if (v8_current_cpu != "mips" && v8_current_cpu != "mipsel") {
+@@ -3888,6 +3888,11 @@ v8_component("v8_libbase") {
+       "src/base/debug/stack_trace_fuchsia.cc",
+       "src/base/platform/platform-fuchsia.cc",
+     ]
++  } else if (is_haiku) {
++    sources += [
++      "src/base/debug/stack_trace_posix.cc",
++      "src/base/platform/platform-haiku.cc",
++    ]
+   } else if (is_mac || is_ios) {
+     sources += [
+       "src/base/debug/stack_trace_posix.cc",
+@@ -4432,6 +4437,13 @@ if (is_fuchsia && !build_with_chromium) {
+ 
+ group("v8_fuzzers") {
+   testonly = true
++
++  if(host_os == "haiku"){
++    data_deps = []
++  }
++
++  if (host_os != "haiku") {
++
+   data_deps = [
+     ":v8_simple_json_fuzzer",
+     ":v8_simple_multi_return_fuzzer",
+@@ -4443,6 +4455,8 @@ group("v8_fuzzers") {
+     ":v8_simple_wasm_compile_fuzzer",
+     ":v8_simple_wasm_fuzzer",
+   ]
++  }
++
+ }
+ 
+ if (is_component_build) {
+diff --git a/deps/v8/include/v8config.h b/deps/v8/include/v8config.h
+index 9825232..4a07457 100644
+--- a/deps/v8/include/v8config.h
++++ b/deps/v8/include/v8config.h
+@@ -61,6 +61,7 @@
+ //  V8_OS_CYGWIN        - Cygwin
+ //  V8_OS_DRAGONFLYBSD  - DragonFlyBSD
+ //  V8_OS_FREEBSD       - FreeBSD
++//  V8_OS_HAIKU         - Haiku
+ //  V8_OS_FUCHSIA       - Fuchsia
+ //  V8_OS_LINUX         - Linux
+ //  V8_OS_MACOSX        - Mac OS X
+@@ -100,6 +101,9 @@
+ # define V8_OS_BSD 1
+ # define V8_OS_FREEBSD 1
+ # define V8_OS_POSIX 1
++#elif defined(__HAIKU__)
++# define V8_OS_HAIKU 1
++# define V8_OS_POSIX 1
+ #elif defined(__Fuchsia__)
+ # define V8_OS_FUCHSIA 1
+ # define V8_OS_POSIX 1
+diff --git a/deps/v8/src/base/debug/stack_trace_posix.cc b/deps/v8/src/base/debug/stack_trace_posix.cc
+index ed602af..58b3b5d 100644
+--- a/deps/v8/src/base/debug/stack_trace_posix.cc
++++ b/deps/v8/src/base/debug/stack_trace_posix.cc
+@@ -25,14 +25,15 @@
+ #include <string>
+ #include <vector>
+ 
+-#if V8_LIBC_GLIBC || V8_LIBC_BSD || V8_LIBC_UCLIBC || V8_OS_SOLARIS
++#if V8_LIBC_GLIBC || V8_LIBC_BSD || V8_LIBC_UCLIBC || V8_OS_SOLARIS || V8_OS_HAIKU
+ #define HAVE_EXECINFO_H 1
+ #endif
+ 
+-#if HAVE_EXECINFO_H
++#if defined(HAVE_EXECINFO_H)
+ #include <cxxabi.h>
+ #include <execinfo.h>
+ #endif
++
+ #if V8_OS_MACOSX
+ #include <AvailabilityMacros.h>
+ #endif
+diff --git a/deps/v8/src/base/export-template.h b/deps/v8/src/base/export-template.h
+index 861cfe4..8c6d885 100644
+--- a/deps/v8/src/base/export-template.h
++++ b/deps/v8/src/base/export-template.h
+@@ -83,6 +83,7 @@
+ // definition sites instead.
+ #define EXPORT_TEMPLATE_DECLARE_MSVC_HACK(export, _)
+ #define EXPORT_TEMPLATE_DEFINE_MSVC_HACK(export, _) export
++#define EXPORT_TEMPLATE_TEST_MSVC_HACK_DEFAULT(...) true
+ 
+ // EXPORT_TEMPLATE_STYLE is an internal helper macro that identifies which
+ // export style needs to be used for the provided FOO_EXPORT macro definition.
+@@ -159,5 +160,5 @@ EXPORT_TEMPLATE_TEST(DEFAULT, __declspec(dllimport));
+ #undef EXPORT_TEMPLATE_TEST
+ #undef EXPORT_TEMPLATE_TEST_DEFAULT_DEFAULT
+ #undef EXPORT_TEMPLATE_TEST_MSVC_HACK_MSVC_HACK
+-
++#undef EXPORT_TEMPLATE_TEST_MSVC_HACK_DEFAULT
+ #endif  // V8_BASE_EXPORT_TEMPLATE_H_
+diff --git a/deps/v8/src/base/platform/platform-haiku.cc b/deps/v8/src/base/platform/platform-haiku.cc
+new file mode 100644
+index 0000000..c4f0ae3
+--- /dev/null
++++ b/deps/v8/src/base/platform/platform-haiku.cc
+@@ -0,0 +1,59 @@
++// Copyright 2012 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Platform-specific code for Haiku goes here. For the POSIX-compatible
++// parts, the implementation is in platform-posix.cc.
++
++#include <pthread.h>
++#include <semaphore.h>
++#include <signal.h>
++#include <stdlib.h>
++#include <sys/resource.h>
++#include <sys/time.h>
++#include <sys/types.h>
++
++#include <fcntl.h>  // open
++#include <sys/mman.h>   // mmap & munmap
++#include <sys/stat.h>   // open
++#include <unistd.h>     // sysconf
++#include <errno.h>
++#include <limits.h>
++#include <stdarg.h>
++#include <strings.h>    // index
++
++#include <cmath>
++
++#include <OS.h>
++
++#undef MAP_TYPE
++
++#include "src/base/macros.h"
++#include "src/base/platform/platform-posix-time.h"
++#include "src/base/platform/platform-posix.h"
++#include "src/base/platform/platform.h"
++
++namespace v8 {
++namespace base {
++
++TimezoneCache* OS::CreateTimezoneCache() {
++  return new PosixDefaultTimezoneCache();
++}
++
++std::vector<OS::SharedLibraryAddress> OS::GetSharedLibraryAddresses() {
++  return std::vector<SharedLibraryAddress>();
++}
++
++void OS::SignalCodeMovingGC() {}
++
++void OS::AdjustSchedulingParams() {}
++
++// static
++void* Stack::GetStackStart() {
++  thread_info threadInfo;
++  get_thread_info(find_thread(NULL), &threadInfo);
++  return threadInfo.stack_base;
++}
++
++}  // namespace base
++}  // namespace v8
+diff --git a/deps/v8/src/base/platform/platform-posix.cc b/deps/v8/src/base/platform/platform-posix.cc
+index e5aa4de..dbf3c65 100644
+--- a/deps/v8/src/base/platform/platform-posix.cc
++++ b/deps/v8/src/base/platform/platform-posix.cc
+@@ -61,7 +61,7 @@
+ #include <sys/resource.h>
+ #endif
+ 
+-#if !defined(_AIX) && !defined(V8_OS_FUCHSIA)
++#if !defined(_AIX) && !defined(V8_OS_FUCHSIA) && !defined(__HAIKU__)
+ #include <sys/syscall.h>
+ #endif
+ 
+@@ -77,6 +77,14 @@ extern int madvise(caddr_t, size_t, int);
+ #endif
+ #endif
+ 
++#if defined(__HAIKU__)
++extern "C" int posix_madvise(void*, size_t, int);
++#endif
++
++#if defined(__HAIKU__)
++#define MADV_FREE POSIX_MADV_DONTNEED
++#endif
++
+ #ifndef MADV_FREE
+ #define MADV_FREE MADV_DONTNEED
+ #endif
+@@ -429,6 +437,8 @@ bool OS::DiscardSystemPages(void* address, size_t size) {
+   int ret = madvise(address, size, MADV_FREE_REUSABLE);
+ #elif defined(_AIX) || defined(V8_OS_SOLARIS)
+   int ret = madvise(reinterpret_cast<caddr_t>(address), size, MADV_FREE);
++#elif defined(__HAIKU__)
++  int ret = posix_madvise(address, size, MADV_FREE);
+ #else
+   int ret = madvise(address, size, MADV_FREE);
+ #endif
+@@ -440,6 +450,8 @@ bool OS::DiscardSystemPages(void* address, size_t size) {
+ // imply runtime support.
+ #if defined(_AIX) || defined(V8_OS_SOLARIS)
+     ret = madvise(reinterpret_cast<caddr_t>(address), size, MADV_DONTNEED);
++#elif defined(__HAIKU__)
++    ret = posix_madvise(address, size, MADV_FREE);
+ #else
+     ret = madvise(address, size, MADV_DONTNEED);
+ #endif
+@@ -987,7 +999,7 @@ void Thread::SetThreadLocal(LocalStorageKey key, void* value) {
+ // keep this version in POSIX as most Linux-compatible derivatives will
+ // support it. MacOS and FreeBSD are different here.
+ #if !defined(V8_OS_FREEBSD) && !defined(V8_OS_MACOSX) && !defined(_AIX) && \
+-    !defined(V8_OS_SOLARIS)
++    !defined(V8_OS_SOLARIS) && !defined(V8_OS_HAIKU)
+ 
+ // static
+ void* Stack::GetStackStart() {
+diff --git a/deps/v8/src/libsampler/sampler.cc b/deps/v8/src/libsampler/sampler.cc
+index 0443657..10026b6 100644
+--- a/deps/v8/src/libsampler/sampler.cc
++++ b/deps/v8/src/libsampler/sampler.cc
+@@ -12,7 +12,7 @@
+ #include <sys/time.h>
+ #include <atomic>
+ 
+-#if !V8_OS_QNX && !V8_OS_AIX
++#if !V8_OS_QNX && !V8_OS_AIX && !V8_OS_HAIKU
+ #include <sys/syscall.h>  // NOLINT
+ #endif
+ 
+@@ -20,7 +20,7 @@
+ #include <mach/mach.h>
+ // OpenBSD doesn't have <ucontext.h>. ucontext_t lives in <signal.h>
+ // and is a typedef for struct sigcontext. There is no uc_mcontext.
+-#elif !V8_OS_OPENBSD
++#elif !V8_OS_OPENBSD && !V8_OS_HAIKU
+ #include <ucontext.h>
+ #endif
+ 
+@@ -490,6 +490,16 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
+   state->sp = reinterpret_cast<void*>(mcontext.__gregs[_REG_SP]);
+   state->fp = reinterpret_cast<void*>(mcontext.__gregs[_REG_FP]);
+ #endif  // V8_HOST_ARCH_*
++#elif V8_OS_HAIKU
++#if V8_HOST_ARCH_IA32
++  state->pc = reinterpret_cast<void*>(mcontext.eip);
++  state->sp = reinterpret_cast<void*>(mcontext.esp);
++  state->fp = reinterpret_cast<void*>(mcontext.ebp);
++#elif V8_HOST_ARCH_X64
++  state->pc = reinterpret_cast<void*>(mcontext.rip);
++  state->sp = reinterpret_cast<void*>(mcontext.rsp);
++  state->fp = reinterpret_cast<void*>(mcontext.rbp);
++#endif  // V8_HOST_ARCH_*
+ #elif V8_OS_NETBSD
+ #if V8_HOST_ARCH_IA32
+   state->pc = reinterpret_cast<void*>(mcontext.__gregs[_REG_EIP]);
+diff --git a/deps/v8/tools/mb/mb.py b/deps/v8/tools/mb/mb.py
+index f3e4615..c3649ba 100755
+--- a/deps/v8/tools/mb/mb.py
++++ b/deps/v8/tools/mb/mb.py
+@@ -869,12 +869,15 @@ class MetaBuildWrapper(object):
+       subdir, exe = 'linux64', 'gn'
+     elif self.platform == 'darwin':
+       subdir, exe = 'mac', 'gn'
++    elif self.platform == 'haiku1':
++      subdir, exe = 'haiku','gn'
++      gn_path = "/bin/gn"
+     else:
+       subdir, exe = 'win', 'gn.exe'
+ 
+     arch = platform.machine()
+     if (arch.startswith('s390') or arch.startswith('ppc') or
+-        self.platform.startswith('aix')):
++	  self.platform.startswith('aix') or self.platform.startswith('haiku')):
+       # use gn in PATH
+       gn_path = 'gn'
+     else:
+-- 
+2.30.0
+
+
+From fce649d6a0bc8a424efaeb6decbedf5369109036 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 27 Mar 2021 18:23:32 +0100
+Subject: v8 gyp build for Haiku
+
+
+diff --git a/tools/v8_gypfiles/features.gypi b/tools/v8_gypfiles/features.gypi
+index b24e0b3..c2a7ecb 100644
+--- a/tools/v8_gypfiles/features.gypi
++++ b/tools/v8_gypfiles/features.gypi
+@@ -46,6 +46,11 @@
+       }, {
+         'is_fuchsia': 0,
+       }],
++      ['OS == "haiku"', {
++        'is_haiku': 1,
++      }, {
++        'is_haiku': 0,
++      }],
+       ['OS=="android"', { # GYP reverts OS to linux so use `-D OS=android`
+         'is_android': 1,
+       }, {
+diff --git a/tools/v8_gypfiles/v8.gyp b/tools/v8_gypfiles/v8.gyp
+index 48ec392..5e3c90c 100644
+--- a/tools/v8_gypfiles/v8.gyp
++++ b/tools/v8_gypfiles/v8.gyp
+@@ -1085,6 +1085,17 @@
+             '<(V8_ROOT)/src/base/platform/platform-fuchsia.cc',
+           ]
+         }],
++        ['is_haiku', {
++          'link_settings': {
++            'libraries': [
++              '-lexecinfo',
++            ]
++          },
++          'sources': [
++            '<(V8_ROOT)/src/base/debug/stack_trace_posix.cc',
++            '<(V8_ROOT)/src/base/platform/platform-haiku.cc',
++          ]
++        }],
+         ['OS == "mac" or OS == "ios"', {
+           'sources': [
+             '<(V8_ROOT)/src/base/debug/stack_trace_posix.cc',
+-- 
+2.30.0
+

@@ -1,0 +1,228 @@
+From 1f2ce2f48932145f0875d9a951242359de667eed Mon Sep 17 00:00:00 2001
+From: Sergei Reznikov <diver@gelios.net>
+Date: Fri, 7 Jul 2017 16:23:59 +0300
+Subject: Add initial Haiku support based on hpux
+
+
+diff --git a/compat/forkpty-haiku.c b/compat/forkpty-haiku.c
+new file mode 100644
+index 0000000..6960ee4
+--- /dev/null
++++ b/compat/forkpty-haiku.c
+@@ -0,0 +1,87 @@
++/*
++ * Copyright (c) 2008 Nicholas Marriott <nicm@users.sourceforge.net>
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF MIND, USE, DATA OR PROFITS, WHETHER
++ * IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
++ * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#include <sys/types.h>
++#include <sys/ioctl.h>
++
++#include <fcntl.h>
++#include <stdlib.h>
++//#include <stropts.h>
++#include <unistd.h>
++
++#include "tmux.h"
++
++pid_t
++forkpty(int *master, char *name, struct termios *tio, struct winsize *ws)
++{
++	int	slave = -1;
++	char   *path;
++	pid_t	pid;
++
++	if ((*master = open("/dev/ptmx", O_RDWR|O_NOCTTY)) == -1)
++		return (-1);
++	if (grantpt(*master) != 0)
++		goto out;
++	if (unlockpt(*master) != 0)
++		goto out;
++
++	if ((path = ptsname(*master)) == NULL)
++		goto out;
++	if (name != NULL)
++		strlcpy(name, path, TTY_NAME_MAX);
++	if ((slave = open(path, O_RDWR|O_NOCTTY)) == -1)
++		goto out;
++
++	switch (pid = fork()) {
++	case -1:
++		goto out;
++	case 0:
++		close(*master);
++
++		setsid();
++#ifdef TIOCSCTTY
++		if (ioctl(slave, TIOCSCTTY, NULL) == -1)
++			fatal("ioctl failed");
++#endif
++/*
++		if (ioctl(slave, I_PUSH, "ptem") == -1)
++			fatal("ioctl failed");
++		if (ioctl(slave, I_PUSH, "ldterm") == -1)
++			fatal("ioctl failed");
++*/
++		if (tio != NULL && tcsetattr(slave, TCSAFLUSH, tio) == -1)
++			fatal("tcsetattr failed");
++		if (ioctl(slave, TIOCSWINSZ, ws) == -1)
++			fatal("ioctl failed");
++
++		dup2(slave, 0);
++		dup2(slave, 1);
++		dup2(slave, 2);
++		if (slave > 2)
++			close(slave);
++		return (0);
++	}
++
++	close(slave);
++	return (pid);
++
++out:
++	if (*master != -1)
++		close(*master);
++	if (slave != -1)
++		close(slave);
++	return (-1);
++}
+diff --git a/configure.ac b/configure.ac
+index bb702f9..b4b61ce 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -291,9 +291,9 @@ AC_TRY_LINK(
+ if test "x$found_b64_ntop" = xno; then
+ 	AC_MSG_RESULT(no)
+ 
+-	AC_MSG_CHECKING(for b64_ntop with -lresolv)
++	AC_MSG_CHECKING(for b64_ntop with -lnetwork)
+ 	OLD_LIBS="$LIBS"
+-	LIBS="$LIBS -lresolv"
++	LIBS="$LIBS -lnetwork"
+ 	AC_TRY_LINK(
+ 		[
+ 			#include <sys/types.h>
+@@ -589,6 +589,10 @@ case "$host_os" in
+ 				;;
+ 		esac
+ 		;;
++	*haiku*)
++		AC_MSG_RESULT(haiku)
++		PLATFORM=haiku
++		;;
+ 	*hpux*)
+ 		AC_MSG_RESULT(hpux)
+ 		PLATFORM=hpux
+diff --git a/osdep-haiku.c b/osdep-haiku.c
+new file mode 100644
+index 0000000..a6d75f9
+--- /dev/null
++++ b/osdep-haiku.c
+@@ -0,0 +1,41 @@
++/* $OpenBSD$ */
++
++/*
++ * Copyright (c) 2009 Nicholas Marriott <nicm@users.sourceforge.net>
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF MIND, USE, DATA OR PROFITS, WHETHER
++ * IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
++ * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#include <sys/types.h>
++
++#include <event.h>
++
++#include "tmux.h"
++
++char *
++osdep_get_name(__unused int fd, __unused char *tty)
++{
++	return (NULL);
++}
++
++char *
++osdep_get_cwd(__unused int fd)
++{
++	return (NULL);
++}
++
++struct event_base *
++osdep_event_init(void)
++{
++	return (event_init());
++}
+diff --git a/tty.c b/tty.c
+index 8efe57b..8cecb8a 100644
+--- a/tty.c
++++ b/tty.c
+@@ -307,7 +307,11 @@ tty_start_tty(struct tty *tty)
+ 		event_add(&tty->event_in, NULL);
+ 
+ 		memcpy(&tio, &tty->tio, sizeof tio);
+-		tio.c_iflag &= ~(IXON|IXOFF|ICRNL|INLCR|IGNCR|IMAXBEL|ISTRIP);
++		tio.c_iflag &= ~(IXON|IXOFF|ICRNL|INLCR|IGNCR
++		#ifndef __HAIKU__
++		|IMAXBEL
++		#endif
++		|ISTRIP);
+ 		tio.c_iflag |= IGNBRK;
+ 		tio.c_oflag &= ~(OPOST|ONLCR|OCRNL|ONLRET);
+ 		tio.c_lflag &= ~(IEXTEN|ICANON|ECHO|ECHOE|ECHONL|ECHOCTL|
+-- 
+2.30.0
+
+
+From ac099e2b8976b9ef36f82f5e24ac0c3fcabfed9d Mon Sep 17 00:00:00 2001
+From: Zach Dykstra <dykstra.zachary@gmail.com>
+Date: Mon, 11 Jan 2021 18:56:17 -0600
+Subject: tmux: use preferred Haiku config path
+
+
+diff --git a/Makefile.am b/Makefile.am
+index 082a467..a331d45 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -13,7 +13,7 @@ dist_EXTRA_tmux_SOURCES = compat/*.[ch]
+ # Preprocessor flags.
+ AM_CPPFLAGS += @XOPEN_DEFINES@ \
+ 	-DTMUX_VERSION="\"@VERSION@\"" \
+-	-DTMUX_CONF="\"$(sysconfdir)/tmux.conf:~/.tmux.conf:~/.config/tmux/tmux.conf\""
++	-DTMUX_CONF="\"$(sysconfdir)/tmux.conf:$(shell finddir B_USER_SETTINGS_DIRECTORY)/tmux.conf:~/.tmux.conf:~/.config/tmux/tmux.conf\""
+ 
+ # Additional object files.
+ LDADD = $(LIBOBJS)
+@@ -198,8 +198,9 @@ endif
+ # Install tmux.1 in the right format.
+ install-exec-hook:
+ 	if test x@MANFORMAT@ = xmdoc; then \
+-		sed -e "s|@SYSCONFDIR@|$(sysconfdir)|g" $(srcdir)/tmux.1 \
+-			>$(srcdir)/tmux.1.mdoc; \
++		sed -e "s|@SYSCONFDIR@|$(sysconfdir)|g" \
++		-e "s|~/\.|$(shell finddir B_USER_SETTINGS_DIRECTORY)/|g" \
++		$(srcdir)/tmux.1 > $(srcdir)/tmux.1.mdoc; \
+ 	else \
+ 		sed -e "s|@SYSCONFDIR@|$(sysconfdir)|g" $(srcdir)/tmux.1| \
+ 			$(AWK) -f $(srcdir)/mdoc2man.awk >$(srcdir)/tmux.1.man; \
+-- 
+2.30.0
+

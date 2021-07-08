@@ -1,0 +1,163 @@
+From d0ad6fd2817075f3b2b42bb4331cc4a9f8124376 Mon Sep 17 00:00:00 2001
+From: Craig Watson <watsoncraigjohn@gmail.com>
+Date: Mon, 19 Apr 2021 14:59:10 +0000
+Subject: Fix looping midi bug in Haiku native midi
+
+
+diff --git a/native_midi/native_midi_haiku.cpp b/native_midi/native_midi_haiku.cpp
+index 8de350e..60face0 100644
+--- a/native_midi/native_midi_haiku.cpp
++++ b/native_midi/native_midi_haiku.cpp
+@@ -74,6 +74,7 @@ class MidiEventsStore : public BMidi
+           --fLoops;
+           fPos = 0;
+           ev = fEvs;
++          startTime = B_NOW;
+         } else
+           break;
+       }
+-- 
+2.30.2
+
+
+From eacc7c3993a0d4c9f8c1b11b5b3f76da58a2a709 Mon Sep 17 00:00:00 2001
+From: Craig Watson <watsoncraigjohn@gmail.com>
+Date: Mon, 3 May 2021 15:20:51 +0000
+Subject: Implicitly create BMidiSynth, AllNotesOff when stopping midi playback
+
+
+diff --git a/native_midi/native_midi_haiku.cpp b/native_midi/native_midi_haiku.cpp
+index 60face0..dde8552 100644
+--- a/native_midi/native_midi_haiku.cpp
++++ b/native_midi/native_midi_haiku.cpp
+@@ -200,7 +200,7 @@ class MidiEventsStore : public BMidi
+   }
+ };
+ 
+-BMidiSynth synth;
++static BMidiSynth *synth = NULL;
+ struct _NativeMidiSong {
+   MidiEventsStore *store;
+ } *currentSong = NULL;
+@@ -209,15 +209,20 @@ char lasterr[1024];
+ 
+ int native_midi_detect()
+ {
+-  status_t res = synth.EnableInput(true, false);
+-  return res == B_OK;
++  synth = new BMidiSynth();
++  if (synth != NULL) {
++  	status_t res = synth->EnableInput(true, false);
++  	return res == B_OK;
++  }
++  return B_ERROR;
+ }
+ 
+ void native_midi_setvolume(int volume)
+ {
++  if (synth == NULL) return;
+   if (volume < 0) volume = 0;
+   if (volume > 128) volume = 128;
+-  synth.SetVolume(volume / 128.0);
++  synth->SetVolume(volume / 128.0);
+ }
+ 
+ NativeMidiSong *native_midi_loadsong_RW(SDL_RWops *rw, int freerw)
+@@ -243,7 +248,7 @@ void native_midi_freesong(NativeMidiSong *song)
+ {
+   if (song == NULL) return;
+   song->store->Stop();
+-  song->store->Disconnect(&synth);
++  song->store->Disconnect(synth);
+   if (currentSong == song) 
+   {
+     currentSong = NULL;
+@@ -254,7 +259,8 @@ void native_midi_freesong(NativeMidiSong *song)
+ void native_midi_start(NativeMidiSong *song, int loops)
+ {
+   native_midi_stop();
+-  song->store->Connect(&synth);
++  
++  song->store->Connect(synth);
+   song->store->SetLoops(loops);
+   song->store->Start();
+   currentSong = song;
+@@ -263,11 +269,13 @@ void native_midi_stop()
+ {
+   if (currentSong == NULL) return;
+   currentSong->store->Stop();
+-  currentSong->store->Disconnect(&synth);
++  currentSong->store->AllNotesOff(true,B_NOW);
++  currentSong->store->Disconnect(synth);
+   while (currentSong->store->IsPlaying())
+     usleep(1000);
+   currentSong = NULL;
+ }
++
+ int native_midi_active()
+ {
+   if (currentSong == NULL) return 0;
+-- 
+2.30.2
+
+
+From ff51dbfa9fad1af27e5c5d59f11c4bfadd1f9573 Mon Sep 17 00:00:00 2001
+From: Craig Watson <watsoncraigjohn@gmail.com>
+Date: Mon, 3 May 2021 17:36:59 +0000
+Subject: Update to track use of synth and dispose when all music is freed
+
+
+diff --git a/native_midi/native_midi_haiku.cpp b/native_midi/native_midi_haiku.cpp
+index dde8552..2be4184 100644
+--- a/native_midi/native_midi_haiku.cpp
++++ b/native_midi/native_midi_haiku.cpp
+@@ -201,14 +201,16 @@ class MidiEventsStore : public BMidi
+ };
+ 
+ static BMidiSynth *synth = NULL;
++static int references = 0;
++
+ struct _NativeMidiSong {
+   MidiEventsStore *store;
+ } *currentSong = NULL;
+ 
+ char lasterr[1024];
+-
+ int native_midi_detect()
+ {
++  if (references > 0) return B_OK;
+   synth = new BMidiSynth();
+   if (synth != NULL) {
+   	status_t res = synth->EnableInput(true, false);
+@@ -241,6 +243,14 @@ NativeMidiSong *native_midi_loadsong_RW(SDL_RWops *rw, int freerw)
+     delete song;
+     return NULL;
+   }
++  
++  references++;
++  if (synth == NULL) {
++  	synth = new BMidiSynth();
++	  if (synth != NULL)
++  		status_t res = synth->EnableInput(true, false);
++  }
++  
+   return song;
+ }
+ 
+@@ -255,6 +265,13 @@ void native_midi_freesong(NativeMidiSong *song)
+   }
+   delete song->store;
+   delete song; song = 0;
++
++  references--;
++  if (synth != NULL && references == 0) 
++  {
++	delete synth;
++	synth = NULL;
++  }
+ }
+ void native_midi_start(NativeMidiSong *song, int loops)
+ {
+-- 
+2.30.2
+

@@ -1,0 +1,168 @@
+SUMMARY="Modern and safe systems programming language"
+DESCRIPTION="Rust is a systems programming language that runs blazingly fast, \
+prevents almost all crashes*, and eliminates data races."
+HOMEPAGE="https://www.rust-lang.org/"
+COPYRIGHT="2021 The Rust Project Developers"
+LICENSE="MIT"
+REVISION="1"
+cargoVersion="0.54.0"
+rustfmtVersion="1.4.37"
+clippyVersion="0.1.53"
+SOURCE_URI="https://static.rust-lang.org/dist/rustc-$portVersion-src.tar.xz"
+CHECKSUM_SHA256="e53a2df2c2c26f8929d551852eeae242b9a6167fba34481f92010b30def32dec"
+SOURCE_DIR="rustc-$portVersion-src"
+PATCHES="rust-$portVersion.patchset"
+
+ARCHITECTURES="!x86_gcc2 ?x86 ?x86_64"
+SECONDARY_ARCHITECTURES="?x86"
+
+PROVIDES="
+	rust_bin$secondaryArchSuffix = $portVersion
+	cmd:rustc$secondaryArchSuffix = $portVersion
+	cmd:rustdoc$secondaryArchSuffix = $portVersion
+	cmd:rustfmt$secondaryArchSuffix = $portVersion
+	cmd:rust_analyzer$secondaryArchSuffix = $portVersion
+	cmd:rust_gdb$secondaryArchSuffix = $portVersion
+	cmd:rust_gdbgui$secondaryArchSuffix = $portVersion
+	cmd:rust_lldb$secondaryArchSuffix = $portVersion
+	cmd:cargo$secondaryArchSuffix = $cargoVersion
+	cmd:cargo_clippy$secondaryArchSuffix = $clippyVersion
+	cmd:cargo_fmt$secondaryArchSuffix = $cargoVersion
+	cmd:cargo_miri$secondaryArchSuffix = $portVersion
+	cmd:clippy_driver$secondaryArchSuffix = $clippyVersion
+	cmd:miri$secondaryArchSuffix = $portVersion
+	cmd:rustfmt = $rustfmtVersion
+	"
+REQUIRES="
+	haiku$secondaryArchSuffix
+	lib:libcrypto$secondaryArchSuffix
+	lib:libcurl$secondaryArchSuffix
+	lib:libssl$secondaryArchSuffix
+	lib:libz$secondaryArchSuffix
+	"
+
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel
+	devel:libcurl$secondaryArchSuffix
+	devel:libssl$secondaryArchSuffix
+	devel:libz$secondaryArchSuffix
+	"
+BUILD_PREREQUIRES="
+	cmd:cargo$secondaryArchSuffix == $cargoVersion
+	cmd:cmake
+	cmd:cmp
+	cmd:file
+	cmd:find
+	cmd:gcc$secondaryArchSuffix
+	cmd:git
+	cmd:grep
+	cmd:ld$secondaryArchSuffix
+	cmd:make
+	cmd:pkg_config$secondaryArchSuffix
+	cmd:python3
+	cmd:rustc$secondaryArchSuffix == $portVersion
+	cmd:sed
+	cmd:tar
+	cmd:which
+	cmd:xargs
+	"
+
+relativeInstallDir="develop/tools$secondaryArchSubDir/rust"
+installDir="$prefix/$relativeInstallDir"
+
+BUILD()
+{
+	# write the build configuration
+	tr -d '\t' >config.toml <<- EOL
+		[llvm]
+		targets = "X86"
+		experimental-targets = ""
+
+		[build]
+		cargo = "/$relativeBinDir/cargo"
+		rustc = "/$relativeBinDir/rustc"
+		submodules = false
+		extended = true
+		tools = ["cargo", "clippy", "rustfmt", "analysis"]
+
+		[install]
+		prefix = "$installDir"
+		libdir = "$installDir/bin/lib"
+		mandir = "$manDir"
+		docdir = "$developDocDir"
+		sysconfdir = "$dataDir"
+
+		[rust]
+		channel = "stable"
+		rpath = false
+		deny-warnings = false
+		dist-src = false
+
+		[dist]
+		src-tarball = false
+EOL
+	# Disable ASLR: compiling stage 1 rustc requires a lot of RAM (about 1.5
+	# GB). Haiku has a per-process limit of 2GB on 32 bit systems. ASLR makes
+	# the available space even smaller. Disabling it will give us the space to
+	# compile Rust
+	export DISABLE_ASLR=1
+
+	# now build rust and cargo
+	./x.py dist
+}
+
+INSTALL()
+{
+	# we will manually invoke the install scripts
+	if [ $effectiveTargetArchitecture = x86 ]; then
+		architecture="i686-unknown-haiku"
+	fi
+	if [ $effectiveTargetArchitecture = x86_64 ]; then
+		architecture="x86_64-unknown-haiku"
+	fi
+
+	# let's install the packages one by one
+	cd $sourceDir/build/tmp/dist/
+	for module in "rust-docs-$srcGitRev-$architecture"     \
+	              "rust-std-$srcGitRev-$architecture"      \
+	              "rustc-$srcGitRev-$architecture"         \
+	              "rust-analysis-$srcGitRev-$architecture" \
+	              "cargo-$cargoVersion-$architecture"      \
+	              "clippy-$clippyVersion-$architecture"    \
+	              "rustfmt-$rustfmtVersion-$architecture"
+	do
+		./$module/install.sh                               \
+				--prefix=$installDir                       \
+				--docdir=$developDocDir                    \
+				--mandir=$manDir                           \
+				--sysconfdir=$dataDir                      \
+				--disable-ldconfig
+	done
+
+	# move zsh data to the datadir
+	mv $installDir/share/zsh $dataDir
+	rm -rf $installDir/share
+
+	# clean out unneccesary files created by the rust installer
+	rm $installDir/lib/rustlib/components
+	rm $installDir/lib/rustlib/install.log
+	rm $installDir/lib/rustlib/manifest-*
+	rm $installDir/lib/rustlib/rust-installer-version
+	rm $installDir/lib/rustlib/uninstall.sh
+
+	# link the binaries in $binDir
+	mkdir -p $binDir
+	for f in cargo cargo-clippy cargo-fmt clippy-driver rls rust-gdb \
+	         rust-lldb rustc rustdoc rustfmt; do
+		symlinkRelative -sfn $installDir/bin/$f $binDir
+	done
+
+	# make sure runtime_loader can find the libraries in the lib dir relative
+	# to the binaries
+	symlinkRelative -sfn $installDir/lib $installDir/bin/lib
+}
+
+TEST()
+{
+	./x.py test
+}

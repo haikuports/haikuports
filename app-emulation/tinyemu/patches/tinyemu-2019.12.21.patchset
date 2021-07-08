@@ -1,0 +1,1039 @@
+From 2baa0abbbb8a97b0c1eb70b1aeafcf7fdba25ad4 Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Wed, 12 May 2021 18:03:24 +0900
+Subject: WIP: Haiku patches, share UART with RISC-V machine
+
+---
+ Makefile        |   9 +-
+ cutils.h        |   2 +-
+ fs_disk.c       |  15 +++
+ riscv_cpu.c     |   7 +-
+ riscv_machine.c |  26 ++++-
+ sdl.c           |   2 +-
+ temu.c          |  18 ++--
+ uart.c          | 228 +++++++++++++++++++++++++++++++++++++++
+ uart.h          |  58 ++++++++++
+ x86_machine.c   | 275 +-----------------------------------------------
+ 10 files changed, 349 insertions(+), 291 deletions(-)
+ create mode 100644 uart.c
+ create mode 100644 uart.h
+
+diff --git a/Makefile b/Makefile
+index 390ae37..dc059cd 100644
+--- a/Makefile
++++ b/Makefile
+@@ -24,12 +24,12 @@
+ 
+ # if set, network filesystem is enabled. libcurl and libcrypto
+ # (openssl) must be installed.
+-CONFIG_FS_NET=y
++#CONFIG_FS_NET=y
+ # SDL support (optional)
+ CONFIG_SDL=y
+ # if set, compile the 128 bit emulator. Note: the 128 bit target does
+ # not compile if gcc does not support the int128 type (32 bit hosts).
+-CONFIG_INT128=y
++#CONFIG_INT128=y
+ # build x86 emulator
+ CONFIG_X86EMU=y
+ # win32 build (not usable yet)
+@@ -62,7 +62,7 @@ endif
+ 
+ all: $(PROGS)
+ 
+-EMU_OBJS:=virtio.o pci.o fs.o cutils.o iomem.o simplefb.o \
++EMU_OBJS:=virtio.o uart.o pci.o fs.o cutils.o iomem.o simplefb.o \
+     json.o machine.o temu.o
+ 
+ ifdef CONFIG_SLIRP
+@@ -72,7 +72,8 @@ endif
+ 
+ ifndef CONFIG_WIN32
+ EMU_OBJS+=fs_disk.o
+-EMU_LIBS=-lrt
++#EMU_LIBS=-lrt
++EMU_LIBS=-lnetwork
+ endif
+ ifdef CONFIG_FS_NET
+ CFLAGS+=-DCONFIG_FS_NET
+diff --git a/cutils.h b/cutils.h
+index 689542e..19283e2 100644
+--- a/cutils.h
++++ b/cutils.h
+@@ -84,7 +84,7 @@ static inline int min_int(int a, int b)
+ 
+ void *mallocz(size_t size);
+ 
+-#if defined(_WIN32)
++#if defined(_WIN32) || defined(__HAIKU__)
+ static inline uint32_t bswap_32(uint32_t v)
+ {
+     return ((v & 0xff000000) >> 24) | ((v & 0x00ff0000) >>  8) |
+diff --git a/fs_disk.c b/fs_disk.c
+index bf96c89..11708d9 100644
+--- a/fs_disk.c
++++ b/fs_disk.c
+@@ -27,9 +27,13 @@
+ #include <inttypes.h>
+ #include <assert.h>
+ #include <stdarg.h>
++#if !defined(__HAIKU__)
+ #include <sys/statfs.h>
++#endif
+ #include <sys/stat.h>
++#if !defined(__HAIKU__)
+ #include <sys/sysmacros.h>
++#endif
+ #include <unistd.h>
+ #include <fcntl.h>
+ #include <dirent.h>
+@@ -144,6 +148,7 @@ static void stat_to_qid(FSQID *qid, const struct stat *st)
+ 
+ static void fs_statfs(FSDevice *fs1, FSStatFS *st)
+ {
++#if !defined(__HAIKU__)
+     FSDeviceDisk *fs = (FSDeviceDisk *)fs1;
+     struct statfs st1;
+     statfs(fs->root_path, &st1);
+@@ -153,6 +158,7 @@ static void fs_statfs(FSDevice *fs1, FSStatFS *st)
+     st->f_bavail = st1.f_bavail;
+     st->f_files = st1.f_files;
+     st->f_ffree = st1.f_ffree;
++#endif
+ }
+ 
+ static char *compose_path(const char *path, const char *name)
+@@ -312,6 +318,10 @@ static int fs_readdir(FSDevice *fs, FSFile *f, uint64_t offset,
+         if ((pos + len) > count)
+             break;
+         offset = telldir(f->u.dirp);
++#if defined(__HAIKU__)
++            d_type = 0;
++            type = P9_QTFILE;
++#else
+         d_type = de->d_type;
+         if (d_type == DT_UNKNOWN) {
+             char *path;
+@@ -330,6 +340,7 @@ static int fs_readdir(FSDevice *fs, FSFile *f, uint64_t offset,
+             type = P9_QTSYMLINK;
+         else
+             type = P9_QTFILE;
++#endif
+         buf[pos++] = type;
+         put_le32(buf + pos, 0); /* version */
+         pos += 4;
+@@ -507,6 +518,9 @@ static int fs_mknod(FSDevice *fs, FSQID *qid,
+              FSFile *f, const char *name, uint32_t mode, uint32_t major,
+              uint32_t minor, uint32_t gid)
+ {
++#if defined(__HAIKU__)
++    return -errno_to_p9(ENOTSUP);
++#else
+     char *path;
+     struct stat st;
+     
+@@ -522,6 +536,7 @@ static int fs_mknod(FSDevice *fs, FSQID *qid,
+     free(path);
+     stat_to_qid(qid, &st);
+     return 0;
++#endif
+ }
+ 
+ static int fs_readlink(FSDevice *fs, char *buf, int buf_size, FSFile *f)
+diff --git a/riscv_cpu.c b/riscv_cpu.c
+index ba4fa4c..cfb910a 100644
+--- a/riscv_cpu.c
++++ b/riscv_cpu.c
+@@ -40,7 +40,7 @@
+ #error CONFIG_RISCV_MAX_XLEN must be defined
+ #endif
+ 
+-//#define DUMP_INVALID_MEM_ACCESS
++#define DUMP_INVALID_MEM_ACCESS
+ //#define DUMP_MMU_EXCEPTIONS
+ //#define DUMP_INTERRUPTS
+ //#define DUMP_INVALID_CSR
+@@ -377,6 +377,8 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
+ #ifdef DUMP_INVALID_MEM_ACCESS
+             printf("target_read_slow: invalid physical address 0x");
+             print_target_ulong(paddr);
++            printf(", PC: ");
++            print_target_ulong(s->pc);
+             printf("\n");
+ #endif
+             return 0;
+@@ -464,7 +466,10 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
+ #ifdef DUMP_INVALID_MEM_ACCESS
+             printf("target_write_slow: invalid physical address 0x");
+             print_target_ulong(paddr);
++            printf(", PC: ");
++            print_target_ulong(s->pc);
+             printf("\n");
++            exit(1);
+ #endif
+         } else if (pr->is_ram) {
+             phys_mem_set_dirty_bit(pr, paddr - pr->addr);
+diff --git a/riscv_machine.c b/riscv_machine.c
+index a7149fd..0e27da4 100644
+--- a/riscv_machine.c
++++ b/riscv_machine.c
+@@ -35,6 +35,7 @@
+ #include "cutils.h"
+ #include "iomem.h"
+ #include "riscv_cpu.h"
++#include "uart.h"
+ #include "virtio.h"
+ #include "machine.h"
+ 
+@@ -56,6 +57,7 @@ typedef struct RISCVMachine {
+     /* HTIF */
+     uint64_t htif_tohost, htif_fromhost;
+ 
++    SerialState *serial_state;
+     VIRTIODevice *keyboard_dev;
+     VIRTIODevice *mouse_dev;
+ 
+@@ -74,6 +76,9 @@ typedef struct RISCVMachine {
+ #define PLIC_BASE_ADDR 0x40100000
+ #define PLIC_SIZE      0x00400000
+ #define FRAMEBUFFER_BASE_ADDR 0x41000000
++#define UART_BASE_ADDR 0x10000000
++#define UART_SIZE 0x100
++#define UART_IRQ 10
+ 
+ #define RTC_FREQ 10000000
+ #define RTC_FREQ_DIV 16 /* arbitrary, relative to CPU freq to have a
+@@ -192,6 +197,14 @@ static void htif_poll(RISCVMachine *s)
+ }
+ #endif
+ 
++static void serial_write_cb(void *opaque, const uint8_t *buf, int buf_len)
++{
++    RISCVMachine *s = opaque;
++    if (s->common.console) {
++        s->common.console->write_data(s->common.console->opaque, buf, buf_len);
++    }
++}
++
+ static uint32_t clint_read(void *opaque, uint32_t offset, int size_log2)
+ {
+     RISCVMachine *m = opaque;
+@@ -696,6 +709,14 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
+     fdt_prop_u32(s, "phandle", plic_phandle);
+ 
+     fdt_end_node(s); /* plic */
++
++    fdt_begin_node_num(s, "serial", UART_BASE_ADDR);
++    fdt_prop_str(s, "compatible", "ns16550a");
++    fdt_prop_tab_u64_2(s, "reg", UART_BASE_ADDR, UART_SIZE);
++    tab[0] = plic_phandle;
++    tab[1] = UART_IRQ;
++    fdt_prop_tab_u32(s, "interrupts-extended", tab, 2);
++    fdt_end_node(s); /* serial */
+     
+     for(i = 0; i < m->virtio_count; i++) {
+         fdt_begin_node_num(s, "virtio", VIRTIO_BASE_ADDR + i * VIRTIO_SIZE);
+@@ -739,7 +760,7 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
+     fdt_end_node(s); /* / */
+ 
+     size = fdt_output(s, dst);
+-#if 0
++#if 1
+     {
+         FILE *f;
+         f = fopen("/tmp/riscvemu.dtb", "wb");
+@@ -881,6 +902,9 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
+                         s, htif_read, htif_write, DEVIO_SIZE32);
+     s->common.console = p->console;
+ 
++    s->serial_state = serial_init(s->mem_map, UART_BASE_ADDR, &s->plic_irq[UART_IRQ],
++        serial_write_cb, s);
++
+     memset(vbus, 0, sizeof(*vbus));
+     vbus->mem_map = s->mem_map;
+     vbus->addr = VIRTIO_BASE_ADDR;
+diff --git a/sdl.c b/sdl.c
+index c2afeba..fba33aa 100644
+--- a/sdl.c
++++ b/sdl.c
+@@ -84,7 +84,7 @@ static void sdl_update(FBDevice *fb_dev, void *opaque,
+     SDL_UpdateRect(screen, r.x, r.y, r.w, r.h);
+ }
+ 
+-#if defined(_WIN32)
++#if defined(_WIN32) || defined(__HAIKU__)
+ 
+ static int sdl_get_keycode(const SDL_KeyboardEvent *ev)
+ {
+diff --git a/temu.c b/temu.c
+index 7c07f3b..f5372d8 100644
+--- a/temu.c
++++ b/temu.c
+@@ -36,8 +36,10 @@
+ #include <termios.h>
+ #include <sys/ioctl.h>
+ #include <net/if.h>
++#ifndef __HAIKU__
+ #include <linux/if_tun.h>
+ #endif
++#endif
+ #include <sys/stat.h>
+ #include <signal.h>
+ 
+@@ -346,7 +348,7 @@ static BlockDevice *block_device_init(const char *filename,
+     return bs;
+ }
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__HAIKU__)
+ 
+ typedef struct {
+     int fd;
+@@ -763,7 +765,7 @@ int main(int argc, char **argv)
+         } else
+ #endif
+         {
+-#ifdef _WIN32
++#if defined(_WIN32)
+             fprintf(stderr, "Filesystem access not supported yet\n");
+             exit(1);
+ #else
+@@ -788,7 +790,7 @@ int main(int argc, char **argv)
+                 exit(1);
+         } else
+ #endif
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__HAIKU__)
+         if (!strcmp(p->tab_eth[i].driver, "tap")) {
+             p->tab_eth[i].net = tun_open(p->tab_eth[i].ifname);
+             if (!p->tab_eth[i].net)
+@@ -805,16 +807,14 @@ int main(int argc, char **argv)
+ #ifdef CONFIG_SDL
+     if (p->display_device) {
+         sdl_init(p->width, p->height);
+-    } else
++    }
+ #endif
+-    {
+ #ifdef _WIN32
+-        fprintf(stderr, "Console not supported yet\n");
+-        exit(1);
++    fprintf(stderr, "Console not supported yet\n");
++    exit(1);
+ #else
+-        p->console = console_init(allow_ctrlc);
++    p->console = console_init(allow_ctrlc);
+ #endif
+-    }
+     p->rtc_real_time = TRUE;
+ 
+     s = virt_machine_init(p);
+diff --git a/uart.c b/uart.c
+new file mode 100644
+index 0000000..147160d
+--- /dev/null
++++ b/uart.c
+@@ -0,0 +1,228 @@
++#include "uart.h"
++#include <stdint.h>
++
++static void serial_write(void *opaque, uint32_t offset,
++                         uint32_t val, int size_log2);
++static uint32_t serial_read(void *opaque, uint32_t offset, int size_log2);
++
++SerialState *serial_init(PhysMemoryMap *port_map, int addr,
++                         IRQSignal *irq,
++                         void (*write_func)(void *opaque, const uint8_t *buf, int buf_len), void *opaque)
++{
++    SerialState *s;
++    s = mallocz(sizeof(*s));
++    
++    /* all 8 bit registers */
++    s->divider = 0; 
++    s->rbr = 0; /* receive register */
++    s->ier = 0;
++    s->iir = UART_IIR_NO_INT; /* read only */
++    s->lcr = 0;
++    s->mcr = 0;
++    s->lsr = UART_LSR_TEMT | UART_LSR_THRE; /* read only */
++    s->msr = 0;
++    s->scr = 0;
++    s->fcr = 0;
++
++    s->irq = irq;
++    s->write_func = write_func;
++    s->opaque = opaque;
++
++    cpu_register_device(port_map, addr, 8, s, serial_read, serial_write, 
++                        DEVIO_SIZE8);
++    return s;
++}
++
++static void serial_update_irq(SerialState *s)
++{
++    if ((s->lsr & UART_LSR_DR) && (s->ier & UART_IER_RDI)) {
++        s->iir = UART_IIR_RDI;
++    } else if ((s->lsr & UART_LSR_THRE) && (s->ier & UART_IER_THRI)) {
++        s->iir = UART_IIR_THRI;
++    } else {
++        s->iir = UART_IIR_NO_INT;
++    }
++    if (s->iir != UART_IIR_NO_INT) {
++        set_irq(s->irq, 1);
++    } else {
++        set_irq(s->irq, 0);
++    }
++}
++
++#if 0
++/* send remainining chars in fifo */
++Serial.prototype.write_tx_fifo = function()
++{
++    if (s->tx_fifo != "") {
++        s->write_func(s->tx_fifo);
++        s->tx_fifo = "";
++        
++        s->lsr |= UART_LSR_THRE;
++        s->lsr |= UART_LSR_TEMT;
++        s->update_irq();
++    }
++}
++#endif
++    
++static void serial_write(void *opaque, uint32_t offset,
++                         uint32_t val, int size_log2)
++{
++    SerialState *s = opaque;
++    int addr;
++
++    addr = offset & 7;
++    switch(addr) {
++    default:
++    case 0:
++        if (s->lcr & UART_LCR_DLAB) {
++            s->divider = (s->divider & 0xff00) | val;
++        } else {
++#if 0
++            if (s->fcr & UART_FCR_FE) {
++                s->tx_fifo += String.fromCharCode(val);
++                s->lsr &= ~UART_LSR_THRE;
++                serial_update_irq(s);
++                if (s->tx_fifo.length >= UART_FIFO_LENGTH) {
++                    /* write to the terminal */
++                    s->write_tx_fifo();
++                }
++            } else
++#endif
++            {
++                uint8_t ch;
++                s->lsr &= ~UART_LSR_THRE;
++                serial_update_irq(s);
++                
++                /* write to the terminal */
++                ch = val;
++                s->write_func(s->opaque, &ch, 1);
++                s->lsr |= UART_LSR_THRE;
++                s->lsr |= UART_LSR_TEMT;
++                serial_update_irq(s);
++            }
++        }
++        break;
++    case 1:
++        if (s->lcr & UART_LCR_DLAB) {
++            s->divider = (s->divider & 0x00ff) | (val << 8);
++        } else {
++            s->ier = val;
++            serial_update_irq(s);
++        }
++        break;
++    case 2:
++#if 0
++        if ((s->fcr ^ val) & UART_FCR_FE) {
++            /* clear fifos */
++            val |= UART_FCR_XFR | UART_FCR_RFR;
++        }
++        if (val & UART_FCR_XFR)
++            s->tx_fifo = "";
++        if (val & UART_FCR_RFR)
++            s->rx_fifo = "";
++        s->fcr = val & UART_FCR_FE;
++#endif
++        break;
++    case 3:
++        s->lcr = val;
++        break;
++    case 4:
++        s->mcr = val;
++        break;
++    case 5:
++        break;
++    case 6:
++        s->msr = val;
++        break;
++    case 7:
++        s->scr = val;
++        break;
++    }
++}
++
++static uint32_t serial_read(void *opaque, uint32_t offset, int size_log2)
++{
++    SerialState *s = opaque;
++    int ret, addr;
++
++    addr = offset & 7;
++    switch(addr) {
++    default:
++    case 0:
++        if (s->lcr & UART_LCR_DLAB) {
++            ret = s->divider & 0xff; 
++        } else {
++            ret = s->rbr;
++            s->lsr &= ~(UART_LSR_DR | UART_LSR_BI);
++            serial_update_irq(s);
++#if 0
++            /* try to receive next chars */
++            s->send_char_from_fifo();
++#endif
++        }
++        break;
++    case 1:
++        if (s->lcr & UART_LCR_DLAB) {
++            ret = (s->divider >> 8) & 0xff;
++        } else {
++            ret = s->ier;
++        }
++        break;
++    case 2:
++        ret = s->iir;
++        if (s->fcr & UART_FCR_FE)
++            ret |= UART_IIR_FE;
++        break;
++    case 3:
++        ret = s->lcr;
++        break;
++    case 4:
++        ret = s->mcr;
++        break;
++    case 5:
++        ret = s->lsr;
++        break;
++    case 6:
++        ret = s->msr;
++        break;
++    case 7:
++        ret = s->scr;
++        break;
++    }
++    return ret;
++}
++
++void serial_send_break(SerialState *s)
++{
++    s->rbr = 0;
++    s->lsr |= UART_LSR_BI | UART_LSR_DR;
++    serial_update_irq(s);
++}
++
++#if 0
++static void serial_send_char(SerialState *s, int ch)
++{
++    s->rbr = ch;
++    s->lsr |= UART_LSR_DR;
++    serial_update_irq(s);
++}
++
++Serial.prototype.send_char_from_fifo = function()
++{
++    var fifo;
++
++    fifo = s->rx_fifo;
++    if (fifo != "" && !(s->lsr & UART_LSR_DR)) {
++        s->send_char(fifo.charCodeAt(0));
++        s->rx_fifo = fifo.substr(1, fifo.length - 1);
++    }
++}
++
++/* queue the string in the UART receive fifo and send it ASAP */
++Serial.prototype.send_chars = function(str)
++{
++    s->rx_fifo += str;
++    s->send_char_from_fifo();
++}
++    
++#endif
+diff --git a/uart.h b/uart.h
+new file mode 100644
+index 0000000..12b92ec
+--- /dev/null
++++ b/uart.h
+@@ -0,0 +1,58 @@
++#ifndef _UART_H_
++#define _UART_H_
++
++#include <stddef.h>
++#include "cutils.h"
++#include "iomem.h"
++
++#define UART_LCR_DLAB	0x80	/* Divisor latch access bit */
++
++#define UART_IER_MSI	0x08	/* Enable Modem status interrupt */
++#define UART_IER_RLSI	0x04	/* Enable receiver line status interrupt */
++#define UART_IER_THRI	0x02	/* Enable Transmitter holding register int. */
++#define UART_IER_RDI	0x01	/* Enable receiver data interrupt */
++
++#define UART_IIR_NO_INT	0x01	/* No interrupts pending */
++#define UART_IIR_ID	0x06	/* Mask for the interrupt ID */
++
++#define UART_IIR_MSI	0x00	/* Modem status interrupt */
++#define UART_IIR_THRI	0x02	/* Transmitter holding register empty */
++#define UART_IIR_RDI	0x04	/* Receiver data interrupt */
++#define UART_IIR_RLSI	0x06	/* Receiver line status interrupt */
++#define UART_IIR_FE     0xC0    /* Fifo enabled */
++
++#define UART_LSR_TEMT	0x40	/* Transmitter empty */
++#define UART_LSR_THRE	0x20	/* Transmit-hold-register empty */
++#define UART_LSR_BI	0x10	/* Break interrupt indicator */
++#define UART_LSR_FE	0x08	/* Frame error indicator */
++#define UART_LSR_PE	0x04	/* Parity error indicator */
++#define UART_LSR_OE	0x02	/* Overrun error indicator */
++#define UART_LSR_DR	0x01	/* Receiver data ready */
++
++#define UART_FCR_XFR        0x04    /* XMIT Fifo Reset */
++#define UART_FCR_RFR        0x02    /* RCVR Fifo Reset */
++#define UART_FCR_FE         0x01    /* FIFO Enable */
++
++#define UART_FIFO_LENGTH    16      /* 16550A Fifo Length */
++
++typedef struct {
++    uint8_t divider; 
++    uint8_t rbr; /* receive register */
++    uint8_t ier;
++    uint8_t iir; /* read only */
++    uint8_t lcr;
++    uint8_t mcr;
++    uint8_t lsr; /* read only */
++    uint8_t msr;
++    uint8_t scr;
++    uint8_t fcr;
++    IRQSignal *irq;
++    void (*write_func)(void *opaque, const uint8_t *buf, int buf_len);
++    void *opaque;
++} SerialState;
++
++SerialState *serial_init(PhysMemoryMap *port_map, int addr,
++                         IRQSignal *irq,
++                         void (*write_func)(void *opaque, const uint8_t *buf, int buf_len), void *opaque);
++
++#endif	// _UART_H_
+diff --git a/x86_machine.c b/x86_machine.c
+index db8f6bb..8497a45 100644
+--- a/x86_machine.c
++++ b/x86_machine.c
+@@ -36,6 +36,7 @@
+ #include "cutils.h"
+ #include "iomem.h"
+ #include "virtio.h"
++#include "uart.h"
+ #include "x86_cpu.h"
+ #include "machine.h"
+ #include "pci.h"
+@@ -980,280 +981,6 @@ static int pit_update_irq(PITState *pit)
+         return delay / (PIT_FREQ / 1000);
+ }
+     
+-/***********************************************************/
+-/* serial port emulation */
+-
+-#define UART_LCR_DLAB	0x80	/* Divisor latch access bit */
+-
+-#define UART_IER_MSI	0x08	/* Enable Modem status interrupt */
+-#define UART_IER_RLSI	0x04	/* Enable receiver line status interrupt */
+-#define UART_IER_THRI	0x02	/* Enable Transmitter holding register int. */
+-#define UART_IER_RDI	0x01	/* Enable receiver data interrupt */
+-
+-#define UART_IIR_NO_INT	0x01	/* No interrupts pending */
+-#define UART_IIR_ID	0x06	/* Mask for the interrupt ID */
+-
+-#define UART_IIR_MSI	0x00	/* Modem status interrupt */
+-#define UART_IIR_THRI	0x02	/* Transmitter holding register empty */
+-#define UART_IIR_RDI	0x04	/* Receiver data interrupt */
+-#define UART_IIR_RLSI	0x06	/* Receiver line status interrupt */
+-#define UART_IIR_FE     0xC0    /* Fifo enabled */
+-
+-#define UART_LSR_TEMT	0x40	/* Transmitter empty */
+-#define UART_LSR_THRE	0x20	/* Transmit-hold-register empty */
+-#define UART_LSR_BI	0x10	/* Break interrupt indicator */
+-#define UART_LSR_FE	0x08	/* Frame error indicator */
+-#define UART_LSR_PE	0x04	/* Parity error indicator */
+-#define UART_LSR_OE	0x02	/* Overrun error indicator */
+-#define UART_LSR_DR	0x01	/* Receiver data ready */
+-
+-#define UART_FCR_XFR        0x04    /* XMIT Fifo Reset */
+-#define UART_FCR_RFR        0x02    /* RCVR Fifo Reset */
+-#define UART_FCR_FE         0x01    /* FIFO Enable */
+-
+-#define UART_FIFO_LENGTH    16      /* 16550A Fifo Length */
+-
+-typedef struct {
+-    uint8_t divider; 
+-    uint8_t rbr; /* receive register */
+-    uint8_t ier;
+-    uint8_t iir; /* read only */
+-    uint8_t lcr;
+-    uint8_t mcr;
+-    uint8_t lsr; /* read only */
+-    uint8_t msr;
+-    uint8_t scr;
+-    uint8_t fcr;
+-    IRQSignal *irq;
+-    void (*write_func)(void *opaque, const uint8_t *buf, int buf_len);
+-    void *opaque;
+-} SerialState;
+-
+-static void serial_write(void *opaque, uint32_t offset,
+-                         uint32_t val, int size_log2);
+-static uint32_t serial_read(void *opaque, uint32_t offset, int size_log2);
+-
+-SerialState *serial_init(PhysMemoryMap *port_map, int addr,
+-                         IRQSignal *irq,
+-                         void (*write_func)(void *opaque, const uint8_t *buf, int buf_len), void *opaque)
+-{
+-    SerialState *s;
+-    s = mallocz(sizeof(*s));
+-    
+-    /* all 8 bit registers */
+-    s->divider = 0; 
+-    s->rbr = 0; /* receive register */
+-    s->ier = 0;
+-    s->iir = UART_IIR_NO_INT; /* read only */
+-    s->lcr = 0;
+-    s->mcr = 0;
+-    s->lsr = UART_LSR_TEMT | UART_LSR_THRE; /* read only */
+-    s->msr = 0;
+-    s->scr = 0;
+-    s->fcr = 0;
+-
+-    s->irq = irq;
+-    s->write_func = write_func;
+-    s->opaque = opaque;
+-
+-    cpu_register_device(port_map, addr, 8, s, serial_read, serial_write, 
+-                        DEVIO_SIZE8);
+-    return s;
+-}
+-
+-static void serial_update_irq(SerialState *s)
+-{
+-    if ((s->lsr & UART_LSR_DR) && (s->ier & UART_IER_RDI)) {
+-        s->iir = UART_IIR_RDI;
+-    } else if ((s->lsr & UART_LSR_THRE) && (s->ier & UART_IER_THRI)) {
+-        s->iir = UART_IIR_THRI;
+-    } else {
+-        s->iir = UART_IIR_NO_INT;
+-    }
+-    if (s->iir != UART_IIR_NO_INT) {
+-        set_irq(s->irq, 1);
+-    } else {
+-        set_irq(s->irq, 0);
+-    }
+-}
+-
+-#if 0
+-/* send remainining chars in fifo */
+-Serial.prototype.write_tx_fifo = function()
+-{
+-    if (s->tx_fifo != "") {
+-        s->write_func(s->tx_fifo);
+-        s->tx_fifo = "";
+-        
+-        s->lsr |= UART_LSR_THRE;
+-        s->lsr |= UART_LSR_TEMT;
+-        s->update_irq();
+-    }
+-}
+-#endif
+-    
+-static void serial_write(void *opaque, uint32_t offset,
+-                         uint32_t val, int size_log2)
+-{
+-    SerialState *s = opaque;
+-    int addr;
+-
+-    addr = offset & 7;
+-    switch(addr) {
+-    default:
+-    case 0:
+-        if (s->lcr & UART_LCR_DLAB) {
+-            s->divider = (s->divider & 0xff00) | val;
+-        } else {
+-#if 0
+-            if (s->fcr & UART_FCR_FE) {
+-                s->tx_fifo += String.fromCharCode(val);
+-                s->lsr &= ~UART_LSR_THRE;
+-                serial_update_irq(s);
+-                if (s->tx_fifo.length >= UART_FIFO_LENGTH) {
+-                    /* write to the terminal */
+-                    s->write_tx_fifo();
+-                }
+-            } else
+-#endif
+-            {
+-                uint8_t ch;
+-                s->lsr &= ~UART_LSR_THRE;
+-                serial_update_irq(s);
+-                
+-                /* write to the terminal */
+-                ch = val;
+-                s->write_func(s->opaque, &ch, 1);
+-                s->lsr |= UART_LSR_THRE;
+-                s->lsr |= UART_LSR_TEMT;
+-                serial_update_irq(s);
+-            }
+-        }
+-        break;
+-    case 1:
+-        if (s->lcr & UART_LCR_DLAB) {
+-            s->divider = (s->divider & 0x00ff) | (val << 8);
+-        } else {
+-            s->ier = val;
+-            serial_update_irq(s);
+-        }
+-        break;
+-    case 2:
+-#if 0
+-        if ((s->fcr ^ val) & UART_FCR_FE) {
+-            /* clear fifos */
+-            val |= UART_FCR_XFR | UART_FCR_RFR;
+-        }
+-        if (val & UART_FCR_XFR)
+-            s->tx_fifo = "";
+-        if (val & UART_FCR_RFR)
+-            s->rx_fifo = "";
+-        s->fcr = val & UART_FCR_FE;
+-#endif
+-        break;
+-    case 3:
+-        s->lcr = val;
+-        break;
+-    case 4:
+-        s->mcr = val;
+-        break;
+-    case 5:
+-        break;
+-    case 6:
+-        s->msr = val;
+-        break;
+-    case 7:
+-        s->scr = val;
+-        break;
+-    }
+-}
+-
+-static uint32_t serial_read(void *opaque, uint32_t offset, int size_log2)
+-{
+-    SerialState *s = opaque;
+-    int ret, addr;
+-
+-    addr = offset & 7;
+-    switch(addr) {
+-    default:
+-    case 0:
+-        if (s->lcr & UART_LCR_DLAB) {
+-            ret = s->divider & 0xff; 
+-        } else {
+-            ret = s->rbr;
+-            s->lsr &= ~(UART_LSR_DR | UART_LSR_BI);
+-            serial_update_irq(s);
+-#if 0
+-            /* try to receive next chars */
+-            s->send_char_from_fifo();
+-#endif
+-        }
+-        break;
+-    case 1:
+-        if (s->lcr & UART_LCR_DLAB) {
+-            ret = (s->divider >> 8) & 0xff;
+-        } else {
+-            ret = s->ier;
+-        }
+-        break;
+-    case 2:
+-        ret = s->iir;
+-        if (s->fcr & UART_FCR_FE)
+-            ret |= UART_IIR_FE;
+-        break;
+-    case 3:
+-        ret = s->lcr;
+-        break;
+-    case 4:
+-        ret = s->mcr;
+-        break;
+-    case 5:
+-        ret = s->lsr;
+-        break;
+-    case 6:
+-        ret = s->msr;
+-        break;
+-    case 7:
+-        ret = s->scr;
+-        break;
+-    }
+-    return ret;
+-}
+-
+-void serial_send_break(SerialState *s)
+-{
+-    s->rbr = 0;
+-    s->lsr |= UART_LSR_BI | UART_LSR_DR;
+-    serial_update_irq(s);
+-}
+-
+-#if 0
+-static void serial_send_char(SerialState *s, int ch)
+-{
+-    s->rbr = ch;
+-    s->lsr |= UART_LSR_DR;
+-    serial_update_irq(s);
+-}
+-
+-Serial.prototype.send_char_from_fifo = function()
+-{
+-    var fifo;
+-
+-    fifo = s->rx_fifo;
+-    if (fifo != "" && !(s->lsr & UART_LSR_DR)) {
+-        s->send_char(fifo.charCodeAt(0));
+-        s->rx_fifo = fifo.substr(1, fifo.length - 1);
+-    }
+-}
+-
+-/* queue the string in the UART receive fifo and send it ASAP */
+-Serial.prototype.send_chars = function(str)
+-{
+-    s->rx_fifo += str;
+-    s->send_char_from_fifo();
+-}
+-    
+-#endif
+ 
+ #ifdef DEBUG_BIOS
+ static void bios_debug_write(void *opaque, uint32_t offset,
+-- 
+2.30.2
+
+From da1e4672ff3f6fa53ee0c7ea72e6e116b8903999 Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Sun, 16 May 2021 22:58:16 +0900
+Subject: implement `utime` register
+
+---
+ riscv_cpu.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/riscv_cpu.c b/riscv_cpu.c
+index cfb910a..b765be6 100644
+--- a/riscv_cpu.c
++++ b/riscv_cpu.c
+@@ -29,6 +29,8 @@
+ #include <assert.h>
+ #include <fcntl.h>
+ 
++#include <OS.h> // system_time()
++
+ #include "cutils.h"
+ #include "iomem.h"
+ #include "riscv_cpu.h"
+@@ -748,6 +750,9 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
+         }
+         val = (int64_t)s->insn_counter;
+         break;
++    case 0xc01: /* utime */
++        val = system_time();
++        break;
+     case 0xc80: /* mcycleh */
+     case 0xc82: /* minstreth */
+         if (s->cur_xlen != 32)
+-- 
+2.30.2
+
+From beafad98395ef74fc64c9b3461ee46879d9ae647 Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Sun, 16 May 2021 22:58:38 +0900
+Subject: virtio: increase queue size, style changes for Pe editor
+
+---
+ virtio.c | 22 +++++++++++-----------
+ 1 file changed, 11 insertions(+), 11 deletions(-)
+
+diff --git a/virtio.c b/virtio.c
+index 8d07f44..56746db 100644
+--- a/virtio.c
++++ b/virtio.c
+@@ -93,7 +93,7 @@
+ 
+ #define MAX_QUEUE 8
+ #define MAX_CONFIG_SPACE_SIZE 256
+-#define MAX_QUEUE_NUM 16
++#define MAX_QUEUE_NUM 32
+ 
+ typedef struct {
+     uint32_t ready; /* 0 or 1 */
+@@ -977,8 +977,8 @@ static void virtio_config_change_notify(VIRTIODevice *s)
+     set_irq(s->irq, 1);
+ }
+ 
+-/*********************************************************************/
+-/* block device */
++
++//#pragma mark block device
+ 
+ typedef struct {
+     uint32_t type;
+@@ -1131,8 +1131,8 @@ VIRTIODevice *virtio_block_init(VIRTIOBusDef *bus, BlockDevice *bs)
+     return (VIRTIODevice *)s;
+ }
+ 
+-/*********************************************************************/
+-/* network device */
++
++//#pragma mark network device
+ 
+ typedef struct VIRTIONetDevice {
+     VIRTIODevice common;
+@@ -1257,8 +1257,8 @@ VIRTIODevice *virtio_net_init(VIRTIOBusDef *bus, EthernetDevice *es)
+     return (VIRTIODevice *)s;
+ }
+ 
+-/*********************************************************************/
+-/* console device */
++
++//#pragma mark console device
+ 
+ typedef struct VIRTIOConsoleDevice {
+     VIRTIODevice common;
+@@ -1359,8 +1359,8 @@ VIRTIODevice *virtio_console_init(VIRTIOBusDef *bus, CharacterDevice *cs)
+     return (VIRTIODevice *)s;
+ }
+ 
+-/*********************************************************************/
+-/* input device */
++
++//#pragma mark input device
+ 
+ enum {
+     VIRTIO_INPUT_CFG_UNSET      = 0x00,
+@@ -1643,8 +1643,8 @@ VIRTIODevice *virtio_input_init(VIRTIOBusDef *bus, VirtioInputTypeEnum type)
+     return (VIRTIODevice *)s;
+ }
+ 
+-/*********************************************************************/
+-/* 9p filesystem device */
++
++//#pragma mark 9p filesystem device
+ 
+ typedef struct {
+     struct list_head link;
+-- 
+2.30.2
+

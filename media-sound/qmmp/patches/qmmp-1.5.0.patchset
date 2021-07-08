@@ -1,0 +1,652 @@
+From 452aa33b8cd84d5049fe6f992dad7df8dc899485 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 30 May 2021 21:53:22 +1000
+Subject: Add haiku support
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0cbcd8b..c2a0ee7 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -63,7 +63,7 @@ find_package(Qt5DBus 5.4.0)
+ find_package(Qt5Multimedia 5.4.0)
+ find_package(Qt5Sql 5.4.0)
+ find_package(Qt5WinExtras 5.4.0)
+-ADD_DEFINITIONS(-DQMMP_WS_X11 -DQT_DISABLE_DEPRECATED_BEFORE=0x050400 -DQT_DEPRECATED_WARNINGS)
++ADD_DEFINITIONS(-DQT_DISABLE_DEPRECATED_BEFORE=0x050400 -DQT_DEPRECATED_WARNINGS)
+ set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+ set(CMAKE_VISIBILITY_INLINES_HIDDEN 1)
+ set(CMAKE_CXX_STANDARD 11)
+@@ -243,7 +243,7 @@ PRINT_SUMMARY ("Two-panel File File Dialog ............" USE_TWO_PANEL_DIALOG 1)
+ 
+ MESSAGE("")
+ MESSAGE("Advanced:")
+-PRINT_SUMMARY ("Skinned user interface ................" USE_SKINNED X11_FOUND AND Qt5X11Extras_FOUND)
++PRINT_SUMMARY ("Skinned user interface ................" USE_SKINNED 1)
+ PRINT_SUMMARY ("Simple user interface (QSUI) .........." USE_QSUI 1)
+ PRINT_SUMMARY ("Automatic charset detection ..........." USE_ENCA ENCA_FOUND)
+ PRINT_SUMMARY ("MPEG plugin with LibRCD support ......." USE_LIBRCD LIBRCD_FOUND)
+diff --git a/src/app/main.cpp b/src/app/main.cpp
+index 579e8b0..3cc71b0 100644
+--- a/src/app/main.cpp
++++ b/src/app/main.cpp
+@@ -30,6 +30,10 @@
+ #include <windows.h>
+ #include <winuser.h>
+ #endif
++#ifdef __HAIKU__
++#include <signal.h>
++#include <unistd.h>
++#endif
+ #include <qmmp/qmmp.h>
+ #include "qmmpstarter.h"
+ 
+@@ -70,5 +74,11 @@ int main(int argc, char *argv[])
+         return starter.exitCode();
+ 
+     a.setQuitOnLastWindowClosed(false);
++#ifdef __HAIKU__
++	int res = a.exec();
++	kill(::getpid(), SIGKILL);
++	return res;
++#else
+     return a.exec();
++#endif
+ }
+diff --git a/src/plugins/Input/gme/CMakeLists.txt b/src/plugins/Input/gme/CMakeLists.txt
+index 0134f73..8cbc33c 100644
+--- a/src/plugins/Input/gme/CMakeLists.txt
++++ b/src/plugins/Input/gme/CMakeLists.txt
+@@ -9,16 +9,10 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../../)
+ link_directories(${CMAKE_CURRENT_BINARY_DIR}/../../../qmmp)
+ 
+ # libgme
+-CHECK_INCLUDE_FILE_CXX(gme/gme.h GME_HEADER_FOUND)
+-FIND_LIBRARY(GME_LIB NAME gme PATHS /usr/lib /usr/lib32  /usr/local/lib /usr/local/lib32)
+-
+-IF(GME_HEADER_FOUND AND (NOT GME_LIB MATCHES "^.*-NOTFOUND"))
+-SET(GME_FOUND TRUE CACHE INTERNAL "GME")
+-MESSAGE(STATUS "Found Game Music Emu: ${GME_LIB}")
+-ELSE(GME_HEADER_FOUND AND (NOT GME_LIB MATCHES "^.*-NOTFOUND"))
+-MESSAGE(STATUS "Could not find Game Music Emu library")
+-ENDIF(GME_HEADER_FOUND AND (NOT GME_LIB MATCHES "^.*-NOTFOUND"))
+-
++pkg_search_module(GME libgme)
++include_directories(${GME_INCLUDE_DIRS})
++link_directories(${GME_LIBRARY_DIRS})
++ADD_DEFINITIONS(${GME_CFLAGS})
+ 
+ SET(libgme_SRCS
+   decoder_gme.cpp
+@@ -51,6 +45,6 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
+ IF(GME_FOUND)
+ ADD_LIBRARY(gme MODULE ${libgme_SRCS} ${libgme_RCC_SRCS} ${libgme_HDRS} ${libgme_UIS_H})
+ add_dependencies(gme libqmmp)
+-target_link_libraries(gme Qt5::Widgets libqmmp ${GME_LIB})
++target_link_libraries(gme Qt5::Widgets libqmmp ${GME_LDFLAGS})
+ install(TARGETS gme DESTINATION ${PLUGIN_DIR}/Input)
+ ENDIF(GME_FOUND)
+diff --git a/src/plugins/Output/CMakeLists.txt b/src/plugins/Output/CMakeLists.txt
+index 867fe49..3881ec7 100644
+--- a/src/plugins/Output/CMakeLists.txt
++++ b/src/plugins/Output/CMakeLists.txt
+@@ -10,6 +10,7 @@ SET(USE_DSOUND TRUE CACHE BOOL "enable/disable DirectSound plugin")
+ SET(USE_QTMULTIMEDIA TRUE CACHE BOOL "enable/disable Qt Multimedia output plugin")
+ SET(USE_WASAPI TRUE CACHE BOOL "enable/disable WASAPI plugin")
+ SET(USE_SHOUT TRUE CACHE BOOL "enable/disable Icecast plugin")
++SET(USE_MEDIAKIT TRUE CACHE BOOL "enable/disable MediaKit plugin")
+ 
+ IF(USE_ALSA)
+ add_subdirectory(alsa)
+@@ -58,3 +59,7 @@ ENDIF(USE_WASAPI)
+ IF(USE_SHOUT)
+ add_subdirectory(shout)
+ ENDIF(USE_SHOUT)
++
++IF(USE_MEDIAKIT)
++add_subdirectory(mediakit)
++ENDIF(USE_MEDIAKIT)
+diff --git a/src/plugins/Output/mediakit/CMakeLists.txt b/src/plugins/Output/mediakit/CMakeLists.txt
+new file mode 100644
+index 0000000..c1fe674
+--- /dev/null
++++ b/src/plugins/Output/mediakit/CMakeLists.txt
+@@ -0,0 +1,31 @@
++project(libmediakit)
++
++include_directories(${CMAKE_CURRENT_BINARY_DIR})
++
++# libqmmp
++include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../../)
++link_directories(${CMAKE_CURRENT_BINARY_DIR}/../../../qmmp)
++
++SET(libmediakit_SRCS
++  outputmediakit.cpp
++  outputmediakitfactory.cpp
++)
++
++SET(libmediakit_HDRS
++  outputmediakit.h
++  outputmediakitfactory.h
++)
++
++SET(libmediakit_RCCS translations/translations.qrc)
++
++QT5_ADD_RESOURCES(libmediakit_RCC_SRCS ${libmediakit_RCCS})
++
++# Don't forget to include output directory, otherwise
++# the UI file won't be wrapped!
++include_directories(${CMAKE_CURRENT_BINARY_DIR})
++
++
++ADD_LIBRARY(mediakit MODULE ${libmediakit_SRCS} ${libmediakit_UIS_H} ${libmediakit_RCC_SRCS} ${libmediakit_HDRS})
++add_dependencies(mediakit libqmmp)
++target_link_libraries(mediakit Qt5::Widgets libqmmp media)
++install(TARGETS mediakit DESTINATION ${PLUGIN_DIR}/Output)
+diff --git a/src/plugins/Output/mediakit/mediakit.pro b/src/plugins/Output/mediakit/mediakit.pro
+new file mode 100644
+index 0000000..86849a8
+--- /dev/null
++++ b/src/plugins/Output/mediakit/mediakit.pro
+@@ -0,0 +1,22 @@
++include(../../plugins.pri)
++
++HEADERS += outputmediakitfactory.h \
++           outputmediakit.h
++
++SOURCES += outputmediakitfactory.cpp \
++           outputmediakit.cpp
++
++
++TARGET=$$PLUGINS_PREFIX/Output/mediakit
++
++CONFIG += warn_on \
++thread \
++plugin \
++link_pkgconfig
++
++LIBS += -lqmmp -lbe -lmedia
++
++RESOURCES = translations/translations.qrc
++
++target.path = $$PLUGIN_DIR/Output
++INSTALLS += target
+diff --git a/src/plugins/Output/mediakit/outputmediakit.cpp b/src/plugins/Output/mediakit/outputmediakit.cpp
+new file mode 100644
+index 0000000..b5108a7
+--- /dev/null
++++ b/src/plugins/Output/mediakit/outputmediakit.cpp
+@@ -0,0 +1,137 @@
++/***************************************************************************
++ *   Copyright (C) 2013-2019 by Gerasim Troeglazov                         *
++ *   3dEyes@gmail.com                                                      *
++ *                                                                         *
++ *   This program is free software; you can redistribute it and/or modify  *
++ *   it under the terms of the GNU General Public License as published by  *
++ *   the Free Software Foundation; either version 2 of the License, or     *
++ *   (at your option) any later version.                                   *
++ *                                                                         *
++ *   This program is distributed in the hope that it will be useful,       *
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
++ *   GNU General Public License for more details.                          *
++ *                                                                         *
++ *   You should have received a copy of the GNU General Public License     *
++ *   along with this program; if not, write to the                         *
++ *   Free Software Foundation, Inc.,                                       *
++ *   51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.         *
++ ***************************************************************************/
++
++#include "outputmediakit.h"
++
++#include <SoundPlayer.h>
++#include <GameKit.h>
++#include <SupportKit.h>
++#include <game/GameSoundDefs.h>
++#include <game/PushGameSound.h>
++#include <game/StreamingGameSound.h>
++#include <media/MediaDefs.h>
++
++static void playerProc(void *cookie, void *buffer, size_t len, const media_raw_audio_format &format)
++{
++	OutputMediaKit *obj = (OutputMediaKit*)cookie;
++	
++	acquire_sem(obj->block_sem);
++	memcpy(buffer, obj->outbuf, len);
++	release_sem(obj->unblock_sem);
++}
++
++OutputMediaKit::OutputMediaKit(): Output()
++{
++    m_player = NULL;
++}
++
++OutputMediaKit::~OutputMediaKit()
++{
++    uninitialize();
++}
++
++bool OutputMediaKit::initialize(quint32 freq, ChannelMap map, Qmmp::AudioFormat format)
++{
++	int buf_len = 2048 * map.count();
++
++	media_raw_audio_format mediaKitFormat = {
++		(float)freq,
++		(uint32)map.count(),
++		media_raw_audio_format::B_AUDIO_SHORT,
++		B_MEDIA_LITTLE_ENDIAN,
++		(uint32)buf_len /  2
++	};
++
++	switch (format) {
++	    case Qmmp::PCM_S8:
++	        mediaKitFormat.format = media_raw_audio_format::B_AUDIO_CHAR;
++	        break;
++	    case Qmmp::PCM_S16LE:
++	    	mediaKitFormat.format = media_raw_audio_format::B_AUDIO_SHORT;
++	        break;
++	    case Qmmp::PCM_S32LE:
++	        mediaKitFormat.format = media_raw_audio_format::B_AUDIO_INT;
++	        break;
++	    default:
++	        qWarning("Haiku MediaKit: unsupported format detected");
++	        return false;
++    }
++
++	block_sem = create_sem(0, "blocker");
++	unblock_sem = create_sem(1, "unblocker");
++
++	outbuf = (char *)malloc(buf_len);
++	m_player = new BSoundPlayer(&mediaKitFormat, "Qmmp", playerProc, NULL, (void*)this);
++	
++	if(m_player->InitCheck() != B_OK) {
++		delete m_player;
++		return false;
++	}
++
++	m_player->Start();
++	m_player->SetHasData(true);
++
++    Output::configure(freq, map, format);
++
++    return true;
++}
++
++qint64 OutputMediaKit::latency()
++{
++    return 0;
++}
++
++qint64 OutputMediaKit::writeAudio(unsigned char *data, qint64 maxSize)
++{
++	acquire_sem(unblock_sem);
++	memcpy(outbuf, data, maxSize);
++	release_sem(block_sem);
++    return maxSize;
++}
++
++void OutputMediaKit::drain()
++{
++}
++
++void OutputMediaKit::reset()
++{
++}
++
++void OutputMediaKit::suspend()
++{
++    m_player->Stop();
++}
++
++void OutputMediaKit::resume()
++{
++	m_player->Start();
++}
++
++
++void OutputMediaKit::uninitialize()
++{
++	if(m_player) {
++		m_player->Stop();
++		delete m_player;
++	}
++	delete_sem(block_sem);
++	delete_sem(unblock_sem);
++	free(outbuf);
++}
+diff --git a/src/plugins/Output/mediakit/outputmediakit.h b/src/plugins/Output/mediakit/outputmediakit.h
+new file mode 100644
+index 0000000..cc1af5b
+--- /dev/null
++++ b/src/plugins/Output/mediakit/outputmediakit.h
+@@ -0,0 +1,56 @@
++/***************************************************************************
++ *   Copyright (C) 2013-2019 by Gerasim Troeglazov                         *
++ *   3dEyes@gmail.com                                                      *
++ *                                                                         *
++ *   This program is free software; you can redistribute it and/or modify  *
++ *   it under the terms of the GNU General Public License as published by  *
++ *   the Free Software Foundation; either version 2 of the License, or     *
++ *   (at your option) any later version.                                   *
++ *                                                                         *
++ *   This program is distributed in the hope that it will be useful,       *
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
++ *   GNU General Public License for more details.                          *
++ *                                                                         *
++ *   You should have received a copy of the GNU General Public License     *
++ *   along with this program; if not, write to the                         *
++ *   Free Software Foundation, Inc.,                                       *
++ *   51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.         *
++ ***************************************************************************/
++
++#ifndef OUTPUTMEDIAKIT_H
++#define OUTPUTMEDIAKIT_H
++
++#include <QObject>
++#include <QHash>
++#include <qmmp/output.h>
++
++#include <MediaKit.h>
++#include <SupportKit.h>
++#include <game/GameSoundDefs.h>
++#include <game/PushGameSound.h>
++
++class OutputMediaKit : public Output
++{
++public:
++    OutputMediaKit();
++    ~OutputMediaKit();
++
++    bool initialize(quint32, ChannelMap map, Qmmp::AudioFormat format);
++
++    qint64 latency();
++    qint64 writeAudio(unsigned char *data, qint64 maxSize);
++    void drain();
++    void suspend();
++    void resume();    
++    void reset();
++
++	char *outbuf;
++	sem_id block_sem;
++	sem_id unblock_sem;
++private:
++    void uninitialize();
++	BSoundPlayer *m_player;
++};
++
++#endif // OUTPUTMEDIAKIT_H
+diff --git a/src/plugins/Output/mediakit/outputmediakitfactory.cpp b/src/plugins/Output/mediakit/outputmediakitfactory.cpp
+new file mode 100644
+index 0000000..a503603
+--- /dev/null
++++ b/src/plugins/Output/mediakit/outputmediakitfactory.cpp
+@@ -0,0 +1,65 @@
++/***************************************************************************
++ *   Copyright (C) 2013-2019 by Gerasim Troeglazov                         *
++ *   3dEyes@gmail.com                                                      *
++ *                                                                         *
++ *   This program is free software; you can redistribute it and/or modify  *
++ *   it under the terms of the GNU General Public License as published by  *
++ *   the Free Software Foundation; either version 2 of the License, or     *
++ *   (at your option) any later version.                                   *
++ *                                                                         *
++ *   This program is distributed in the hope that it will be useful,       *
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
++ *   GNU General Public License for more details.                          *
++ *                                                                         *
++ *   You should have received a copy of the GNU General Public License     *
++ *   along with this program; if not, write to the                         *
++ *   Free Software Foundation, Inc.,                                       *
++ *   51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.         *
++ ***************************************************************************/
++
++#include <QTranslator>
++#include <QMessageBox>
++
++#include <qmmp/qmmp.h>
++#include "outputmediakit.h"
++#include "outputmediakitfactory.h"
++
++
++OutputProperties OutputMediaKitFactory::properties() const
++{
++    OutputProperties properties;
++    properties.name = "MediaKit Plugin";
++    properties.hasAbout = true;
++    properties.hasSettings = false;
++    properties.shortName = "mediakit";
++    return properties;
++}
++
++Output* OutputMediaKitFactory::create()
++{
++    return new OutputMediaKit();
++}
++
++Volume *OutputMediaKitFactory::createVolume()
++{
++    return 0;
++}
++
++void OutputMediaKitFactory::showSettings(QWidget* parent)
++{
++   Q_UNUSED(parent);
++}
++
++void OutputMediaKitFactory::showAbout(QWidget *parent)
++{
++   QMessageBox::about (parent, "About MediaKit Output Plugin",
++	"Qmmp MediaKit Output Plugin\n(C) 2013-2019 3dEyes**");
++}
++
++QString OutputMediaKitFactory::translation() const
++{
++    return QLatin1String(":/mediakit_plugin_");
++}
++
++//Q_EXPORT_PLUGIN2(mediakit, OutputMediaKitFactory)
+diff --git a/src/plugins/Output/mediakit/outputmediakitfactory.h b/src/plugins/Output/mediakit/outputmediakitfactory.h
+new file mode 100644
+index 0000000..e90eb23
+--- /dev/null
++++ b/src/plugins/Output/mediakit/outputmediakitfactory.h
+@@ -0,0 +1,50 @@
++/***************************************************************************
++ *   Copyright (C) 2013-2019 by Gerasim Troeglazov                         *
++ *   3dEyes@gmail.com                                                      *
++ *                                                                         *
++ *   This program is free software; you can redistribute it and/or modify  *
++ *   it under the terms of the GNU General Public License as published by  *
++ *   the Free Software Foundation; either version 2 of the License, or     *
++ *   (at your option) any later version.                                   *
++ *                                                                         *
++ *   This program is distributed in the hope that it will be useful,       *
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
++ *   GNU General Public License for more details.                          *
++ *                                                                         *
++ *   You should have received a copy of the GNU General Public License     *
++ *   along with this program; if not, write to the                         *
++ *   Free Software Foundation, Inc.,                                       *
++ *   51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.         *
++ ***************************************************************************/
++
++#ifndef OUTPUTMEDIAKITFACTORY_H
++#define OUTPUTMEDIAKITFACTORY_H
++
++
++#include <QObject>
++#include <QString>
++#include <QIODevice>
++#include <QWidget>
++
++#include <qmmp/output.h>
++#include <qmmp/outputfactory.h>
++
++
++class OutputMediaKitFactory : public QObject,
++                          OutputFactory
++{
++Q_OBJECT
++Q_PLUGIN_METADATA(IID "org.qmmp.qmmp.OutputFactoryInterface.1.0")
++Q_INTERFACES(OutputFactory)
++
++public:
++    OutputProperties properties() const override;
++    Output* create() override;
++    Volume *createVolume() override;
++    void showSettings(QWidget* parent) override;
++    void showAbout(QWidget *parent) override;
++	QString translation() const override;
++};
++
++#endif
+diff --git a/src/plugins/Output/mediakit/translations/mediakit_plugin_en.ts b/src/plugins/Output/mediakit/translations/mediakit_plugin_en.ts
+new file mode 100644
+index 0000000..48f6632
+--- /dev/null
++++ b/src/plugins/Output/mediakit/translations/mediakit_plugin_en.ts
+@@ -0,0 +1,7 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!DOCTYPE TS>
++<TS version="2.0" language="en_US">
++<context>
++    <name>OutputMediaKitFactory</name>
++</context>
++</TS>
+diff --git a/src/plugins/Output/mediakit/translations/translations.qrc b/src/plugins/Output/mediakit/translations/translations.qrc
+new file mode 100644
+index 0000000..f678c61
+--- /dev/null
++++ b/src/plugins/Output/mediakit/translations/translations.qrc
+@@ -0,0 +1,5 @@
++<!DOCTYPE RCC>
++<RCC version="1.0">
++  <qresource>
++  </qresource>
++</RCC>
+diff --git a/src/plugins/Ui/CMakeLists.txt b/src/plugins/Ui/CMakeLists.txt
+index ca25b54..7670cdb 100644
+--- a/src/plugins/Ui/CMakeLists.txt
++++ b/src/plugins/Ui/CMakeLists.txt
+@@ -1,9 +1,9 @@
+ SET(USE_SKINNED TRUE CACHE BOOL "enable/disable skinned user interface")
+ SET(USE_QSUI TRUE CACHE BOOL "enable/disable simple user interface (qsui)")
+ 
+-IF(USE_SKINNED AND Qt5X11Extras_FOUND)
++IF(USE_SKINNED)
+ add_subdirectory(skinned)
+-ENDIF(USE_SKINNED AND Qt5X11Extras_FOUND)
++ENDIF(USE_SKINNED)
+ 
+ IF(USE_QSUI)
+ add_subdirectory(qsui)
+diff --git a/src/plugins/Ui/qsui/mainwindow.cpp b/src/plugins/Ui/qsui/mainwindow.cpp
+index 8c51aa2..bca6f64 100644
+--- a/src/plugins/Ui/qsui/mainwindow.cpp
++++ b/src/plugins/Ui/qsui/mainwindow.cpp
+@@ -320,6 +320,7 @@ void MainWindow::showSettings()
+     QSUiSettings *simpleSettings = new QSUiSettings(this);
+     confDialog->addPage(tr("Appearance"), simpleSettings, QIcon(":/qsui/qsui_settings.png"));
+     confDialog->addPage(tr("Shortcuts"), new HotkeyEditor(this), QIcon(":/qsui/qsui_shortcuts.png"));
++	confDialog->setModal(false);
+     confDialog->exec();
+     simpleSettings->writeSettings();
+     confDialog->deleteLater();
+diff --git a/src/plugins/Ui/skinned/CMakeLists.txt b/src/plugins/Ui/skinned/CMakeLists.txt
+index 63dc385..f202f88 100644
+--- a/src/plugins/Ui/skinned/CMakeLists.txt
++++ b/src/plugins/Ui/skinned/CMakeLists.txt
+@@ -5,11 +5,6 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../../)
+ link_directories(${CMAKE_CURRENT_BINARY_DIR}/../../../qmmpui)
+ link_directories(${CMAKE_CURRENT_BINARY_DIR}/../../../qmmp)
+ 
+-# X11
+-include_directories(${X11_INCLUDE_DIRS})
+-link_directories(${X11_LIBRARY_DIRS})
+-ADD_DEFINITIONS(${X11_CFLAGS})
+-
+ SET(skinned_SRCS
+     fft.c
+     balancebar.cpp
+@@ -96,10 +91,7 @@ QT5_WRAP_UI(skinned_UIS_H ${skinned_UIS})
+ # the UI file won't be wrapped!
+ include_directories(${CMAKE_CURRENT_BINARY_DIR})
+ 
+-IF(X11_FOUND)
+ ADD_LIBRARY(skinned MODULE ${skinned_SRCS} ${skinned_UIS_H} ${skinned_RCC_SRCS} ${skinned_HDRS})
+ add_dependencies(skinned libqmmpui libqmmp)
+-target_link_libraries(skinned Qt5::Widgets Qt5::X11Extras libqmmpui libqmmp ${X11_LDFLAGS})
++target_link_libraries(skinned Qt5::Widgets libqmmpui libqmmp)
+ install(TARGETS skinned DESTINATION ${PLUGIN_DIR}/Ui)
+-install(FILES scripts/kwin.sh DESTINATION ${CMAKE_INSTALL_DATADIR}/qmmp${APP_NAME_SUFFIX}/scripts)
+-ENDIF(X11_FOUND)
+diff --git a/src/plugins/Ui/skinned/display.cpp b/src/plugins/Ui/skinned/display.cpp
+index 34749d4..d9b0d45 100644
+--- a/src/plugins/Ui/skinned/display.cpp
++++ b/src/plugins/Ui/skinned/display.cpp
+@@ -344,7 +344,9 @@ void MainDisplay::mousePressEvent(QMouseEvent *e)
+ {
+     if (e->button() == Qt::RightButton)
+         m_mw->menu()->exec(e->globalPos());
++#ifndef Q_OS_HAIKU
+     else if(e->button() == Qt::LeftButton && m_aboutWidget->underMouse())
+         m_mw->about();
++#endif
+     PixmapWidget::mousePressEvent(e);
+ }
+diff --git a/src/plugins/Ui/skinned/mainwindow.cpp b/src/plugins/Ui/skinned/mainwindow.cpp
+index 94afe4f..4bca5ee 100644
+--- a/src/plugins/Ui/skinned/mainwindow.cpp
++++ b/src/plugins/Ui/skinned/mainwindow.cpp
+@@ -358,6 +358,7 @@ void MainWindow::showSettings()
+     SkinnedSettings *skinnedSettings = new SkinnedSettings(this);
+     confDialog->addPage(tr("Appearance"), skinnedSettings, QIcon(":/skinned/interface.png"));
+     confDialog->addPage(tr("Shortcuts"), new HotkeyEditor(this), QIcon(":/skinned/shortcuts.png"));
++    confDialog->setModal(false);
+     confDialog->exec();
+     skinnedSettings->writeSettings();
+     confDialog->deleteLater();
+diff --git a/src/plugins/Ui/skinned/skinreader.cpp b/src/plugins/Ui/skinned/skinreader.cpp
+index f4fc93f..44fa6e1 100644
+--- a/src/plugins/Ui/skinned/skinreader.cpp
++++ b/src/plugins/Ui/skinned/skinreader.cpp
+@@ -50,7 +50,7 @@ void SkinReader::generateThumbs()
+     QDir dir(Qmmp::configDir() + "/skins");
+     dir.setFilter( QDir::Files | QDir::Hidden | QDir::NoSymLinks);
+     QFileInfoList f = dir.entryInfoList();
+-#if defined(Q_OS_WIN) && !defined(Q_OS_CYGWIN)
++#if (defined(Q_OS_WIN) && !defined(Q_OS_CYGWIN)) || defined(Q_OS_HAIKU)
+     dir.setPath(qApp->applicationDirPath() + "/skins");
+ #else
+     dir.setPath(Qmmp::dataPath() + "/skins");
+diff --git a/src/qmmp/qmmp.cpp b/src/qmmp/qmmp.cpp
+index cc752bb..3683c35 100644
+--- a/src/qmmp/qmmp.cpp
++++ b/src/qmmp/qmmp.cpp
+@@ -54,6 +54,8 @@ QString Qmmp::configDir()
+     }
+     else
+         return m_configDir;
++#elif defined(Q_OS_HAIKU)
++	return m_configDir.isEmpty() ? QDir::homePath() +"/config/settings/Qmmp/" : m_configDir;
+ #else
+     return m_configDir.isEmpty() ? QDir::homePath() +"/.qmmp" : m_configDir;
+ #endif
+@@ -86,9 +88,9 @@ QString Qmmp::pluginPath()
+     if(!path.isEmpty())
+         return path;
+     QString fallbackPath = qApp->applicationDirPath() + "/../lib/qmmp-" STR(QMMP_VERSION_MAJOR) "." STR(QMMP_VERSION_MINOR);
+-#ifdef QMMP_PLUGIN_DIR
++#if defined(QMMP_PLUGIN_DIR) && !defined(Q_OS_HAIKU)
+     QDir dir(QMMP_PLUGIN_DIR);
+-#elif defined(Q_OS_WIN) && !defined(Q_OS_CYGWIN)
++#elif defined(Q_OS_WIN) && !defined(Q_OS_CYGWIN) || defined(Q_OS_HAIKU)
+     QDir dir(qApp->applicationDirPath() + "/plugins");
+ #else
+     QDir dir(fallbackPath);
+-- 
+2.30.2
+
