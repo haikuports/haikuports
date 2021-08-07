@@ -1,0 +1,280 @@
+From e6b43d72b14469dcbd2160e07e538358fc8a2279 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sat, 7 Aug 2021 20:55:40 +0200
+Subject: Port the patches from ghc 8.10.2
+
+
+diff --git a/compiler/main/DynFlags.hs b/compiler/main/DynFlags.hs
+index a811698..c5e3f31 100644
+--- a/compiler/main/DynFlags.hs
++++ b/compiler/main/DynFlags.hs
+@@ -4660,6 +4660,7 @@ default_PIC platform =
+     -- be built with -fPIC.
+     -- See #15275, #18892
+     (OSDarwin,  ArchAArch64) -> [Opt_PIC]
++    (OSHaiku, _)             -> [Opt_PIC]
+     (OSLinux,   ArchAArch64) -> [Opt_PIC, Opt_ExternalDynamicRefs]
+     (OSLinux,   ArchARM {})  -> [Opt_PIC, Opt_ExternalDynamicRefs]
+     (OSOpenBSD, ArchX86_64)  -> [Opt_PIC] -- Due to PIE support in
+diff --git a/configure.ac b/configure.ac
+index 4458644..8dd711a 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -727,11 +727,11 @@ dnl --------------------------------------------------------------
+ dnl ** Copy the files from the "fs" utility into the right folders.
+ dnl --------------------------------------------------------------
+ AC_MSG_NOTICE([Creating links for in-tree file handling routines.])
+-ln -f utils/fs/fs.* utils/lndir/
+-ln -f utils/fs/fs.* utils/unlit/
+-ln -f utils/fs/fs.* rts/
+-ln -f utils/fs/fs.h libraries/base/include/
+-ln -f utils/fs/fs.c libraries/base/cbits/
++cp utils/fs/fs.* utils/lndir/
++cp utils/fs/fs.* utils/unlit/
++cp utils/fs/fs.* rts/
++cp utils/fs/fs.h libraries/base/include/
++cp utils/fs/fs.c libraries/base/cbits/
+ AC_MSG_NOTICE([Routines in place. Packages can now be build normally.])
+ 
+ dnl --------------------------------------------------------------
+@@ -1302,7 +1302,7 @@ dnl ** Use MMAP in the runtime linker?
+ dnl --------------------------------------------------------------
+ 
+ case ${TargetOS} in
+-    linux|linux-android|freebsd|dragonfly|netbsd|openbsd|kfreebsdgnu|gnu|solaris2)
++    linux|linux-android|freebsd|dragonfly|netbsd|openbsd|kfreebsdgnu|gnu|solaris2|haiku)
+         RtsLinkerUseMmap=1
+         ;;
+     darwin|ios|watchos|tvos)
+diff --git a/libraries/Cabal/Cabal/Distribution/Simple/GHC.hs b/libraries/Cabal/Cabal/Distribution/Simple/GHC.hs
+index 48a1709..342d48e 100644
+--- a/libraries/Cabal/Cabal/Distribution/Simple/GHC.hs
++++ b/libraries/Cabal/Cabal/Distribution/Simple/GHC.hs
+@@ -1738,6 +1738,7 @@ getRPaths lbi clbi | supportRPaths hostOS = do
+     supportRPaths Android     = False
+     supportRPaths Ghcjs       = False
+     supportRPaths Hurd        = False
++    supportRPaths Haiku       = True
+     supportRPaths (OtherOS _) = False
+     -- Do _not_ add a default case so that we get a warning here when a new OS
+     -- is added.
+diff --git a/libraries/Cabal/Cabal/Distribution/Simple/InstallDirs.hs b/libraries/Cabal/Cabal/Distribution/Simple/InstallDirs.hs
+index da405c6..7f2d1e8 100644
+--- a/libraries/Cabal/Cabal/Distribution/Simple/InstallDirs.hs
++++ b/libraries/Cabal/Cabal/Distribution/Simple/InstallDirs.hs
+@@ -193,6 +193,7 @@ defaultInstallDirs' False comp userInstall _hasLibs = do
+       else case buildOS of
+            Windows -> do windowsProgramFilesDir <- getWindowsProgramFilesDir
+                          return (windowsProgramFilesDir </> "Haskell")
++           Haiku   -> return "/boot/system/non-packaged"
+            _       -> return "/usr/local"
+   installLibDir <-
+       case buildOS of
+@@ -212,17 +213,23 @@ defaultInstallDirs' False comp userInstall _hasLibs = do
+       flibdir      = "$libdir",
+       libexecdir   = case buildOS of
+         Windows   -> "$prefix" </> "$libname"
++        Haiku     -> "$libdir"
+         _other    -> "$prefix" </> "libexec",
+       includedir   = "$libdir" </> "$libsubdir" </> "include",
+       datadir      = case buildOS of
+         Windows   -> "$prefix"
+         _other    -> "$prefix" </> "share",
+       datasubdir   = "$abi" </> "$pkgid",
+-      docdir       = "$datadir" </> "doc" </> "$abi" </> "$pkgid",
+-      mandir       = "$datadir" </> "man",
++      docdir       = case buildOS of
++        Haiku -> "$prefix" </> "documentation" </> "ghc"
++        _ -> "$datadir" </> "doc" </> "$abi" </> "$pkgid",
++      mandir       = "$docdir" </> "man",
+       htmldir      = "$docdir"  </> "html",
+       haddockdir   = "$htmldir",
+-      sysconfdir   = "$prefix" </> "etc"
++      sysconfdir   = case buildOS of
++        Haiku -> "boot" </> "home" </> "config" </> "settings"
++        _ -> "$prefix" </> "etc"
++
+   }
+ 
+ -- ---------------------------------------------------------------------------
+diff --git a/libraries/Cabal/Cabal/Distribution/Simple/PreProcess.hs b/libraries/Cabal/Cabal/Distribution/Simple/PreProcess.hs
+index e9dc66b..ed702b9 100644
+--- a/libraries/Cabal/Cabal/Distribution/Simple/PreProcess.hs
++++ b/libraries/Cabal/Cabal/Distribution/Simple/PreProcess.hs
+@@ -629,6 +629,7 @@ platformDefines lbi =
+       OpenBSD   -> ["openbsd"]
+       NetBSD    -> ["netbsd"]
+       DragonFly -> ["dragonfly"]
++      Haiku     -> ["haiku"]
+       Solaris   -> ["solaris2"]
+       AIX       -> ["aix"]
+       HPUX      -> ["hpux"]
+diff --git a/libraries/Cabal/Cabal/Distribution/Simple/Utils.hs b/libraries/Cabal/Cabal/Distribution/Simple/Utils.hs
+index ccc35f5..2dc82fb 100644
+--- a/libraries/Cabal/Cabal/Distribution/Simple/Utils.hs
++++ b/libraries/Cabal/Cabal/Distribution/Simple/Utils.hs
+@@ -1167,7 +1167,7 @@ createDirectoryIfMissingVerbose verbosity create_parents path0
+           -- the case that the dir did exist but another process deletes the
+           -- directory and creates a file in its place before we can check
+           -- that the directory did indeed exist.
+-          | isAlreadyExistsError e -> (do
++          | isAlreadyExistsError e || isPermissionError e -> (do
+               isDir <- doesDirectoryExist dir
+               unless isDir $ throwIO e
+               ) `catchIO` ((\_ -> return ()) :: IOException -> IO ())
+diff --git a/libraries/Cabal/Cabal/Distribution/System.hs b/libraries/Cabal/Cabal/Distribution/System.hs
+index 89fcb5d..0fb8427 100644
+--- a/libraries/Cabal/Cabal/Distribution/System.hs
++++ b/libraries/Cabal/Cabal/Distribution/System.hs
+@@ -91,7 +91,7 @@ data ClassificationStrictness = Permissive | Compat | Strict
+ --
+ data OS = Linux | Windows | OSX        -- tier 1 desktop OSs
+         | FreeBSD | OpenBSD | NetBSD   -- other free Unix OSs
+-        | DragonFly
++        | DragonFly | Haiku
+         | Solaris | AIX | HPUX | IRIX  -- ageing Unix OSs
+         | HaLVM                        -- bare metal / VMs / hypervisors
+         | Hurd                         -- GNU's microkernel
+@@ -106,7 +106,7 @@ instance NFData OS where rnf = genericRnf
+ 
+ knownOSs :: [OS]
+ knownOSs = [Linux, Windows, OSX
+-           ,FreeBSD, OpenBSD, NetBSD, DragonFly
++           ,FreeBSD, OpenBSD, NetBSD, DragonFly, Haiku
+            ,Solaris, AIX, HPUX, IRIX
+            ,HaLVM
+            ,Hurd
+@@ -118,6 +118,7 @@ osAliases Permissive Windows = ["mingw32", "win32", "cygwin32"]
+ osAliases Compat     Windows = ["mingw32", "win32"]
+ osAliases _          OSX     = ["darwin"]
+ osAliases _          Hurd    = ["gnu"]
++osAliases _          Haiku   = ["haiku"]
+ osAliases Permissive FreeBSD = ["kfreebsdgnu"]
+ osAliases Compat     FreeBSD = ["kfreebsdgnu"]
+ osAliases Permissive Solaris = ["solaris2"]
+diff --git a/libraries/Cabal/Cabal/Makefile b/libraries/Cabal/Cabal/Makefile
+index 4a814fb..be42c92 100644
+--- a/libraries/Cabal/Cabal/Makefile
++++ b/libraries/Cabal/Cabal/Makefile
+@@ -4,7 +4,7 @@ VERSION=3.2.0.0
+ KIND=rc
+ #KIND=cabal-latest
+ 
+-PREFIX=/usr/local
++PREFIX=/boot/system
+ HC=ghc
+ GHCFLAGS=-Wall -threaded
+ SSH_USER=$(USER)
+diff --git a/libraries/Cabal/cabal-install/bootstrap.sh b/libraries/Cabal/cabal-install/bootstrap.sh
+index 4769282..a4c3da1 100755
+--- a/libraries/Cabal/cabal-install/bootstrap.sh
++++ b/libraries/Cabal/cabal-install/bootstrap.sh
+@@ -122,7 +122,7 @@ while [ "$#" -gt 0 ]; do
+       shift;;
+     "--global")
+       SCOPE_OF_INSTALLATION="${1}"
+-      DEFAULT_PREFIX="/usr/local"
++      DEFAULT_PREFIX="/boot/system"
+       shift;;
+     "--sandbox")
+       shift
+diff --git a/libraries/directory/System/Directory/Internal/Posix.hsc b/libraries/directory/System/Directory/Internal/Posix.hsc
+index ba67480..504895e 100644
+--- a/libraries/directory/System/Directory/Internal/Posix.hsc
++++ b/libraries/directory/System/Directory/Internal/Posix.hsc
+@@ -305,7 +305,12 @@ getXdgDirectoryListFallback xdgDirs =
+ 
+ getAppUserDataDirectoryInternal :: FilePath -> IO FilePath
+ getAppUserDataDirectoryInternal appName =
++# if defined(haiku_HOST_OS)
++  (\ home -> home <> ("/config/settings/" : appName)) <$> getHomeDirectoryInternal
++# else
+   (\ home -> home <> ('/' : '.' : appName)) <$> getHomeDirectoryInternal
++# endif
++
+ 
+ getUserDocumentsDirectoryInternal :: IO FilePath
+ getUserDocumentsDirectoryInternal = getHomeDirectoryInternal
+diff --git a/mk/config.mk.in b/mk/config.mk.in
+index 92d552f..f73bf46 100644
+--- a/mk/config.mk.in
++++ b/mk/config.mk.in
+@@ -205,7 +205,7 @@ GhcThreadedRts = @GhcThreadedRts@
+ # Whether to include GHCi in the compiler.  Depends on whether the RTS linker
+ # has support for this OS/ARCH combination.
+ 
+-OsSupportsGHCi=$(strip $(patsubst $(TargetOS_CPP), YES, $(findstring $(TargetOS_CPP), mingw32 linux solaris2 freebsd dragonfly netbsd openbsd darwin kfreebsdgnu)))
++OsSupportsGHCi=$(strip $(patsubst $(TargetOS_CPP), YES, $(findstring $(TargetOS_CPP), mingw32 linux solaris2 freebsd dragonfly netbsd openbsd darwin kfreebsdgnu haiku)))
+ ArchSupportsGHCi=$(strip $(patsubst $(TargetArch_CPP), YES, $(findstring $(TargetArch_CPP), i386 x86_64 powerpc powerpc64 powerpc64le sparc sparc64 arm aarch64)))
+ 
+ ifeq "$(OsSupportsGHCi)$(ArchSupportsGHCi)" "YESYES"
+diff --git a/rts/LinkerInternals.h b/rts/LinkerInternals.h
+index 946aac1..f9ca948 100644
+--- a/rts/LinkerInternals.h
++++ b/rts/LinkerInternals.h
+@@ -379,7 +379,7 @@ void freeSegments(ObjectCode *oc);
+ || defined(linux_android_HOST_OS) \
+ || defined(freebsd_HOST_OS) || defined(kfreebsdgnu_HOST_OS) \
+ || defined(dragonfly_HOST_OS) || defined(netbsd_HOST_OS) \
+-|| defined(openbsd_HOST_OS) || defined(gnu_HOST_OS)
++|| defined(openbsd_HOST_OS) || defined(gnu_HOST_OS) || defined(haiku_HOST_OS)
+ #  define OBJFORMAT_ELF
+ #  include "linker/ElfTypes.h"
+ #elif defined(mingw32_HOST_OS)
+diff --git a/rts/Task.h b/rts/Task.h
+index cf12ca2..54b3e8c 100644
+--- a/rts/Task.h
++++ b/rts/Task.h
+@@ -321,7 +321,7 @@ typedef StgWord64 TaskId;
+ //
+ #if defined(THREADED_RTS)
+ INLINE_HEADER TaskId serialiseTaskId (OSThreadId taskID) {
+-#if defined(freebsd_HOST_OS) || defined(darwin_HOST_OS)
++#if defined(freebsd_HOST_OS) || defined(darwin_HOST_OS) || defined(haiku_HOST_OS)
+     // Here OSThreadId is a pthread_t and pthread_t is a pointer, but within
+     // the process we can still use that pointer value as a unique id.
+     return (TaskId) (size_t) taskID;
+diff --git a/rts/linker/Elf.c b/rts/linker/Elf.c
+index 2d043f3..108e316 100644
+--- a/rts/linker/Elf.c
++++ b/rts/linker/Elf.c
+@@ -4,7 +4,7 @@
+ || defined(linux_android_HOST_OS) \
+ || defined(freebsd_HOST_OS) || defined(kfreebsdgnu_HOST_OS) \
+ || defined(dragonfly_HOST_OS) || defined(netbsd_HOST_OS) \
+-|| defined(openbsd_HOST_OS) || defined(gnu_HOST_OS)
++|| defined(openbsd_HOST_OS) || defined(gnu_HOST_OS) || defined(haiku_HOST_OS)
+ 
+ // It is essential that this is included before any <elf.h> is included. <elf.h>
+ // defines R_XXX relocations, which would interfere with the COMPAT_R_XXX
+diff --git a/rts/posix/OSMem.c b/rts/posix/OSMem.c
+index 6b1a6d3..f69fa05 100644
+--- a/rts/posix/OSMem.c
++++ b/rts/posix/OSMem.c
+@@ -246,6 +246,10 @@ my_mmap (void *addr, W_ size, int operation)
+         // See #7500.
+         ret = linux_retry_mmap(operation, size, ret, addr, prot, flags);
+     }
++#elif defined(haiku_HOST_OS)
++    // Retry without address constraint
++    if (ret == (void *)-1 && errno == EFAULT)
++        ret = mmap(0, size, prot, MAP_ANON | MAP_PRIVATE, -1, 0);
+ # endif
+     if (ret == MAP_FAILED) {
+         return NULL;
+diff --git a/rules/library-path.mk b/rules/library-path.mk
+index 9a398ee..8c7801e 100644
+--- a/rules/library-path.mk
++++ b/rules/library-path.mk
+@@ -15,6 +15,8 @@ ifeq "$(TargetOS_CPP)" "mingw32"
+ prependLibraryPath = $(error Do not know how to prependLibraryPath on Windows)
+ else ifeq "$(TargetOS_CPP)" "darwin"
+ prependLibraryPath = export DYLD_LIBRARY_PATH="$1$${DYLD_LIBRARY_PATH:+:$$DYLD_LIBRARY_PATH}"
++else ifeq "$(TargetOS_CPP)" "haiku"
++prependLibraryPath = export LIBRARY_PATH="$1:$$LIBRARY_PATH"
+ else
+ prependLibraryPath = export LD_LIBRARY_PATH="$1$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}"
+ endif
+-- 
+2.30.2
+
