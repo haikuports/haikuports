@@ -1,0 +1,446 @@
+From 73945da945fa31bf535df1708460359a0518d3f5 Mon Sep 17 00:00:00 2001
+From: Craig Watson <watsoncraigjohn@gmail.com>
+Date: Thu, 2 Sep 2021 11:10:02 +0100
+Subject: Haiku support
+
+
+diff --git a/RSPiX/Src/ORANGE/File/file.cpp b/RSPiX/Src/ORANGE/File/file.cpp
+index ca6cfef..610ab1a 100644
+--- a/RSPiX/Src/ORANGE/File/file.cpp
++++ b/RSPiX/Src/ORANGE/File/file.cpp
+@@ -149,6 +149,11 @@
+ #include <ctype.h>
+ #endif
+ 
++#if __HAIKU__
++#include <FindDirectory.h>
++#include <Path.h>
++#endif
++
+ #ifdef WIN32
+ #define WIN32_LEAN_AND_MEAN 1
+ #include <windows.h>
+@@ -405,11 +410,21 @@ extern const char *FindCorrectFile(const char *_pszName, const char *pszMode)
+             if (prefpath[strlen(prefpath)-1] != '/') strcat(prefpath, "/");
+ 
+             strcat(prefpath, "Library/Application Support/Postal Plus/");
+-            #else
++            #else            
+             const char *homedir = getenv("HOME");
+             const char *xdghomedir = getenv("XDG_DATA_HOME");
+             const char *append = "";
+ 
++#ifdef __HAIKU__
++			BPath dataPath;
++			//haiku paths are not set if launched outside of console
++			if(find_directory(B_USER_NONPACKAGED_DATA_DIRECTORY, &dataPath) == B_OK) 
++			{
++				xdghomedir = dataPath.Path();
++			}
++			homedir = NULL;
++#endif
++
+             if (xdghomedir == NULL)
+             {
+                 if (homedir == NULL)
+diff --git a/RSPiX/Src/ORANGE/GameLib/Shapes.h b/RSPiX/Src/ORANGE/GameLib/Shapes.h
+index b71c2e9..5d92fe0 100644
+--- a/RSPiX/Src/ORANGE/GameLib/Shapes.h
++++ b/RSPiX/Src/ORANGE/GameLib/Shapes.h
+@@ -61,6 +61,10 @@
+ #ifndef SHAPES_H
+ #define SHAPES_H
+ 
++#ifdef __HAIKU__
++#include <stdint.h>
++#endif
++
+ 
+ class RPt
+ {
+diff --git a/main.cpp b/main.cpp
+index 813d910..ad7248e 100644
+--- a/main.cpp
++++ b/main.cpp
+@@ -154,6 +154,12 @@
+ #include "WishPiX/Menu/menu.h"
+ #endif
+ 
++#ifdef __HAIKU__
++#include <Entry.h>
++#include <FindDirectory.h>
++#include <Path.h>
++#endif
++
+ ////////////////////////////////////////////////////////////////////////////////
+ // Macros/types/etc.
+ ////////////////////////////////////////////////////////////////////////////////
+@@ -765,6 +771,44 @@ int main(int argc, char **argv)
+         return 1;
+     #endif
+ 
++#ifdef __HAIKU__
++		//pref file should be copied from data if missing
++		//will then be used from user non-packaged for all writes
++		BPath systemDataPath, userDataPath;
++		if(find_directory(B_USER_NONPACKAGED_DATA_DIRECTORY, &userDataPath) == B_OK) 
++		{
++			BEntry userPostalIni;
++			userDataPath.Append("PostalPlus/POSTAL.INI", true);
++			TRACE("User prefs path: %s\n", userDataPath.Path());
++	
++			userPostalIni.SetTo(userDataPath.Path());
++			if (!userPostalIni.Exists())
++			{
++				if(find_directory(B_SYSTEM_DATA_DIRECTORY, &systemDataPath) == B_OK) 
++				{
++					systemDataPath.Append("Postal/POSTAL.INI", true);
++					TRACE("System prefs path: %s\n", systemDataPath.Path());
++					
++					FILE *in = fopen(systemDataPath.Path(), "rb");
++		            FILE *out = fopen(userDataPath.Path(), "wb");
++		            if (in && out)
++		            {
++		                int ch = 0;
++		                while (1)  // !!! FIXME: this is really lame.
++		                {
++		                    ch = fgetc(in);
++		                    if (ch == EOF) break;
++		                    fputc(ch, out);
++		                }
++		            }
++		            if (in) fclose(in);
++		            if (out) fclose(out);
++				}
++			}
++		}
++			
++#endif
++
+ 	//------------------------------------------------------------------------
+ 	// Get hardware-related settings from prefs file
+ 	//------------------------------------------------------------------------
+diff --git a/makefile b/makefile
+index 8cddcf6..5e60c14 100644
+--- a/makefile
++++ b/makefile
+@@ -34,6 +34,17 @@ else ifeq ($(linux_x86),1)
+ else ifeq ($(macosx_x86),1)
+   target := macosx_x86
+   CLIENTEXE := $(BINDIR)/postal1-x86
++else ifeq ($(HAIKU_32),1)
++  target := linux_x86
++  ishaiku := true
++  CFLAGS += -m32
++  CLIENTEXE := $(BINDIR)/postal1
++  steamworks := false
++else ifeq ($(HAIKU),1)
++  target := linux_x86_64
++  ishaiku := true
++  CLIENTEXE := $(BINDIR)/postal1
++  steamworks := false
+ else
+   target := linux_x86_64
+   CLIENTEXE := $(BINDIR)/postal1-x86_64
+@@ -309,13 +320,17 @@ ifeq ($(strip $(macosx)),true)
+ else
+   ifeq ($(CPUARCH),arm)
+     LIBS += -lSDL2
+-  else
+-	ifeq ($(CPUARCH),x86_64)
+-	  LIBS += -lSDL2
+ 	else
+-	  LIBS += SDL2/libs/linux-x86/libSDL2-2.0.so.0
+-	  LDFLAGS += -Wl,-rpath,\$$ORIGIN
+-	  STEAMLDFLAGS += steamworks/sdk/redistributable_bin/linux32/libsteam_api.so
++	  ifeq ($(strip $(ishaiku)),true)
++		LDFLAGS=`pkg-config --libs sdl2` -lbe
++	  else
++		ifeq ($(CPUARCH),x86_64)
++		  LIBS += -lSDL2
++		else
++		  LIBS += SDL2/libs/linux-x86/libSDL2-2.0.so.0
++		  LDFLAGS += -Wl,-rpath,\$$ORIGIN
++		  STEAMLDFLAGS += steamworks/sdk/redistributable_bin/linux32/libsteam_api.so
++		endif
+ 	endif
+  endif
+ endif
+diff --git a/postal_plus.ini b/postal_plus.ini
+index 60dc8be..b097258 100644
+--- a/postal_plus.ini
++++ b/postal_plus.ini
+@@ -1,63 +1,54 @@
+ ; Postal Plus
+-
++; NOTE: Be careful when modifying this file!
+ [Video]
+ EditorViewHeight = 480
+ EditorViewWidth = 640
+-GripZoneRadius = 75
+-GammaVal = 178
+-DeviceWidth = 640
+-DeviceHeight = 480
+-UseCurrentDeviceDimensions = 1
+-Type = GDI
+-ResizeWindows = 0
+ GameFilmScale = 1.000000
++Type = DirectX
++GammaVal = 155
++UseCurrentDeviceDimensions=0
+ 
+ [Audio]
+-Type = WINMM
+-DeviceBufTime = 300
+-DeviceRate = 11025
++PainFrequency = 8
++AudioLanguage = 0
++DeviceBufTime = 600
++DeviceRate = 22050 
+ DeviceBits = 16
+ 
+ [Paths]
+-CD = .
+-HD = .
+-VD = .
+-Sound = .
+-Game = .
+-Hoods = .
++CD=/boot/home/config/non-packaged/data/PostalPlus/
++HD=/boot/home/config/non-packaged/data/PostalPlus/
++VD=/boot/home/config/non-packaged/data/PostalPlus/
++Sound=/boot/home/config/non-packaged/data/PostalPlus/
++Game=/boot/home/config/non-packaged/data/PostalPlus/
++Hoods=/boot/home/config/non-packaged/data/PostalPlus/
+ 
+ [Game]
++UnlockedLevels = 1114113
++KidModeAprilFools = 1
++CompletedAllLevelsMode = 0
++KidMode = 0
++AudioLanguage = 0
+ RecentViolence = 11
+ UseCrossHair = 1
+-RecentDifficulty = 1
+-
+-[Demo]
+-InitialTimeOut = 60000
+-PersistentTimeOut = 60000
+-NumAvailable = 3
+-
+-[Title]
+-Duration1 = 4000
+-Duration2 = 4000
+-Duration3 = 4000
+-Duration4 = 4000
+-
+-[Can]
+-TakeSnapShots = 0
++RecentDifficulty = 5
+ 
+ [Input]
++UseNewMouse = 1
+ UseJoystick = 1
+-MouseSensitivityY = 0.200000
+-MouseSensitivityX = 0.200000
++MouseSensitivityY = 2.000000
++MouseSensitivityX = 2.000000
+ TapRotationDegrees = 10.000000
+-StillFastTurnRate = 240.000000
+-StillSlowTurnRate = 180.000000
+-RunTurnRate = 300.000000
+-WalkTurnRate = 240.000000
++StillFastTurnRate = 400.000000
++StillSlowTurnRate = 400.000000
++RunTurnRate = 400.000000
++WalkTurnRate = 400.000000
+ UseMouse = 1
+ 
+ [Keys]
+-Next Level = F1
++StrafeRight = None
++StrafeLeft = None
++NextLevel = F1
+ MoveRight = D
+ MoveLeft = A
+ PrevWeapon = Left Bracket
+@@ -82,9 +73,9 @@ NoWeapon = Left Quote
+ Suicide = Q
+ Execute = X
+ Rejuvenate = Space
+-Duck = Numpad 0
++Duck = F
+ Fire2 = None
+-Fire = None
++Fire = Control
+ Strafe2 = None
+ Strafe1 = None
+ Run2 = None
+@@ -95,6 +86,19 @@ Right = None
+ Left = None
+ 
+ [Mouse]
++PrevWeapon = None
++NextWeapon = None
++NextLevel = None
++FireDown = None
++FireUp = None
++FireRight = None
++FireLeft = None
++StrafeRight = None
++StrafeLeft = None
++MoveRight = None
++MoveLeft = None
++Down = None
++Up = None
+ Mines = None
+ Flamer = None
+ Napalm = None
+@@ -109,11 +113,11 @@ NoWeapon = None
+ Suicide = None
+ Execute = None
+ Rejuvenate = None
+-Duck = None
++Duck = Right
+ Fire2 = None
+ Fire = Left
+ Strafe2 = None
+-Strafe1 = Middle
++Strafe1 = None
+ Run2 = None
+ Run1 = None
+ Backward = None
+@@ -121,53 +125,10 @@ Forward = Right
+ Right = None
+ Left = None
+ 
+-[Multiplayer]
+-HostMaxPlayers = 16
+-HostMinBandwidth = 0
+-Bandwidth = 0
+-HostKillLimit = 20
+-HostTimeLimit = 0
+-HostRejuvenate = 1
+-HostResetScoresEachLevel = 1
+-TimePerFrame = 100
+-MaxFrameLag = 2
+-SendInputInterval = 100
+-GetInputInterval = 100
+-Protocol = 1
+-Color = 1
+-Port = 61663
+-HostName = Postal Host Name
+-Name = MyName
+-Server = 10.11.12.13
+-
+-[Realms]
+-File = res/levels/postal_plus_realms.ini
+-
+-[Features]
+-PlayAmbientSounds = 1
+-VolumeDistance = 1
+-ParticleEffects = 1
+-3DLighting = 1
+-XRayEffect = 1
+-AlphaBlend = 1
+-
+-[Debug]
+-DisplayInfo = 0
+-
+-[Volumes]
+-SUFFERING = 8
+-PAIN = 8
+-SHOUTING = 8
+-DEMON = 8
+-AMBIENT = 8
+-DESTRUCTION = 8
+-FEEDBACK = 8
+-WEAPONS = 8
+-SOUNDTRACK = 8
+-GENERAL = 8
+-
+ [Joystick]
+-Next Level = B
++StrafeRight = None
++StrafeLeft = None
++NextLevel = B
+ MoveRight = None
+ MoveLeft = None
+ PrevWeapon = LB
+@@ -192,9 +153,9 @@ NoWeapon = None
+ Suicide = Y
+ Execute = X
+ Rejuvenate = A
+-Duck = A
++Duck = LT
+ Fire2 = None
+-Fire = None
++Fire = RT
+ Strafe2 = None
+ Strafe1 = None
+ Run2 = None
+@@ -203,3 +164,61 @@ Backward = None
+ Forward = None
+ Right = None
+ Left = None
++
++[Multiplayer]
++HostKillLimit = 20
++HostTimeLimit = 0
++HostRejuvenate = 1
++HostResetScoresEachLevel = 1
++HostMaxPlayers = 16
++HostMinBandwidth = 0
++Bandwidth = 6
++Color = 0
++Protocol = 1
++Port = 61663
++HostName = New Server
++Name = Dude
++Server = 0.0.0.0
++MaxBlockingTime = 1000 
++ForceAbortTime = 5000 
++
++[Realms]
++File = res/levels/postal_plus_realms.ini
++
++[Features]
++PlayAmbientSounds = 1
++VolumeDistance = 1
++ParticleEffects = 1
++3DLighting = 1
++XRayEffect = 1
++AlphaBlend = 1
++
++[Volumes]
++SUFFERING = 8
++PAIN = 8
++SHOUTING = 8
++DEMON = 8
++AMBIENT = 8
++DESTRUCTION = 8
++FEEDBACK = 8
++WEAPONS = 8
++SOUNDTRACK = 8
++GENERAL = 8
++
++[Demo]
++InitialTimeOut = 60000
++PersistentTimeOut = 60000
++NumAvailable = 3
++
++[Title]
++Duration1 = 4000
++Duration2 = 4000
++Duration3 = 4000
++Duration4 = 4000
++
++[Can]
++TakeSnapShots = 0
++
++[Debug]
++DisplayInfo = 0
++
+-- 
+2.30.2
+
