@@ -28,8 +28,8 @@ for my $collectionPkgName (@collections) {
 	my $collectionPkg = $tlpdb->get_package($collectionPkgName);
 	my $shortdesc = $collectionPkg->shortdesc();
 	my $longdesc = $collectionPkg->longdesc();
-	if (length $shortdesc >= 44) { # SUMMARY must not exceed 80 characters in total
-		$shortdesc = substr($shortdesc, 0, 42) . "…";
+	if (length $shortdesc >= 48) { # SUMMARY must not exceed 80 characters in total
+		$shortdesc = substr($shortdesc, 0, 46) . "…";
 	}
 	if ($shortdesc =~ /\.$/) { # SUMMARY must not end in a '.'
 		$shortdesc = substr($shortdesc, 0, -1);
@@ -47,7 +47,7 @@ for my $collectionPkgName (@collections) {
 		push @srcfiles, $depPkg->srcfiles();
 	}
 	if (@runfiles) {
-		print "SUMMARY_$collection=\"TeXLive Collection: $shortdesc\"\n";
+		print "SUMMARY_$collection=\"TeX Collection: $shortdesc\"\n";
 		print "DESCRIPTION_$collection=\"$longdesc\"\n" if $longdesc;
 		print "PROVIDES_$collection=\"\n";
 		print "\ttexlive_$collection = \$portVersion\n";
@@ -66,7 +66,7 @@ for my $collectionPkgName (@collections) {
 		print "subpackages+=($collection)\n";
 	}
 	if (@docfiles) {
-		print "SUMMARY_${collection}_doc=\"TeXLive Collection: $shortdesc (documentation)\"\n";
+		print "SUMMARY_${collection}_doc=\"TeX Collection: $shortdesc (documentation)\"\n";
 		print "DESCRIPTION_${collection}_doc=\"$longdesc\"\n" if $longdesc;
 		print "PROVIDES_${collection}_doc=\"\n";
 		print "\ttexlive_${collection}_doc = \$portVersion\n";
@@ -81,7 +81,7 @@ for my $collectionPkgName (@collections) {
 		print "subpackages+=(${collection}_doc)\n";
 	}
 	if (@srcfiles) {
-		print "SUMMARY_${collection}_source=\"TeXLive Collection: $shortdesc (source files)\"\n";
+		print "SUMMARY_${collection}_source=\"TeX Collection: $shortdesc (source files)\"\n";
 		print "DESCRIPTION_${collection}_source=\"$longdesc\"\n" if $longdesc;
 		print "PROVIDES_${collection}_source=\"\n";
 		print "\ttexlive_${collection}_source = \$portVersion\n";
