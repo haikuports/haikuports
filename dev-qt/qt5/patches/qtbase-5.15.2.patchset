@@ -876,3 +876,293 @@ index a5c72f8..cc2afac 100644
 -- 
 2.28.0
 
+
+From d7e8622c4b1b6246c80a54c0c84dc164ea8afeac Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sat, 9 Oct 2021 18:33:27 +1000
+Subject: QSharedMemory implementation for Haiku
+
+
+diff --git a/src/corelib/kernel/kernel.pri b/src/corelib/kernel/kernel.pri
+index 749672c..e9bb3e9 100644
+--- a/src/corelib/kernel/kernel.pri
++++ b/src/corelib/kernel/kernel.pri
+@@ -167,13 +167,18 @@ unix|integrity {
+ 
+     qtConfig(clock-gettime): QMAKE_USE_PRIVATE += librt
+ 
+-    !android {
++    !android:!haiku {
+         SOURCES += kernel/qsharedmemory_posix.cpp \
+                    kernel/qsharedmemory_systemv.cpp \
+                    kernel/qsharedmemory_unix.cpp \
+                    kernel/qsystemsemaphore_posix.cpp \
+                    kernel/qsystemsemaphore_systemv.cpp \
+                    kernel/qsystemsemaphore_unix.cpp
++    } else:haiku {
++        SOURCES += kernel/qsharedmemory_haiku.cpp \
++                   kernel/qsystemsemaphore_posix.cpp \
++                   kernel/qsystemsemaphore_systemv.cpp \
++                   kernel/qsystemsemaphore_unix.cpp
+     } else {
+         SOURCES += kernel/qsharedmemory_android.cpp \
+                    kernel/qsystemsemaphore_android.cpp
+diff --git a/src/corelib/kernel/qsharedmemory.cpp b/src/corelib/kernel/qsharedmemory.cpp
+index 2d65e0b..8fd63d1 100644
+--- a/src/corelib/kernel/qsharedmemory.cpp
++++ b/src/corelib/kernel/qsharedmemory.cpp
+@@ -46,6 +46,9 @@
+ #ifdef Q_OS_WIN
+ #  include <qt_windows.h>
+ #endif
++#ifdef Q_OS_HAIKU
++#  include <OS.h>
++#endif
+ 
+ QT_BEGIN_NAMESPACE
+ 
+@@ -77,6 +80,14 @@ QSharedMemoryPrivate::makePlatformSafeKey(const QString &key,
+     result.append(QLatin1String(hex));
+ #ifdef Q_OS_WIN
+     return result;
++#elif defined(Q_OS_HAIKU)
++    if (key.length() < B_OS_NAME_LENGTH)
++        return key;
++
++    result = key;
++    result.truncate(B_OS_NAME_LENGTH - 4);
++    quint16 summ = qChecksum(key.toLatin1().constData(), key.length());
++    return result + QLatin1Char('_') + QString::number(summ, 16);
+ #elif defined(QT_POSIX_IPC)
+     return QLatin1Char('/') + result;
+ #else
+diff --git a/src/corelib/kernel/qsharedmemory_haiku.cpp b/src/corelib/kernel/qsharedmemory_haiku.cpp
+new file mode 100644
+index 0000000..afc24ed
+--- /dev/null
++++ b/src/corelib/kernel/qsharedmemory_haiku.cpp
+@@ -0,0 +1,183 @@
++/****************************************************************************
++**
++** Copyright (C) 2016 The Qt Company Ltd.
++** Copyright (C) 2021 Gerasim Troeglazov,
++** Contact: 3dEyes@gmail.com
++**
++** GNU General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU
++** General Public License version 2.0 or (at your option) the GNU General
++** Public license version 3 or any later version approved by the KDE Free
++** Qt Foundation. The licenses are as published by the Free Software
++** Foundation and appearing in the file LICENSE.GPL2 and LICENSE.GPL3
++** included in the packaging of this file. Please review the following
++** information to ensure the GNU General Public License requirements will
++** be met: https://www.gnu.org/licenses/gpl-2.0.html and
++** https://www.gnu.org/licenses/gpl-3.0.html.
++**
++****************************************************************************/
++
++#include "qsharedmemory.h"
++#include "qsharedmemory_p.h"
++#include <qdebug.h>
++
++#include <OS.h>
++
++#ifndef QT_NO_SHAREDMEMORY
++QT_BEGIN_NAMESPACE
++
++QSharedMemoryPrivate::QSharedMemoryPrivate()
++	: QObjectPrivate(), memory(0), size(0), error(QSharedMemory::NoError),
++#ifndef QT_NO_SYSTEMSEMAPHORE
++	systemSemaphore(QString()), lockedByMe(false),
++#endif
++	hand(-1)
++{
++}
++
++void QSharedMemoryPrivate::setErrorString(QLatin1String function)
++{
++	Q_UNUSED(function);
++}
++
++key_t QSharedMemoryPrivate::handle()
++{
++	const QString safeKey = makePlatformSafeKey(key);
++	if (safeKey.isEmpty()) {
++		errorString = QSharedMemory::tr("%1: key is empty").arg(QLatin1String("QSharedMemory::handle"));
++		error = QSharedMemory::KeyError;
++		return 0;
++	}
++
++	return 1;
++}
++
++#endif // QT_NO_SHAREDMEMORY
++
++#if !(defined(QT_NO_SHAREDMEMORY) && defined(QT_NO_SYSTEMSEMAPHORE))
++int QSharedMemoryPrivate::createUnixKeyFile(const QString &fileName)
++{
++	Q_UNUSED(fileName);
++	return 0;
++}
++#endif // QT_NO_SHAREDMEMORY && QT_NO_SYSTEMSEMAPHORE
++
++#ifndef QT_NO_SHAREDMEMORY
++
++bool QSharedMemoryPrivate::cleanHandle()
++{
++	if (hand > 0)
++		delete_area(hand);
++
++	hand = -1;
++
++	return true;
++}
++
++bool QSharedMemoryPrivate::create(int size)
++{
++	if (!handle())
++		return false;
++
++	const QLatin1String function("QSharedMemory::create");
++
++	const QString areaName = makePlatformSafeKey(key);
++
++	if (find_area(areaName.toUtf8().constData()) > 0) {
++		errorString = QSharedMemory::tr("%1: already exists").arg(function);
++		error = QSharedMemory::AlreadyExists;
++		return false;
++	}
++
++	hand = create_area(areaName.toUtf8().constData(), &memory, B_ANY_ADDRESS, size,
++		B_NO_LOCK, B_READ_AREA | B_WRITE_AREA);
++
++	if (hand <= B_ERROR) {
++		switch (hand) {
++			case B_NO_MEMORY:
++				errorString = QSharedMemory::tr("%1: not enough memory").arg(function);
++				error = QSharedMemory::OutOfResources;
++				break;
++			case B_BAD_VALUE:
++				errorString = QSharedMemory::tr("%1: bad area name").arg(function);
++				error = QSharedMemory::KeyError;
++				break;
++			default:
++				errorString = QSharedMemory::tr("%1: unknown error").arg(function);
++				error = QSharedMemory::UnknownError;
++				break;
++		}
++		return false;
++	}
++
++	return true;
++}
++
++bool QSharedMemoryPrivate::attach(QSharedMemory::AccessMode mode)
++{
++	const QLatin1String function("QSharedMemory::attach");
++
++	const QString areaName = makePlatformSafeKey(key);
++
++	uint32 permissions = mode == QSharedMemory::ReadOnly ? B_READ_AREA : B_READ_AREA | B_WRITE_AREA;
++
++	if (hand <= B_ERROR) {
++		area_id baseArea = find_area(areaName.toUtf8().constData());
++		if (baseArea <= B_ERROR) {
++			error = QSharedMemory::NotFound;
++			errorString = QSharedMemory::tr("%1: doesn't exist").arg(function);
++			cleanHandle();
++			return false;
++		}
++
++		hand = clone_area(areaName.toUtf8().constData(), &memory, B_ANY_ADDRESS, permissions, baseArea);
++		if (hand <= B_ERROR) {
++			error = QSharedMemory::UnknownError;
++			errorString = QSharedMemory::tr("%1: clone_area failed").arg(function);
++			cleanHandle();
++			return false;
++		}
++	}
++
++	area_info info;
++	if (get_area_info(hand, &info) != B_OK) {
++		error = QSharedMemory::UnknownError;
++		errorString = QSharedMemory::tr("%1: size query failed").arg(function);
++		cleanHandle();
++		return false;
++	}
++
++	size = info.size;
++	memory = info.address;
++
++	return true;
++}
++
++bool QSharedMemoryPrivate::detach()
++{
++	const QLatin1String function("QSharedMemory::detach");
++
++	area_id id = area_for(memory);
++
++	if (id == B_ERROR) {
++		error = QSharedMemory::NotFound;
++		errorString = QSharedMemory::tr("%1: doesn't exist").arg(function);
++		return false;
++	}
++
++	if (delete_area(id) != B_OK) {
++		error = QSharedMemory::UnknownError;
++		errorString = QSharedMemory::tr("%1: delete_area failed").arg(function);
++		return false;
++	}
++
++	memory = 0;
++	size = 0;
++
++	return cleanHandle();
++}
++
++
++QT_END_NAMESPACE
++
++#endif // QT_NO_SHAREDMEMORY
+diff --git a/src/corelib/kernel/qsharedmemory_p.h b/src/corelib/kernel/qsharedmemory_p.h
+index e6e989a..dbf32b6 100644
+--- a/src/corelib/kernel/qsharedmemory_p.h
++++ b/src/corelib/kernel/qsharedmemory_p.h
+@@ -72,10 +72,14 @@ namespace QSharedMemoryPrivate
+ # include "private/qobject_p.h"
+ #endif
+ 
+-#if !defined(Q_OS_WIN) && !defined(Q_OS_ANDROID) && !defined(Q_OS_INTEGRITY) && !defined(Q_OS_RTEMS)
++#if !defined(Q_OS_WIN) && !defined(Q_OS_ANDROID) && !defined(Q_OS_INTEGRITY) && !defined(Q_OS_RTEMS) && !defined(Q_OS_HAIKU)
+ #  include <sys/sem.h>
+ #endif
+ 
++#if defined(Q_OS_HAIKU)
++#  include <OS.h>
++#endif
++
+ QT_BEGIN_NAMESPACE
+ 
+ #ifndef QT_NO_SYSTEMSEMAPHORE
+@@ -138,6 +142,8 @@ public:
+             const QString &prefix = QLatin1String("qipc_sharedmemory_"));
+ #ifdef Q_OS_WIN
+     Qt::HANDLE handle();
++#elif defined(Q_OS_HAIKU)
++	area_id handle();
+ #elif defined(QT_POSIX_IPC)
+     int handle();
+ #else
+@@ -165,6 +171,8 @@ public:
+ private:
+ #ifdef Q_OS_WIN
+     Qt::HANDLE hand;
++#elif defined(Q_OS_HAIKU)
++	area_id hand;
+ #elif defined(QT_POSIX_IPC)
+     int hand;
+ #else
+-- 
+2.30.2
+
