@@ -1,0 +1,1893 @@
+From f86c124ad474a14efe6778043a811438adbccfe2 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Mon, 19 Apr 2021 23:14:39 +1000
+Subject: Add Haiku support
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e2962df..5014acd 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,6 +1,6 @@
+ cmake_minimum_required(VERSION 3.0)
+ 
+-project(GLFW VERSION 3.3.4 LANGUAGES C)
++project(GLFW VERSION 3.3.4 LANGUAGES C CXX)
+ 
+ set(CMAKE_LEGACY_CYGWIN_WIN32 OFF)
+ 
+@@ -152,6 +152,9 @@ elseif (WIN32)
+ elseif (APPLE)
+     set(_GLFW_COCOA 1)
+     message(STATUS "Using Cocoa for window creation")
++elseif (HAIKU)
++    set(_GLFW_HAIKU 1)
++    message(STATUS "Using Haiku for window creation")
+ elseif (UNIX)
+     set(_GLFW_X11 1)
+     message(STATUS "Using X11 for window creation")
+@@ -195,6 +198,14 @@ if (_GLFW_WIN32)
+     endif()
+ endif()
+ 
++#--------------------------------------------------------------------
++# Use Haiku for window creation
++#--------------------------------------------------------------------
++if (_GLFW_HAIKU)
++    find_package(OSMesa REQUIRED)
++    list(APPEND glfw_LIBRARIES "${CMAKE_THREAD_LIBS_INIT}" "-lbe -lgame -ldevice -lGL")
++endif()
++
+ #--------------------------------------------------------------------
+ # Use X11 for window creation
+ #--------------------------------------------------------------------
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index a409459..c5c8813 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -55,6 +55,12 @@ elseif (_GLFW_WAYLAND)
+         PROTOCOL
+         "${WAYLAND_PROTOCOLS_PKGDATADIR}/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml"
+         BASENAME idle-inhibit-unstable-v1)
++elseif (_GLFW_HAIKU)
++    set(glfw_HEADERS ${common_HEADERS} haiku_platform.h haiku_joystick.h haiku_platform_window.h
++                     haiku_platform_view.h posix_time.h posix_thread.h osmesa_context.h)
++    set(glfw_SOURCES ${common_SOURCES} haiku_init.cpp haiku_monitor.cpp haiku_window.cpp
++                     haiku_platform_window.cpp haiku_platform_view.cpp haiku_joystick.cpp posix_time.c
++                     posix_thread.c osmesa_context.c)
+ elseif (_GLFW_OSMESA)
+     set(glfw_HEADERS ${common_HEADERS} null_platform.h null_joystick.h
+                      posix_time.h posix_thread.h osmesa_context.h)
+diff --git a/src/glfw_config.h.in b/src/glfw_config.h.in
+index f418c99..631eb2d 100644
+--- a/src/glfw_config.h.in
++++ b/src/glfw_config.h.in
+@@ -42,6 +42,8 @@
+ #cmakedefine _GLFW_COCOA
+ // Define this to 1 if building GLFW for Wayland
+ #cmakedefine _GLFW_WAYLAND
++// Define this to 1 if building GLFW for Haiku
++#cmakedefine _GLFW_HAIKU
+ // Define this to 1 if building GLFW for OSMesa
+ #cmakedefine _GLFW_OSMESA
+ 
+diff --git a/src/haiku_init.cpp b/src/haiku_init.cpp
+new file mode 100644
+index 0000000..60058c2
+--- /dev/null
++++ b/src/haiku_init.cpp
+@@ -0,0 +1,218 @@
++//========================================================================
++// Copyright (c) 2021 Gerasim Troeglazov <3dEyes@gmail.com>
++//
++// This software is provided 'as-is', without any express or implied
++// warranty. In no event will the authors be held liable for any damages
++// arising from the use of this software.
++//
++// Permission is granted to anyone to use this software for any purpose,
++// including commercial applications, and to alter it and redistribute it
++// freely, subject to the following restrictions:
++//
++// 1. The origin of this software must not be misrepresented; you must not
++//    claim that you wrote the original software. If you use this software
++//    in a product, an acknowledgment in the product documentation would
++//    be appreciated but is not required.
++//
++// 2. Altered source versions must be plainly marked as such, and must not
++//    be misrepresented as being the original software.
++//
++// 3. This notice may not be removed or altered from any source
++//    distribution.
++//========================================================================
++
++extern "C" {
++#include "internal.h"
++}
++
++#include <AppKit.h>
++#include <MessageQueue.h>
++#include <storage/Path.h>
++#include <storage/Entry.h>
++#include <storage/File.h>
++#include <storage/AppFileInfo.h>
++
++#include <Rect.h>
++#include <Screen.h>
++
++// Default application signature
++const char *signature = "application/x-vnd.GLFW-executable";
++
++// Create key code translation tables
++//
++static void createKeyTables(void)
++{
++    int scancode;
++
++    memset(_glfw.haiku.keycodes, -1, sizeof(_glfw.haiku.keycodes));
++    memset(_glfw.haiku.scancodes, -1, sizeof(_glfw.haiku.scancodes));
++
++    _glfw.haiku.keycodes[0x01] = GLFW_KEY_ESCAPE;
++    _glfw.haiku.keycodes[0x02] = GLFW_KEY_F1;
++    _glfw.haiku.keycodes[0x03] = GLFW_KEY_F2;
++    _glfw.haiku.keycodes[0x04] = GLFW_KEY_F3;
++    _glfw.haiku.keycodes[0x05] = GLFW_KEY_F4;
++    _glfw.haiku.keycodes[0x06] = GLFW_KEY_F5;
++    _glfw.haiku.keycodes[0x07] = GLFW_KEY_F6;
++    _glfw.haiku.keycodes[0x08] = GLFW_KEY_F7;
++    _glfw.haiku.keycodes[0x09] = GLFW_KEY_F8;
++    _glfw.haiku.keycodes[0x0A] = GLFW_KEY_F9;
++    _glfw.haiku.keycodes[0x0B] = GLFW_KEY_F10;
++    _glfw.haiku.keycodes[0x0C] = GLFW_KEY_F11;
++    _glfw.haiku.keycodes[0x0D] = GLFW_KEY_F12;
++	_glfw.haiku.keycodes[0x0E] = GLFW_KEY_PRINT_SCREEN;
++    _glfw.haiku.keycodes[0x0F] = GLFW_KEY_SCROLL_LOCK;
++    _glfw.haiku.keycodes[0x10] = GLFW_KEY_PAUSE;
++
++    _glfw.haiku.keycodes[0x11] = GLFW_KEY_GRAVE_ACCENT;
++    _glfw.haiku.keycodes[0x12] = GLFW_KEY_1;
++    _glfw.haiku.keycodes[0x13] = GLFW_KEY_2;
++    _glfw.haiku.keycodes[0x14] = GLFW_KEY_3;
++    _glfw.haiku.keycodes[0x15] = GLFW_KEY_4;
++    _glfw.haiku.keycodes[0x16] = GLFW_KEY_5;
++    _glfw.haiku.keycodes[0x17] = GLFW_KEY_6;
++    _glfw.haiku.keycodes[0x18] = GLFW_KEY_7;
++    _glfw.haiku.keycodes[0x19] = GLFW_KEY_8;
++    _glfw.haiku.keycodes[0x1A] = GLFW_KEY_9;
++    _glfw.haiku.keycodes[0x1B] = GLFW_KEY_0;
++    _glfw.haiku.keycodes[0x1C] = GLFW_KEY_MINUS;
++    _glfw.haiku.keycodes[0x1D] = GLFW_KEY_EQUAL;
++    _glfw.haiku.keycodes[0x1E] = GLFW_KEY_BACKSPACE;
++    _glfw.haiku.keycodes[0x1F] = GLFW_KEY_INSERT;
++    _glfw.haiku.keycodes[0x20] = GLFW_KEY_HOME;
++    _glfw.haiku.keycodes[0x21] = GLFW_KEY_PAGE_UP;
++    _glfw.haiku.keycodes[0x22] = GLFW_KEY_NUM_LOCK;
++    _glfw.haiku.keycodes[0x23] = GLFW_KEY_KP_DIVIDE;
++    _glfw.haiku.keycodes[0x24] = GLFW_KEY_KP_MULTIPLY;
++    _glfw.haiku.keycodes[0x25] = GLFW_KEY_KP_SUBTRACT;
++
++    _glfw.haiku.keycodes[0x26] = GLFW_KEY_TAB;
++    _glfw.haiku.keycodes[0x27] = GLFW_KEY_Q;
++    _glfw.haiku.keycodes[0x28] = GLFW_KEY_W;
++    _glfw.haiku.keycodes[0x29] = GLFW_KEY_E;
++    _glfw.haiku.keycodes[0x2A] = GLFW_KEY_R;
++    _glfw.haiku.keycodes[0x2B] = GLFW_KEY_T;
++    _glfw.haiku.keycodes[0x2C] = GLFW_KEY_Y;
++    _glfw.haiku.keycodes[0x2D] = GLFW_KEY_U;
++    _glfw.haiku.keycodes[0x2E] = GLFW_KEY_I;
++    _glfw.haiku.keycodes[0x2F] = GLFW_KEY_O;
++    _glfw.haiku.keycodes[0x30] = GLFW_KEY_P;
++    _glfw.haiku.keycodes[0x31] = GLFW_KEY_LEFT_BRACKET;
++    _glfw.haiku.keycodes[0x32] = GLFW_KEY_RIGHT_BRACKET;
++    _glfw.haiku.keycodes[0x33] = GLFW_KEY_BACKSLASH;
++    _glfw.haiku.keycodes[0x34] = GLFW_KEY_DELETE;
++    _glfw.haiku.keycodes[0x35] = GLFW_KEY_END;
++    _glfw.haiku.keycodes[0x36] = GLFW_KEY_PAGE_DOWN;
++    _glfw.haiku.keycodes[0x37] = GLFW_KEY_KP_7;
++    _glfw.haiku.keycodes[0x38] = GLFW_KEY_KP_8;
++    _glfw.haiku.keycodes[0x39] = GLFW_KEY_KP_9;
++    _glfw.haiku.keycodes[0x3A] = GLFW_KEY_KP_ADD;
++
++    _glfw.haiku.keycodes[0x3B] = GLFW_KEY_CAPS_LOCK;
++    _glfw.haiku.keycodes[0x3C] = GLFW_KEY_A;
++    _glfw.haiku.keycodes[0x3D] = GLFW_KEY_S;
++    _glfw.haiku.keycodes[0x3E] = GLFW_KEY_D;
++    _glfw.haiku.keycodes[0x3F] = GLFW_KEY_F;
++    _glfw.haiku.keycodes[0x40] = GLFW_KEY_G;
++    _glfw.haiku.keycodes[0x41] = GLFW_KEY_H;
++    _glfw.haiku.keycodes[0x42] = GLFW_KEY_J;
++    _glfw.haiku.keycodes[0x43] = GLFW_KEY_K;
++    _glfw.haiku.keycodes[0x44] = GLFW_KEY_L;
++    _glfw.haiku.keycodes[0x45] = GLFW_KEY_SEMICOLON;
++    _glfw.haiku.keycodes[0x46] = GLFW_KEY_APOSTROPHE;
++    _glfw.haiku.keycodes[0x47] = GLFW_KEY_ENTER;
++    _glfw.haiku.keycodes[0x48] = GLFW_KEY_KP_4;
++    _glfw.haiku.keycodes[0x49] = GLFW_KEY_KP_5;
++    _glfw.haiku.keycodes[0x4A] = GLFW_KEY_KP_6;
++
++    _glfw.haiku.keycodes[0x4B] = GLFW_KEY_LEFT_SHIFT;
++    _glfw.haiku.keycodes[0x4C] = GLFW_KEY_Z;
++    _glfw.haiku.keycodes[0x4D] = GLFW_KEY_X;
++    _glfw.haiku.keycodes[0x4E] = GLFW_KEY_C;
++    _glfw.haiku.keycodes[0x4F] = GLFW_KEY_V;
++    _glfw.haiku.keycodes[0x50] = GLFW_KEY_B;
++    _glfw.haiku.keycodes[0x51] = GLFW_KEY_N;
++    _glfw.haiku.keycodes[0x52] = GLFW_KEY_M;
++    _glfw.haiku.keycodes[0x53] = GLFW_KEY_COMMA;
++    _glfw.haiku.keycodes[0x54] = GLFW_KEY_PERIOD;
++    _glfw.haiku.keycodes[0x55] = GLFW_KEY_SLASH;
++    _glfw.haiku.keycodes[0x56] = GLFW_KEY_RIGHT_SHIFT;
++    _glfw.haiku.keycodes[0x57] = GLFW_KEY_UP;
++    _glfw.haiku.keycodes[0x58] = GLFW_KEY_KP_1;
++    _glfw.haiku.keycodes[0x59] = GLFW_KEY_KP_2;
++    _glfw.haiku.keycodes[0x5A] = GLFW_KEY_KP_3;
++    _glfw.haiku.keycodes[0x5B] = GLFW_KEY_KP_ENTER;
++
++    _glfw.haiku.keycodes[0x5C] = GLFW_KEY_LEFT_CONTROL;
++    _glfw.haiku.keycodes[0x5D] = GLFW_KEY_LEFT_ALT;
++    _glfw.haiku.keycodes[0x5E] = GLFW_KEY_SPACE;
++    _glfw.haiku.keycodes[0x5F] = GLFW_KEY_RIGHT_ALT;
++    _glfw.haiku.keycodes[0x60] = GLFW_KEY_RIGHT_CONTROL;
++    _glfw.haiku.keycodes[0x61] = GLFW_KEY_LEFT;
++    _glfw.haiku.keycodes[0x62] = GLFW_KEY_DOWN;
++    _glfw.haiku.keycodes[0x63] = GLFW_KEY_RIGHT;
++    _glfw.haiku.keycodes[0x64] = GLFW_KEY_KP_0;
++    _glfw.haiku.keycodes[0x65] = GLFW_KEY_KP_DECIMAL;
++    _glfw.haiku.keycodes[0x66] = GLFW_KEY_LEFT_SUPER;
++    _glfw.haiku.keycodes[0x67] = GLFW_KEY_RIGHT_SUPER;
++
++    for (scancode = 0;  scancode < 256;  scancode++)
++    {
++        if (_glfw.haiku.keycodes[scancode] >= 0)
++            _glfw.haiku.scancodes[_glfw.haiku.keycodes[scancode]] = scancode;
++    }
++}
++
++//////////////////////////////////////////////////////////////////////////
++//////                       GLFW platform API                      //////
++//////////////////////////////////////////////////////////////////////////
++
++int _glfwPlatformInit(void)
++{
++	if (!be_app) {
++	    image_info info;
++	    int32 cookie = 0;
++	    if (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
++	        BFile file(info.name, O_RDONLY);
++	        if (file.InitCheck() == B_OK) {
++	            BAppFileInfo app_info(&file);
++	            if (app_info.InitCheck() == B_OK) {
++	                char sig[B_MIME_TYPE_LENGTH];
++	                if (app_info.GetSignature(sig) == B_OK)
++	                    signature = strndup(sig, B_MIME_TYPE_LENGTH);
++	            }
++	        }
++	    }
++		be_app = new BApplication(signature);
++	}
++
++	createKeyTables();
++
++	_glfw.haiku.messageQueue = (void*)new BMessageQueue();
++
++	_glfwInitTimerPOSIX();
++	_glfwInitJoysticksHaiku();
++	
++	BScreen scr(B_MAIN_SCREEN_ID);
++
++	float dpi = 90.0;
++	float widthMM = (scr.Frame().Width() / dpi) * 2.54;
++	float heightMM = (scr.Frame().Height() / dpi) * 2.54;
++
++    _GLFWmonitor *monitor = _glfwAllocMonitor("Default monitor", widthMM, heightMM);
++    _glfwInputMonitor(monitor, GLFW_CONNECTED, _GLFW_INSERT_LAST);
++    
++    return GLFW_TRUE;
++}
++
++void _glfwPlatformTerminate(void)
++{
++	delete (BMessageQueue*)_glfw.haiku.messageQueue;
++    _glfwTerminateOSMesa();
++    _glfwTerminateJoysticksHaiku();
++}
++
++const char* _glfwPlatformGetVersionString(void)
++{
++    return _GLFW_VERSION_NUMBER " Haiku OSMesa";
++}
+diff --git a/src/haiku_joystick.cpp b/src/haiku_joystick.cpp
+new file mode 100644
+index 0000000..4b8b33a
+--- /dev/null
++++ b/src/haiku_joystick.cpp
+@@ -0,0 +1,145 @@
++//========================================================================
++// Copyright (c) 2021 Gerasim Troeglazov <3dEyes@gmail.com>
++//
++// This software is provided 'as-is', without any express or implied
++// warranty. In no event will the authors be held liable for any damages
++// arising from the use of this software.
++//
++// Permission is granted to anyone to use this software for any purpose,
++// including commercial applications, and to alter it and redistribute it
++// freely, subject to the following restrictions:
++//
++// 1. The origin of this software must not be misrepresented; you must not
++//    claim that you wrote the original software. If you use this software
++//    in a product, an acknowledgment in the product documentation would
++//    be appreciated but is not required.
++//
++// 2. Altered source versions must be plainly marked as such, and must not
++//    be misrepresented as being the original software.
++//
++// 3. This notice may not be removed or altered from any source
++//    distribution.
++//========================================================================
++
++extern "C" {
++#include "internal.h"
++}
++
++#include <stdio.h>
++#include <string.h>
++
++#include <String.h>
++#include <Joystick.h>
++
++//////////////////////////////////////////////////////////////////////////
++//////                       GLFW internal API                      //////
++//////////////////////////////////////////////////////////////////////////
++
++// Initialize joystick interface
++//
++GLFWbool _glfwInitJoysticksHaiku(void)
++{
++	BJoystick *joystick = new BJoystick();
++
++	if (joystick->CountDevices() <= 0)
++		return GLFW_FALSE;
++
++	char devName[B_OS_NAME_LENGTH];
++	memset(devName, 0, B_OS_NAME_LENGTH);
++	joystick->GetDeviceName(0, devName);
++	if (joystick->Open(devName) == B_ERROR)
++		return GLFW_FALSE;
++
++	char name[B_OS_NAME_LENGTH];
++	memset(name, 0, B_OS_NAME_LENGTH);
++	strncpy(name, "Generic USB Joystick", sizeof(name));
++
++	char guid[33] = "";
++    sprintf(guid, "05000000%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x00",
++		name[0], name[1], name[2], name[3],
++		name[4], name[5], name[6], name[7],
++		name[8], name[9], name[10]);
++
++	_GLFWjoystick* js = _glfwAllocJoystick(name, guid,
++		joystick->CountAxes(), joystick->CountButtons(), joystick->CountHats());
++
++    js->haiku.device  = (void*)joystick;
++    js->haiku.lastButtonValues = 0;
++
++    _glfwInputJoystick(js, GLFW_CONNECTED);
++
++	return GLFW_TRUE;
++}
++
++// Close all opened joystick handles
++//
++void _glfwTerminateJoysticksHaiku(void)
++{
++	for (int jid = 0;  jid <= GLFW_JOYSTICK_LAST;  jid++) {
++		if (_glfw.joysticks[jid].present)
++			delete (BJoystick*)(_glfw.joysticks[jid].haiku.device);
++	}
++}
++//////////////////////////////////////////////////////////////////////////
++//////                       GLFW platform API                      //////
++//////////////////////////////////////////////////////////////////////////
++
++int _glfwPlatformPollJoystick(_GLFWjoystick* js, int mode)
++{
++	BJoystick *joystick = (BJoystick*)js->haiku.device;
++	joystick->Update();
++	if (mode & _GLFW_POLL_AXES) {
++		int16 axes[joystick->CountAxes()];
++		joystick->GetAxisValues(axes);
++		for (int axesIdx = 0; axesIdx < joystick->CountAxes(); axesIdx++) {
++			double value = 0;
++			if (axes[axesIdx] >= 0)
++                value = axes[axesIdx] / 32767.0;
++            else
++                value = axes[axesIdx] / 32768.0;
++
++			_glfwInputJoystickAxis(js, (int) axesIdx, value);
++		}
++	}
++
++	if (mode & _GLFW_POLL_BUTTONS) {
++		uint32 buttonValues = joystick->ButtonValues();
++		for (int buttonIdx = 0; buttonIdx < joystick->CountButtons(); buttonIdx++) {
++			bool buttonValue = buttonValues & (1 << buttonIdx);
++			bool lastButtonValue = js->haiku.lastButtonValues & (1 << buttonIdx);
++			if (buttonValue != lastButtonValue)
++				_glfwInputJoystickButton(js, (int)buttonIdx, buttonValue ? GLFW_PRESS : GLFW_RELEASE);
++		}
++		js->haiku.lastButtonValues = buttonValues;
++
++		int hatsCount = joystick->CountHats();
++		uint8 hatsValues[hatsCount];
++		joystick->GetHatValues(hatsValues, 0);
++
++		for (int i = 0;  i < hatsCount;  i++) {
++			const int states[9] = {
++				GLFW_HAT_CENTERED,
++				GLFW_HAT_UP,
++				GLFW_HAT_RIGHT_UP,
++				GLFW_HAT_RIGHT,
++				GLFW_HAT_RIGHT_DOWN,
++				GLFW_HAT_DOWN,
++				GLFW_HAT_LEFT_DOWN,
++				GLFW_HAT_LEFT,
++				GLFW_HAT_LEFT_UP
++			};
++
++            long state = hatsValues[i];
++			if (state < 0 || state > 8)
++				state = 0;
++
++			_glfwInputJoystickHat(js, (int)i, states[state]);
++        }
++	}
++	return js->present;
++}
++
++void _glfwPlatformUpdateGamepadGUID(char* guid)
++{
++}
++
+diff --git a/src/haiku_joystick.h b/src/haiku_joystick.h
+new file mode 100644
+index 0000000..4d9efa7
+--- /dev/null
++++ b/src/haiku_joystick.h
+@@ -0,0 +1,39 @@
++//========================================================================
++// Copyright (c) 2021 Gerasim Troeglazov <3dEyes@gmail.com>
++//
++// This software is provided 'as-is', without any express or implied
++// warranty. In no event will the authors be held liable for any damages
++// arising from the use of this software.
++//
++// Permission is granted to anyone to use this software for any purpose,
++// including commercial applications, and to alter it and redistribute it
++// freely, subject to the following restrictions:
++//
++// 1. The origin of this software must not be misrepresented; you must not
++//    claim that you wrote the original software. If you use this software
++//    in a product, an acknowledgment in the product documentation would
++//    be appreciated but is not required.
++//
++// 2. Altered source versions must be plainly marked as such, and must not
++//    be misrepresented as being the original software.
++//
++// 3. This notice may not be removed or altered from any source
++//    distribution.
++//========================================================================
++
++#define _GLFW_PLATFORM_JOYSTICK_STATE         _GLFWjoystickHaiku haiku
++#define _GLFW_PLATFORM_LIBRARY_JOYSTICK_STATE struct { int dummyLibraryJoystick; }
++
++#define _GLFW_PLATFORM_MAPPING_NAME "Haiku"
++
++// Haiku-specific per-joystick data
++//
++typedef struct _GLFWjoystickHaiku
++{
++	void*		device;
++	uint32_t	lastButtonValues;
++} _GLFWjoystickHaiku;
++
++
++GLFWbool _glfwInitJoysticksHaiku(void);
++void _glfwTerminateJoysticksHaiku(void);
+diff --git a/src/haiku_monitor.cpp b/src/haiku_monitor.cpp
+new file mode 100644
+index 0000000..54d9f0d
+--- /dev/null
++++ b/src/haiku_monitor.cpp
+@@ -0,0 +1,142 @@
++//========================================================================
++// Copyright (c) 2021 Gerasim Troeglazov <3dEyes@gmail.com>
++//
++// This software is provided 'as-is', without any express or implied
++// warranty. In no event will the authors be held liable for any damages
++// arising from the use of this software.
++//
++// Permission is granted to anyone to use this software for any purpose,
++// including commercial applications, and to alter it and redistribute it
++// freely, subject to the following restrictions:
++//
++// 1. The origin of this software must not be misrepresented; you must not
++//    claim that you wrote the original software. If you use this software
++//    in a product, an acknowledgment in the product documentation would
++//    be appreciated but is not required.
++//
++// 2. Altered source versions must be plainly marked as such, and must not
++//    be misrepresented as being the original software.
++//
++// 3. This notice may not be removed or altered from any source
++//    distribution.
++//========================================================================
++
++extern "C" {
++#include "internal.h"
++}
++
++#include <Rect.h>
++#include <Screen.h>
++#include <stdio.h>
++
++static void addVideoMode(_GLFWmonitor *monitor, int32_t width, int32_t height, float refresh)
++{
++    GLFWvidmode mode;
++
++    mode.width = width;
++    mode.height = height;
++    mode.redBits = 8;
++    mode.greenBits = 8;
++    mode.blueBits = 8;
++    mode.refreshRate = (int)refresh;
++
++	if (monitor->modeCount > 0 && monitor->modes) {
++		for (int i = 0; i < monitor->modeCount; i++) {
++			if (monitor->modes[i].width == width && 
++				monitor->modes[i].height == height &&
++				monitor->modes[i].refreshRate == refresh)
++				return;
++		}
++	}
++
++    monitor->modeCount++;
++    if (monitor->modes)
++    	monitor->modes = (GLFWvidmode*)realloc(monitor->modes, monitor->modeCount * sizeof(GLFWvidmode));
++    else
++    	monitor->modes = (GLFWvidmode*)malloc(monitor->modeCount * sizeof(GLFWvidmode));
++
++    monitor->modes[monitor->modeCount - 1] = mode;
++}
++
++//////////////////////////////////////////////////////////////////////////
++//////                       GLFW platform API                      //////
++//////////////////////////////////////////////////////////////////////////
++
++void _glfwPlatformFreeMonitor(_GLFWmonitor* monitor)
++{
++}
++
++void _glfwPlatformGetMonitorPos(_GLFWmonitor* monitor, int* xpos, int* ypos)
++{
++	if (xpos)
++	   *xpos = 0;
++	if (ypos)
++	   *ypos = 0;
++}
++
++void _glfwPlatformGetMonitorContentScale(_GLFWmonitor* monitor,
++                                         float* xscale, float* yscale)
++{
++    if (xscale)
++        *xscale = 1.f;
++    if (yscale)
++        *yscale = 1.f;
++}
++
++void _glfwPlatformGetMonitorWorkarea(_GLFWmonitor* monitor,
++                                     int* xpos, int* ypos,
++                                     int* width, int* height)
++{
++	if (xpos)
++        *xpos = 0;
++    if (ypos)
++        *ypos = 0;
++    if (width)
++        *width = monitor->modes[0].width;
++    if (height)
++        *height = monitor->modes[0].height;
++}
++
++GLFWvidmode* _glfwPlatformGetVideoModes(_GLFWmonitor* monitor, int* found)
++{
++	BScreen scr(B_MAIN_SCREEN_ID);
++
++	if (!monitor->modes) {
++		display_mode hmode;
++	    scr.GetMode(&hmode);
++	    float refresh = float(hmode.timing.pixel_clock * 1000) / float(hmode.timing.h_total * hmode.timing.v_total);
++#if 0
++		addVideoMode(monitor, 640, 480, refresh);
++		addVideoMode(monitor, 800, 600, refresh);
++		addVideoMode(monitor, 1024, 768, refresh);
++#endif
++		addVideoMode(monitor, hmode.virtual_width, hmode.virtual_height, refresh);
++	}
++
++	*found = monitor->modeCount;
++	return monitor->modes;
++}
++
++void _glfwPlatformGetVideoMode(_GLFWmonitor* monitor, GLFWvidmode* _mode)
++{
++	BScreen scr(B_MAIN_SCREEN_ID);
++	GLFWvidmode mode;
++	mode.width = scr.Frame().Width() + 1;
++    mode.height = scr.Frame().Height() + 1;
++    mode.redBits = 8;
++    mode.greenBits = 8;
++    mode.blueBits = 8;
++    mode.refreshRate = 60;
++
++ 	*_mode = mode;
++}
++
++GLFWbool _glfwPlatformGetGammaRamp(_GLFWmonitor* monitor, GLFWgammaramp* ramp)
++{
++    return GLFW_FALSE;
++}
++
++void _glfwPlatformSetGammaRamp(_GLFWmonitor* monitor, const GLFWgammaramp* ramp)
++{
++}
++
+diff --git a/src/haiku_platform.h b/src/haiku_platform.h
+new file mode 100644
+index 0000000..3c5dbf4
+--- /dev/null
++++ b/src/haiku_platform.h
+@@ -0,0 +1,71 @@
++//========================================================================
++// Copyright (c) 2021 Gerasim Troeglazov <3dEyes@gmail.com>
++//
++// This software is provided 'as-is', without any express or implied
++// warranty. In no event will the authors be held liable for any damages
++// arising from the use of this software.
++//
++// Permission is granted to anyone to use this software for any purpose,
++// including commercial applications, and to alter it and redistribute it
++// freely, subject to the following restrictions:
++//
++// 1. The origin of this software must not be misrepresented; you must not
++//    claim that you wrote the original software. If you use this software
++//    in a product, an acknowledgment in the product documentation would
++//    be appreciated but is not required.
++//
++// 2. Altered source versions must be plainly marked as such, and must not
++//    be misrepresented as being the original software.
++//
++// 3. This notice may not be removed or altered from any source
++//    distribution.
++//========================================================================
++
++#include <dlfcn.h>
++
++#define _GLFW_PLATFORM_WINDOW_STATE _GLFWwindowHaiku haiku
++
++#define _GLFW_PLATFORM_CONTEXT_STATE         struct { int dummyContext; }
++#define _GLFW_PLATFORM_MONITOR_STATE         struct { int dummyMonitor; }
++#define _GLFW_PLATFORM_CURSOR_STATE          struct { int dummyCursor; }
++#define _GLFW_PLATFORM_LIBRARY_CONTEXT_STATE struct { int dummyLibraryContext; }
++#define _GLFW_EGL_CONTEXT_STATE              struct { int dummyEGLContext; }
++#define _GLFW_EGL_LIBRARY_CONTEXT_STATE      struct { int dummyEGLLibraryContext; }
++
++#define _GLFW_PLATFORM_LIBRARY_WINDOW_STATE  _GLFWlibraryHaiku haiku
++
++#include "osmesa_context.h"
++#include "posix_time.h"
++#include "posix_thread.h"
++#include "haiku_joystick.h"
++
++#define _glfw_dlopen(name) dlopen(name, RTLD_LAZY | RTLD_LOCAL)
++#define _glfw_dlclose(handle) dlclose(handle)
++#define _glfw_dlsym(handle, name) dlsym(handle, name)
++
++// Haiku-specific per-window data
++//
++typedef struct _GLFWwindowHaiku
++{
++    int 		width;
++    int 		height;
++    void*		object;
++    uint32_t	lastMouseButtons;
++    int			mouseGrab;
++} _GLFWwindowHaiku;
++
++
++// Cocoa-specific global data
++//
++typedef struct _GLFWlibraryHaiku
++{
++	_GLFWwindow*	disabledCursorWindow;
++
++	double			restoreCursorPosX, restoreCursorPosY;
++
++	void*			messageQueue;
++
++	char			keynames[GLFW_KEY_LAST + 1][17];
++	short int		keycodes[256];
++	short int		scancodes[GLFW_KEY_LAST + 1];
++} _GLFWlibraryHaiku;
+diff --git a/src/haiku_platform_view.cpp b/src/haiku_platform_view.cpp
+new file mode 100644
+index 0000000..d8558f9
+--- /dev/null
++++ b/src/haiku_platform_view.cpp
+@@ -0,0 +1,142 @@
++//========================================================================
++// Copyright (c) 2021 Gerasim Troeglazov <3dEyes@gmail.com>
++//
++// This software is provided 'as-is', without any express or implied
++// warranty. In no event will the authors be held liable for any damages
++// arising from the use of this software.
++//
++// Permission is granted to anyone to use this software for any purpose,
++// including commercial applications, and to alter it and redistribute it
++// freely, subject to the following restrictions:
++//
++// 1. The origin of this software must not be misrepresented; you must not
++//    claim that you wrote the original software. If you use this software
++//    in a product, an acknowledgment in the product documentation would
++//    be appreciated but is not required.
++//
++// 2. Altered source versions must be plainly marked as such, and must not
++//    be misrepresented as being the original software.
++//
++// 3. This notice may not be removed or altered from any source
++//    distribution.
++//========================================================================
++
++#include <stdio.h>
++
++#include "haiku_platform_view.h"
++
++HaikuPlatformView::HaikuPlatformView(BRect rect, int width, int height, _GLFWwindow* win) :
++	BView(rect, "HaikuPlatformView", B_FOLLOW_ALL, B_WILL_DRAW)
++{
++	mouseMode = MOUSE_MODE_NORMAL;
++	pixelBufferWidth = width;
++	pixelBufferHeight = height;
++	window = win;
++
++	BRect	fbRect = BRect(0, 0, pixelBufferWidth - 1, pixelBufferHeight - 1);
++	bufferBitmap = new BBitmap(fbRect, B_RGB32, true);
++	pixelBuffer = (char*)malloc(bufferBitmap->BitsLength());
++}
++
++HaikuPlatformView::~HaikuPlatformView()
++{
++	if (bufferBitmap)
++		delete bufferBitmap;
++	if (pixelBuffer)
++		free(pixelBuffer);
++}
++
++void 
++HaikuPlatformView::MessageReceived(BMessage *message)
++{
++	BMessageQueue *queue = (BMessageQueue*)(_glfw.haiku.messageQueue);
++
++	switch (message->what) {
++		case B_MOUSE_DOWN:
++		{
++			SetMouseEventMask(B_POINTER_EVENTS, B_NO_POINTER_HISTORY);
++			BMessage *msg = new BMessage(*message);
++			msg->AddPointer("window", (void*)window);
++			queue->AddMessage(msg);
++			return;
++		}
++		case B_MOUSE_UP:
++		{
++			BPoint where;
++			uint32 buttons;
++			GetMouse(&where, &buttons);
++			BMessage *msg = new BMessage(*message);
++			msg->AddPointer("window", (void*)window);
++			msg->AddInt32("buttons", buttons);
++			queue->AddMessage(msg);
++			return;
++		}
++		case B_MOUSE_MOVED:
++		{
++			BMessage *msg = new BMessage(*message);
++			msg->AddPointer("window", (void*)window);
++			queue->AddMessage(msg);
++			return;
++		}
++		default:
++			break;
++	}
++	BView::MessageReceived(message);
++}
++
++void 
++HaikuPlatformView::Draw(BRect rect)
++{
++	SetDrawingMode(B_OP_COPY);
++	DrawBitmap(bufferBitmap, rect, rect);
++}
++
++void
++HaikuPlatformView::SetMouseMode(int32 mode)
++{
++	mouseMode = mode;
++
++	if (mouseMode == MOUSE_MODE_RELATIVE)
++		SetEventMask(B_POINTER_EVENTS | B_KEYBOARD_EVENTS, B_NO_POINTER_HISTORY);
++	else
++		SetEventMask(0, 0);
++}
++
++void 
++HaikuPlatformView::Repaint()
++{
++	uint32 bytesPerRow = bufferBitmap->BytesPerRow();
++
++   	char *s_ptr = pixelBuffer + ((pixelBufferHeight - 1) * pixelBufferWidth) * 4;
++   	char *d_ptr = (char*)bufferBitmap->Bits();
++
++   	for (int i=0; i < pixelBufferHeight; i++, d_ptr += bytesPerRow, s_ptr -= bytesPerRow)
++		memcpy(d_ptr, s_ptr, bytesPerRow);
++
++	if (LockLooperWithTimeout(10000) == B_OK) {
++		SetDrawingMode(B_OP_COPY);
++		DrawBitmap(bufferBitmap);
++		UnlockLooper();
++	}
++}
++
++void
++HaikuPlatformView::ResizeBitmap(int width, int height)
++{
++	if(width == pixelBufferWidth && height == pixelBufferHeight)
++		return;
++
++	if(LockLooper()) {
++	 	delete bufferBitmap;
++	 	free(pixelBuffer);
++
++		pixelBufferWidth = width;
++		pixelBufferHeight = height;
++
++		BRect	fbRect = BRect(0, 0, pixelBufferWidth - 1, pixelBufferHeight - 1);
++		bufferBitmap = new BBitmap(fbRect, B_RGB32, true);
++		pixelBuffer = (char*)malloc(bufferBitmap->BitsLength());
++
++	 	UnlockLooper();
++	} 	 
++}
+diff --git a/src/haiku_platform_view.h b/src/haiku_platform_view.h
+new file mode 100644
+index 0000000..8b0db24
+--- /dev/null
++++ b/src/haiku_platform_view.h
+@@ -0,0 +1,82 @@
++//========================================================================
++// Copyright (c) 2021 Gerasim Troeglazov <3dEyes@gmail.com>
++//
++// This software is provided 'as-is', without any express or implied
++// warranty. In no event will the authors be held liable for any damages
++// arising from the use of this software.
++//
++// Permission is granted to anyone to use this software for any purpose,
++// including commercial applications, and to alter it and redistribute it
++// freely, subject to the following restrictions:
++//
++// 1. The origin of this software must not be misrepresented; you must not
++//    claim that you wrote the original software. If you use this software
++//    in a product, an acknowledgment in the product documentation would
++//    be appreciated but is not required.
++//
++// 2. Altered source versions must be plainly marked as such, and must not
++//    be misrepresented as being the original software.
++//
++// 3. This notice may not be removed or altered from any source
++//    distribution.
++//========================================================================
++
++#ifndef _HAIKU_PLATFORM_VIEW_H
++#define _HAIKU_PLATFORM_VIEW_H
++
++extern "C" {
++#include "internal.h"
++}
++
++#include <SupportDefs.h>
++#include <Window.h>
++#include <Bitmap.h>
++#include <View.h>
++#include <Cursor.h>
++#include <Rect.h>
++#include <kernel/OS.h>
++#include <MessageQueue.h>
++#include <game/WindowScreen.h>
++
++#define MOUSE_MODE_NORMAL	0
++#define MOUSE_MODE_RELATIVE	1
++
++class HaikuPlatformView : public BView 
++{
++ public:
++		HaikuPlatformView(BRect rect, int width, int height, _GLFWwindow* win);
++		~HaikuPlatformView();
++
++//		virtual void		MouseDown(BPoint point);
++//		virtual void		MouseUp(BPoint point);
++//		virtual void 		MouseMoved(BPoint where, uint32 code, const BMessage *message);
++		virtual void		MessageReceived(BMessage *message);
++		virtual void		Draw(BRect r);
++
++		void 				Repaint();
++
++		void				SetMouseMode(int32 mode);
++
++		char*				GetBuffer() { return pixelBuffer; }
++		uint32				GetBufferSize() { return bufferBitmap->BitsLength(); }
++
++		void				ResizeBitmap(int width, int height);
++
++		int					Width() { return pixelBufferWidth; }
++		int					Height() { return pixelBufferHeight; }
++
++ private:
++		_GLFWwindow*		window;
++
++		BBitmap*			bufferBitmap;
++
++ 		int					pixelBufferWidth;
++ 		int					pixelBufferHeight;
++		char*				pixelBuffer;
++
++//		BPoint				lastMousePosition;
++//		uint32 				lastButtons;
++		int32				mouseMode;
++};
++
++#endif //_HAIKU_PLATFORM_VIEW_H
+diff --git a/src/haiku_platform_window.cpp b/src/haiku_platform_window.cpp
+new file mode 100644
+index 0000000..d3b258d
+--- /dev/null
++++ b/src/haiku_platform_window.cpp
+@@ -0,0 +1,117 @@
++//========================================================================
++// Copyright (c) 2021 Gerasim Troeglazov <3dEyes@gmail.com>
++//
++// This software is provided 'as-is', without any express or implied
++// warranty. In no event will the authors be held liable for any damages
++// arising from the use of this software.
++//
++// Permission is granted to anyone to use this software for any purpose,
++// including commercial applications, and to alter it and redistribute it
++// freely, subject to the following restrictions:
++//
++// 1. The origin of this software must not be misrepresented; you must not
++//    claim that you wrote the original software. If you use this software
++//    in a product, an acknowledgment in the product documentation would
++//    be appreciated but is not required.
++//
++// 2. Altered source versions must be plainly marked as such, and must not
++//    be misrepresented as being the original software.
++//
++// 3. This notice may not be removed or altered from any source
++//    distribution.
++//========================================================================
++
++extern "C" {
++#include "internal.h"
++}
++
++#include "haiku_platform_window.h"
++
++#include <stdlib.h>
++
++HaikuPlatformWindow::HaikuPlatformWindow(BRect frame, const char* title, window_type type, uint32 flags, _GLFWwindow* glwin)
++	: BWindow(frame, title, type, flags)
++{
++	window = glwin;
++
++	cursorEmpty = new BCursor(B_CURSOR_ID_NO_CURSOR);
++	cursorStd = new BCursor(B_CURSOR_ID_SYSTEM_DEFAULT);
++
++	fView = new HaikuPlatformView(Bounds(), window->haiku.width, window->haiku.height, window);
++	AddChild(fView);
++}
++
++
++HaikuPlatformWindow::~HaikuPlatformWindow()
++{
++	delete cursorEmpty;
++	delete cursorStd;
++}
++
++void 
++HaikuPlatformWindow::MessageReceived(BMessage *message)
++{
++	switch (message->what) {
++		case 'mSHO':
++			fView->SetViewCursor(cursorStd);
++			break;
++		case 'mHID':
++			fView->SetViewCursor(cursorEmpty);
++			break;
++		case 'mNOR':
++			fView->SetMouseMode(MOUSE_MODE_NORMAL);
++			break;
++		case 'mREL':
++			fView->SetMouseMode(MOUSE_MODE_RELATIVE);
++			break;
++		case B_UNMAPPED_KEY_UP:
++		case B_KEY_UP:
++		case B_UNMAPPED_KEY_DOWN:
++		case B_KEY_DOWN:
++		case B_MOUSE_WHEEL_CHANGED:
++		{
++			BMessage *msg = new BMessage(*message);
++			msg->AddPointer("window", (void*)window);
++			PLATFORM_QUEUE->AddMessage(msg);
++			break;
++		}
++		default:
++			break;
++	}
++	BWindow::MessageReceived(message);
++}
++
++void
++HaikuPlatformWindow::FrameResized(float width, float height)
++{
++	BMessage *msg = new BMessage(B_WINDOW_RESIZED);
++	msg->AddPointer("window", (void*)window);
++	msg->AddFloat("width", width);
++	msg->AddFloat("height", height);
++	PLATFORM_QUEUE->AddMessage(msg);
++}
++
++void
++HaikuPlatformWindow::FrameMoved(BPoint point)
++{
++	BMessage *msg = new BMessage(B_WINDOW_MOVED);
++	msg->AddPointer("window", (void*)window);
++	msg->AddPoint("where", point);
++	PLATFORM_QUEUE->AddMessage(msg);
++}
++
++void
++HaikuPlatformWindow::WindowActivated(bool active)
++{
++	BMessage *msg = new BMessage(B_WINDOW_ACTIVATED);
++	msg->AddPointer("window", (void*)window);
++	msg->AddBool("active", active);
++	PLATFORM_QUEUE->AddMessage(msg);
++}
++
++bool
++HaikuPlatformWindow::QuitRequested()
++{
++	_glfwInputWindowCloseRequest(window);
++	return false;
++}
+diff --git a/src/haiku_platform_window.h b/src/haiku_platform_window.h
+new file mode 100644
+index 0000000..9800439
+--- /dev/null
++++ b/src/haiku_platform_window.h
+@@ -0,0 +1,63 @@
++//========================================================================
++// Copyright (c) 2021 Gerasim Troeglazov <3dEyes@gmail.com>
++//
++// This software is provided 'as-is', without any express or implied
++// warranty. In no event will the authors be held liable for any damages
++// arising from the use of this software.
++//
++// Permission is granted to anyone to use this software for any purpose,
++// including commercial applications, and to alter it and redistribute it
++// freely, subject to the following restrictions:
++//
++// 1. The origin of this software must not be misrepresented; you must not
++//    claim that you wrote the original software. If you use this software
++//    in a product, an acknowledgment in the product documentation would
++//    be appreciated but is not required.
++//
++// 2. Altered source versions must be plainly marked as such, and must not
++//    be misrepresented as being the original software.
++//
++// 3. This notice may not be removed or altered from any source
++//    distribution.
++//========================================================================
++
++#ifndef _HAIKU_PLATFORM_WINDOW_H
++#define _HAIKU_PLATFORM_WINDOW_H
++
++#include <stdio.h>
++
++#include <OS.h>
++#include <View.h>
++#include <Window.h>
++#include <SupportDefs.h>
++#include <MessageQueue.h>
++
++#include "haiku_platform_view.h"
++
++class HaikuPlatformWindow : public BWindow {
++	public:
++						HaikuPlatformWindow(BRect frame, const char* title, window_type type, uint32 flags, _GLFWwindow* glwin);
++		virtual			~HaikuPlatformWindow();
++
++		virtual void 	MessageReceived(BMessage *message);
++		virtual	bool	QuitRequested();
++		virtual void	FrameResized(float width, float height);
++		virtual void 	FrameMoved(BPoint point);
++		virtual void	WindowActivated(bool active);
++
++		HaikuPlatformView*	View(void) { return fView; }
++
++	private:
++		_GLFWwindow* window;
++		HaikuPlatformView *fView;
++		BCursor *cursorEmpty;
++		BCursor *cursorStd;
++};
++
++#define PLATFORM_WINDOW(window) ((HaikuPlatformWindow*)(window->haiku.object))
++#define PLATFORM_VIEW(window) (PLATFORM_WINDOW(window)->View())
++#define PLATFORM_QUEUE ((BMessageQueue*)(_glfw.haiku.messageQueue))
++
++#endif //_HAIKU_PLATFORM_WINDOW_H
++
++
+diff --git a/src/haiku_window.cpp b/src/haiku_window.cpp
+new file mode 100644
+index 0000000..b043b40
+--- /dev/null
++++ b/src/haiku_window.cpp
+@@ -0,0 +1,687 @@
++//========================================================================
++// Copyright (c) 2021 Gerasim Troeglazov <3dEyes@gmail.com>
++//
++// This software is provided 'as-is', without any express or implied
++// warranty. In no event will the authors be held liable for any damages
++// arising from the use of this software.
++//
++// Permission is granted to anyone to use this software for any purpose,
++// including commercial applications, and to alter it and redistribute it
++// freely, subject to the following restrictions:
++//
++// 1. The origin of this software must not be misrepresented; you must not
++//    claim that you wrote the original software. If you use this software
++//    in a product, an acknowledgment in the product documentation would
++//    be appreciated but is not required.
++//
++// 2. Altered source versions must be plainly marked as such, and must not
++//    be misrepresented as being the original software.
++//
++// 3. This notice may not be removed or altered from any source
++//    distribution.
++//========================================================================
++
++extern "C" {
++#include "internal.h"
++}
++
++#include <stdio.h>
++
++#include <GL/gl.h>
++
++#include <Application.h>
++#include <Window.h>
++#include <Rect.h>
++#include <View.h>
++#include <Bitmap.h>
++#include <Screen.h>
++#include <Cursor.h>
++#include <MessageQueue.h>
++#include <InterfaceDefs.h>
++#include <game/WindowScreen.h>
++
++#include "haiku_platform_window.h"
++#include "haiku_platform_view.h"
++
++static int createNativeWindow(_GLFWwindow* window,
++                              const _GLFWwndconfig* wndconfig)
++{
++	window->haiku.width = wndconfig->width;
++	window->haiku.height = wndconfig->height;
++
++	BRect winPos = BRect(100, 100, 100 + (wndconfig->width - 1), 100 + (wndconfig->height - 1));
++
++	if (window->monitor) {
++		BScreen scr(B_MAIN_SCREEN_ID);
++    	window->haiku.width = scr.Frame().Width() + 1;
++    	window->haiku.height = scr.Frame().Height() + 1;
++    	winPos = BRect(0, 0, window->haiku.width, window->haiku.height);
++	}
++
++	uint32 flags = B_NOT_RESIZABLE | B_NOT_ZOOMABLE;
++
++#if 0
++	if (wndconfig->resizable && !window->monitor) {
++		flags &= ~B_NOT_RESIZABLE;
++		flags &= ~B_NOT_ZOOMABLE;
++	}
++#endif
++
++	HaikuPlatformWindow *haiku_window = new HaikuPlatformWindow(winPos,
++		wndconfig->title, B_TITLED_WINDOW, flags, window);
++
++	window->haiku.object = (void*)(haiku_window);
++	window->haiku.mouseGrab = GLFW_FALSE;
++	
++	if (window->monitor)
++		haiku_window->Show();
++
++    return GLFW_TRUE;
++}
++
++// Translates Haiku key modifiers into GLFW ones
++//
++static int translateFlags(int32 modificators)
++{
++    int mods = 0;
++
++    if (modificators & B_SHIFT_KEY)
++        mods |= GLFW_MOD_SHIFT;
++    if (modificators & B_CONTROL_KEY)
++        mods |= GLFW_MOD_CONTROL;
++    if (modificators & B_COMMAND_KEY)
++        mods |= GLFW_MOD_ALT;
++    if (modificators & B_OPTION_KEY)
++        mods |= GLFW_MOD_SUPER;
++    if (modificators & B_CAPS_LOCK)
++        mods |= GLFW_MOD_CAPS_LOCK;
++
++    return mods;
++}
++
++// Translates a Haiku keycode to a GLFW keycode
++//
++static int translateKey(unsigned int key)
++{
++    if (key >= sizeof(_glfw.haiku.keycodes) / sizeof(_glfw.haiku.keycodes[0]))
++        return GLFW_KEY_UNKNOWN;
++
++    return _glfw.haiku.keycodes[key];
++}
++
++// Decode a Unicode code point from a UTF-8 stream
++// Based on cutef8 by Jeff Bezanson (Public Domain)
++//
++static unsigned int decodeUTF8(const char** s)
++{
++    unsigned int ch = 0, count = 0;
++    static const unsigned int offsets[] =
++    {
++        0x00000000u, 0x00003080u, 0x000e2080u,
++        0x03c82080u, 0xfa082080u, 0x82082080u
++    };
++
++    do
++    {
++        ch = (ch << 6) + (unsigned char) **s;
++        (*s)++;
++        count++;
++    } while ((**s & 0xc0) == 0x80);
++
++    return ch - offsets[count - 1];
++}
++
++// Updates the cursor image according to its cursor mode
++//
++static void updateCursorImage(_GLFWwindow* window)
++{
++    if (window->cursorMode == GLFW_CURSOR_NORMAL ||
++	    	!PLATFORM_WINDOW(window)->IsActive()) {
++    	PLATFORM_WINDOW(window)->PostMessage('mSHO');
++    } else {
++    	PLATFORM_WINDOW(window)->PostMessage('mHID');
++    }
++}
++
++// Apply disabled cursor mode to a focused window
++//
++static void disableCursor(_GLFWwindow* window)
++{
++    _glfw.haiku.disabledCursorWindow = window;
++    _glfwPlatformGetCursorPos(window, &_glfw.haiku.restoreCursorPosX, &_glfw.haiku.restoreCursorPosY);
++    updateCursorImage(window);
++    _glfwCenterCursorInContentArea(window);
++   	PLATFORM_WINDOW(window)->PostMessage('mREL');
++}
++
++// Exit disabled cursor mode for the specified window
++//
++static void enableCursor(_GLFWwindow* window)
++{
++    _glfw.haiku.disabledCursorWindow = NULL;
++    _glfwPlatformSetCursorPos(window, _glfw.haiku.restoreCursorPosX, _glfw.haiku.restoreCursorPosY);
++    window->haiku.mouseGrab = GLFW_FALSE;
++    updateCursorImage(window);
++	PLATFORM_WINDOW(window)->PostMessage('mNOR');
++}
++
++
++//////////////////////////////////////////////////////////////////////////
++//////                       GLFW platform API                      //////
++//////////////////////////////////////////////////////////////////////////
++
++int _glfwPlatformCreateWindow(_GLFWwindow* window,
++                              const _GLFWwndconfig* wndconfig,
++                              const _GLFWctxconfig* ctxconfig,
++                              const _GLFWfbconfig* fbconfig)
++{
++    if (!createNativeWindow(window, wndconfig))
++        return GLFW_FALSE;
++
++    if (ctxconfig->client != GLFW_NO_API)
++    {
++        if (ctxconfig->source == GLFW_OSMESA_CONTEXT_API || ctxconfig->source == GLFW_NATIVE_CONTEXT_API)
++        {
++            if (!_glfwInitOSMesa())
++                return GLFW_FALSE;
++            if (!_glfwCreateContextOSMesa(window, ctxconfig, fbconfig))
++                return GLFW_FALSE;
++        }
++        else
++        {
++            _glfwInputError(GLFW_API_UNAVAILABLE, "Haiku: EGL not available");
++            return GLFW_FALSE;
++        }
++    }
++
++    return GLFW_TRUE;
++}
++
++void _glfwPlatformDestroyWindow(_GLFWwindow* window)
++{
++	PLATFORM_WINDOW(window)->Lock();
++	PLATFORM_WINDOW(window)->Quit();
++
++    if (window->context.destroy)
++        window->context.destroy(window);
++}
++
++void _glfwPlatformSetWindowTitle(_GLFWwindow* window, const char* title)
++{
++	PLATFORM_WINDOW(window)->SetTitle(title);
++}
++
++void _glfwPlatformSetWindowIcon(_GLFWwindow* window, int count,
++                                const GLFWimage* images)
++{
++}
++
++void _glfwPlatformSetWindowMonitor(_GLFWwindow* window,
++                                   _GLFWmonitor* monitor,
++                                   int xpos, int ypos,
++                                   int width, int height,
++                                   int refreshRate)
++{
++	_glfwInputWindowMonitor(window, monitor);
++}
++
++void _glfwPlatformGetWindowPos(_GLFWwindow* window, int* xpos, int* ypos)
++{
++	BRect rect = PLATFORM_WINDOW(window)->Frame();
++	if (xpos)
++		*xpos = rect.left;
++	if (ypos)
++		*ypos = rect.top;
++}
++
++void _glfwPlatformSetWindowPos(_GLFWwindow* window, int xpos, int ypos)
++{
++	PLATFORM_WINDOW(window)->MoveTo(xpos, ypos);
++}
++
++void _glfwPlatformGetWindowSize(_GLFWwindow* window, int* width, int* height)
++{
++    if (width)
++        *width = window->haiku.width;
++    if (height)
++        *height = window->haiku.height;
++}
++
++void _glfwPlatformSetWindowSize(_GLFWwindow* window, int width, int height)
++{
++    window->haiku.width = width;
++    window->haiku.height = height;
++    PLATFORM_WINDOW(window)->ResizeTo(width, height);
++}
++
++void _glfwPlatformSetWindowSizeLimits(_GLFWwindow* window,
++                                      int minwidth, int minheight,
++                                      int maxwidth, int maxheight)
++{
++}
++
++void _glfwPlatformSetWindowAspectRatio(_GLFWwindow* window, int n, int d)
++{
++}
++
++void _glfwPlatformGetFramebufferSize(_GLFWwindow* window, int* width, int* height)
++{
++    if (width)
++        *width = PLATFORM_VIEW(window)->Width();
++    if (height)
++        *height = PLATFORM_VIEW(window)->Height();	
++}
++
++void _glfwPlatformGetWindowFrameSize(_GLFWwindow* window,
++                                     int* left, int* top,
++                                     int* right, int* bottom)
++{
++	BRect rect = PLATFORM_WINDOW(window)->Frame();
++	if (left)
++		*left = rect.left;
++	if (top)
++		*top = rect.top;
++	if (right)
++		*right = rect.right;
++	if (bottom)
++		*bottom = rect.bottom;
++}
++
++void _glfwPlatformGetWindowContentScale(_GLFWwindow* window,
++                                        float* xscale, float* yscale)
++{
++    if (xscale)
++        *xscale = 1.f;
++    if (yscale)
++        *yscale = 1.f;
++}
++
++void _glfwPlatformIconifyWindow(_GLFWwindow* window)
++{
++	if (!PLATFORM_WINDOW(window)->IsMinimized())
++		PLATFORM_WINDOW(window)->Minimize(true);
++}
++
++void _glfwPlatformRestoreWindow(_GLFWwindow* window)
++{
++	if (PLATFORM_WINDOW(window)->IsMinimized())
++		PLATFORM_WINDOW(window)->Minimize(false);
++}
++
++void _glfwPlatformMaximizeWindow(_GLFWwindow* window)
++{
++}
++
++int _glfwPlatformWindowMaximized(_GLFWwindow* window)
++{
++    return GLFW_FALSE;
++}
++
++int _glfwPlatformWindowHovered(_GLFWwindow* window)
++{
++    return GLFW_FALSE;
++}
++
++int _glfwPlatformFramebufferTransparent(_GLFWwindow* window)
++{
++    return GLFW_FALSE;
++}
++
++void _glfwPlatformSetWindowResizable(_GLFWwindow* window, GLFWbool enabled)
++{
++#if 0
++	uint32 flags = ((BWindow*)(window->haiku.wnd))->Flags();
++	if (enabled) {
++		flags &= ~B_NOT_RESIZABLE;
++		flags &= ~B_NOT_ZOOMABLE;
++	} else {
++		flags |= B_NOT_RESIZABLE | B_NOT_ZOOMABLE;
++	}
++	((BWindow*)(window->haiku.wnd))->SetFlags(flags);
++#endif
++}
++
++void _glfwPlatformSetWindowDecorated(_GLFWwindow* window, GLFWbool enabled)
++{
++}
++
++void _glfwPlatformSetWindowFloating(_GLFWwindow* window, GLFWbool enabled)
++{
++}
++
++float _glfwPlatformGetWindowOpacity(_GLFWwindow* window)
++{
++    return 1.f;
++}
++
++void _glfwPlatformSetWindowOpacity(_GLFWwindow* window, float opacity)
++{
++}
++
++void _glfwPlatformSetRawMouseMotion(_GLFWwindow *window, GLFWbool enabled)
++{
++}
++
++GLFWbool _glfwPlatformRawMouseMotionSupported(void)
++{
++    return GLFW_FALSE;
++}
++
++void _glfwPlatformShowWindow(_GLFWwindow* window)
++{
++	if (PLATFORM_WINDOW(window)->IsHidden())
++		PLATFORM_WINDOW(window)->Show();
++}
++
++
++void _glfwPlatformRequestWindowAttention(_GLFWwindow* window)
++{
++}
++
++void _glfwPlatformUnhideWindow(_GLFWwindow* window)
++{
++	if (PLATFORM_WINDOW(window)->IsHidden())
++		PLATFORM_WINDOW(window)->Show();
++}
++
++void _glfwPlatformHideWindow(_GLFWwindow* window)
++{
++	if (!PLATFORM_WINDOW(window)->IsHidden())
++		PLATFORM_WINDOW(window)->Hide();
++}
++
++void _glfwPlatformFocusWindow(_GLFWwindow* window)
++{
++	if (!PLATFORM_WINDOW(window)->IsActive())
++		PLATFORM_WINDOW(window)->Activate(true);
++}
++
++int _glfwPlatformWindowFocused(_GLFWwindow* window)
++{
++    return PLATFORM_WINDOW(window)->IsActive() ? GLFW_TRUE : GLFW_FALSE;
++}
++
++int _glfwPlatformWindowIconified(_GLFWwindow* window)
++{
++    return GLFW_FALSE;
++}
++
++int _glfwPlatformWindowVisible(_GLFWwindow* window)
++{
++    return PLATFORM_WINDOW(window)->IsHidden() ? GLFW_FALSE : GLFW_TRUE;
++}
++
++void _glfwPlatformPollEvents(void)
++{
++	PLATFORM_QUEUE->Lock();
++	while(!PLATFORM_QUEUE->IsEmpty()) {
++		BMessage *message = PLATFORM_QUEUE->NextMessage();
++		_GLFWwindow* window = (_GLFWwindow*)(message->GetPointer("window"));
++		switch(message->what) {
++			case B_MOUSE_DOWN:
++			{
++				int32 mod = modifiers();
++				uint32 buttons = message->FindInt32("buttons");
++
++				if (buttons & B_PRIMARY_MOUSE_BUTTON) {
++					if (window->cursorMode == GLFW_CURSOR_DISABLED && window->haiku.mouseGrab == GLFW_FALSE) {
++						window->haiku.mouseGrab = GLFW_TRUE;
++						disableCursor(window);
++					}
++					_glfwInputMouseClick(window, GLFW_MOUSE_BUTTON_LEFT, GLFW_PRESS, translateFlags(mod));
++				}
++			
++				if (buttons & B_SECONDARY_MOUSE_BUTTON)
++					_glfwInputMouseClick(window, GLFW_MOUSE_BUTTON_RIGHT, GLFW_PRESS, translateFlags(mod));
++			
++				if (buttons & B_TERTIARY_MOUSE_BUTTON)
++					_glfwInputMouseClick(window, GLFW_MOUSE_BUTTON_MIDDLE, GLFW_PRESS, translateFlags(mod));
++
++				window->haiku.lastMouseButtons = buttons;
++
++				break;
++			}
++			case B_MOUSE_UP:
++			{
++				int32 mod = modifiers();
++				uint32 buttons = message->FindInt32("buttons");
++
++				if ((window->haiku.lastMouseButtons & B_PRIMARY_MOUSE_BUTTON) && !(buttons & B_PRIMARY_MOUSE_BUTTON))
++					_glfwInputMouseClick(window, GLFW_MOUSE_BUTTON_LEFT, GLFW_RELEASE, translateFlags(mod));
++			
++				if ((window->haiku.lastMouseButtons & B_SECONDARY_MOUSE_BUTTON) && !(buttons & B_SECONDARY_MOUSE_BUTTON))
++					_glfwInputMouseClick(window, GLFW_MOUSE_BUTTON_RIGHT, GLFW_RELEASE, translateFlags(mod));
++			
++				if ((window->haiku.lastMouseButtons & B_TERTIARY_MOUSE_BUTTON) && !(buttons & B_TERTIARY_MOUSE_BUTTON))
++					_glfwInputMouseClick(window, GLFW_MOUSE_BUTTON_MIDDLE, GLFW_RELEASE, translateFlags(mod));
++
++				break;
++			}
++			case B_MOUSE_MOVED:
++			{
++				uint32 transit;
++				message->FindInt32("be:transit", (int32*)&transit);
++				BPoint where;
++				message->FindPoint("be:view_where", &where);
++
++				if (transit == B_ENTERED_VIEW) {
++					_glfwInputCursorEnter(window, GLFW_TRUE);
++				} else if (transit == B_EXITED_VIEW) {
++					_glfwInputCursorEnter(window, GLFW_FALSE);
++				} else if (transit == B_INSIDE_VIEW || transit == B_OUTSIDE_VIEW) {
++					if (window->cursorMode == GLFW_CURSOR_DISABLED) {
++						if (PLATFORM_WINDOW(window)->IsActive() && window->haiku.mouseGrab == GLFW_TRUE) {
++							int cx = PLATFORM_WINDOW(window)->Bounds().Width() / 2;
++							int cy = PLATFORM_WINDOW(window)->Bounds().Height() / 2;
++							float dx = where.x - cx;
++							float dy = where.y - cy;
++							BPoint center((PLATFORM_WINDOW(window)->Frame().right + PLATFORM_WINDOW(window)->Frame().left) / 2,
++								(PLATFORM_WINDOW(window)->Frame().bottom + PLATFORM_WINDOW(window)->Frame().top) / 2);
++							set_mouse_position(center.x, center.y);
++							_glfwInputCursorPos(window, window->virtualCursorPosX + dx, window->virtualCursorPosY + dy);
++						}
++					} else
++						_glfwInputCursorPos(window, where.x, where.y);
++				}			
++				break;
++			}
++			case B_MOUSE_WHEEL_CHANGED:
++			{
++				float shift_x=0;
++				float shift_y=0;
++				if (message->FindFloat("be:wheel_delta_x", &shift_x) != B_OK)
++					shift_x = 0;
++				if (message->FindFloat("be:wheel_delta_y", &shift_y) != B_OK)
++					shift_y = 0;
++				if (window)
++					_glfwInputScroll(window, shift_x, -shift_y);
++				break;
++			}
++			case B_WINDOW_ACTIVATED:
++			{
++				bool active = message->FindBool("active");
++				if (active) {
++					_glfwInputWindowFocus(window, GLFW_TRUE);
++					if (window->cursorMode == GLFW_CURSOR_DISABLED && window->haiku.mouseGrab == GLFW_TRUE)
++						disableCursor(window);
++				} else {
++					if (window->cursorMode == GLFW_CURSOR_DISABLED)
++						enableCursor(window);
++
++					if (window->monitor && window->autoIconify)
++						_glfwPlatformIconifyWindow(window);
++
++					_glfwInputWindowFocus(window, GLFW_FALSE);
++				}
++				break;
++			}
++			case B_WINDOW_MOVED:
++			{
++				BPoint point = message->FindPoint("where");
++				_glfwInputWindowPos(window, point.x, point.y);
++				break;
++			}
++			case B_WINDOW_RESIZED:
++			{
++				float width = message->FindFloat("width");
++				float height = message->FindFloat("height");
++				if (!window->monitor)
++					_glfwInputFramebufferSize(window, width, height);
++
++				_glfwInputWindowSize(window, width, height);
++				window->haiku.width = width;
++				window->haiku.height = height;
++				break;
++			}
++			case B_UNMAPPED_KEY_UP:
++			case B_KEY_UP:
++			case B_UNMAPPED_KEY_DOWN:
++			case B_KEY_DOWN:
++			{
++				const int action = (message->what == B_UNMAPPED_KEY_UP || message->what == B_KEY_UP) ? GLFW_RELEASE : GLFW_PRESS;
++				const int mods = translateFlags(modifiers());
++				
++				int32 scancode;
++				message->FindInt32("key", &scancode);	
++				int32 key = translateKey(scancode);
++
++				_glfwInputKey(window, key, key, action, mods);
++
++				if (action == GLFW_PRESS) {
++					const char* bytes;
++					if(message->FindString("bytes", &bytes) == B_OK) {
++						const int plain = !(mods & (GLFW_MOD_CONTROL | GLFW_MOD_ALT));
++						_glfwInputChar(window, decodeUTF8(&bytes), mods, plain);
++					}
++				}
++				break;
++			}
++		}
++	}
++	PLATFORM_QUEUE->Unlock();
++}
++
++void _glfwPlatformWaitEvents(void)
++{
++	while(PLATFORM_QUEUE->IsEmpty())
++		snooze(10);
++
++	_glfwPlatformPollEvents();
++}
++
++void _glfwPlatformWaitEventsTimeout(double timeout)
++{
++	bigtime_t enterTime = system_time();
++
++	while(PLATFORM_QUEUE->IsEmpty()) {
++		bigtime_t elapsed = system_time() - enterTime;
++		if (elapsed > timeout * 1000000)
++			break;
++		snooze(10);
++	}
++
++	_glfwPlatformPollEvents();
++}
++
++void _glfwPlatformPostEmptyEvent(void)
++{
++	BMessage *msg = new BMessage(B_PULSE);
++	PLATFORM_QUEUE->AddMessage(msg);
++}
++
++void _glfwPlatformGetCursorPos(_GLFWwindow* window, double* xpos, double* ypos)
++{
++	uint32 buttons;
++	BPoint screenWhere;
++	get_mouse(&screenWhere, &buttons);
++	BPoint mousePos = screenWhere - PLATFORM_WINDOW(window)->Frame().LeftTop();
++
++	if (xpos)
++		*xpos = mousePos.x;
++	if (ypos)
++		*ypos = mousePos.y;
++}
++
++void _glfwPlatformSetCursorPos(_GLFWwindow* window, double x, double y)
++{
++	set_mouse_position(PLATFORM_WINDOW(window)->Frame().left + x, PLATFORM_WINDOW(window)->Frame().top + y);
++}
++
++void _glfwPlatformSetCursorMode(_GLFWwindow* window, int mode)
++{
++	if (mode == GLFW_CURSOR_DISABLED) {
++		if (_glfwPlatformWindowFocused(window)) {
++			disableCursor(window);
++			window->haiku.mouseGrab = GLFW_TRUE;
++		}
++	} else if (_glfw.haiku.disabledCursorWindow == window)
++		enableCursor(window);
++
++	updateCursorImage(window);
++}
++
++int _glfwPlatformCreateCursor(_GLFWcursor* cursor,
++                              const GLFWimage* image,
++                              int xhot, int yhot)
++{
++    return GLFW_TRUE;
++}
++
++int _glfwPlatformCreateStandardCursor(_GLFWcursor* cursor, int shape)
++{
++    return GLFW_TRUE;
++}
++
++void _glfwPlatformDestroyCursor(_GLFWcursor* cursor)
++{
++}
++
++void _glfwPlatformSetCursor(_GLFWwindow* window, _GLFWcursor* cursor)
++{
++}
++
++void _glfwPlatformSetClipboardString(const char* string)
++{
++}
++
++const char* _glfwPlatformGetClipboardString(void)
++{
++    return NULL;
++}
++
++const char* _glfwPlatformGetScancodeName(int scancode)
++{
++    return "";
++}
++
++int _glfwPlatformGetKeyScancode(int key)
++{
++	return _glfw.haiku.scancodes[key];
++}
++
++void _glfwPlatformGetRequiredInstanceExtensions(char** extensions)
++{
++}
++
++void _glfwPlatformSwapBuffers(_GLFWwindow* window)
++{
++   	HaikuPlatformView *view = PLATFORM_VIEW(window);
++   	glReadPixels(0, 0, view->Width(), view->Height(), GL_BGRA, GL_UNSIGNED_BYTE, view->GetBuffer());
++   	view->Repaint();   	
++}
++
++int _glfwPlatformGetPhysicalDevicePresentationSupport(VkInstance instance,
++                                                      VkPhysicalDevice device,
++                                                      uint32_t queuefamily)
++{
++    return GLFW_FALSE;
++}
++
++VkResult _glfwPlatformCreateWindowSurface(VkInstance instance,
++                                          _GLFWwindow* window,
++                                          const VkAllocationCallbacks* allocator,
++                                          VkSurfaceKHR* surface)
++{
++    return VK_ERROR_INITIALIZATION_FAILED;
++}
++
+diff --git a/src/internal.h b/src/internal.h
+index 91631c0..01b6e5c 100644
+--- a/src/internal.h
++++ b/src/internal.h
+@@ -188,6 +188,8 @@ typedef void (APIENTRY * PFN_vkVoidFunction)(void);
+  #include "x11_platform.h"
+ #elif defined(_GLFW_WAYLAND)
+  #include "wl_platform.h"
++#elif defined(_GLFW_HAIKU)
++ #include "haiku_platform.h"
+ #elif defined(_GLFW_OSMESA)
+  #include "null_platform.h"
+ #else
+@@ -678,6 +680,10 @@ void _glfwPlatformWaitEvents(void);
+ void _glfwPlatformWaitEventsTimeout(double timeout);
+ void _glfwPlatformPostEmptyEvent(void);
+ 
++#ifdef __HAIKU__
++void _glfwPlatformSwapBuffers(_GLFWwindow* window);
++#endif
++
+ void _glfwPlatformGetRequiredInstanceExtensions(char** extensions);
+ int _glfwPlatformGetPhysicalDevicePresentationSupport(VkInstance instance,
+                                                       VkPhysicalDevice device,
+diff --git a/src/mappings.h b/src/mappings.h
+index 606824a..e434d9e 100644
+--- a/src/mappings.h
++++ b/src/mappings.h
+@@ -471,6 +471,8 @@ const char* _glfwDefaultMappings[] =
+ "78696e70757405000000000000000000,XInput Dance Pad (GLFW),platform:Windows,a:b0,b:b1,x:b2,y:b3,leftshoulder:b4,rightshoulder:b5,back:b6,start:b7,leftstick:b8,rightstick:b9,leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:a4,righttrigger:a5,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,",
+ "78696e70757406000000000000000000,XInput Guitar (GLFW),platform:Windows,a:b0,b:b1,x:b2,y:b3,leftshoulder:b4,rightshoulder:b5,back:b6,start:b7,leftstick:b8,rightstick:b9,leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:a4,righttrigger:a5,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,",
+ "78696e70757408000000000000000000,XInput Drum Kit (GLFW),platform:Windows,a:b0,b:b1,x:b2,y:b3,leftshoulder:b4,rightshoulder:b5,back:b6,start:b7,leftstick:b8,rightstick:b9,leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:a4,righttrigger:a5,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,",
++
++"0500000047656e657269632055534200,Generic USB Joystick,a:b2,b:b1,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,leftshoulder:b4,leftstick:b10,lefttrigger:b6,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b11,righttrigger:b7,rightx:a3,righty:a4,start:b9,x:b3,y:b0,platform:Haiku,",
+ NULL
+ };
+ 
+diff --git a/src/osmesa_context.c b/src/osmesa_context.c
+index c2fa49d..884316f 100644
+--- a/src/osmesa_context.c
++++ b/src/osmesa_context.c
+@@ -92,6 +92,9 @@ static void destroyContextOSMesa(_GLFWwindow* window)
+ static void swapBuffersOSMesa(_GLFWwindow* window)
+ {
+     // No double buffering on OSMesa
++#ifdef __HAIKU__
++    _glfwPlatformSwapBuffers(window);
++#endif
+ }
+ 
+ static void swapIntervalOSMesa(int interval)
+-- 
+2.30.2
+
