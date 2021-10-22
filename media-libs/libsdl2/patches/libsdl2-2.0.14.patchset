@@ -1,320 +1,8 @@
-From b4d2752b7cfa3981996edb197c99d342fa7d5ae4 Mon Sep 17 00:00:00 2001
-From: Adrien Destugues <pulkomandy@pulkomandy.tk>
-Date: Fri, 2 Feb 2018 09:40:46 +0100
-Subject: Fix secondary arch build.
-
-Rather than trying to guess the name of libstdc++, run libtool in C++
-mode so it figures this out by itself. The previous way of detecting
-libstdc++ would not allow for building a secondary architecture package.
-
-diff --git a/Makefile.in b/Makefile.in
-index 57871be..ea7f5e5 100644
---- a/Makefile.in
-+++ b/Makefile.in
-@@ -151,13 +151,13 @@ update-revision:
- .PHONY: all update-revision install install-bin install-hdrs install-lib install-data uninstall uninstall-bin uninstall-hdrs uninstall-lib uninstall-data clean distclean dist $(OBJECTS:.lo=.d)
- 
- $(objects)/$(TARGET): $(GEN_HEADERS) $(GEN_OBJECTS) $(OBJECTS) $(VERSION_OBJECTS)
--	$(RUN_CMD_LTLINK)$(LIBTOOL) --tag=CC --mode=link $(CC) -o $@ $(OBJECTS) $(GEN_OBJECTS) $(VERSION_OBJECTS) $(LDFLAGS) $(EXTRA_LDFLAGS) $(LT_LDFLAGS)
-+	$(RUN_CMD_LTLINK)$(LIBTOOL) --tag=CXX --mode=link $(CXX) -o $@ $(OBJECTS) $(GEN_OBJECTS) $(VERSION_OBJECTS) $(LDFLAGS) $(EXTRA_LDFLAGS) $(LT_LDFLAGS)
- 
- $(objects)/$(SDLMAIN_TARGET): $(SDLMAIN_OBJECTS)
--	$(RUN_CMD_LTLINK)$(LIBTOOL) --tag=CC --mode=link $(CC) -static -o $@ $(SDLMAIN_OBJECTS) -rpath $(libdir)
-+	$(RUN_CMD_LTLINK)$(LIBTOOL) --tag=CXX --mode=link $(CXX) -static -o $@ $(SDLMAIN_OBJECTS) -rpath $(libdir)
- 
- $(objects)/$(SDLTEST_TARGET): $(SDLTEST_OBJECTS)
--	$(RUN_CMD_LTLINK)$(LIBTOOL) --tag=CC --mode=link $(CC) -static -o $@ $(SDLTEST_OBJECTS) -rpath $(libdir)
-+	$(RUN_CMD_LTLINK)$(LIBTOOL) --tag=CXX --mode=link $(CXX) -static -o $@ $(SDLTEST_OBJECTS) -rpath $(libdir)
- 
- install: all install-bin install-hdrs install-lib install-data
- install-bin:
-diff --git a/configure.ac b/configure.ac
-index b7e519b..8e15ca9 100644
---- a/configure.ac
-+++ b/configure.ac
-@@ -3942,9 +3942,6 @@ AS_HELP_STRING([--enable-render-d3d], [enable the Direct3D render driver [[defau
-         # The Haiku platform requires special setup.
-         SOURCES="$srcdir/src/main/haiku/*.cc $SOURCES"
-         EXTRA_LDFLAGS="$EXTRA_LDFLAGS -lroot -lbe -lmedia -lgame -ldevice -ltextencoding"
--        # Haiku's x86 spins use libstdc++.r4.so (for binary compat?), but
--        #  other spins, like x86-64, use a more standard "libstdc++.so.*"
--        AC_CHECK_FILE("/boot/system/lib/libstdc++.r4.so", EXTRA_LDFLAGS="$EXTRA_LDFLAGS -lstdc++.r4", EXTRA_LDFLAGS="$EXTRA_LDFLAGS -lstdc++")
-         ;;
-     *-ios-*)
-         ARCH=ios
--- 
-2.30.0
-
-
-From f21290d64a86de299f16809ee22ec2af9c68a302 Mon Sep 17 00:00:00 2001
-From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Mon, 8 Mar 2021 14:34:02 +1000
-Subject: Fix relative mode for mouse
-
-
-diff --git a/src/video/haiku/SDL_BWin.h b/src/video/haiku/SDL_BWin.h
-index 34f0d5f..806fc51 100644
---- a/src/video/haiku/SDL_BWin.h
-+++ b/src/video/haiku/SDL_BWin.h
-@@ -140,7 +140,6 @@ class SDL_BWin:public BDirectWindow
-             _gl_type = gl_flags;
-         }
-         AddChild(_SDL_GLView);
--        _SDL_GLView->SetEventMask(B_POINTER_EVENTS | B_KEYBOARD_EVENTS, B_NO_POINTER_HISTORY);
-         _SDL_GLView->EnableDirectMode(true);
-         _SDL_GLView->LockGL();  /* "New" GLViews are created */
-         Unlock();
-diff --git a/src/video/haiku/SDL_bvideo.cc b/src/video/haiku/SDL_bvideo.cc
-index 817fccf..234eaf0 100644
---- a/src/video/haiku/SDL_bvideo.cc
-+++ b/src/video/haiku/SDL_bvideo.cc
-@@ -37,6 +37,12 @@ extern "C" {
- #include "SDL_bframebuffer.h"
- #include "SDL_bevents.h"
- 
-+#include "SDL_BWin.h"
-+
-+static SDL_INLINE SDL_BWin *_ToBeWin(SDL_Window *window) {
-+    return ((SDL_BWin*)(window->driverdata));
-+}
-+
- #include <Url.h>
- 
- /* FIXME: Undefined functions */
-@@ -152,12 +158,34 @@ static int HAIKU_ShowCursor(SDL_Cursor *cur)
- 	return 0;
- }
- 
-+static int
-+HAIKU_SetRelativeMouseMode(SDL_bool enabled)
-+{
-+    SDL_Window *window = SDL_GetMouseFocus();
-+    if (!window) {
-+      return 0;
-+    }
-+
-+	SDL_BWin *bewin = _ToBeWin(window);
-+	BGLView *_SDL_GLView = bewin->GetGLView();
-+
-+	bewin->Lock();
-+	if (enabled)
-+		_SDL_GLView->SetEventMask(B_POINTER_EVENTS | B_KEYBOARD_EVENTS, B_NO_POINTER_HISTORY);
-+	else
-+		_SDL_GLView->SetEventMask(0, 0);
-+	bewin->Unlock();
-+
-+    return 0;
-+}
-+
- static void HAIKU_MouseInit(_THIS)
- {
- 	SDL_Mouse *mouse = SDL_GetMouse();
- 	if (!mouse)
- 		return;
- 	mouse->ShowCursor = HAIKU_ShowCursor;
-+	mouse->SetRelativeMouseMode = HAIKU_SetRelativeMouseMode;
- 	mouse->cur_cursor = (SDL_Cursor*)0x1;
- 	mouse->def_cursor = (SDL_Cursor*)0x2;
- }
--- 
-2.30.0
-
-
-From e72180d6c6a05161fbb7051a3d0396a9371dd726 Mon Sep 17 00:00:00 2001
-From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Mon, 8 Mar 2021 14:34:40 +1000
-Subject: Add support for system cursors
-
-
-diff --git a/src/video/haiku/SDL_BWin.h b/src/video/haiku/SDL_BWin.h
-index 806fc51..974c152 100644
---- a/src/video/haiku/SDL_BWin.h
-+++ b/src/video/haiku/SDL_BWin.h
-@@ -37,6 +37,7 @@ extern "C" {
- 
- #include <stdio.h>
- #include <AppKit.h>
-+#include <Cursor.h>
- #include <InterfaceKit.h>
- #include <game/DirectWindow.h>
- #if SDL_VIDEO_OPENGL
-diff --git a/src/video/haiku/SDL_bvideo.cc b/src/video/haiku/SDL_bvideo.cc
-index 234eaf0..0948451 100644
---- a/src/video/haiku/SDL_bvideo.cc
-+++ b/src/video/haiku/SDL_bvideo.cc
-@@ -141,20 +141,72 @@ void HAIKU_DeleteDevice(SDL_VideoDevice * device)
-     SDL_free(device);
- }
- 
--static int HAIKU_ShowCursor(SDL_Cursor *cur)
-+static SDL_Cursor *
-+HAIKU_CreateSystemCursor(SDL_SystemCursor id)
-+{
-+    SDL_Cursor *cursor;
-+    BCursorID cursorId = B_CURSOR_ID_SYSTEM_DEFAULT;
-+
-+    switch(id)
-+    {
-+    default:
-+        SDL_assert(0);
-+        return NULL;
-+    case SDL_SYSTEM_CURSOR_ARROW:     cursorId = B_CURSOR_ID_SYSTEM_DEFAULT; break;
-+    case SDL_SYSTEM_CURSOR_IBEAM:     cursorId = B_CURSOR_ID_I_BEAM; break;
-+    case SDL_SYSTEM_CURSOR_WAIT:      cursorId = B_CURSOR_ID_PROGRESS; break;
-+    case SDL_SYSTEM_CURSOR_CROSSHAIR: cursorId = B_CURSOR_ID_CROSS_HAIR; break;
-+    case SDL_SYSTEM_CURSOR_WAITARROW: cursorId = B_CURSOR_ID_PROGRESS; break;
-+    case SDL_SYSTEM_CURSOR_SIZENWSE:  cursorId = B_CURSOR_ID_RESIZE_NORTH_WEST_SOUTH_EAST; break;
-+    case SDL_SYSTEM_CURSOR_SIZENESW:  cursorId = B_CURSOR_ID_RESIZE_NORTH_EAST_SOUTH_WEST; break;
-+    case SDL_SYSTEM_CURSOR_SIZEWE:    cursorId = B_CURSOR_ID_RESIZE_EAST_WEST; break;
-+    case SDL_SYSTEM_CURSOR_SIZENS:    cursorId = B_CURSOR_ID_RESIZE_NORTH_SOUTH; break;
-+    case SDL_SYSTEM_CURSOR_SIZEALL:   cursorId = B_CURSOR_ID_MOVE; break;
-+    case SDL_SYSTEM_CURSOR_NO:        cursorId = B_CURSOR_ID_NOT_ALLOWED; break;
-+    case SDL_SYSTEM_CURSOR_HAND:      cursorId = B_CURSOR_ID_FOLLOW_LINK; break;
-+    }
-+
-+    cursor = (SDL_Cursor *) SDL_calloc(1, sizeof(*cursor));
-+    if (cursor) {
-+        cursor->driverdata = (void *)new BCursor(cursorId);
-+    } else {
-+        SDL_OutOfMemory();
-+    }
-+
-+    return cursor;
-+}
-+
-+static SDL_Cursor *
-+HAIKU_CreateDefaultCursor()
-+{
-+    return HAIKU_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW);
-+}
-+
-+static void
-+HAIKU_FreeCursor(SDL_Cursor * cursor)
-+{
-+    if (cursor->driverdata) {
-+        delete (BCursor*) cursor->driverdata;
-+    }
-+    SDL_free(cursor);
-+}
-+
-+static int HAIKU_ShowCursor(SDL_Cursor *cursor)
- {
- 	SDL_Mouse *mouse = SDL_GetMouse();
--	int show;
-+
- 	if (!mouse)
- 		return 0;
--	show = (cur || !mouse->focus);
--	if (show) {
--		if (be_app->IsCursorHidden())
--			be_app->ShowCursor();
-+
-+	if (cursor) {
-+		BCursor *hCursor = (BCursor*)cursor->driverdata;
-+		be_app->SetCursor(hCursor);
- 	} else {
--		if (!be_app->IsCursorHidden())
--			be_app->HideCursor();
-+		BCursor *hCursor = new BCursor(B_CURSOR_ID_NO_CURSOR);
-+		be_app->SetCursor(hCursor);
-+		delete hCursor;
- 	}
-+
- 	return 0;
- }
- 
-@@ -184,10 +236,12 @@ static void HAIKU_MouseInit(_THIS)
- 	SDL_Mouse *mouse = SDL_GetMouse();
- 	if (!mouse)
- 		return;
-+	mouse->CreateSystemCursor = HAIKU_CreateSystemCursor;
- 	mouse->ShowCursor = HAIKU_ShowCursor;
-+	mouse->FreeCursor = HAIKU_FreeCursor;
- 	mouse->SetRelativeMouseMode = HAIKU_SetRelativeMouseMode;
--	mouse->cur_cursor = (SDL_Cursor*)0x1;
--	mouse->def_cursor = (SDL_Cursor*)0x2;
-+
-+	SDL_SetDefaultCursor(HAIKU_CreateDefaultCursor());
- }
- 
- int HAIKU_VideoInit(_THIS)
--- 
-2.30.0
-
-
-From e3c8ac3ec956272129a320ff5a7347d9050d69ca Mon Sep 17 00:00:00 2001
-From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Mon, 8 Mar 2021 14:36:14 +1000
-Subject: Disable direct mode for BGLView
-
-
-diff --git a/src/video/haiku/SDL_BWin.h b/src/video/haiku/SDL_BWin.h
-index 974c152..83bb346 100644
---- a/src/video/haiku/SDL_BWin.h
-+++ b/src/video/haiku/SDL_BWin.h
-@@ -141,7 +141,7 @@ class SDL_BWin:public BDirectWindow
-             _gl_type = gl_flags;
-         }
-         AddChild(_SDL_GLView);
--        _SDL_GLView->EnableDirectMode(true);
-+        _SDL_GLView->EnableDirectMode(false); /* Disable direct mode */
-         _SDL_GLView->LockGL();  /* "New" GLViews are created */
-         Unlock();
-         return (_SDL_GLView);
--- 
-2.30.0
-
-
-From 8ac03106fea9245de0b495d23e38bf4055b8df55 Mon Sep 17 00:00:00 2001
-From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Mon, 8 Mar 2021 14:36:48 +1000
-Subject: Fix build for gcc2
-
-
-diff --git a/src/video/haiku/SDL_bvideo.cc b/src/video/haiku/SDL_bvideo.cc
-index 0948451..f3c80ac 100644
---- a/src/video/haiku/SDL_bvideo.cc
-+++ b/src/video/haiku/SDL_bvideo.cc
-@@ -18,11 +18,14 @@
-      misrepresented as being the original software.
-   3. This notice may not be removed or altered from any source distribution.
- */
-+
- #include "../../SDL_internal.h"
- #include "../../main/haiku/SDL_BApp.h"
- 
- #if SDL_VIDEO_DRIVER_HAIKU
- 
-+#include "SDL_BWin.h"
-+#include <Url.h>
- 
- #ifdef __cplusplus
- extern "C" {
-@@ -37,14 +40,10 @@ extern "C" {
- #include "SDL_bframebuffer.h"
- #include "SDL_bevents.h"
- 
--#include "SDL_BWin.h"
--
- static SDL_INLINE SDL_BWin *_ToBeWin(SDL_Window *window) {
-     return ((SDL_BWin*)(window->driverdata));
- }
- 
--#include <Url.h>
--
- /* FIXME: Undefined functions */
- //    #define HAIKU_PumpEvents NULL
-     #define HAIKU_StartTextInput NULL
--- 
-2.30.0
-
-
-From 27e186cc748fb703abd03fa433c700725980e049 Mon Sep 17 00:00:00 2001
+From b80b2cc614b66c74f92071c215bdd070e4776df8 Mon Sep 17 00:00:00 2001
 From: Jerome Duval <jerome.duval@gmail.com>
 Date: Sun, 25 Apr 2021 13:35:32 +0200
 Subject: Haiku: cmake build
 
-use CMAKE_INSTALL_ variables where applicable
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index b9b9eb6..c203236 100644
@@ -489,5 +177,259 @@ index b9b9eb6..c203236 100644
    install(FILES "${SDL2_SOURCE_DIR}/sdl2.m4" DESTINATION "${CMAKE_INSTALL_FULL_DATAROOTDIR}/aclocal")
  endif()
 -- 
-2.30.0
+2.30.2
+
+
+From eab8fa429a1df6e87bc35237068115dd4f470fb0 Mon Sep 17 00:00:00 2001
+From: Jessica Hamilton <jessica.l.hamilton@gmail.com>
+Date: Sun, 25 Jul 2021 13:06:32 +0000
+Subject: Fix secondary arch build.
+
+Rather than trying to guess the name of libstdc++, run libtool
+with with C++ linker, which will pull in the correct version for
+the given Haiku architecture.
+
+diff --git a/Makefile.in b/Makefile.in
+index 57871be..0da6230 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -29,6 +29,7 @@ INSTALL = @INSTALL@
+ AR	= @AR@
+ RANLIB	= @RANLIB@
+ RC	= @RC@
++LINKER = @LINKER@
+ 
+ TARGET  = libSDL2.la
+ OBJECTS = @OBJECTS@
+@@ -151,13 +152,13 @@ update-revision:
+ .PHONY: all update-revision install install-bin install-hdrs install-lib install-data uninstall uninstall-bin uninstall-hdrs uninstall-lib uninstall-data clean distclean dist $(OBJECTS:.lo=.d)
+ 
+ $(objects)/$(TARGET): $(GEN_HEADERS) $(GEN_OBJECTS) $(OBJECTS) $(VERSION_OBJECTS)
+-	$(RUN_CMD_LTLINK)$(LIBTOOL) --tag=CC --mode=link $(CC) -o $@ $(OBJECTS) $(GEN_OBJECTS) $(VERSION_OBJECTS) $(LDFLAGS) $(EXTRA_LDFLAGS) $(LT_LDFLAGS)
++	$(RUN_CMD_LTLINK)$(LIBTOOL) --tag=CC --mode=link $(LINKER) -o $@ $(OBJECTS) $(GEN_OBJECTS) $(VERSION_OBJECTS) $(LDFLAGS) $(EXTRA_LDFLAGS) $(LT_LDFLAGS)
+ 
+ $(objects)/$(SDLMAIN_TARGET): $(SDLMAIN_OBJECTS)
+-	$(RUN_CMD_LTLINK)$(LIBTOOL) --tag=CC --mode=link $(CC) -static -o $@ $(SDLMAIN_OBJECTS) -rpath $(libdir)
++	$(RUN_CMD_LTLINK)$(LIBTOOL) --tag=CC --mode=link $(LINKER) -static -o $@ $(SDLMAIN_OBJECTS) -rpath $(libdir)
+ 
+ $(objects)/$(SDLTEST_TARGET): $(SDLTEST_OBJECTS)
+-	$(RUN_CMD_LTLINK)$(LIBTOOL) --tag=CC --mode=link $(CC) -static -o $@ $(SDLTEST_OBJECTS) -rpath $(libdir)
++	$(RUN_CMD_LTLINK)$(LIBTOOL) --tag=CC --mode=link $(LINKER) -static -o $@ $(SDLTEST_OBJECTS) -rpath $(libdir)
+ 
+ install: all install-bin install-hdrs install-lib install-data
+ install-bin:
+diff --git a/configure.ac b/configure.ac
+index b7e519b..4c25f90 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -80,6 +80,17 @@ case "$host" in
+         ;;
+ esac
+ 
++dnl use CXX for linker on Haiku
++case "$host" in
++    *-*-haiku*)
++        LINKER=CXX
++        ;;
++    *)
++        LINKER=CC
++        ;;
++esac
++AC_SUBST(LINKER)
++
+ if test x$srcdir != x.; then
+     INCLUDE="-Iinclude $INCLUDE"
+ elif test -d .hg; then
+-- 
+2.30.2
+
+
+From a293cfe20b765609dc88ecd90bbcccfe306f101f Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Mon, 8 Mar 2021 14:34:02 +1000
+Subject: Fix mouse relative mode and disable BGLView direct mode
+
+
+diff --git a/src/video/haiku/SDL_BWin.h b/src/video/haiku/SDL_BWin.h
+index 34f0d5f..83bb346 100644
+--- a/src/video/haiku/SDL_BWin.h
++++ b/src/video/haiku/SDL_BWin.h
+@@ -37,6 +37,7 @@ extern "C" {
+ 
+ #include <stdio.h>
+ #include <AppKit.h>
++#include <Cursor.h>
+ #include <InterfaceKit.h>
+ #include <game/DirectWindow.h>
+ #if SDL_VIDEO_OPENGL
+@@ -140,8 +141,7 @@ class SDL_BWin:public BDirectWindow
+             _gl_type = gl_flags;
+         }
+         AddChild(_SDL_GLView);
+-        _SDL_GLView->SetEventMask(B_POINTER_EVENTS | B_KEYBOARD_EVENTS, B_NO_POINTER_HISTORY);
+-        _SDL_GLView->EnableDirectMode(true);
++        _SDL_GLView->EnableDirectMode(false); /* Disable direct mode */
+         _SDL_GLView->LockGL();  /* "New" GLViews are created */
+         Unlock();
+         return (_SDL_GLView);
+-- 
+2.30.2
+
+
+From 773a4c33414e5d8781e03b4eec8d81af4f0b9277 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Mon, 8 Mar 2021 14:34:40 +1000
+Subject: Add system cursor support
+
+
+diff --git a/src/video/haiku/SDL_bvideo.cc b/src/video/haiku/SDL_bvideo.cc
+index 817fccf..f3c80ac 100644
+--- a/src/video/haiku/SDL_bvideo.cc
++++ b/src/video/haiku/SDL_bvideo.cc
+@@ -18,11 +18,14 @@
+      misrepresented as being the original software.
+   3. This notice may not be removed or altered from any source distribution.
+ */
++
+ #include "../../SDL_internal.h"
+ #include "../../main/haiku/SDL_BApp.h"
+ 
+ #if SDL_VIDEO_DRIVER_HAIKU
+ 
++#include "SDL_BWin.h"
++#include <Url.h>
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -37,7 +40,9 @@ extern "C" {
+ #include "SDL_bframebuffer.h"
+ #include "SDL_bevents.h"
+ 
+-#include <Url.h>
++static SDL_INLINE SDL_BWin *_ToBeWin(SDL_Window *window) {
++    return ((SDL_BWin*)(window->driverdata));
++}
+ 
+ /* FIXME: Undefined functions */
+ //    #define HAIKU_PumpEvents NULL
+@@ -135,31 +140,107 @@ void HAIKU_DeleteDevice(SDL_VideoDevice * device)
+     SDL_free(device);
+ }
+ 
+-static int HAIKU_ShowCursor(SDL_Cursor *cur)
++static SDL_Cursor *
++HAIKU_CreateSystemCursor(SDL_SystemCursor id)
++{
++    SDL_Cursor *cursor;
++    BCursorID cursorId = B_CURSOR_ID_SYSTEM_DEFAULT;
++
++    switch(id)
++    {
++    default:
++        SDL_assert(0);
++        return NULL;
++    case SDL_SYSTEM_CURSOR_ARROW:     cursorId = B_CURSOR_ID_SYSTEM_DEFAULT; break;
++    case SDL_SYSTEM_CURSOR_IBEAM:     cursorId = B_CURSOR_ID_I_BEAM; break;
++    case SDL_SYSTEM_CURSOR_WAIT:      cursorId = B_CURSOR_ID_PROGRESS; break;
++    case SDL_SYSTEM_CURSOR_CROSSHAIR: cursorId = B_CURSOR_ID_CROSS_HAIR; break;
++    case SDL_SYSTEM_CURSOR_WAITARROW: cursorId = B_CURSOR_ID_PROGRESS; break;
++    case SDL_SYSTEM_CURSOR_SIZENWSE:  cursorId = B_CURSOR_ID_RESIZE_NORTH_WEST_SOUTH_EAST; break;
++    case SDL_SYSTEM_CURSOR_SIZENESW:  cursorId = B_CURSOR_ID_RESIZE_NORTH_EAST_SOUTH_WEST; break;
++    case SDL_SYSTEM_CURSOR_SIZEWE:    cursorId = B_CURSOR_ID_RESIZE_EAST_WEST; break;
++    case SDL_SYSTEM_CURSOR_SIZENS:    cursorId = B_CURSOR_ID_RESIZE_NORTH_SOUTH; break;
++    case SDL_SYSTEM_CURSOR_SIZEALL:   cursorId = B_CURSOR_ID_MOVE; break;
++    case SDL_SYSTEM_CURSOR_NO:        cursorId = B_CURSOR_ID_NOT_ALLOWED; break;
++    case SDL_SYSTEM_CURSOR_HAND:      cursorId = B_CURSOR_ID_FOLLOW_LINK; break;
++    }
++
++    cursor = (SDL_Cursor *) SDL_calloc(1, sizeof(*cursor));
++    if (cursor) {
++        cursor->driverdata = (void *)new BCursor(cursorId);
++    } else {
++        SDL_OutOfMemory();
++    }
++
++    return cursor;
++}
++
++static SDL_Cursor *
++HAIKU_CreateDefaultCursor()
++{
++    return HAIKU_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW);
++}
++
++static void
++HAIKU_FreeCursor(SDL_Cursor * cursor)
++{
++    if (cursor->driverdata) {
++        delete (BCursor*) cursor->driverdata;
++    }
++    SDL_free(cursor);
++}
++
++static int HAIKU_ShowCursor(SDL_Cursor *cursor)
+ {
+ 	SDL_Mouse *mouse = SDL_GetMouse();
+-	int show;
++
+ 	if (!mouse)
+ 		return 0;
+-	show = (cur || !mouse->focus);
+-	if (show) {
+-		if (be_app->IsCursorHidden())
+-			be_app->ShowCursor();
++
++	if (cursor) {
++		BCursor *hCursor = (BCursor*)cursor->driverdata;
++		be_app->SetCursor(hCursor);
+ 	} else {
+-		if (!be_app->IsCursorHidden())
+-			be_app->HideCursor();
++		BCursor *hCursor = new BCursor(B_CURSOR_ID_NO_CURSOR);
++		be_app->SetCursor(hCursor);
++		delete hCursor;
+ 	}
++
+ 	return 0;
+ }
+ 
++static int
++HAIKU_SetRelativeMouseMode(SDL_bool enabled)
++{
++    SDL_Window *window = SDL_GetMouseFocus();
++    if (!window) {
++      return 0;
++    }
++
++	SDL_BWin *bewin = _ToBeWin(window);
++	BGLView *_SDL_GLView = bewin->GetGLView();
++
++	bewin->Lock();
++	if (enabled)
++		_SDL_GLView->SetEventMask(B_POINTER_EVENTS | B_KEYBOARD_EVENTS, B_NO_POINTER_HISTORY);
++	else
++		_SDL_GLView->SetEventMask(0, 0);
++	bewin->Unlock();
++
++    return 0;
++}
++
+ static void HAIKU_MouseInit(_THIS)
+ {
+ 	SDL_Mouse *mouse = SDL_GetMouse();
+ 	if (!mouse)
+ 		return;
++	mouse->CreateSystemCursor = HAIKU_CreateSystemCursor;
+ 	mouse->ShowCursor = HAIKU_ShowCursor;
+-	mouse->cur_cursor = (SDL_Cursor*)0x1;
+-	mouse->def_cursor = (SDL_Cursor*)0x2;
++	mouse->FreeCursor = HAIKU_FreeCursor;
++	mouse->SetRelativeMouseMode = HAIKU_SetRelativeMouseMode;
++
++	SDL_SetDefaultCursor(HAIKU_CreateDefaultCursor());
+ }
+ 
+ int HAIKU_VideoInit(_THIS)
+-- 
+2.30.2
 
