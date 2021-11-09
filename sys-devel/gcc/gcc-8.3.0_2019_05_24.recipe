@@ -5,7 +5,7 @@ HOMEPAGE="https://gcc.gnu.org/"
 COPYRIGHT="1988-2019 Free Software Foundation, Inc."
 LICENSE="GNU GPL v3
 	GNU LGPL v3"
-REVISION="13"
+REVISION="14"
 gccVersion="${portVersion%%_*}"
 SOURCE_URI="https://ftpmirror.gnu.org/gcc/gcc-$gccVersion/gcc-$gccVersion.tar.xz
 	https://ftp.gnu.org/gnu/gcc/gcc-$gccVersion/gcc-$gccVersion.tar.xz"
@@ -104,9 +104,11 @@ PROVIDES_syslibs_devel="
 	gcc${secondaryArchSuffix}_syslibs_devel = $portVersion compat >= 7
 	devel:libatomic$secondaryArchSuffix = $libatomicLibVersion compat >= $libatomicSoVersion
 	devel:libgcc$secondaryArchSuffix = $libgccLibVersion compat >= $libgccSoVersion
+	devel:libgcc_kernel$secondaryArchSuffix = $libgccLibVersion compat >= $libgccSoVersion
+	devel:libgcc_boot$secondaryArchSuffix = $libgccLibVersion compat >= $libgccSoVersion
 	devel:libgcc_eh$secondaryArchSuffix = $libgccLibVersion compat >= $libgccSoVersion
 	devel:libgcc_eh_kernel$secondaryArchSuffix = $libgccLibVersion compat >= $libgccSoVersion
-	devel:libgcc_kernel$secondaryArchSuffix = $libgccLibVersion compat >= $libgccSoVersion
+	devel:libgcc_eh_boot$secondaryArchSuffix = $libgccLibVersion compat >= $libgccSoVersion
 	devel:libgcc_s$secondaryArchSuffix = $libgccLibVersion compat >= $libgccSoVersion
 	devel:libgfortran$secondaryArchSuffix = $libgfortranLibVersion compat >= $libgfortranSoVersion
 	devel:libgomp$secondaryArchSuffix = $libgompLibVersion compat >= $libgompSoVersion
@@ -117,6 +119,7 @@ PROVIDES_syslibs_devel="
 	devel:libstdc++fs$secondaryArchSuffix = $portVersion compat >= 7
 	devel:libsupc++$secondaryArchSuffix = $portVersion compat >= 7
 	devel:libsupc++_kernel$secondaryArchSuffix = $portVersion compat >= 7
+	devel:libsupc++_boot$secondaryArchSuffix = $portVersion compat >= 7
 	"
 REQUIRES_syslibs_devel=""
 
@@ -219,9 +222,9 @@ BUILD()
 
 	make $jobArgs
 
-	echo "######################## building special libraries ################"
+	echo "#################### building special libraries ####################"
 
-	echo "### libgcc"
+	echo "### libgcc-kernel ###"
 
 	# build kernel versions of libgcc.a and libgcc_eh.a (no threads or TLS)
 	cd $objectsDir/$effectiveTargetMachineTriple/libgcc
@@ -229,12 +232,14 @@ BUILD()
 	mv libgcc.a libgcc_eh.a libgcc_s* libgcov* saved/
 	make clean
 	ln -sfn "$sourceDir/libgcc/gthr-single.h" gthr-default.h
-	make CFLAGS="-O2 $kernelCcFlags" CXXFLAGS="-O2 $kernelCcFlags"
+	make $jobArgs CFLAGS="-O2 $kernelCcFlags" CXXFLAGS="-O2 $kernelCcFlags"
 	mv libgcc.a libgcc-kernel.a
 	mv libgcc_eh.a libgcc_eh-kernel.a
 	ln -sfn "$sourceDir/libgcc/gthr-posix.h" gthr-default.h
 	mv saved/* .
 	rmdir saved
+
+	echo "### libsupc++-kernel ###"
 
 	# build kernel version of libsupc++.a (without threads or TLS)
 	cd $objectsDir/$effectiveTargetMachineTriple/libstdc++-v3/libsupc++
@@ -251,12 +256,56 @@ BUILD()
 		"../config.h"
 	sed -i -e 's,#define _GLIBCXX_HAVE_TLS 1,/* #undef _GLIBCXX_HAVE_TLS */,' \
 		"../include/$effectiveTargetMachineTriple/bits/c++config.h"
-	make CFLAGS="-O2 $kernelCcFlags" CXXFLAGS="-O2 $kernelCcFlags"
+	make $jobArgs CFLAGS="-O2 $kernelCcFlags" CXXFLAGS="-O2 $kernelCcFlags"
 	mv .libs/libsupc++.a .libs/libsupc++-kernel.a
 	mv saved/libsupc++* .libs/
 	mv saved/gthr-default.h "../include/$effectiveTargetMachineTriple/bits/"
 	mv saved/config.h ..
 	mv saved/c++config.h "../include/$effectiveTargetMachineTriple/bits/"
+	rmdir saved
+
+	local bootCcFlags
+	if [ $effectiveTargetArchitecture == arm ]; then
+		# EFI arm (32-bit) requires software fp
+		bootCcFlags+="-mfloat-abi=soft -nostartfiles -fshort-wchar";
+	fi
+
+	echo "### libgcc-boot ###"
+
+	# build bootloader version of libgcc and libgcc_eh.a (no threads, TLS)
+	cd $objectsDir/$effectiveTargetMachineTriple/libgcc
+	mkdir -p saved
+	mv libgcc.a libgcc_eh.a libgcc_s* libgcov* libgcc-kernel.a libgcc_eh-kernel.a saved/
+	make clean
+	ln -sfn "$sourceDir/libgcc/gthr-single.h" gthr-default.h
+	make $jobArgs CFLAGS="-O2 $bootCcFlags" CXXFLAGS="-O2 $bootCcFlags"
+	mv libgcc.a libgcc-boot.a
+	mv libgcc_eh.a libgcc_eh-boot.a
+	ln -sfn "$sourceDir/libgcc/gthr-posix.h" gthr-default.h
+	mv saved/* .
+	rmdir saved
+
+	echo "### libsupc++-kernel ###"
+
+	# build bootloader version of libsupc++.a (without threads or TLS)
+	cd $objectsDir/$effectiveTargetMachineTriple/libstdc++-v3/libsupc++
+	mkdir -p saved
+	mv .libs/libsupc++* saved/
+	cp "../include/$effectiveTargetMachineTriple/bits/gthr-default.h" \
+		"../config.h" \
+		"../include/$effectiveTargetMachineTriple/bits/c++config.h" \
+		saved/
+	make clean
+	# deactivate threads and tls support
+	cp "../include/$effectiveTargetMachineTriple/bits/gthr-single.h" \
+		"../include/$effectiveTargetMachineTriple/bits/gthr-default.h"
+	sed -i -e 's,#define _GLIBCXX_HAS_GTHREADS 1,/* #undef _GLIBCXX_HAS_GTHREADS */,' \
+		"../config.h"
+	sed -i -e 's,#define _GLIBCXX_HAVE_TLS 1,/* #undef _GLIBCXX_HAVE_TLS */,' \
+		"../include/$effectiveTargetMachineTriple/bits/c++config.h"
+	make $jobArgs CFLAGS="-O2 $bootCcFlags" CXXFLAGS="-O2 $bootCcFlags"
+	mv .libs/libsupc++.a .libs/libsupc++-boot.a
+	mv saved/* .libs/
 	rmdir saved
 }
 
@@ -336,12 +385,17 @@ INSTALL()
 	libstdcxxDir=$objectsDir/$effectiveTargetMachineTriple/libstdc++-v3
 	cp $libstdcxxDir/libsupc++/.libs/libsupc++-kernel.a \
 		$gccLibDir/
+	cp $libstdcxxDir/libsupc++/.libs/libsupc++-boot.a \
+		$gccLibDir/
 	ln -s libstdc++.so $libDir/libsupc++.so
 	cp $gccLibDir/libsupc++*.a $developLibDir/
 
 	# libgcc
 	cp $objectsDir/$effectiveTargetMachineTriple/libgcc/libgcc-kernel.a \
 		$objectsDir/$effectiveTargetMachineTriple/libgcc/libgcc_eh-kernel.a \
+		$gccLibDir/
+	cp $objectsDir/$effectiveTargetMachineTriple/libgcc/libgcc-boot.a \
+		$objectsDir/$effectiveTargetMachineTriple/libgcc/libgcc_eh-boot.a \
 		$gccLibDir/
 	cp -d $gccLibDir/libgcc_s.so \
 		$gccLibDir/libgcc_s.so.$libgccSoVersion \
@@ -458,12 +512,15 @@ INSTALL()
 		$developLibDir/*.so* \
 		$developLibDir/libgcc.a \
 		$developLibDir/libgcc-kernel.a \
+		$developLibDir/libgcc-boot.a \
 		$developLibDir/libgcc_eh.a \
 		$developLibDir/libgcc_eh-kernel.a \
+		$developLibDir/libgcc_eh-boot.a \
 		$developLibDir/libssp_nonshared.a \
 		$developLibDir/libstdc++fs.a \
 		$developLibDir/libsupc++.a \
 		$developLibDir/libsupc++-kernel.a \
+		$developLibDir/libsupc++-boot.a \
 		$relativeIncludeDir
 
 	rm -rf $includeDir
