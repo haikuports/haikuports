@@ -1,0 +1,170 @@
+From 00c1e5974b4d6d6cbafe5ae42ab70766370b8580 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 10 Nov 2021 18:14:13 +1000
+Subject: Fixes for Haiku
+
+
+diff --git a/base/haiku_types.h b/base/haiku_types.h
+new file mode 100644
+index 0000000..3a57ce2
+--- /dev/null
++++ b/base/haiku_types.h
+@@ -0,0 +1,24 @@
++#pragma once
++
++#ifdef Q_OS_HAIKU
++
++#define _SUPPORT_DEFS_H
++
++#ifdef __x86_64__
++#define int64 __haiku_int64
++#ifdef USE_HAIKU_UINT64
++#define uint64 __haiku_uint64
++#endif
++#else
++#define int32 __haiku_int32
++#define uint32 __haiku_uint32
++#endif
++
++typedef int32 status_t;
++typedef uint32 type_code;
++typedef uint32 perform_code;
++
++typedef int64 bigtime_t;
++typedef int64 nanotime_t;
++
++#endif
+diff --git a/base/platform/linux/base_file_utilities_linux.cpp b/base/platform/linux/base_file_utilities_linux.cpp
+index b3ba5f3..a481e3b 100644
+--- a/base/platform/linux/base_file_utilities_linux.cpp
++++ b/base/platform/linux/base_file_utilities_linux.cpp
+@@ -27,8 +27,58 @@
+ #include <stdio.h>
+ #include <fcntl.h>
+ 
++#ifdef Q_OS_HAIKU
++#include <base/haiku_types.h>
++#include <AppKit.h>
++#include <StorageKit.h>
++#endif
++
+ namespace base::Platform {
+ namespace {
++	
++#ifdef Q_OS_HAIKU
++bool HaikuShowInFolder(const QString &filepath) {
++	try {
++		BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
++		if (!trackerMessenger.IsValid())
++			return false;
++
++		BEntry fileEntry(filepath.toUtf8().data());
++		entry_ref fileRef;
++		if (fileEntry.GetRef(&fileRef) != B_OK)
++			return false;
++
++		if (!fileEntry.Exists())
++			return false;
++
++		BEntry folderEntry;
++		if (fileEntry.GetParent(&folderEntry) != B_OK)
++			return false;
++
++		entry_ref folderRef;
++		if (folderEntry.GetRef(&folderRef) != B_OK)
++			return false;
++
++		BMessage openCommand(B_REFS_RECEIVED);
++		openCommand.AddRef("refs", &folderRef);
++		node_ref fileNodeRef;
++		if (fileEntry.GetNodeRef(&fileNodeRef) == B_OK) {
++			openCommand.AddData("nodeRefToSelect", B_RAW_TYPE,
++				static_cast<void*>(&fileNodeRef), sizeof(node_ref));
++		}
++		if (trackerMessenger.SendMessage(&openCommand) == B_OK) {
++			snooze(300000);
++			BMessage selectCommand('Tsel');
++			selectCommand.AddRef("refs", &fileRef);
++			trackerMessenger.SendMessage(&selectCommand);
++			return true;
++		}
++	} catch (...) {
++	}
++
++	return false;
++}
++#endif
+ 
+ #ifndef DESKTOP_APP_DISABLE_DBUS_INTEGRATION
+ bool PortalShowInFolder(const QString &filepath) {
+@@ -152,6 +202,12 @@ bool ShowInFolder(const QString &filepath) {
+ 		return true;
+ 	}
+ 
++#ifdef Q_OS_HAIKU
++	if (HaikuShowInFolder(filepath)) {
++		return true;
++	}
++#endif
++
+ 	if (ProcessShowInFolder(filepath)) {
+ 		return true;
+ 	}
+diff --git a/base/platform/linux/base_last_input_linux.cpp b/base/platform/linux/base_last_input_linux.cpp
+index 1021c85..fd6e541 100644
+--- a/base/platform/linux/base_last_input_linux.cpp
++++ b/base/platform/linux/base_last_input_linux.cpp
+@@ -24,6 +24,11 @@
+ #include <xcb/screensaver.h>
+ #endif // !DESKTOP_APP_DISABLE_X11_INTEGRATION
+ 
++#ifdef Q_OS_HAIKU
++#include <base/haiku_types.h>
++#include <InterfaceDefs.h>
++#endif
++
+ namespace base::Platform {
+ namespace {
+ 
+@@ -184,9 +189,23 @@ std::optional<crl::time> MutterDBusLastUserInputTime() {
+ }
+ #endif // !DESKTOP_APP_DISABLE_DBUS_INTEGRATION
+ 
++#ifdef Q_OS_HAIKU
++std::optional<crl::time> HaikuLastUserInputTime() {	
++	const auto idle = idle_time() / 1000;
++	return (crl::now() - static_cast<crl::time>(idle));
++}
++#endif
++
+ } // namespace
+ 
+ std::optional<crl::time> LastUserInputTime() {
++#ifdef Q_OS_HAIKU
++	const auto haikuResult = HaikuLastUserInputTime();
++	if (haikuResult.has_value()) {
++		return haikuResult;
++	}
++#endif
++
+ #ifndef DESKTOP_APP_DISABLE_X11_INTEGRATION
+ 	if (::Platform::IsX11()) {
+ 		const auto xcbResult = XCBLastUserInputTime();
+diff --git a/base/platform/linux/base_url_scheme_linux.cpp b/base/platform/linux/base_url_scheme_linux.cpp
+index 20aed5e..61d46fc 100644
+--- a/base/platform/linux/base_url_scheme_linux.cpp
++++ b/base/platform/linux/base_url_scheme_linux.cpp
+@@ -13,6 +13,10 @@
+ #include "base/platform/linux/base_linux_glibmm_helper.h"
+ #endif // !DESKTOP_APP_DISABLE_DBUS_INTEGRATION
+ 
++#ifdef Q_OS_HAIKU
++#include <base/haiku_types.h>
++#endif
++
+ #include <QtCore/QFile>
+ #include <QtCore/QProcess>
+ #include <QtGui/QWindow>
+-- 
+2.30.2
+
