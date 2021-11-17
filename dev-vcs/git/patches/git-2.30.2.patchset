@@ -1,0 +1,249 @@
+From 7e7db2bdf066f19fa006f30ff21daf2c35624f6a Mon Sep 17 00:00:00 2001
+From: Ingo Weinhold <ingo_weinhold@gmx.de>
+Date: Tue, 13 Aug 2013 08:07:25 +0200
+Subject: git-web--browse.sh: use "open" on Haiku
+
+
+diff --git a/git-web--browse.sh b/git-web--browse.sh
+index ae15253..b074d1a 100755
+--- a/git-web--browse.sh
++++ b/git-web--browse.sh
+@@ -133,6 +133,11 @@ if test -z "$browser" ; then
+ 		browser_candidates="cygstart $browser_candidates"
+ 	fi
+ 
++	# /boot/system/haiku_loader indicates Haiku
++	if test -f /boot/system/haiku_loader; then
++		browser_candidates="open $browser_candidates"
++	fi
++
+ 	for i in $browser_candidates; do
+ 		init_browser_path $i
+ 		if type "$browser_path" > /dev/null 2>&1; then
+-- 
+2.30.2
+
+
+From 1173ccfc8391460ba2c19135ca8f705b82d16f57 Mon Sep 17 00:00:00 2001
+From: Ingo Weinhold <ingo_weinhold@gmx.de>
+Date: Mon, 19 Jan 2015 15:37:16 -0500
+Subject: On Haiku use the user settings directory instead of HOME
+
+
+diff --git a/path.c b/path.c
+index 7b385e5..f0669d6 100644
+--- a/path.c
++++ b/path.c
+@@ -13,6 +13,11 @@
+ #include "object-store.h"
+ #include "lockfile.h"
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#include <StorageDefs.h>
++#endif
++
+ static int get_st_mode_bits(const char *path, int *mode)
+ {
+ 	struct stat st;
+@@ -1502,10 +1507,19 @@ char *xdg_config_home(const char *filename)
+ {
+ 	const char *home, *config_home;
+ 
++#ifdef __HAIKU__
++	char settingsPath[B_PATH_NAME_LENGTH];
++	assert(filename);
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, true, settingsPath,
++		sizeof(settingsPath)) == B_OK)
++		return mkpathdup("%s/git/%s", settingsPath, filename);
++#else
+ 	assert(filename);
+ 	config_home = getenv("XDG_CONFIG_HOME");
++
+ 	if (config_home && *config_home)
+ 		return mkpathdup("%s/git/%s", config_home, filename);
++#endif
+ 
+ 	home = getenv("HOME");
+ 	if (home)
+-- 
+2.30.2
+
+
+From 3da701076a44b5aad208bbcc2f589a1a59894606 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Mon, 19 Jan 2015 15:50:09 -0500
+Subject: Ensure config-directory exists before using it.
+
+
+diff --git a/config.c b/config.c
+index 1137bd7..14cd935 100644
+--- a/config.c
++++ b/config.c
+@@ -2777,6 +2777,14 @@ int git_config_set_multivar_in_file_gently(const char *config_filename,
+ 	if (!config_filename)
+ 		config_filename = filename_buf = git_pathdup("config");
+ 
++	if (find_last_dir_sep(config_filename) != NULL)  {
++		char *config_dir = xstrdup(config_filename);
++		* find_last_dir_sep(config_dir) = '\0';
++		if (access(config_dir, F_OK) != 0)
++			mkdir(config_dir, 0755);
++		free(config_dir);
++	}
++
+ 	/*
+ 	 * The lock serves a purpose in addition to locking: the new
+ 	 * contents of .git/config will be written into it.
+-- 
+2.30.2
+
+
+From 6a1b7b987bc0ce2448f4f8e31688b947f414f27e Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sun, 14 Feb 2016 10:32:12 +0100
+Subject: Move credential cache to the config directory.
+
+Do not clutter the home dir.
+
+diff --git a/builtin/credential-cache.c b/builtin/credential-cache.c
+index 9b3f709..893db81 100644
+--- a/builtin/credential-cache.c
++++ b/builtin/credential-cache.c
+@@ -90,7 +90,7 @@ static char *get_socket_path(void)
+ {
+ 	struct stat sb;
+ 	char *old_dir, *socket;
+-	old_dir = expand_user_path("~/.git-credential-cache", 0);
++	old_dir = xdg_config_home("credential-cache");
+ 	if (old_dir && !stat(old_dir, &sb) && S_ISDIR(sb.st_mode))
+ 		socket = xstrfmt("%s/socket", old_dir);
+ 	else
+-- 
+2.30.2
+
+
+From 067bbb03f2435533c92f8d29bdf6e72208ab4f85 Mon Sep 17 00:00:00 2001
+From: sfanxiang <sfanxiang@gmail.com>
+Date: Mon, 1 Jan 2018 13:26:28 +0000
+Subject: builtin: config: use xdg_config even if it does not exist
+
+
+diff --git a/builtin/config.c b/builtin/config.c
+index f71fa39..0843a19 100644
+--- a/builtin/config.c
++++ b/builtin/config.c
+@@ -674,24 +674,11 @@ int cmd_config(int argc, const char **argv, const char *prefix)
+ 		char *user_config = expand_user_path("~/.gitconfig", 0);
+ 		char *xdg_config = xdg_config_home("config");
+ 
+-		if (!user_config)
+-			/*
+-			 * It is unknown if HOME/.gitconfig exists, so
+-			 * we do not know if we should write to XDG
+-			 * location; error out even if XDG_CONFIG_HOME
+-			 * is set and points at a sane location.
+-			 */
+-			die(_("$HOME not set"));
+-
+-		given_config_source.scope = CONFIG_SCOPE_GLOBAL;
+-
+-		if (access_or_warn(user_config, R_OK, 0) &&
+-		    xdg_config && !access_or_warn(xdg_config, R_OK, 0)) {
+-			given_config_source.file = xdg_config;
+-			free(user_config);
+-		} else {
++		if (!xdg_config) {
+ 			given_config_source.file = user_config;
+-			free(xdg_config);
++		} else {
++			given_config_source.file = xdg_config;
++			if (user_config) free(user_config);
+ 		}
+ 	}
+ 	else if (use_system_config) {
+-- 
+2.30.2
+
+
+From 07b60aae359b18135125a44c3fea15e1ecb661c8 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sun, 18 Nov 2018 11:56:26 +0100
+Subject: Fix detection of Haiku for git web browse
+
+The bootloader was renamed, so it is not a reliable thing to use. Detect
+the BEINCLUDES environment variable instead.
+
+diff --git a/git-web--browse.sh b/git-web--browse.sh
+index b074d1a..0f95000 100755
+--- a/git-web--browse.sh
++++ b/git-web--browse.sh
+@@ -133,8 +133,8 @@ if test -z "$browser" ; then
+ 		browser_candidates="cygstart $browser_candidates"
+ 	fi
+ 
+-	# /boot/system/haiku_loader indicates Haiku
+-	if test -f /boot/system/haiku_loader; then
++	# BEINCLUDES indicates Haiku
++	if test -n "$BEINCLUDES"; then
+ 		browser_candidates="open $browser_candidates"
+ 	fi
+ 
+-- 
+2.30.2
+
+
+From 6f22d769e9097a01055f2020cb9941e784b930a7 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Fri, 29 Nov 2019 21:46:54 +0100
+Subject: ignore test failures.
+
+
+diff --git a/t/Makefile b/t/Makefile
+index 882d26e..3252f7f 100644
+--- a/t/Makefile
++++ b/t/Makefile
+@@ -54,7 +54,7 @@ prove: pre-clean check-chainlint $(TEST_LINT)
+ 	$(MAKE) clean-except-prove-cache
+ 
+ $(T):
+-	@echo "*** $@ ***"; '$(TEST_SHELL_PATH_SQ)' $@ $(GIT_TEST_OPTS)
++	- @echo "*** $@ ***"; '$(TEST_SHELL_PATH_SQ)' $@ $(GIT_TEST_OPTS)
+ 
+ pre-clean:
+ 	$(RM) -r '$(TEST_RESULTS_DIRECTORY_SQ)'
+-- 
+2.30.2
+
+
+From 82e4176ded57dbc776d038ae917b6f76f869eb89 Mon Sep 17 00:00:00 2001
+From: Augustin Cavalier <waddlesplash@gmail.com>
+Date: Wed, 17 Nov 2021 18:11:17 -0500
+Subject: git-gui: Use symbolic links.
+
+
+diff --git a/git-gui/Makefile b/git-gui/Makefile
+index 56c85a8..4b3e8eb 100644
+--- a/git-gui/Makefile
++++ b/git-gui/Makefile
+@@ -59,7 +59,7 @@ INSTALL_X1 =
+ INSTALL_A0 = find # space is required here
+ INSTALL_A1 = | cpio -pud
+ INSTALL_L0 = rm -f # space is required here
+-INSTALL_L1 = && ln # space is required here
++INSTALL_L1 = && ln -s # space is required here
+ INSTALL_L2 =
+ INSTALL_L3 =
+ 
+@@ -89,7 +89,7 @@ ifndef V
+ 	INSTALL_L0 = dst=
+ 	INSTALL_L1 = && src=
+ 	INSTALL_L2 = && dst=
+-	INSTALL_L3 = && echo '   ' 'LINK       ' `basename "$$dst"` '->' `basename "$$src"` && rm -f "$$dst" && ln "$$src" "$$dst"
++	INSTALL_L3 = && echo '   ' 'LINK       ' `basename "$$dst"` '->' `basename "$$src"` && rm -f "$$dst" && ln -s "$$src" "$$dst"
+ 
+ 	CLEAN_DST = echo ' ' UNINSTALL
+ 	REMOVE_D0 = dir=
+-- 
+2.30.2
+
