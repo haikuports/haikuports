@@ -1,6 +1,8 @@
 #!/bin/perl
+# Copyright 2021, Joachim Mairböck <j.mairboeck@gmail.com>
+# Distributed under the terms of the MIT license.
 
-# Helper script to generate the package metadata definitions for the texlive_texmf subpackages
+# Helper script to generate the package metadata definitions for the texlive subpackages
 # usage:
 # 	perl -I $sourceDir/tlpkg createSubpackageInfos.pl <tlpdbroot> > subpackageInfos.recipe
 #
@@ -8,7 +10,7 @@
 #		It also needs the texmf-dist directory to work.
 #		After these have been symlinked to $sourceDir (by the BUILD function in the recipe),
 #		$sourceDir can be used inside the haikuporter chroot.
-#		Alternatively, after the installation of the texlive_texmf package,
+#		Alternatively, after the installation of the texlive package,
 #		/boot/system/data/texlive can be used.
 #
 # This script uses the TeXLive perl modules, therefore it needs $sourceDir/tlpkg in @INC.

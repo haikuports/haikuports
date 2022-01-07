@@ -1,6 +1,8 @@
 #!/bin/perl
+# Copyright 2021, Joachim Mairböck <j.mairboeck@gmail.com>
+# Distributed under the terms of the MIT license.
 
-# Helper script to get the packageEntries for texlive_texmf subpackages
+# Helper script to get the packageEntries for texlive subpackages
 # usage:
 # 	perl -I $sourceDir/tlpkg getPackageEntries.pl <prefix> <collectionname>
 #
