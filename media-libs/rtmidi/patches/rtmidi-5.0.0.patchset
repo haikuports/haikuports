@@ -1,0 +1,532 @@
+From 75d2ff6da72f1cfdb6f0c725b0661b01116f6443 Mon Sep 17 00:00:00 2001
+From: Cacodemon345 <wahil1976@outlook.com>
+Date: Sun, 13 Mar 2022 23:56:17 +0600
+Subject: Add Haiku MidiKit2 backend
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 616fdaf..62801c3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -40,11 +40,14 @@ set(RTMIDI_TARGETNAME_UNINSTALL "uninstall" CACHE STRING "Name of 'uninstall' bu
+ 
+ # API Options
+ option(RTMIDI_API_JACK "Compile with JACK support." ${HAVE_JACK})
+-if(UNIX AND NOT APPLE)
++if(UNIX AND NOT APPLE AND NOT HAIKU)
+   option(RTMIDI_API_ALSA "Compile with ALSA support." ON)
+ endif()
+ option(RTMIDI_API_WINMM "Compile with WINMM support." ${WIN32})
+ option(RTMIDI_API_CORE "Compile with CoreMIDI support." ${APPLE})
++if (HAIKU)
++  option(RTMIDI_API_BMIDI2 "Compile with MidiKit2 support." ${HAIKU})
++endif()
+ 
+ # Add -Wall if possible
+ if (CMAKE_COMPILER_IS_GNUCXX)
+@@ -151,11 +154,21 @@ if(RTMIDI_API_CORE)
+   list(APPEND LINKFLAGS "-Wl,-F/Library/Frameworks")
+ endif()
+ 
++# MidiKit2
++if(RTMIDI_API_BMIDI2)
++    list(APPEND API_DEFS "-D__HAIKU_BMIDI2__")
++    list(APPEND LINKLIBS midi2)
++endif()
++
+ # pthread
+ if (NEED_PTHREAD)
+-  find_package(Threads REQUIRED
+-    CMAKE_THREAD_PREFER_PTHREAD
+-    THREADS_PREFER_PTHREAD_FLAG)
++  if (HAIKU)
++      find_package(Threads REQUIRED)
++  else()
++      find_package(Threads REQUIRED
++        CMAKE_THREAD_PREFER_PTHREAD
++        THREADS_PREFER_PTHREAD_FLAG)
++  endif()
+   list(APPEND PUBLICLINKLIBS Threads::Threads)
+ endif()
+ 
+@@ -251,7 +264,11 @@ install(TARGETS ${LIB_TARGETS}
+ export(PACKAGE RtMidi)
+ 
+ # Set installation path for CMake files.
+-set(RTMIDI_CMAKE_DESTINATION share/rtmidi)
++if (HAIKU)
++    set(RTMIDI_CMAKE_DESTINATION lib/cmake/rtmidi)
++else()
++    set(RTMIDI_CMAKE_DESTINATION share/rtmidi)
++endif()
+ 
+ # Export library target (build-tree).
+ export(EXPORT RtMidiTargets
+diff --git a/RtMidi.cpp b/RtMidi.cpp
+index 6a1c89e..66fd061 100644
+--- a/RtMidi.cpp
++++ b/RtMidi.cpp
+@@ -40,6 +40,13 @@
+ #include "RtMidi.h"
+ #include <sstream>
+ 
++#if defined(__HAIKU_BMIDI2__)
++#include <os/MidiKit.h>
++#include <os/midi2/MidiConsumer.h>
++#include <os/midi2/MidiProducer.h>
++#include <os/midi2/MidiRoster.h>
++#endif
++
+ #if (TARGET_OS_IPHONE == 1)
+ 
+     #define AudioGetCurrentHostTime CAHostTimeBase::GetCurrentTime
+@@ -77,7 +84,7 @@
+ //
+ // **************************************************************** //
+ 
+-#if !defined(__LINUX_ALSA__) && !defined(__UNIX_JACK__) && !defined(__MACOSX_CORE__) && !defined(__WINDOWS_MM__) && !defined(TARGET_IPHONE_OS) && !defined(__WEB_MIDI_API__)
++#if !defined(__LINUX_ALSA__) && !defined(__UNIX_JACK__) && !defined(__MACOSX_CORE__) && !defined(__WINDOWS_MM__) && !defined(TARGET_IPHONE_OS) && !defined(__WEB_MIDI_API__) && !defined(__HAIKU_BMIDI2__)
+   #define __RTMIDI_DUMMY__
+ #endif
+ 
+@@ -305,6 +312,63 @@ class MidiOutWeb: public MidiOutApi
+ 
+ #endif
+ 
++#if defined(__HAIKU_BMIDI2__)
++class MidiInBMidi : public MidiInApi
++{
++private:
++ class BMidiInputConsumer : public BMidiLocalConsumer
++ {
++  friend class MidiInBMidi;
++  BMidiProducer* connectedProducer = nullptr;
++  MidiInBMidi* midiCallback = nullptr;
++ public:
++  BMidiInputConsumer(const char* name, MidiInBMidi* parent);
++ protected:
++  void Data(uchar *data, size_t length, bool atomic, bigtime_t time) override;
++ } *consumer;
++ bool virtualPortOpen = false;
++
++public:
++ MidiInBMidi(const std::string &/*clientName*/, unsigned int queueSizeLimit );
++ ~MidiInBMidi( void );
++ RtMidi::Api getCurrentApi( void ) { return RtMidi::HAIKU_BMIDI2; };
++ void openPort( unsigned int portNumber, const std::string &portName );
++ void openVirtualPort( const std::string &portName );
++ void closePort( void );
++ void setClientName( const std::string &clientName );
++ void setPortName( const std::string &portName );
++ unsigned int getPortCount( void );
++ std::string getPortName( unsigned int portNumber );
++
++protected:
++ void initialize( const std::string& clientName );
++};
++
++class MidiOutBMidi: public MidiOutApi
++{
++  BMidiLocalProducer* producer = nullptr;
++  BMidiConsumer* connectedConsumer = nullptr;
++  bool virtualPortOpen = false;
++
++ public:
++  MidiOutBMidi( const std::string &clientName );
++  ~MidiOutBMidi( void );
++  RtMidi::Api getCurrentApi( void ) { return RtMidi::HAIKU_BMIDI2; };
++  void openPort( unsigned int portNumber, const std::string &portName );
++  void openVirtualPort( const std::string &portName );
++  void closePort( void );
++  void setClientName( const std::string &clientName );
++  void setPortName( const std::string &portName );
++  unsigned int getPortCount( void );
++  std::string getPortName( unsigned int portNumber );
++  void sendMessage( const unsigned char *message, size_t size );
++
++ protected:
++  void initialize( const std::string& clientName );
++};
++
++#endif
++
+ #if defined(__RTMIDI_DUMMY__)
+ 
+ class MidiInDummy: public MidiInApi
+@@ -380,6 +444,7 @@ const char* rtmidi_api_names[][2] = {
+   { "winmm"       , "Windows MultiMedia" },
+   { "web"         , "Web MIDI API" },
+   { "dummy"       , "Dummy" },
++  { "midikit2"    , "Haiku MidiKit2" },
+ };
+ const unsigned int rtmidi_num_api_names =
+   sizeof(rtmidi_api_names)/sizeof(rtmidi_api_names[0]);
+@@ -402,6 +467,9 @@ extern "C" const RtMidi::Api rtmidi_compiled_apis[] = {
+ #if defined(__WEB_MIDI_API__)
+   RtMidi::WEB_MIDI_API,
+ #endif
++#if defined(__HAIKU_BMIDI2__)
++  RtMidi::HAIKU_BMIDI2,
++#endif
+ #if defined(__RTMIDI_DUMMY__)
+   RtMidi::RTMIDI_DUMMY,
+ #endif
+@@ -488,6 +556,10 @@ void RtMidiIn :: openMidiApi( RtMidi::Api api, const std::string &clientName, un
+     if ( api == WEB_MIDI_API )
+     rtapi_ = new MidiInWeb( clientName, queueSizeLimit );
+ #endif
++#if defined(__HAIKU_BMIDI2__)
++    if ( api == HAIKU_BMIDI2 )
++    rtapi_ = new MidiInBMidi( clientName, queueSizeLimit );
++#endif
+ #if defined(__RTMIDI_DUMMY__)
+   if ( api == RTMIDI_DUMMY )
+     rtapi_ = new MidiInDummy( clientName, queueSizeLimit );
+@@ -560,6 +632,10 @@ void RtMidiOut :: openMidiApi( RtMidi::Api api, const std::string &clientName )
+     if ( api == WEB_MIDI_API )
+     rtapi_ = new MidiOutWeb( clientName );
+ #endif
++#if defined(__HAIKU_BMIDI2__)
++    if ( api == HAIKU_BMIDI2 )
++    rtapi_ = new MidiOutBMidi( clientName );
++#endif
+ #if defined(__RTMIDI_DUMMY__)
+   if ( api == RTMIDI_DUMMY )
+     rtapi_ = new MidiOutDummy( clientName );
+@@ -3932,3 +4008,295 @@ void MidiOutWeb::initialize( const std::string& clientName )
+ }
+ 
+ #endif  // __WEB_MIDI_API__
++
++#ifdef __HAIKU_BMIDI2__
++MidiInBMidi::MidiInBMidi(const std::string& cname, unsigned int queueSizeLimit)
++    : MidiInApi(queueSizeLimit)
++{
++    initialize(cname);
++}
++
++void MidiInBMidi::initialize(const std::string &clientName)
++{
++    consumer = new BMidiInputConsumer(nullptr, this);
++    if (consumer->IsValid() == false)
++    {
++        consumer->Release();
++        error(RtMidiError::DRIVER_ERROR, "MidiInBMidi:::MidiInBMidi: Failed to create BMidiLocalConsumer object!");
++    }
++}
++
++void MidiInBMidi::setPortName(const std::string &portName)
++{
++    consumer->SetName(portName.data());
++}
++
++unsigned int MidiInBMidi::getPortCount()
++{
++    BMidiProducer* producer = nullptr;
++    int id = 0;
++    unsigned int i = 0;
++    while((producer = BMidiRoster::NextProducer(&id)) != nullptr)
++    {
++        producer->Release();
++        i++;
++    }
++    return i;
++}
++
++std::string MidiInBMidi::getPortName(unsigned int portNumber)
++{
++    BMidiProducer* producer = nullptr;
++    int id = 0;
++    unsigned int i = 0;
++    std::string p_name{""};
++    while((producer = BMidiRoster::NextProducer(&id)) != nullptr)
++    {
++        if (portNumber == i)
++        {
++            p_name = producer->Name();
++            producer->Release();
++            break;
++        }
++        producer->Release();
++        i++;
++    }
++    return p_name;
++}
++
++void MidiInBMidi::setClientName(const std::string &clientName)
++{
++    error(RtMidiError::WARNING,
++        "MidiInBMidi::setClientName: this function is not implemented for the "
++        "HAIKU_BMIDI2 API!");
++}
++
++void MidiInBMidi::openPort(unsigned int portNumber, const std::string &portName)
++{
++    if (getPortCount() < 1)
++    {
++        error(RtMidiError::NO_DEVICES_FOUND, "MidiInBMidi::openPort: no MIDI input sources found!");
++    }
++    setPortName(portName);
++    BMidiProducer* producer = nullptr;
++    int id = 0;
++    unsigned int i = 0;
++    bool drivererror = true;
++    while((producer = BMidiRoster::NextProducer(&id)) != nullptr)
++    {
++        if (i == portNumber)
++        {
++            if (producer->Connect(consumer) != B_OK)
++            {
++                producer->Release();
++                error(RtMidiError::NO_DEVICES_FOUND, "MidiInBMidi::openPort: Midi2Kit error making port connection.");
++            }
++            consumer->connectedProducer = producer;
++            drivererror = false;
++            break;
++        }
++        producer->Release();
++        i++;
++    }
++    if (drivererror)
++    {
++        std::ostringstream ost;
++        ost << "MidiInBMidi::openPort: the 'portNumber' argument (" << portNumber << ") is invalid.";
++        error(RtMidiError::DRIVER_ERROR, ost.str());
++    }
++}
++
++void MidiInBMidi::closePort()
++{
++    if (consumer->connectedProducer)
++    {
++        consumer->connectedProducer->Disconnect(consumer);
++        consumer->connectedProducer->Release();
++        consumer->connectedProducer = nullptr;
++    }
++}
++
++void MidiInBMidi::openVirtualPort(const std::string &portName)
++{
++    consumer->SetName(portName.data());
++    consumer->Register();
++    virtualPortOpen = true;
++}
++
++MidiInBMidi::~MidiInBMidi()
++{
++    if (consumer->connectedProducer)
++    {
++        consumer->connectedProducer->Disconnect(consumer);
++        consumer->connectedProducer->Release();
++        consumer->connectedProducer = nullptr;
++    }
++    if (virtualPortOpen) consumer->Unregister();
++    consumer->Release();
++}
++
++MidiInBMidi::BMidiInputConsumer::BMidiInputConsumer(const char* name, MidiInBMidi* parent)
++{
++    midiCallback = parent;
++}
++
++void MidiInBMidi::BMidiInputConsumer::Data(uchar *data, size_t length, bool atomic, bigtime_t time)
++{
++    snooze_until(time, B_SYSTEM_TIMEBASE);
++    if (time == 0) time = system_time();
++    static bigtime_t deltatime = time;
++    if (atomic)
++    {
++        if (((midiCallback->inputData_.ignoreFlags & 0x1) && data[0] == 0xF0)
++           || ((midiCallback->inputData_.ignoreFlags & 0x2) && (data[0] == 0xF1 || data[0] == 0xF8))
++           || ((midiCallback->inputData_.ignoreFlags & 0x4) && (data[0] == 0xFE)))
++        {
++            return BMidiLocalConsumer::Data(data, length, atomic, time);
++        }
++        std::vector<unsigned char> midiBytes(data, &data[length]);
++        if (midiCallback->inputData_.usingCallback)
++            midiCallback->inputData_.userCallback((time - deltatime) / 1000000., &midiBytes, midiCallback->inputData_.userData);
++        else
++        {
++            MidiInApi::MidiMessage msg;
++            msg.bytes = std::vector<unsigned char>(data, &data[length]);
++            msg.timeStamp = (time - deltatime) / 1000000.;
++            if (!midiCallback->inputData_.queue.push(msg))
++            {
++                std::cerr << "\nMidiInBMidi: message queue limit reached!!\n\n";
++            }
++        }
++        deltatime = time;
++    }
++    return BMidiLocalConsumer::Data(data, length, atomic, time);
++}
++
++MidiOutBMidi::MidiOutBMidi(const std::string& clientName)
++{
++    initialize(clientName);
++}
++
++void MidiOutBMidi::initialize(const std::string &clientName)
++{
++    producer = new BMidiLocalProducer;
++    if (producer->IsValid() == false)
++    {
++        producer->Release();
++        error(RtMidiError::DRIVER_ERROR, "MidiOutBMidi:::MidiOutBMidi: Failed to create BMidiLocalProducer object!");
++    }
++}
++
++void MidiOutBMidi::openVirtualPort(const std::string &portName)
++{
++    producer->SetName(portName.data());
++    producer->Register();
++}
++
++void MidiOutBMidi::setPortName(const std::string &portName)
++{
++    producer->SetName(portName.data());
++}
++
++unsigned int MidiOutBMidi::getPortCount()
++{
++    BMidiConsumer* consumer = nullptr;
++    int id = 0;
++    unsigned int i = 0;
++    while((consumer = BMidiRoster::NextConsumer(&id)) != nullptr)
++    {
++        consumer->Release();
++        i++;
++    }
++    return i;
++}
++
++std::string MidiOutBMidi::getPortName(unsigned int portNumber)
++{
++    BMidiConsumer* consumer = nullptr;
++    int id = 0;
++    unsigned int i = 0;
++    std::string p_name{""};
++    while((consumer = BMidiRoster::NextConsumer(&id)) != nullptr)
++    {
++        if (portNumber == i)
++        {
++            p_name = consumer->Name();
++            consumer->Release();
++            break;
++        }
++        consumer->Release();
++        i++;
++    }
++    return p_name;
++}
++
++void MidiOutBMidi::setClientName(const std::string &clientName)
++{
++    error(RtMidiError::WARNING,
++        "MidiOutBMidi::setClientName: this function is not implemented for the "
++        "HAIKU_BMIDI2 API!");
++}
++
++void MidiOutBMidi::openPort(unsigned int portNumber, const std::string &portName)
++{
++    if (getPortCount() < 1)
++    {
++        error(RtMidiError::NO_DEVICES_FOUND, "MidiOutBMidi::openPort: no MIDI output destinations found!");
++    }
++    setPortName(portName);
++    BMidiConsumer* consumer = nullptr;
++    int id = 0;
++    unsigned int i = 0;
++    bool drivererror = true;
++    while((consumer = BMidiRoster::NextConsumer(&id)) != nullptr)
++    {
++        if (i == portNumber)
++        {
++            if (producer->Connect(consumer) != B_OK)
++            {
++                consumer->Release();
++                error(RtMidiError::DRIVER_ERROR, "MidiInBMidi::openPort: Midi2Kit error making port connection.");
++            }
++            connectedConsumer = consumer;
++            drivererror = false;
++            break;
++        }
++        consumer->Release();
++        i++;
++    }
++    if (drivererror)
++    {
++        std::ostringstream ost;
++        ost << "MidiOutBMidi::openPort: the 'portNumber' argument (" << portNumber << ") is invalid.";
++        error(RtMidiError::DRIVER_ERROR, ost.str());
++    }
++}
++
++void MidiOutBMidi::closePort()
++{
++    if (connectedConsumer)
++    {
++        producer->Disconnect(connectedConsumer);
++        connectedConsumer->Release();
++        connectedConsumer = nullptr;
++    }
++}
++
++MidiOutBMidi::~MidiOutBMidi()
++{
++    if (connectedConsumer)
++    {
++        producer->Disconnect(connectedConsumer);
++        connectedConsumer->Release();
++        connectedConsumer = nullptr;
++    }
++    if (virtualPortOpen) producer->Unregister();
++    producer->Release();
++}
++
++void MidiOutBMidi::sendMessage(const unsigned char *message, size_t size)
++{
++    producer->SprayData((void*)message, size, true);
++}
++
++#endif // __HAIKU_BMIDI2__
+diff --git a/RtMidi.h b/RtMidi.h
+index a6f5b79..3e947da 100644
+--- a/RtMidi.h
++++ b/RtMidi.h
+@@ -144,6 +144,7 @@ class RTMIDI_DLL_PUBLIC RtMidi
+     WINDOWS_MM,     /*!< The Microsoft Multimedia MIDI API. */
+     RTMIDI_DUMMY,   /*!< A compilable but non-functional API. */
+     WEB_MIDI_API,   /*!< W3C Web MIDI API. */
++    HAIKU_BMIDI2,   /*!< Haiku MidiKit2 MIDI API. */
+     NUM_APIS        /*!< Number of values in this enum. */
+   };
+ 
+diff --git a/rtmidi_c.cpp b/rtmidi_c.cpp
+index 19f586e..4fc2eba 100644
+--- a/rtmidi_c.cpp
++++ b/rtmidi_c.cpp
+@@ -17,6 +17,8 @@ class StaticAssertions { StaticAssertions() {
+     ENUM_EQUAL( RTMIDI_API_UNIX_JACK,       RtMidi::UNIX_JACK );
+     ENUM_EQUAL( RTMIDI_API_WINDOWS_MM,      RtMidi::WINDOWS_MM );
+     ENUM_EQUAL( RTMIDI_API_RTMIDI_DUMMY,    RtMidi::RTMIDI_DUMMY );
++    ENUM_EQUAL( RTMIDI_API_WEB_MIDI_API,    RtMidi::WEB_MIDI_API );
++    ENUM_EQUAL( RTMIDI_API_HAIKU_BMIDI2,    RtMidi::HAIKU_BMIDI2 );
+ 
+     ENUM_EQUAL( RTMIDI_ERROR_WARNING,            RtMidiError::WARNING );
+     ENUM_EQUAL( RTMIDI_ERROR_DEBUG_WARNING,      RtMidiError::DEBUG_WARNING );
+diff --git a/rtmidi_c.h b/rtmidi_c.h
+index efbf977..0325876 100644
+--- a/rtmidi_c.h
++++ b/rtmidi_c.h
+@@ -65,6 +65,8 @@ enum RtMidiApi {
+     RTMIDI_API_UNIX_JACK,      /*!< The Jack Low-Latency MIDI Server API. */
+     RTMIDI_API_WINDOWS_MM,     /*!< The Microsoft Multimedia MIDI API. */
+     RTMIDI_API_RTMIDI_DUMMY,   /*!< A compilable but non-functional API. */
++    RTMIDI_API_WEB_MIDI_API,   /*!< W3C Web MIDI API. */
++    RTMIDI_API_HAIKU_BMIDI2,   /*!< Haiku MidiKit2 MIDI API. */
+     RTMIDI_API_NUM             /*!< Number of values in this enum. */
+ };
+ 
+-- 
+2.30.2
+
