@@ -1,0 +1,147 @@
+SUMMARY="H.265/HEVC video encoder"
+DESCRIPTION="x265 is a full-fledged video encoder for the HEVC video format \
+(also known as High Efficiency Video Coding, ISO/IEC 23008-2, MPEG-H Part 2, \
+and ITU-T H.265). HEVC is a direct successor to the earlier H.264/MPEG-4 AVC \
+video compression standard, aiming to achieve the same video quality at half \
+the bit rate. x265 is a free software project implementing that standard."
+HOMEPAGE="http://x265.org/"
+COPYRIGHT="2013-2021 x265 Project"
+LICENSE="GNU GPL v2"
+REVISION="1"
+SOURCE_URI="https://bitbucket.org/multicoreware/x265_git/get/$portVersion.tar.gz"
+CHECKSUM_SHA256="5ca3403c08de4716719575ec56c686b1eb55b078c0fe50a064dcf1ac20af1618"
+# BitBucket sucks
+SOURCE_DIR="multicoreware-x265_git-f0c1022b6be1"
+PATCHES="x265-$portVersion.patchset"
+
+ARCHITECTURES="all !x86_gcc2"
+SECONDARY_ARCHITECTURES="!x86_gcc2 x86"
+
+libVersion="199"
+libVersionCompat="$libVersion compat >= ${libVersion}"
+
+PROVIDES="
+	x265$secondaryArchSuffix = $portVersion
+	lib:libx265$secondaryArchSuffix = $libVersionCompat
+	"
+REQUIRES="
+	haiku$secondaryArchSuffix
+	"
+
+PROVIDES_devel="
+	x265${secondaryArchSuffix}_devel = $portVersion
+	devel:libx265$secondaryArchSuffix = $libVersionCompat
+	"
+REQUIRES_devel="
+	x265$secondaryArchSuffix == $portVersion base
+	"
+
+PROVIDES_bin="
+	x265${secondaryArchSuffix}_bin = $portVersion
+	cmd:x265 = $portVersion
+	"
+REQUIRES_bin="
+	x265$secondaryArchSuffix == $portVersion base
+	haiku$secondaryArchSuffix
+	"
+
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel
+	"
+BUILD_PREREQUIRES="
+	cmd:cmake
+	cmd:gcc$secondaryArchSuffix
+#	cmd:git
+	cmd:make
+	cmd:nasm
+	"
+
+defineDebugInfoPackage x265$secondaryArchSuffix \
+ 	"$libDir"/libx265.so.$libVersion \
+ 	"$(getPackagePrefix bin)/$relativeBinDir"/x265$secondaryArchSuffix
+
+BUILD()
+{
+	# Can't put this in SOURCE_DIR as cmake uses a file in the root
+	# directory to find out the version of x265
+	cd source
+
+# By default, the library and the encoder is configured for only one output bit
+# depth. Meaning, one has to rebuild libx265 if (s)he wants to produce HEVC
+# files with a different bit depth, which is annoying. However, upstream
+# supports proper namespacing for 8bits, 10bits & 12bits HEVC and linking all
+# that together so that the resulting library can produce all three of them
+# instead of only one.
+# The API requires the bit depth parameter, so that libx265 can then chose which
+# variant of the encoder to use.
+# To achieve this, we have to build one (static) library for each non-main
+# variant, and link it into the main library.
+# Upstream documents using the 8bit variant as main library, hence we do not
+# allow disabling it: "main" *MUST* come last in the following list.
+
+	# 12 bit #################
+	echo "Configuring variant: 12 bit"
+	cmake \
+		-S. \
+		-B build/12bit \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DHIGH_BIT_DEPTH=ON \
+		-DEXPORT_C_API=OFF \
+		-DENABLE_SHARED=OFF \
+		-DENABLE_CLI=OFF \
+		-DMAIN12=ON \
+		-DENABLE_ASSEMBLY=OFF
+	make $jobArgs -C build/12bit
+	cp ./build/12bit/libx265.a ./libx265_12b.a
+
+	#10 bit #################
+	echo "Configuring variant: 10 bit"
+	cmake \
+		-S. \
+		-B build/10bit \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DHIGH_BIT_DEPTH=ON \
+		-DEXPORT_C_API=OFF \
+		-DENABLE_SHARED=OFF \
+		-DENABLE_CLI=OFF \
+		-DENABLE_HDR10_PLUS=ON \
+		-DENABLE_ASSEMBLY=OFF
+	make $jobArgs -C build/10bit
+	cp ./build/10bit/libx265.a ./libx265_10b.a
+	cp ./build/10bit/libhdr10plus.a ./libhdr10plus.a
+
+	#8 bit #################
+	echo "Configuring variant: 8 bit"
+	cmake \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DGIT_ARCHETYPE=1 \
+		-DENABLE_SHARED=ON \
+		-DEXTRA_LIB="libx265_12b.a;libx265_10b.a;libhdr10plus.a" \
+		-DEXTRA_LINK_FLAGS=-L. \
+		-DLINKED_10BIT=ON \
+		-DLINKED_12BIT=ON \
+		-DCMAKE_INSTALL_PREFIX:PATH=$prefix	\
+		-DLIB_INSTALL_DIR:PATH=$relativeLibDir	\
+		-DBIN_INSTALL_DIR:PATH=$relativeBinDir	\
+		-DINCLUDE_INSTALL_DIR:PATH=$relativeIncludeDir
+	make $jobArgs
+}
+
+INSTALL()
+{
+	cd source
+	make install
+
+	rm -f $libDir/libx265.a
+
+	prepareInstalledDevelLibs libx265
+	fixPkgconfig
+
+	# bin package
+	packageEntries bin \
+		$binDir
+
+	# devel package
+	packageEntries devel \
+		$developDir
+}
