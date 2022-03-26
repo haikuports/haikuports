@@ -18,16 +18,20 @@ SOURCE_DIR="install-tl-20210324"
 SOURCE_DIR_2="texlive-$fullVersion-texmf"
 SOURCE_DIR_3="texlive-$fullVersion-extra"
 ADDITIONAL_FILES="
+	createSubpackageInfos.pl
+	getPackageEntries.pl
+	subpackageInfos.recipe
 	texlive.profile
 	texlive_postinstall.sh
+	texlive_update.sh
 	"
 
-POST_INSTALL_SCRIPTS="$relativePostInstallDir/texlive_postinstall.sh"
 ARCHITECTURES="?any"
 DISABLE_SOURCE_PACKAGE="yes"
 
 PROVIDES="
 	texlive = $portVersion
+	cmd:texlive_update.sh
 	"
 REQUIRES="
 	haiku
@@ -35,12 +39,35 @@ REQUIRES="
 	cmd:kpsewhich
 	"
 
-PROVIDES_doc="
-	texlive_doc = $portVersion
+SUMMARY_full="Metapackage for all TeXLive collections"
+PROVIDES_full="
+	texlive_full = $portVersion
 	"
-REQUIRES_doc="
-	cmd:kpsewhich
+
+SUMMARY_full_doc="Metapackage for all TeXLive collections (documentation)"
+PROVIDES_full_doc="
+	texlive_full_doc = $portVersion
 	"
+
+SUMMARY_full_source="Metapackage for all TeXLive collections (source files)"
+PROVIDES_full_source="
+	texlive_full_source = $portVersion
+	"
+
+declare -a subpackages
+
+# workaround for $portDir not being set correctly (or being empty)
+# $workDir is not set when parsing recipes or during the PATCH function (outside the chroot), so use $portBaseDir instead.
+# $portBaseDir can't be used when building the recipe because it points outside the chroot.
+# In this case the (empty) $portDir is okay though.
+if [ "${workDir-unset}" = unset -o "$recipeAction" = PATCH ]; then
+	portDir=$portBaseDir
+fi
+
+# note: this doesn't work (would need extracted and prepared sources already, after the BUILD function)
+# $(perl -I $sourceDir/tlpkg $portDir/additional-files/createSubpackageInfos.pl $sourceDir)
+# source the pregenerated subpackage infos instead
+source $portDir/additional-files/subpackageInfos.recipe
 
 BUILD_REQUIRES="
 	haiku_devel
@@ -52,6 +79,7 @@ BUILD_PREREQUIRES="
 
 GLOBAL_WRITABLE_FILES="
 	settings/texlive/ls-R auto-merge
+	var/texlive/fonts/conf/texlive-fontconfig.conf auto-merge
 	var/texlive/ls-R auto-merge
 	var/texlive/tex/generic/config/language.dat auto-merge
 	var/texlive/tex/generic/config/language.dat.lua auto-merge
@@ -166,7 +194,13 @@ GLOBAL_WRITABLE_FILES="
 	var/texlive/web2c/xetex/xetex.log
 	"
 
-fetchTexLiveInstaller()
+PATCH() {
+	sed -i "s|\`kpsewhich -var-value=SELFAUTOPARENT\`|\"$dataDir/texlive\"|" $sourceDir/tlpkg/TeXLive/TLUtils.pm
+	sed -i "s|\`kpsewhich -var-value=FC_CACHEDIR\`|\"$sharedStateDir/texlive/fonts/cache\"|" $sourceDir3/tlpkg/tlpostcode/xetex.pl
+	sed -i "s|\`kpsewhich -var-value=FONTCONFIG_PATH\`|\"$sharedStateDir/texlive/fonts/conf\"|" $sourceDir3/tlpkg/tlpostcode/xetex.pl
+}
+
+BUILD()
 {
 	# Put the texmf-dist into the correct location
 	rm -rv texmf-dist || true
@@ -176,14 +210,14 @@ fetchTexLiveInstaller()
 
 	if [ $targetArchitecture = x86_gcc2 ] || [ $targetArchitecture = x86 ]; then
 		if [ ! -e bin/i386-haiku ] ; then
-			mkdir -p bin
-			ln -s /boot/system/bin bin/i386-haiku
+			mkdir -pv bin
+			ln -sv /boot/system/bin bin/i386-haiku
 		fi
 
 	else
 		if [ ! -e bin/${targetArchitecture}-haiku ] ; then
-			mkdir -p bin
-			ln -s /boot/system/bin bin/${targetArchitecture}-haiku
+			mkdir -pv bin
+			ln -sv /boot/system/bin bin/${targetArchitecture}-haiku
 		fi
 	fi
 
@@ -194,15 +228,8 @@ fetchTexLiveInstaller()
 	cp -v $sourceDir3/{README{,.usergroups},{index,doc}.html} .
 }
 
-PATCH() {
-	sed -i "s|\`kpsewhich -var-value=SELFAUTOPARENT\`|\"$dataDir/texlive\"|" $sourceDir/tlpkg/TeXLive/TLUtils.pm
-	sed -i "s|\`kpsewhich -var-value=FC_CACHEDIR\`|\"$sharedStateDir/texlive/fonts/cache\"|" $sourceDir3/tlpkg/tlpostcode/xetex.pl
-	sed -i "s|\`kpsewhich -var-value=FONTCONFIG_PATH\`|\"$sharedStateDir/texlive/fonts/conf\"|" $sourceDir3/tlpkg/tlpostcode/xetex.pl
-}
-
 INSTALL()
 {
-	fetchTexLiveInstaller
 	export TEXLIVE_INSTALL_PREFIX=$dataDir/texlive
 	export TEXLIVE_INSTALL_TEXMFSYSVAR=$sharedStateDir/texlive
 	export TEXLIVE_INSTALL_TEXMFSYSCONFIG=$sysconfDir/texlive
@@ -230,18 +257,18 @@ INSTALL()
 	# replace it with the known working version from the main texlive_core package
 	cp -f /boot/system/data/texmf-dist/web2c/texmf.cnf $dataDir/texlive/texmf-dist/web2c/texmf.cnf
 
-	# remove useless libtool files and other unneeded files
-	rm -f $libDir/*.la
-
 	rm -rf $dataDir/texlive/bin
-	rm -f $dataDir/texlive/install-tl*
 
-	mkdir -p $postInstallDir
-	install -t $postInstallDir -m 755 $portDir/additional-files/texlive_postinstall.sh
+	mkdir -p $binDir
+	install -t $binDir -m 755 $portDir/additional-files/texlive_update.sh
 
-	# texmf_doc package
-	packageEntries doc \
-		$dataDir/texlive/texmf-dist/doc
-
-	# exit 1
+	for subpackage in ${subpackages[@]}; do
+		packageEntries $subpackage \
+			$(perl -I $sourceDir/tlpkg $portDir/additional-files/getPackageEntries.pl $dataDir/texlive/ $subpackage)
+		if [[ $subpackage != *_* ]]; then # ignore subpackages with a suffix (doc or source)
+			mkdir -p $(getPackagePrefix $subpackage)/$relativePostInstallDir
+			install -t $(getPackagePrefix $subpackage)/$relativePostInstallDir \
+				-m 755 $portDir/additional-files/texlive_postinstall.sh
+		fi
+	done
 }
