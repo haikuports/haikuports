@@ -1,0 +1,187 @@
+From c8ec7984fa9f647a70a22dfa396194e5f633b4b8 Mon Sep 17 00:00:00 2001
+From: "Georgi D. Sotirov" <gdsotirov@gmail.com>
+Date: Wed, 5 May 2021 14:16:46 +0300
+Subject: Add inline with SNAPPY_ATTRIBUTE_ALWAYS_INLINE
+
+Add inline with SNAPPY_ATTRIBUTE_ALWAYS_INLINE on AdvanceToNextTag to
+fix the following compilation errors and a warning with GCC:
+
+[  2%] Building CXX object CMakeFiles/snappy.dir/snappy.cc.o
+/usr/bin/c++   -DHAVE_CONFIG_H -Dsnappy_EXPORTS
+-I/tmp/snappy-1.1.9/build -I/tmp/snappy-1.1.9  -O3
+-march=i586 -mtune=i686 -Wall -Wextra -fno-exceptions -fno-rtti -O3
+-DNDEBUG -fPIC   -std=c++11 -o CMakeFiles/snappy.dir/snappy.cc.o -c
+/tmp/snappy-1.1.9/snappy.cc
+/tmp/snappy-1.1.9/snappy.cc:1017:8: warning: always_inline
+function might not be inlinable [-Wattributes]
+ size_t AdvanceToNextTag(const uint8_t** ip_p, size_t* tag) {
+        ^
+/tmp/snappy-1.1.9/snappy.cc: In function 'std::pair<const
+unsigned char*, int> snappy::DecompressBranchless(const uint8_t*, const
+uint8_t*, ptrdiff_t, T, ptrdiff_t) [with T = char*; uint8_t = unsigned
+char; ptrdiff_t = int]':
+/tmp/snappy-1.1.9/snappy.cc:1017:8: error: inlining failed in
+call to always_inline 'size_t snappy::AdvanceToNextTag(const uint8_t**,
+size_t*)': function body can be overwritten at link time
+/tmp/snappy-1.1.9/snappy.cc:1097:53: error: called from here
+         size_t tag_type = AdvanceToNextTag(&ip, &tag);
+                                                     ^
+/tmp/snappy-1.1.9/snappy.cc:1017:8: error: inlining failed in
+call to always_inline 'size_t snappy::AdvanceToNextTag(const uint8_t**,
+size_t*)': function body can be overwritten at link time
+ size_t AdvanceToNextTag(const uint8_t** ip_p, size_t* tag) {
+        ^
+/tmp/snappy-1.1.9/snappy.cc:1097:53: error: called from here
+         size_t tag_type = AdvanceToNextTag(&ip, &tag);
+                                                     ^
+/tmp/snappy-1.1.9/snappy.cc:1017:8: error: inlining failed in
+call to always_inline 'size_t snappy::AdvanceToNextTag(const uint8_t**,
+size_t*)': function body can be overwritten at link time
+ size_t AdvanceToNextTag(const uint8_t** ip_p, size_t* tag) {
+        ^
+/tmp/snappy-1.1.9/snappy.cc:1097:53: error: called from here
+         size_t tag_type = AdvanceToNextTag(&ip, &tag);
+                                                     ^
+CMakeFiles/snappy.dir/build.make:137: recipe for target
+'CMakeFiles/snappy.dir/snappy.cc.o' failed
+
+Just like with other functions using SNAPPY_ATTRIBUTE_ALWAYS_INLINE
+macro (i.e. __attribute__((always_inline)) ) it is necessary to use C++
+inline specifier.
+
+diff --git a/snappy.cc b/snappy.cc
+index 79dc0e8..51157be 100644
+--- a/snappy.cc
++++ b/snappy.cc
+@@ -1014,7 +1014,7 @@ void MemMove(ptrdiff_t dst, const void* src, size_t size) {
+ }
+ 
+ SNAPPY_ATTRIBUTE_ALWAYS_INLINE
+-size_t AdvanceToNextTag(const uint8_t** ip_p, size_t* tag) {
++inline size_t AdvanceToNextTag(const uint8_t** ip_p, size_t* tag) {
+   const uint8_t*& ip = *ip_p;
+   // This section is crucial for the throughput of the decompression loop.
+   // The latency of an iteration is fundamentally constrained by the
+-- 
+2.30.2
+
+
+From 43f605eed88d92a3efafe63d6983c212cc362c2f Mon Sep 17 00:00:00 2001
+From: Danilo Spinella <danilo.spinella@suse.com>
+Date: Fri, 9 Jul 2021 16:57:35 +0200
+Subject: Add a switch to use system gtest and benchmark
+
+Allow to use the gtest and benchmark libraries from the system.
+Use pkg-config to check that the libraries are installed and to
+add the correct cflags/link flags.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 672561e..eb2a743 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -90,6 +90,14 @@ option(SNAPPY_BUILD_TESTS "Build Snappy's own tests." ON)
+ 
+ option(SNAPPY_BUILD_BENCHMARKS "Build Snappy's benchmarks" ON)
+ 
++if(UNIX)
++  option(SNAPPY_USE_BUNDLED_GTEST "Build test using bundled googletest library" ON)
++  option(SNAPPY_USE_BUNDLED_BENCHMARK_LIB "Build benchmarks using bundled benchmark library" ON)
++else(UNIX)
++  set(SNAPPY_USE_BUNDLED_GTEST ON)
++  set(SNAPPY_USE_BUNDLED_BENCHMARK_LIB ON)
++endif(UNIX)
++
+ option(SNAPPY_FUZZING_BUILD "Build Snappy for fuzzing." OFF)
+ 
+ option(SNAPPY_REQUIRE_AVX "Target processors with AVX support." OFF)
+@@ -284,29 +292,40 @@ endif(SNAPPY_BUILD_TESTS OR SNAPPY_BUILD_BENCHMARKS)
+ if(SNAPPY_BUILD_TESTS)
+   enable_testing()
+ 
+-  # Prevent overriding the parent project's compiler/linker settings on Windows.
+-  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+-  set(install_gtest OFF)
+-  set(install_gmock OFF)
+-  set(build_gmock ON)
+-
+-  # This project is tested using GoogleTest.
+-  add_subdirectory("third_party/googletest")
+-
+-  # GoogleTest triggers a missing field initializers warning.
+-  if(SNAPPY_HAVE_NO_MISSING_FIELD_INITIALIZERS)
+-    set_property(TARGET gtest
+-        APPEND PROPERTY COMPILE_OPTIONS -Wno-missing-field-initializers)
+-    set_property(TARGET gmock
+-        APPEND PROPERTY COMPILE_OPTIONS -Wno-missing-field-initializers)
+-  endif(SNAPPY_HAVE_NO_MISSING_FIELD_INITIALIZERS)
++  if(SNAPPY_USE_BUNDLED_GTEST)
++    # Prevent overriding the parent project's compiler/linker settings on Windows.
++    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
++    set(install_gtest OFF)
++    set(install_gmock OFF)
++    set(build_gmock ON)
++
++    # This project is tested using GoogleTest.
++    add_subdirectory("third_party/googletest")
++
++    # GoogleTest triggers a missing field initializers warning.
++    if(SNAPPY_HAVE_NO_MISSING_FIELD_INITIALIZERS)
++      set_property(TARGET gtest
++          APPEND PROPERTY COMPILE_OPTIONS -Wno-missing-field-initializers)
++      set_property(TARGET gmock
++          APPEND PROPERTY COMPILE_OPTIONS -Wno-missing-field-initializers)
++    endif(SNAPPY_HAVE_NO_MISSING_FIELD_INITIALIZERS)
++  else(SNAPPY_USE_BUNDLED_GTEST)
++    find_package(PkgConfig)
++    pkg_search_module(GTEST REQUIRED gtest_main)
++  endif(SNAPPY_USE_BUNDLED_GTEST)
+ 
+   add_executable(snappy_unittest "")
+   target_sources(snappy_unittest
+     PRIVATE
+       "snappy_unittest.cc"
+   )
+-  target_link_libraries(snappy_unittest snappy_test_support gmock_main gtest)
++  target_link_libraries(snappy_unittest snappy_test_support)
++  if(SNAPPY_USE_BUNDLED_GTEST)
++    target_link_libraries(snappy_unittest gmock_main gtest)
++  else(SNAPPY_USE_BUNDLED_BENCHMARK_LIB)
++    target_link_libraries(snappy_unittest ${GTEST_LDFLAGS})
++    target_compile_options(snappy_unittest PUBLIC ${GTEST_CFLAGS})
++  endif(SNAPPY_USE_BUNDLED_GTEST)
+ 
+   add_test(
+     NAME snappy_unittest
+@@ -322,17 +341,28 @@ if(SNAPPY_BUILD_TESTS)
+ endif(SNAPPY_BUILD_TESTS)
+ 
+ if(SNAPPY_BUILD_BENCHMARKS)
++  if(NOT SNAPPY_USE_BUNDLED_BENCHMARK_LIB)
++    find_package(PkgConfig)
++    pkg_search_module(BENCHMARK REQUIRED benchmark)
++  endif(NOT SNAPPY_USE_BUNDLED_BENCHMARK_LIB)
++
+   add_executable(snappy_benchmark "")
+   target_sources(snappy_benchmark
+     PRIVATE
+       "snappy_benchmark.cc"
+   )
+   target_link_libraries(snappy_benchmark snappy_test_support benchmark_main)
++  if(NOT SNAPPY_USE_BUNDLED_BENCHMARK_LIB)
++    target_link_libraries(snappy_benchmark ${BENCHMARK_LDFLAGS})
++    target_compile_options(snappy_benchmark PUBLIC ${BENCHMARK_CFLAGS})
++  endif(NOT SNAPPY_USE_BUNDLED_BENCHMARK_LIB)
+ 
+   # This project uses Google benchmark for benchmarking.
+   set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+   set(BENCHMARK_ENABLE_EXCEPTIONS OFF CACHE BOOL "" FORCE)
+-  add_subdirectory("third_party/benchmark")
++  if(SNAPPY_USE_BUNDLED_BENCHMARK_LIB)
++    add_subdirectory("third_party/benchmark")
++  endif(SNAPPY_USE_BUNDLED_BENCHMARK_LIB)
+ endif(SNAPPY_BUILD_BENCHMARKS)
+ 
+ if(SNAPPY_FUZZING_BUILD)
+-- 
+2.30.2
+
