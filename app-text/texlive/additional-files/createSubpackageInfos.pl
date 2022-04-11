@@ -7,11 +7,13 @@
 # 	perl -I $sourceDir/tlpkg createSubpackageInfos.pl <tlpdbroot> > subpackageInfos.recipe
 #
 #	<tlpdbroot> is the root of the TeXLive package database, containing tlpkg/texlive.tlpdb.
-#		It also needs the texmf-dist directory to work.
-#		After these have been symlinked to $sourceDir (by the BUILD function in the recipe),
-#		$sourceDir can be used inside the haikuporter chroot.
-#		Alternatively, after the installation of the texlive package,
-#		/boot/system/data/texlive can be used.
+#		It also needs the texmf-dist directory to work. It is best to use the installed version,
+#		after install-tl is run, because the source version also contains platform specific
+#		packages not relevant for Haiku (the "wintools" collection). After the installation of the
+#		texlive package, use the directory /boot/system/data/texlive.
+#
+#	TODO: filter out platform specific packages so that the source version of texlive.tlpdb can
+#		also be used.
 #
 # This script uses the TeXLive perl modules, therefore it needs $sourceDir/tlpkg in @INC.
 

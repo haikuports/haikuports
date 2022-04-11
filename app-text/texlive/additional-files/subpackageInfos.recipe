@@ -284,7 +284,7 @@ REQUIRES_full_source+="
 	"
 subpackages+=(fontutils_source)
 SUMMARY_formatsextra="TeX Collection: Additional formats"
-DESCRIPTION_formatsextra="Collected TeX \`formats', i.e., large-scale macro packages designed to be dumped into .fmt files -- excluding the most common ones, such as latex and context, which have their own package(s). It also includes the Aleph engine and related Omega formats and packages."
+DESCRIPTION_formatsextra="Collected TeX \`formats', i.e., large-scale macro packages designed to be dumped into .fmt files -- excluding the most common ones, such as latex and context, which have their own package(s). It also includes the Aleph engine and related Omega formats and packages, and the HiTeX engine and related."
 PROVIDES_formatsextra="
 	texlive_formatsextra = $portVersion
 	"
@@ -300,7 +300,7 @@ REQUIRES_full+="
 POST_INSTALL_SCRIPTS_formatsextra="$relativePostInstallDir/texlive_postinstall.sh"
 subpackages+=(formatsextra)
 SUMMARY_formatsextra_doc="TeX Collection: Additional formats (documentation)"
-DESCRIPTION_formatsextra_doc="Collected TeX \`formats', i.e., large-scale macro packages designed to be dumped into .fmt files -- excluding the most common ones, such as latex and context, which have their own package(s). It also includes the Aleph engine and related Omega formats and packages."
+DESCRIPTION_formatsextra_doc="Collected TeX \`formats', i.e., large-scale macro packages designed to be dumped into .fmt files -- excluding the most common ones, such as latex and context, which have their own package(s). It also includes the Aleph engine and related Omega formats and packages, and the HiTeX engine and related."
 PROVIDES_formatsextra_doc="
 	texlive_formatsextra_doc = $portVersion
 	"
@@ -313,7 +313,7 @@ REQUIRES_full_doc+="
 	"
 subpackages+=(formatsextra_doc)
 SUMMARY_formatsextra_source="TeX Collection: Additional formats (source files)"
-DESCRIPTION_formatsextra_source="Collected TeX \`formats', i.e., large-scale macro packages designed to be dumped into .fmt files -- excluding the most common ones, such as latex and context, which have their own package(s). It also includes the Aleph engine and related Omega formats and packages."
+DESCRIPTION_formatsextra_source="Collected TeX \`formats', i.e., large-scale macro packages designed to be dumped into .fmt files -- excluding the most common ones, such as latex and context, which have their own package(s). It also includes the Aleph engine and related Omega formats and packages, and the HiTeX engine and related."
 PROVIDES_formatsextra_source="
 	texlive_formatsextra_source = $portVersion
 	"
