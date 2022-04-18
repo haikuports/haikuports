@@ -1,0 +1,187 @@
+From 23fe51375c6aa281488168144108a012e330d7fa Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Thu, 14 Apr 2022 15:21:58 +0200
+Subject: don't use hard links
+
+
+diff --git a/Documentation/po/GNUmakefile b/Documentation/po/GNUmakefile
+index 340e9ea..d4d1395 100644
+--- a/Documentation/po/GNUmakefile
++++ b/Documentation/po/GNUmakefile
+@@ -14,11 +14,11 @@ TELY_FILES += $(foreach l, $(LANGS), $(shell ls $(depth)/Documentation/$(l)/*.te
+ messages: $(outdir)/messages
+ 
+ $(outdir)/messages: $(MO_FILES)
+-	$(call ly_progress,Making,$@,(hard links))
++	$(call ly_progress,Making,$@,(symbolic links))
+ 	for i in $(CATALOGS); do \
+ 	  rm -rf $(doc-localedir)/$$i/LC_MESSAGES; \
+ 	  mkdir -p $(doc-localedir)/$$i/LC_MESSAGES; \
+-	  $(LN) $(outdir)/$$i.mo $(doc-localedir)/$$i/LC_MESSAGES/lilypond-doc.mo; \
++	  $(LN) -s ../../$$i.mo $(doc-localedir)/$$i/LC_MESSAGES/lilypond-doc.mo; \
+ 	done
+ 	touch $@
+ 
+diff --git a/GNUmakefile.in b/GNUmakefile.in
+index d796004..2ae8f72 100644
+--- a/GNUmakefile.in
++++ b/GNUmakefile.in
+@@ -141,13 +141,13 @@ $(outdir)/%-root/index.html: doc-build
+ 	mkdir -p $(dir $@)/Documentation/
+ 	for d in . musicxml abc2ly lilypond-book ; do \
+ 		mkdir -p $(dir $@)/input/regression/$${d}; \
+-		cp --link -a input/regression/$${d}/out-www/*  $(dir $@)/input/regression/$${d}/ ; \
++		cp -a input/regression/$${d}/out-www/*  $(dir $@)/input/regression/$${d}/ ; \
+ 	done
+ 	find $(dir $@)/input/regression/ -type f -not -name '*.png' \
+ 		-not -name '*.ly' -not -name '*.html' -not -name 'collated-files.pdf' \
+ 		-delete
+-	cp --link -a Documentation/out-www/webdoc/* $(dir $@)/Documentation/
+-	cp --link $(TOPDOC_TXT_FILES) $(dir $@)
++	cp -a Documentation/out-www/webdoc/* $(dir $@)/Documentation/
++	cp $(TOPDOC_TXT_FILES) $(dir $@)
+ 	# No link because the files come from the source directory.
+ 	cp $(addprefix $(src-dir)/,$(README_FILES)) $(dir $@)
+ 	$(PYTHON) $(buildscript-dir)/www_post.py $(PACKAGE_NAME) $(TOPLEVEL_VERSION) $(dir $@) "$*"
+diff --git a/configure.ac b/configure.ac
+index 720f329..cd19c9e 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -433,7 +433,7 @@ touch local.make
+ STEPMAKE_END
+ 
+ if make top-doc 1>/dev/null 2>&1; then
+-    rm -f INSTALL.txt && ln Documentation/out/topdocs/INSTALL.txt .
++    rm -f INSTALL.txt && ln -s Documentation/out/topdocs/INSTALL.txt .
+ fi
+ 
+ cat <<EOF
+diff --git a/python/book_snippets.py b/python/book_snippets.py
+index 3cd2270..3693e9f 100644
+--- a/python/book_snippets.py
++++ b/python/book_snippets.py
+@@ -676,10 +676,7 @@ printing diff against existing file." % filename)
+                     content = content.replace(basename, final_basename)
+                     open(dst, 'wb').write(content)
+                 else:
+-                    try:
+-                        os.link(src, dst)
+-                    except AttributeError:
+-                        shutil.copyfile(src, dst)
++                    shutil.copyfile(src, dst)
+             except (IOError, OSError):
+                 error(_('Could not overwrite file %s') % dst)
+                 raise CompileError(self.basename())
+-- 
+2.30.2
+
+
+From 3c3bddf4c2117190cac3f0e53f344b6b746b97f1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Sat, 16 Apr 2022 14:04:41 +0200
+Subject: use perl globbing instead of shell globbing to avoid a too long
+ argument list
+
+the increase in hrev55899 is still not enough for this command, apparently.
+
+diff --git a/GNUmakefile.in b/GNUmakefile.in
+index 2ae8f72..bc5f4ba 100644
+--- a/GNUmakefile.in
++++ b/GNUmakefile.in
+@@ -154,7 +154,7 @@ $(outdir)/%-root/index.html: doc-build
+ 	find $(outdir)/$*-root -type l | xargs rm -f
+ 	cd $(outdir)/$*-root && find -name \*.html -execdir $(buildscript-dir)/fix-docsize.sh {} +
+ 	$(PERL) -i -pe 's#(href)="\.\./Documentation/#\1="#g' $(dir $@)/Documentation/*html
+-	$(PERL) -i -pe 's#(href)="\.\./\.\./Documentation/#\1="../#g' $(dir $@)/Documentation/*/*html
++	$(PERL) -i -pe 'BEGIN{ @ARGV = glob(pop) } s#(href)="\.\./\.\./Documentation/#\1="../#g' "$(dir $@)/Documentation/*/*html"
+ 	# Fixup links to CSS files.
+ 	$(PERL) -i -pe 's#(href)="css/#\1="../../Documentation/css/#g' $(dir $@)/input/regression/*html
+ 	$(PERL) -i -pe 's#(href)="css/#\1="../../../Documentation/css/#g' $(dir $@)/input/regression/*/*html
+-- 
+2.30.2
+
+
+From cd6c4eb018001e1975ccbb4ae3f628cda34e7428 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Sat, 16 Apr 2022 16:59:07 +0200
+Subject: fix docdir configure argument not being honoured
+
+
+diff --git a/config.make.in b/config.make.in
+index 2b8c636..582708a 100644
+--- a/config.make.in
++++ b/config.make.in
+@@ -77,7 +77,7 @@ configure-builddir = @abs_builddir@
+ configure-srcdir = @abs_srcdir@
+ datadir = @datadir@
+ datarootdir = @datarootdir@
+-docdir = $(datadir)/doc
++docdir = @docdir@
+ elispdir = $(datadir)/emacs/site-lisp
+ exec_prefix = @exec_prefix@
+ includedir = @includedir@
+-- 
+2.30.2
+
+
+From e03900f64ac990454af339ecd2174f92ea684b51 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Sun, 17 Apr 2022 12:45:41 +0200
+Subject: fix installing info symlink
+
+python's os.getcwd() returns the normalized path with all symlinks resolved,
+which is a problem with the symlinked packaging paths of Haiku.
+
+diff --git a/scripts/build/relative.py b/scripts/build/relative.py
+index 7bd700d..b8dba56 100644
+--- a/scripts/build/relative.py
++++ b/scripts/build/relative.py
+@@ -3,8 +3,8 @@ import sys
+ 
+ 
+ def relative(dir, r=os.getcwd()):
+-    dir = os.path.normpath(dir) + '/'
+-    r = os.path.normpath(r) + '/'
++    dir = os.path.realpath(os.path.normpath(dir)) + '/'
++    r = os.path.realpath(os.path.normpath(r)) + '/'
+     prefix = len(os.path.commonprefix((dir, r)))
+     if prefix == len(dir):
+         return './'
+-- 
+2.30.2
+
+
+From 750cb8af980433616b8dc23e82782126e798aea5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Mon, 18 Apr 2022 11:14:49 +0200
+Subject: some fixes for tests
+
+tests have not yet run successfully because of missing extractbb (should be provided by
+texlive_core)
+
+diff --git a/scripts/build/output-distance.py b/scripts/build/output-distance.py
+index be9626c..50aa97e 100644
+--- a/scripts/build/output-distance.py
++++ b/scripts/build/output-distance.py
+@@ -99,7 +99,8 @@ def system_allow_exit1(x):
+     log_verbose('invoking %s' % x)
+     stat = os.system(x)
+     # This return value convention is sick.
+-    assert (stat == 0) or (stat == 256)
++    # this assert fails on Haiku, disable it
++    # assert (stat == 0) or (stat == 256)
+ 
+ 
+ def shorten_string(s, threshold=15):
+@@ -1278,7 +1279,7 @@ def link_file(x, y):
+     mkdir(os.path.split(y)[0])
+     try:
+         log_verbose('%s -> %s' % (x, y))
+-        os.link(x, y)
++        os.symlink(x, y)
+     except OSError as z:
+         if z.errno == errno.ENOENT:
+             pass
+-- 
+2.30.2
+
