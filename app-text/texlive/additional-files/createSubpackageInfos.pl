@@ -4,7 +4,7 @@
 
 # Helper script to generate the package metadata definitions for the texlive subpackages
 # usage:
-# 	perl -I $sourceDir/tlpkg createSubpackageInfos.pl <tlpdbroot> > subpackageInfos.recipe
+# 	perl -I $sourceDir/tlpkg createSubpackageInfos.pl <tlpdbroot> > subpackageInfos.sh
 #
 #	<tlpdbroot> is the root of the TeXLive package database, containing tlpkg/texlive.tlpdb.
 #		It also needs the texmf-dist directory to work. It is best to use the installed version,
