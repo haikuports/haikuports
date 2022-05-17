@@ -1,4 +1,4 @@
-From 0b12dae8767915db687e76d6c56fe3c4ba287dfc Mon Sep 17 00:00:00 2001
+From 5d1e31acdab3a153a6995473e0ecb737e138ec9d Mon Sep 17 00:00:00 2001
 From: Sergei Reznikov <diver@gelios.net>
 Date: Sun, 31 Oct 2021 13:15:08 +0300
 Subject: Fix build on Haiku
@@ -150,6 +150,136 @@ index 4862515..cca39a8 100644
  #define WITH_SHM 1
  #else
  #define WITH_SHM 0
+-- 
+2.30.2
+
+
+From bb6f7a38cdbc77ae74db6d761ded6445c8a92d04 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Tue, 17 May 2022 21:28:27 +1000
+Subject: Add OpenWith handler for Haiku
+
+
+diff --git a/src/gui/openurljob.cpp b/src/gui/openurljob.cpp
+index 6b18f1a..1b5a099 100644
+--- a/src/gui/openurljob.cpp
++++ b/src/gui/openurljob.cpp
+@@ -163,7 +163,7 @@ void KIO::OpenUrlJob::start()
+         emitResult();
+     };
+ 
+-#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
++#if defined(Q_OS_WIN) || defined(Q_OS_MACOS) || defined(Q_OS_HAIKU)
+     if (d->m_externalBrowserEnabled) {
+         // For Windows and MacOS, the mimetypes handling is different, so use QDesktopServices
+         qtOpenUrl();
+diff --git a/src/widgets/CMakeLists.txt b/src/widgets/CMakeLists.txt
+index 763f1d5..4ff18c1 100644
+--- a/src/widgets/CMakeLists.txt
++++ b/src/widgets/CMakeLists.txt
+@@ -158,6 +158,10 @@ if(ACL_FOUND)
+    target_link_libraries(KF5KIOWidgets PRIVATE ${ACL_LIBS})
+ endif()
+ 
++if(HAIKU)
++   target_link_libraries(KF5KIOWidgets PRIVATE be tracker)
++endif()
++
+ # Headers not prefixed with KIO/
+ ecm_generate_headers(KIOWidgets_HEADERS
+   HEADER_NAMES
+diff --git a/src/widgets/krun.cpp b/src/widgets/krun.cpp
+index ea2410b..c8953e0 100644
+--- a/src/widgets/krun.cpp
++++ b/src/widgets/krun.cpp
+@@ -68,6 +68,10 @@
+ #include "widgetsopenwithhandler_win.cpp" // displayNativeOpenWithDialog
+ #endif
+ 
++#ifdef Q_OS_HAIKU
++#include "widgetsopenwithhandler_haiku.cpp"
++#endif
++
+ KRunPrivate::KRunPrivate(KRun *parent)
+     : q(parent)
+     , m_showingDialog(false)
+@@ -200,7 +204,7 @@ bool KRun::displayOpenWithDialog(const QList<QUrl> &lst, QWidget *window, bool t
+         return false;
+     }
+ 
+-#ifdef Q_OS_WIN
++#if defined(Q_OS_WIN) || defined(Q_OS_HAIKU)
+     KConfigGroup cfgGroup(KSharedConfig::openConfig(), QStringLiteral("KOpenWithDialog Settings"));
+     if (cfgGroup.readEntry("Native", true)) {
+         return displayNativeOpenWithDialog(lst, window);
+diff --git a/src/widgets/widgetsopenwithhandler.cpp b/src/widgets/widgetsopenwithhandler.cpp
+index a7c3e09..f1be915 100644
+--- a/src/widgets/widgetsopenwithhandler.cpp
++++ b/src/widgets/widgetsopenwithhandler.cpp
+@@ -20,6 +20,10 @@
+ #include "widgetsopenwithhandler_win.cpp" // displayNativeOpenWithDialog
+ #endif
+ 
++#ifdef Q_OS_HAIKU
++#include "widgetsopenwithhandler_haiku.cpp"
++#endif
++
+ KIO::WidgetsOpenWithHandler::WidgetsOpenWithHandler(QObject *parent)
+     : KIO::OpenWithHandlerInterface(parent)
+ {
+@@ -31,7 +35,7 @@ void KIO::WidgetsOpenWithHandler::promptUserForApplication(KJob *job, const QLis
+ {
+     QWidget *parentWidget = job ? KJobWidgets::window(job) : qApp->activeWindow();
+ 
+-#ifdef Q_OS_WIN
++#if defined(Q_OS_WIN) || defined(Q_OS_HAIKU)
+     KConfigGroup cfgGroup(KSharedConfig::openConfig(), QStringLiteral("KOpenWithDialog Settings"));
+     if (cfgGroup.readEntry("Native", true)) {
+         // Implemented in applicationlauncherjob_win.cpp
+diff --git a/src/widgets/widgetsopenwithhandler_haiku.cpp b/src/widgets/widgetsopenwithhandler_haiku.cpp
+new file mode 100644
+index 0000000..9614b87
+--- /dev/null
++++ b/src/widgets/widgetsopenwithhandler_haiku.cpp
+@@ -0,0 +1,38 @@
++/*
++    This file is part of the KDE libraries
++    SPDX-FileCopyrightText: 2022 Gerasim Troeglazov <3dEyes@gmail.com>
++
++    SPDX-License-Identifier: LGPL-2.0-or-later
++*/
++
++#include <QDir>
++#include <QWidget>
++
++#include <InterfaceKit.h>
++#include <StorageKit.h>
++#include <SupportKit.h>
++#include <MimeType.h>
++#include <Roster.h>
++
++static bool displayNativeOpenWithDialog(const QList<QUrl> &lst, QWidget *window)
++{
++	BMessenger trackerMessenger("application/x-vnd.Be-TRAK");
++	if (trackerMessenger.IsValid()) {
++		BMessage openCommand(B_REFS_RECEIVED);
++    	for (const QUrl &url : lst) {
++    		if (!url.isLocalFile())
++    			return false;
++        	QString filepath = QDir::toNativeSeparators(url.toLocalFile());
++        	BEntry fileEntry(filepath.toUtf8().data());
++			entry_ref fileRef;
++			if (fileEntry.GetRef(&fileRef) == B_OK) {
++				update_mime_info(filepath.toUtf8().data(), false, true, false);
++				openCommand.AddRef("refs", &fileRef);
++			}
++    	}
++		openCommand.AddInt32("launchUsingSelector", 0);
++		if (trackerMessenger.SendMessage(&openCommand) == B_OK)
++			return true;
++	}
++    return false;
++}
 -- 
 2.30.2
 
