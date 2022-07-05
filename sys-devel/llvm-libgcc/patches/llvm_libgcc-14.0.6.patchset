@@ -1,0 +1,1770 @@
+From 719a0ee6d158de40b914599a704df7c15e843830 Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Wed Mar 16 07:04:18 2022 +0900
+Subject: libroot: implement Itanium ABI unwind functions by using LLVM
+ libunwind
+
+---
+ libunwind/src/UnwindCursor.hpp       | 70 ++++++++++++++++++++++++++--
+ libunwind/src/UnwindLevel1-gcc-ext.c |  6 +--
+ libunwind/src/config.h               |  2 +
+ 3 files changed, 70 insertions(+), 8 deletions(-)
+
+diff --git a/libunwind/src/UnwindCursor.hpp b/libunwind/src/UnwindCursor.hpp
+index 1ca842f33a..b794d24ad0 100644
+--- a/libunwind/src/UnwindCursor.hpp
++++ b/libunwind/src/UnwindCursor.hpp
+@@ -954,6 +954,9 @@ private:
+   template <typename Registers> int stepThroughSigReturn(Registers &) {
+     return UNW_STEP_END;
+   }
++#elif defined(__HAIKU__)
++  bool setInfoForSigReturn();
++  int stepThroughSigReturn();
+ #endif
+ 
+ #if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
+@@ -1226,7 +1229,7 @@ private:
+   unw_proc_info_t  _info;
+   bool             _unwindInfoMissing;
+   bool             _isSignalFrame;
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
+   bool             _isSigReturn = false;
+ #endif
+ };
+@@ -1925,7 +1928,7 @@ bool UnwindCursor<A, R>::getInfoFromSEH(pint_t pc) {
+ 
+ template <typename A, typename R>
+ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
+   _isSigReturn = false;
+ #endif
+ 
+@@ -2027,7 +2030,7 @@ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
+   }
+ #endif // #if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
+ 
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
+   if (setInfoForSigReturn())
+     return;
+ #endif
+@@ -2096,6 +2099,65 @@ int UnwindCursor<A, R>::stepThroughSigReturn(Registers_arm64 &) {
+   _isSignalFrame = true;
+   return UNW_STEP_SUCCESS;
+ }
++#elif defined(__HAIKU__)
++
++#include <commpage_defs.h>
++#include <signal.h>
++
++extern "C" {
++extern void *__gCommPageAddress;
++}
++
++template <typename A, typename R>
++bool UnwindCursor<A, R>::setInfoForSigReturn() {
++#if defined(_LIBUNWIND_TARGET_X86_64)
++  addr_t signal_handler = (((addr_t*)__gCommPageAddress)[COMMPAGE_ENTRY_X86_SIGNAL_HANDLER] + (addr_t)__gCommPageAddress);
++	addr_t signal_handler_ret = signal_handler + 45;
++#endif
++  pint_t pc = static_cast<pint_t>(this->getReg(UNW_REG_IP));
++  if (pc == signal_handler_ret) {
++  	//printf("signal frame detected\n");
++    _info = {};
++    _info.start_ip = signal_handler;
++    _info.end_ip = signal_handler_ret;
++    _isSigReturn = true;
++    return true;
++  }
++  return false;
++}
++
++template <typename A, typename R>
++int UnwindCursor<A, R>::stepThroughSigReturn() {
++	//printf("stepThroughSigReturn\n");
++  _isSignalFrame = true;
++  pint_t sp = _registers.getSP();
++ // printf("sp: %p\n", (void*)sp);
++#if defined(_LIBUNWIND_TARGET_X86_64)
++  vregs *regs = (vregs*)(sp + 0x70);
++  //printf("&regs: %p\n", regs);
++
++  _registers.setRegister(UNW_REG_IP, regs->rip);
++  _registers.setRegister(UNW_REG_SP, regs->rsp);
++  _registers.setRegister(UNW_X86_64_RAX, regs->rax);
++  _registers.setRegister(UNW_X86_64_RDX, regs->rdx);
++  _registers.setRegister(UNW_X86_64_RCX, regs->rcx);
++  _registers.setRegister(UNW_X86_64_RBX, regs->rbx);
++  _registers.setRegister(UNW_X86_64_RSI, regs->rsi);
++  _registers.setRegister(UNW_X86_64_RDI, regs->rdi);
++  _registers.setRegister(UNW_X86_64_RBP, regs->rbp);
++  _registers.setRegister(UNW_X86_64_R8,  regs->r8);
++  _registers.setRegister(UNW_X86_64_R9,  regs->r9);
++  _registers.setRegister(UNW_X86_64_R10, regs->r10);
++  _registers.setRegister(UNW_X86_64_R11, regs->r11);
++  _registers.setRegister(UNW_X86_64_R12, regs->r12);
++  _registers.setRegister(UNW_X86_64_R13, regs->r13);
++  _registers.setRegister(UNW_X86_64_R14, regs->r14);
++  _registers.setRegister(UNW_X86_64_R15, regs->r15);
++  // TODO: XMM
++#endif
++
++  return UNW_STEP_SUCCESS;
++}
+ #endif // defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64)
+ 
+ template <typename A, typename R>
+@@ -2106,7 +2168,7 @@ int UnwindCursor<A, R>::step() {
+ 
+   // Use unwinding info to modify register set as if function returned.
+   int result;
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
+   if (_isSigReturn) {
+     result = this->stepThroughSigReturn();
+   } else
+diff --git a/libunwind/src/UnwindLevel1-gcc-ext.c b/libunwind/src/UnwindLevel1-gcc-ext.c
+index 951d5d219a..73f1e01e7c 100644
+--- a/libunwind/src/UnwindLevel1-gcc-ext.c
++++ b/libunwind/src/UnwindLevel1-gcc-ext.c
+@@ -266,10 +266,9 @@ _LIBUNWIND_EXPORT void __register_frame_info_bases(const void *fde, void *ob,
+ }
+ 
+ _LIBUNWIND_EXPORT void __register_frame_info(const void *fde, void *ob) {
+-  (void)fde;
+   (void)ob;
+   _LIBUNWIND_TRACE_API("__register_frame_info(%p, %p)", fde, ob);
+-  // do nothing, this function never worked in Mac OS X
++  __unw_add_dynamic_eh_frame_section((unw_word_t)(uintptr_t)fde);
+ }
+ 
+ _LIBUNWIND_EXPORT void __register_frame_info_table_bases(const void *fde,
+@@ -298,9 +297,8 @@ _LIBUNWIND_EXPORT void __register_frame_table(const void *fde) {
+ }
+ 
+ _LIBUNWIND_EXPORT void *__deregister_frame_info(const void *fde) {
+-  (void)fde;
+   _LIBUNWIND_TRACE_API("__deregister_frame_info(%p)", fde);
+-  // do nothing, this function never worked in Mac OS X
++  __unw_remove_dynamic_eh_frame_section((unw_word_t)(uintptr_t)fde);
+   return NULL;
+ }
+ 
+diff --git a/libunwind/src/config.h b/libunwind/src/config.h
+index 5ae1604f65..4812aadb42 100644
+--- a/libunwind/src/config.h
++++ b/libunwind/src/config.h
+@@ -45,7 +45,9 @@
+   #define _LIBUNWIND_USE_DL_UNWIND_FIND_EXIDX 1
+ #else
+   // Assume an ELF system with a dl_iterate_phdr function.
++#ifndef __HAIKU__
+   #define _LIBUNWIND_USE_DL_ITERATE_PHDR 1
++#endif
+   #if !defined(_LIBUNWIND_ARM_EHABI)
+     #define _LIBUNWIND_SUPPORT_DWARF_UNWIND 1
+     #define _LIBUNWIND_SUPPORT_DWARF_INDEX 1
+-- 
+2.35.0
+
+
+From c7cd831051235f6401c5e537d8d20bf1ffa216a3 Mon Sep 17 00:00:00 2001
+From: Christopher Di Bella <cjdb@google.com>
+Date: Tue, 17 Aug 2021 20:23:22 +0000
+Subject: [llvm-libgcc] initial commit
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Note: the term "libgcc" refers to the all of `libgcc.a`, `libgcc_eh.a`,
+and `libgcc_s.so`.
+
+Enabling libunwind as a replacement for libgcc on Linux has proven to be
+challenging since libgcc_s.so is a required dependency in the [Linux
+standard base][5]. Some software is transitively dependent on libgcc
+because glibc makes hardcoded calls to functions in libgcc_s. For example,
+the function `__GI___backtrace` eventually makes its way to a [hardcoded
+dlopen to libgcc_s' _Unwind_Backtrace][1]. Since libgcc_{eh.a,s.so} and
+libunwind have the same ABI, but different implementations, the two
+libraries end up [cross-talking, which ultimately results in a
+segfault][2].
+
+To solve this problem, libunwind needs to build a “libgcc”. That is, link
+the necessary functions from compiler-rt and libunwind into an archive
+and shared object that advertise themselves as `libgcc.a`, `libgcc_eh.a`,
+and `libgcc_s.so`, so that glibc’s baked calls are diverted to the
+correct objects in memory. Fortunately for us, compiler-rt and libunwind
+use the same ABI as the libgcc family, so the problem is solvable at the
+llvm-project configuration level: no program source needs to be edited.
+Thus, the end result is for a user to configure their LLVM build with a
+flag that indicates they want to archive compiler-rt/unwind as libgcc.
+We achieve this by compiling libunwind with all the symbols necessary
+for compiler-rt to emulate the libgcc family, and then generate symlinks
+named for our "libgcc" that point to their corresponding libunwind
+counterparts.
+
+We alternatively considered patching glibc so that the source doesn't
+directly refer to libgcc, but rather _defaults_ to libgcc, so that a
+system preferring compiler-rt/libunwind can point to these libraries
+at the config stage instead. Even if we modified the Linux standard
+base, this alternative won't work because binaries that are built using
+libgcc will still end up having crosstalk between the differing
+implementations.
+
+This problem has been solved in this manner for [FreeBSD][3], and this
+CL has been tested against [Chrome OS][4].
+
+[1]: https://github.com/bminor/glibc/blob/master/sysdeps/arm/backtrace.c#L68
+[2]: https://bugs.chromium.org/p/chromium/issues/detail?id=1162190#c16
+[3]: https://github.com/freebsd/freebsd-src/tree/main/lib/libgcc_s
+[4]: https://chromium-review.googlesource.com/c/chromiumos/overlays/chromiumos-overlay/+/2945947
+[5]: https://refspecs.linuxbase.org/LSB_5.0.0/LSB-Core-generic/LSB-Core-generic/libgcc-s.html
+
+Differential Revision: https://reviews.llvm.org/D108416
+---
+ compiler-rt/cmake/Modules/AddCompilerRT.cmake |   2 +-
+ llvm-libgcc/CMakeLists.txt                    |  42 ++++
+ llvm-libgcc/docs/LLVMLibgcc.rst               | 187 ++++++++++++++++++
+ llvm-libgcc/generate_version_script.py        | 131 ++++++++++++
+ llvm-libgcc/lib/CMakeLists.txt                |  85 ++++++++
+ llvm-libgcc/lib/blank.c                       |   0
+ llvm-libgcc/lib/gcc_s.ver                     | 167 ++++++++++++++++
+ runtimes/CMakeLists.txt                       |  17 ++
+ 8 files changed, 630 insertions(+), 1 deletion(-)
+ create mode 100644 llvm-libgcc/CMakeLists.txt
+ create mode 100644 llvm-libgcc/docs/LLVMLibgcc.rst
+ create mode 100755 llvm-libgcc/generate_version_script.py
+ create mode 100644 llvm-libgcc/lib/CMakeLists.txt
+ create mode 100644 llvm-libgcc/lib/blank.c
+ create mode 100644 llvm-libgcc/lib/gcc_s.ver
+
+diff --git a/compiler-rt/cmake/Modules/AddCompilerRT.cmake b/compiler-rt/cmake/Modules/AddCompilerRT.cmake
+index 4a496fc18f..ebabaf1867 100644
+--- a/compiler-rt/cmake/Modules/AddCompilerRT.cmake
++++ b/compiler-rt/cmake/Modules/AddCompilerRT.cmake
+@@ -375,7 +375,7 @@ function(add_compiler_rt_runtime name type)
+       if(APPLE)
+         # Ad-hoc sign the dylibs
+         add_custom_command(TARGET ${libname}
+-          POST_BUILD  
++          POST_BUILD
+           COMMAND codesign --sign - $<TARGET_FILE:${libname}>
+           WORKING_DIRECTORY ${COMPILER_RT_OUTPUT_LIBRARY_DIR}
+         )
+diff --git a/llvm-libgcc/CMakeLists.txt b/llvm-libgcc/CMakeLists.txt
+new file mode 100644
+index 0000000000..91c40bbf1c
+--- /dev/null
++++ b/llvm-libgcc/CMakeLists.txt
+@@ -0,0 +1,42 @@
++cmake_minimum_required(VERSION 3.13.4)
++
++if (NOT IS_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/../libunwind")
++  message(FATAL_ERROR "llvm-libgcc requires being built in a monorepo layout with libunwind available")
++endif()
++
++set(LLVM_COMMON_CMAKE_UTILS "${CMAKE_CURRENT_SOURCE_DIR}/../cmake")
++
++list(APPEND CMAKE_MODULE_PATH
++  "${CMAKE_CURRENT_SOURCE_DIR}/cmake"
++  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules"
++  "${LLVM_COMMON_CMAKE_UTILS}"
++  "${LLVM_COMMON_CMAKE_UTILS}/Modules"
++  )
++
++project(llvm-libgcc LANGUAGES C CXX ASM)
++
++if(NOT LLVM_LIBGCC_EXPLICIT_OPT_IN)
++  message(FATAL_ERROR
++    "llvm-libgcc is not for the casual LLVM user. It is intended to be used by distro "
++    "managers who want to replace libgcc with compiler-rt and libunwind, but cannot "
++    "fully abandon the libgcc family (e.g. because they are dependent on glibc). Such "
++    "managers must have worked out their compatibility requirements ahead of using "
++    "llvm-libgcc. If you want to build llvm-libgcc, please add -DLLVM_LIBGCC_EXPLICIT_OPT_IN=Yes "
++    "to your CMake invocation and try again.")
++endif()
++
++set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/lib${LLVMLIB_DIR_SUFFIX}")
++set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/lib${LLVMLIB_DIR_SUFFIX}")
++set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
++
++set(COMPILER_RT_BUILD_BUILTINS On)
++set(COMPILER_RT_BUILTINS_HIDE_SYMBOLS Off)
++add_subdirectory("../compiler-rt" "compiler-rt")
++
++set(LIBUNWIND_ENABLE_STATIC On)
++set(LIBUNWIND_ENABLE_SHARED Off)
++set(LIBUNWIND_HAS_COMMENT_LIB_PRAGMA Off)
++set(LIBUNWIND_USE_COMPILER_RT On)
++add_subdirectory("../libunwind" "libunwind")
++
++add_subdirectory(lib)
+diff --git a/llvm-libgcc/docs/LLVMLibgcc.rst b/llvm-libgcc/docs/LLVMLibgcc.rst
+new file mode 100644
+index 0000000000..22dae7afaa
+--- /dev/null
++++ b/llvm-libgcc/docs/LLVMLibgcc.rst
+@@ -0,0 +1,187 @@
++.. llvm-libgcc:
++
++===========
++llvm-libgcc
++===========
++
++.. contents::
++  :local:
++
++**Note that these instructions assume a Linux and bash-friendly environment.
++YMMV if you’re on a non Linux-based platform.**
++
++.. _introduction:
++
++Motivation
++============
++
++Enabling libunwind as a replacement for libgcc on Linux has proven to be
++challenging since libgcc_s.so is a required dependency in the [Linux standard
++base][5]. Some software is transitively dependent on libgcc because glibc makes
++hardcoded calls to functions in libgcc_s. For example, the function
++``__GI___backtrace`` eventually makes its way to a [hardcoded dlopen to libgcc_s'
++_Unwind_Backtrace][1]. Since libgcc_{eh.a,s.so} and libunwind have the same ABI,
++but different implementations, the two libraries end up [cross-talking, which
++ultimately results in a segfault][2].
++
++To solve this problem, libunwind needs libgcc "front" that is, link the
++necessary functions from compiler-rt and libunwind into an archive and shared
++object that advertise themselves as ``libgcc.a``, ``libgcc_eh.a``, and
++``libgcc_s.so``, so that glibc’s baked calls are diverted to the correct objects
++in memory. Fortunately for us, compiler-rt and libunwind use the same ABI as the
++libgcc family, so the problem is solvable at the llvm-project configuration
++level: no program source needs to be edited. Thus, the end result is for a
++distro manager to configure their LLVM build with a flag that indicates they
++want to archive compiler-rt/unwind as libgcc. We achieve this by compiling
++libunwind with all the symbols necessary for compiler-rt to emulate the libgcc
++family, and then generate symlinks named for our "libgcc" that point to their
++corresponding libunwind counterparts.
++
++.. _alternatives
++
++Alternatives
++============
++
++We alternatively considered patching glibc so that the source doesn't directly
++refer to libgcc, but rather _defaults_ to libgcc, so that a system preferring
++compiler-rt/libunwind can point to these libraries at the config stage instead.
++Even if we modified the Linux standard base, this alternative won't work because
++binaries that are built using libgcc will still end up having cross-talk between
++the differing implementations.
++
++.. _target audience:
++
++Target audience
++===============
++
++llvm-libgcc is not for the casual LLVM user. It is intended to be used by distro
++managers who want to replace libgcc with compiler-rt and libunwind, but cannot
++fully abandon the libgcc family (e.g. because they are dependent on glibc). Such
++managers must have worked out their compatibility requirements ahead of using
++llvm-libgcc.
++
++.. _cmake options:
++
++CMake options
++=============
++
++.. option:: `LLVM_LIBGCC_EXPLICIT_OPT_IN`
++
++  **Required**
++
++  Since llvm-libgcc is such a fundamental, low-level component, we have made it
++  difficult to accidentally build, by requiring you to set an opt-in flag.
++
++.. _Building llvm-libgcc
++
++Building llvm-libgcc
++--------------------
++
++The first build tree is a mostly conventional build tree and gets you a Clang
++build with these compiler-rt symbols exposed.
++
++.. code-block:: bash
++  # Assumes $(PWD) is /path/to/llvm-project
++  $ cmake -GNinja -S llvm -B build-primary                    \
++      -DCMAKE_BUILD_TYPE=Release                              \
++      -DCMAKE_CROSSCOMPILING=On                               \
++      -DCMAKE_INSTALL_PREFIX=/tmp/aarch64-unknown-linux-gnu   \
++      -DLLVM_ENABLE_PROJECTS='clang'                          \
++      -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;llvm-libgcc"   \
++      -DLLVM_TARGETS_TO_BUILD=AArch64                         \
++      -DLLVM_DEFAULT_TARGET_TRIPLE=aarch64-unknown-linux-gnu  \
++      -DLLVM_LIBGCC_EXPLICIT_OPT_IN=Yes
++  $ ninja -C build-primary install
++
++It's very important to notice that neither ``compiler-rt``, nor ``libunwind``,
++are listed in ``LLVM_ENABLE_RUNTIMES``. llvm-libgcc makes these subprojects, and
++adding them to this list will cause you problems due to there being duplicate
++targets. As such, configuring the runtimes build will reject explicitly mentioning
++either project with ``llvm-libgcc``.
++
++To avoid issues when building with ``-DLLVM_ENABLE_RUNTIMES=all``, ``llvm-libgcc``
++is not included, and all runtimes targets must be manually listed.
++
++## Verifying your results
++
++This gets you a copy of libunwind with the libgcc symbols. You can verify this
++using ``readelf``.
++
++.. code-block:: bash
++
++  $ llvm-readelf -W --dyn-syms "${LLVM_LIBGCC_SYSROOT}/lib/libunwind.so" | grep FUNC | grep GCC_3.0
++
++
++Roughly sixty symbols should appear, all suffixed with ``@@GCC_3.0``. You can
++replace ``GCC_3.0`` with any of the supported version names in the version
++script you’re exporting to verify that the symbols are exported.
++
++
++.. _supported platforms:
++
++Supported platforms
++===================
++
++llvm-libgcc currently supports the following target triples:
++
++* ``aarch64-*-*-*``
++* ``armv7a-*-*-gnueabihf``
++* ``i386-*-*-*``
++* ``x86_64-*-*-*``
++
++If you would like to support another triple (e.g. ``powerpc64-*-*-*``), you'll
++need to generate a new version script, and then edit ``lib/gcc_s.ver``.
++
++.. _Generating a new version script
++
++Generating a new version script
++-------------------------------
++
++To generate a new version script, we need to generate the list of symbols that
++exist in the set (``clang-builtins.a`` ∪ ``libunwind.a``) ∩ ``libgcc_s.so.1``.
++The prerequisites for generating a version script are a binaries for the three
++aforementioned libraries targeting your architecture (without having built
++llvm-libgcc).
++
++Once these libraries are in place, to generate a new version script, run the
++following command.
++
++.. code-block:: bash
++
++  /path/to/llvm-project
++  $ export ARCH=powerpc64
++  $ llvm/tools/llvm-libgcc/generate_version_script.py       \
++      --compiler_rt=/path/to/libclang_rt.builtins-${ARCH}.a \
++      --libunwind=/path/to/libunwind.a                      \
++      --libgcc_s=/path/to/libgcc_s.so.1                     \
++      --output=${ARCH}
++
++This will generate a new version script a la
++``/path/to/llvm-project/llvm/tools/llvm-libgcc/gcc_s-${ARCH}.ver``, which we use
++in the next section.
++
++.. _Editing ``lib/gcc_s.ver``
++
++Editing ``lib/gcc_s.ver``
++-------------------------
++
++Our freshly generated version script is unique to the specific architecture that
++it was generated for, but a lot of the symbols are shared among many platforms.
++As such, we don't check in unique version scripts, but rather have a single
++version script that's run through the C preprocessor to prune symbols we won't
++be using in ``lib/gcc_s.ver``.
++
++Working out which symbols are common is largely a manual process at the moment,
++because some symbols may be shared across different architectures, but not in
++the same versions of libgcc. As such, a symbol appearing in ``lib/gcc_s.ver``
++doesn't guarantee that the symbol is available for our new architecture: we need
++to verify that the versions are the same, and if they're not, add the symbol to
++the new version section, with the appropriate include guards.
++
++There are a few macros that aim to improve readability.
++
++* ``ARM_GNUEABIHF``, which targets exactly ``arm-*-*-gnueabihf``.
++* ``GLOBAL_X86``, which should be used to target both x86 and x86_64, regardless
++  of the triple.
++* ``GLOBAL_32BIT``, which is be used to target 32-bit platforms.
++* ``GLOBAL_64BIT``, which is be used to target 64-bit platforms.
+diff --git a/llvm-libgcc/generate_version_script.py b/llvm-libgcc/generate_version_script.py
+new file mode 100755
+index 0000000000..98850d4f4a
+--- /dev/null
++++ b/llvm-libgcc/generate_version_script.py
+@@ -0,0 +1,131 @@
++#!/usr/bin/env python3
++
++# Generates a version script for an architecture so that it can be incorporated
++# into gcc_s.ver.
++
++from collections import defaultdict
++from itertools import chain
++import argparse, subprocess, sys, os
++
++
++def split_suffix(symbol):
++    """
++    Splits a symbol such as `__gttf2@GCC_3.0` into a triple representing its
++    function name (__gttf2), version name (GCC_3.0), and version number (300).
++
++    The version number acts as a priority. Since earlier versions are more
++    accessible and are likely to be used more, the lower the number is, the higher
++    its priortiy. A symbol that has a '@@' instead of '@' has been designated by
++    the linker as the default symbol, and is awarded a priority of -1.
++    """
++    if '@' not in symbol:
++        return None
++    data = [i for i in filter(lambda s: s, symbol.split('@'))]
++    _, version = data[-1].split('_')
++    version = version.replace('.', '')
++    priority = -1 if '@@' in symbol else int(version + '0' *
++                                             (3 - len(version)))
++    return data[0], data[1], priority
++
++
++def invert_mapping(symbol_map):
++    """Transforms a map from Key->Value to Value->Key."""
++    store = defaultdict(list)
++    for symbol, (version, _) in symbol_map.items():
++        store[version].append(symbol)
++    result = []
++    for k, v in store.items():
++        v.sort()
++        result.append((k, v))
++    result.sort(key=lambda x: x[0])
++    return result
++
++
++def intersection(llvm, gcc):
++    """
++  Finds the intersection between the symbols extracted from compiler-rt.a/libunwind.a
++  and libgcc_s.so.1.
++  """
++    common_symbols = {}
++    for i in gcc:
++        suffix_triple = split_suffix(i)
++        if not suffix_triple:
++            continue
++
++        symbol, version_name, version_number = suffix_triple
++        if symbol in llvm:
++            if symbol not in common_symbols:
++                common_symbols[symbol] = (version_name, version_number)
++                continue
++            if version_number < common_symbols[symbol][1]:
++                common_symbols[symbol] = (version_name, version_number)
++    return invert_mapping(common_symbols)
++
++
++def find_function_names(path):
++    """
++    Runs readelf on a binary and reduces to only defined functions. Equivalent to
++    `llvm-readelf --wide ${path} | grep 'FUNC' | grep -v 'UND' | awk '{print $8}'`.
++    """
++    result = subprocess.run(args=['llvm-readelf', '-su', path],
++                            capture_output=True)
++
++    if result.returncode != 0:
++        print(result.stderr.decode('utf-8'), file=sys.stderr)
++        sys.exit(1)
++
++    stdout = result.stdout.decode('utf-8')
++    stdout = filter(lambda x: 'FUNC' in x and 'UND' not in x,
++                    stdout.split('\n'))
++    stdout = chain(
++        map(lambda x: filter(None, x), (i.split(' ') for i in stdout)))
++
++    return [list(i)[7] for i in stdout]
++
++
++def to_file(versioned_symbols):
++    path = f'{os.path.dirname(os.path.realpath(__file__))}/new-gcc_s-symbols'
++    with open(path, 'w') as f:
++        f.write('Do not check this version script in: you should instead work '
++                'out which symbols are missing in `lib/gcc_s.ver` and then '
++                'integrate them into `lib/gcc_s.ver`. For more information, '
++                'please see `doc/LLVMLibgcc.rst`.\n')
++        for version, symbols in versioned_symbols:
++            f.write(f'{version} {{\n')
++            for i in symbols:
++                f.write(f'  {i};\n')
++            f.write('};\n\n')
++
++
++def read_args():
++    parser = argparse.ArgumentParser()
++    parser.add_argument('--compiler_rt',
++                        type=str,
++                        help='Path to `libclang_rt.builtins-${ARCH}.a`.',
++                        required=True)
++    parser.add_argument('--libunwind',
++                        type=str,
++                        help='Path to `libunwind.a`.',
++                        required=True)
++    parser.add_argument(
++        '--libgcc_s',
++        type=str,
++        help=
++        'Path to `libgcc_s.so.1`. Note that unlike the other two arguments, this is a dynamic library.',
++        required=True)
++    return parser.parse_args()
++
++
++def main():
++    args = read_args()
++    llvm = find_function_names(args.compiler_rt) + find_function_names(
++        args.libunwind)
++    gcc = find_function_names(args.libgcc_s)
++    versioned_symbols = intersection(llvm, gcc)
++    # TODO(cjdb): work out a way to integrate new symbols in with the existing
++    #             ones
++    to_file(versioned_symbols)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/llvm-libgcc/lib/CMakeLists.txt b/llvm-libgcc/lib/CMakeLists.txt
+new file mode 100644
+index 0000000000..652af46db4
+--- /dev/null
++++ b/llvm-libgcc/lib/CMakeLists.txt
+@@ -0,0 +1,85 @@
++include(CheckLibraryExists)
++include(GNUInstallDirs)
++
++string(REPLACE "-Wl,-z,defs" "" CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
++
++add_custom_target(gcc_s_ver ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/gcc_s.ver")
++set(LLVM_LIBGCC_GCC_S_VER "${CMAKE_CURRENT_BINARY_DIR}/gcc_s.ver")
++
++add_custom_target(gcc_s.ver ALL
++  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/gcc_s.ver"
++  COMMAND
++    "${CMAKE_C_COMPILER}"
++    "-E"
++    "-xc" "${CMAKE_CURRENT_SOURCE_DIR}/gcc_s.ver"
++    "-o" "${CMAKE_CURRENT_BINARY_DIR}/gcc_s.ver"
++)
++set_target_properties(gcc_s.ver PROPERTIES
++  OUTPUT_PATH "${CMAKE_CURRENT_BINARY_DIR}/gcc_s.ver")
++
++add_library(libgcc_s SHARED blank.c)
++add_dependencies(libgcc_s gcc_s_ver)
++set_target_properties(libgcc_s
++  PROPERTIES
++    LINKER_LANGUAGE C
++    OUTPUT_NAME "unwind"
++    VERSION "1.0"
++    SOVERSION "1"
++    POSITION_INDEPENDENT_CODE ON)
++string(REGEX MATCH "[^-]+" LLVM_LIBGCC_TARGET_ARCH ${CMAKE_C_COMPILER_TARGET})
++target_link_libraries(libgcc_s PRIVATE
++  $<TARGET_OBJECTS:unwind_static>
++  $<TARGET_OBJECTS:clang_rt.builtins-${LLVM_LIBGCC_TARGET_ARCH}>
++)
++target_link_options(libgcc_s PRIVATE
++  -nostdlib
++  -Wl,--version-script,$<TARGET_PROPERTY:gcc_s.ver,OUTPUT_PATH>)
++
++check_library_exists(m sin "" LLVM_LIBGCC_HAS_LIBM)
++target_link_libraries(libgcc_s PRIVATE
++  $<$<BOOL:LLVM_LIBGCC_HAS_LIBM>:m>
++  c
++)
++
++get_filename_component(LLVM_LIBGCC_LIBUNWIND_STATIC_ROOT "${CMAKE_INSTALL_PREFIX}/${LIBUNWIND_INSTALL_LIBRARY_DIR}" ABSOLUTE)
++#string(REPLACE "${CMAKE_INSTALL_FULL_LIBDIR}/" "" LLVM_LIBGCC_LIBUNWIND_STATIC_ROOT "${LLVM_LIBGCC_LIBUNWIND_STATIC_ROOT}")
++
++install(TARGETS libgcc_s
++        LIBRARY DESTINATION "${LLVM_LIBGCC_LIBUNWIND_STATIC_ROOT}" COMPONENT unwind
++        ARCHIVE DESTINATION "${LLVM_LIBGCC_LIBUNWIND_STATIC_ROOT}" COMPONENT unwind
++        RUNTIME DESTINATION bin COMPONENT unwind)
++
++get_compiler_rt_install_dir(${LLVM_LIBGCC_TARGET_ARCH} install_dir_builtins)
++string(REGEX REPLACE "^lib/" "" install_dir_builtins "${install_dir_builtins}")
++string(FIND "${install_dir_builtins}" "clang" install_path_contains_triple)
++if(install_path_contains_triple EQUAL -1)
++  set(builtins_suffix "-${LLVM_LIBGCC_TARGET_ARCH}")
++else()
++  string(PREPEND install_dir_builtins "../")
++endif()
++install(CODE "execute_process(
++                COMMAND \"\${CMAKE_COMMAND}\" -E
++                create_symlink ${install_dir_builtins}/libclang_rt.builtins${builtins_suffix}.a libgcc.a
++                WORKING_DIRECTORY \"\$ENV{DESTDIR}${LLVM_LIBGCC_LIBUNWIND_STATIC_ROOT}\")"
++        COMPONENT unwind)
++
++install(CODE "execute_process(
++                COMMAND \"\${CMAKE_COMMAND}\" -E
++                create_symlink libunwind.a libgcc_eh.a
++                WORKING_DIRECTORY \"\$ENV{DESTDIR}${LLVM_LIBGCC_LIBUNWIND_STATIC_ROOT}\")"
++        COMPONENT unwind)
++install(CODE "execute_process(
++               COMMAND \"\${CMAKE_COMMAND}\" -E
++               create_symlink libunwind.so libgcc_s.so.1.0
++               WORKING_DIRECTORY \"\$ENV{DESTDIR}${LLVM_LIBGCC_LIBUNWIND_STATIC_ROOT}\")"
++        COMPONENT unwind)
++install(CODE "execute_process(
++                COMMAND \"\${CMAKE_COMMAND}\" -E
++                create_symlink libgcc_s.so.1.0 libgcc_s.so.1
++                WORKING_DIRECTORY \"\$ENV{DESTDIR}${LLVM_LIBGCC_LIBUNWIND_STATIC_ROOT}\")"
++        COMPONENT unwind)
++install(CODE "execute_process(
++                COMMAND \"\${CMAKE_COMMAND}\" -E
++                create_symlink libgcc_s.so.1 libgcc_s.so
++                WORKING_DIRECTORY \"\$ENV{DESTDIR}${LLVM_LIBGCC_LIBUNWIND_STATIC_ROOT}\")"
++        COMPONENT unwind)
+diff --git a/llvm-libgcc/lib/blank.c b/llvm-libgcc/lib/blank.c
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/llvm-libgcc/lib/gcc_s.ver b/llvm-libgcc/lib/gcc_s.ver
+new file mode 100644
+index 0000000000..d8d038d1f5
+--- /dev/null
++++ b/llvm-libgcc/lib/gcc_s.ver
+@@ -0,0 +1,167 @@
++// Detect if we're using arm-*-*-gnueabihf
++#if defined(__arm__) && \
++    defined(__ARM_ARCH_7A__) && defined(__ARM_EABI__) && \
++    defined(__ARM_FP) && (__ARM_FP >= 0x04)
++  #define ARM_GNUEABIHF
++#endif
++
++#if !defined(__x86_64__)  && \
++    !defined(__aarch64__) && \
++    !defined(__i386__)    && \
++    !defined(ARM_GNUEABIHF)
++  #error The only platforms that are currently supported are x86_64, i386, arm-gnueabihf, and aarch64.
++#endif
++
++#if defined(__x86_64__) || defined(__i386__)
++  #define GLOBAL_X86
++#endif
++
++#if __SIZEOF_POINTER__ >= 8
++  #define GLOBAL_64BIT
++#else
++  #define GLOBAL_32BIT
++#endif
++
++GCC_3.0 {
++  __absvdi2;    __absvsi2;    __addvdi3; __addvsi3; __clear_cache; __ffsdi2;
++  __fixunsdfdi; __fixunssfdi; __mulvdi3; __mulvsi3; __negvdi2;     __negvsi2;
++  __subvdi3;    __subvsi3;
++  _Unwind_DeleteException;
++  _Unwind_ForcedUnwind;
++  _Unwind_GetDataRelBase;
++  _Unwind_GetLanguageSpecificData;
++  _Unwind_GetRegionStart;
++  _Unwind_GetTextRelBase;
++  _Unwind_RaiseException;
++  _Unwind_Resume;
++};
++
++GCC_3.3   { _Unwind_GetCFA; _Unwind_Resume_or_Rethrow;                    };
++GCC_3.3.1 { __gcc_personality_v0;                                         };
++GCC_3.4   { __clzdi2; __ctzdi2; __paritydi2; __popcountdi2;               };
++GCC_3.4.2 { __enable_execute_stack;                                       };
++GCC_4.0.0 { __divdc3; __divsc3; __muldc3; __mulsc3; __powidf2; __powisf2; };
++GCC_4.3.0 { __bswapdi2; __bswapsi2; __emutls_get_address;                 };
++
++#if defined(GLOBAL_32BIT)
++  GCC_3.0 {
++    __ashldi3;    __ashrdi3;   __cmpdi2;    __fixdfdi; __fixsfdi; __fixunsdfsi;
++    __fixunssfsi; __floatdidf; __floatdisf; __lshrdi3; __muldi3;  __negdi2;
++    __ucmpdi2;    __udivmoddi4;
++  };
++
++  GCC_3.4   { __clzsi2;      __ctzsi2;      __paritysi2; __popcountsi2; };
++  GCC_4.2.0 { __floatundidf; __floatundisf;                             };
++  GCC_4.3.0 { __ffssi2;                                                 };
++  GCC_7.0.0 { __divmoddi4;                                              };
++  GLIBC_2.0 { __divdi3;     __moddi3;       __udivdi3; __umoddi3;       };
++#elif defined(GLOBAL_64BIT)
++  GCC_3.0 {
++    __ashlti3; __ashrti3;    __cmpti2;     __divti3;  __ffsti2;  __fixdfti;
++    __fixsfti; __fixunssfti; __floattidf;  __lshrti3; __modti3;  __multi3;
++    __negti2;  __ucmpti2;    __udivmodti4; __udivti3; __umodti3; __fixunsdfti;
++    __floattisf;
++  };
++
++  GCC_3.4   { __clzti2;      __ctzti2;  __parityti2; __popcountti2;           };
++  GCC_3.4.4 { __absvti2;     __addvti3; __mulvti3;   __negvti2;    __subvti3; };
++  GCC_4.2.0 { __floatuntidf; __floatuntisf;                                   };
++  GCC_7.0.0 { __divmodti4;                                                    };
++#endif
++
++#if defined(GLOBAL_X86)
++  GCC_3.0 {
++    __deregister_frame_info_bases; __fixunsxfdi; __register_frame_info_bases;
++    __register_frame_info_table_bases;
++  };
++
++  GCC_4.0.0 { __divxc3; __mulxc3; __powixf2; };
++  GCC_4.8.0 { __cpu_indicator_init;          };
++#endif
++
++#if !defined(ARM_GNUEABIHF)
++  GCC_3.0 {
++    _Unwind_Find_FDE; _Unwind_GetGR; _Unwind_GetIP; _Unwind_SetGR; _Unwind_SetIP;
++  };
++
++  GCC_3.3   { _Unwind_Backtrace; _Unwind_FindEnclosingFunction; };
++  GCC_4.2.0 { _Unwind_GetIPInfo; };
++#else // defined(ARM_GNUEABIHF)
++  GCC_3.0 {
++    __adddf3;  __addsf3;      __divdf3;  __divsf3;    __divsi3;    __eqdf2;
++    __eqsf2;   __extendsfdf2; __fixdfsi; __fixsfsi;   __floatsidf; __floatsisf;
++    __gedf2;   __gesf2;       __gtdf2;   __gtsf2;     __ledf2;     __lesf2;
++    __ltdf2;   __ltsf2;       __modsi3;  __muldf3;    __mulsf3;    __nedf2;
++    __negdf2;  __negsf2;      __nesf2;   __subdf3;    __subsf3;    __truncdfsf2;
++    __udivsi3; __umodsi3;
++  };
++
++  GCC_3.3.4 { __unorddf2; __unordsf2; };
++
++  GCC_3.5 {
++    __aeabi_cdcmpeq; __aeabi_cdcmple;  __aeabi_cdrcmple;       __aeabi_cfcmpeq;
++    __aeabi_cfcmple; __aeabi_cfrcmple; __aeabi_d2f;            __aeabi_d2iz;
++    __aeabi_d2lz;    __aeabi_d2uiz;    __aeabi_d2ulz;          __aeabi_dadd;
++    __aeabi_dcmpeq;  __aeabi_dcmpge;   __aeabi_dcmpgt;         __aeabi_dcmple;
++    __aeabi_dcmplt;  __aeabi_dcmpun;   __aeabi_ddiv;           __aeabi_dmul;
++    __aeabi_dneg;    __aeabi_drsub;    __aeabi_dsub;           __aeabi_f2d;
++    __aeabi_f2iz;    __aeabi_f2lz;     __aeabi_f2uiz;          __aeabi_f2ulz;
++    __aeabi_fadd;    __aeabi_fcmpeq;   __aeabi_fcmpge;         __aeabi_fcmpgt;
++    __aeabi_fcmple;  __aeabi_fcmplt;   __aeabi_fcmpun;         __aeabi_fdiv;
++    __aeabi_fmul;    __aeabi_fneg;     __aeabi_frsub;          __aeabi_fsub;
++    __aeabi_i2d;     __aeabi_i2f;      __aeabi_idiv;           __aeabi_idiv0;
++    __aeabi_idivmod; __aeabi_l2d;      __aeabi_l2f;            __aeabi_lasr;
++    __aeabi_lcmp;    __aeabi_ldiv0;    __aeabi_ldivmod;        __aeabi_llsl;
++    __aeabi_llsr;    __aeabi_lmul;     __aeabi_ui2d;           __aeabi_ui2f;
++    __aeabi_uidiv;   __aeabi_uidivmod; __aeabi_ul2d;           __aeabi_ul2f;
++    __aeabi_ulcmp;   __aeabi_uldivmod; __aeabi_unwind_cpp_pr0;
++    __aeabi_unwind_cpp_pr1;            __aeabi_unwind_cpp_pr2;
++    __gnu_unwind_frame;
++    _Unwind_Complete;
++    _Unwind_VRS_Get;
++    _Unwind_VRS_Pop;
++    _Unwind_VRS_Set;
++  };
++
++  GCC_4.2.0 { __floatunsidf; __floatunsisf; };
++  GCC_4.3.0 { _Unwind_Backtrace;            };
++#endif
++
++#if defined(__aarch64__)
++  GCC_3.0 {
++    __addtf3;     __divtf3;     __eqtf2;     __extenddftf2; __extendsftf2;
++    __fixtfdi;    __fixtfsi;    __fixtfti;   __fixunstfdi;  __fixunstfsi;
++    __fixunstfti; __floatditf;  __floatsitf; __floattitf;   __getf2;
++    __gttf2;      __letf2;      __lttf2;     __multf3;      __netf2;
++    __subtf3;     __trunctfdf2; __trunctfsf2;
++  };
++
++  GCC_4.0.0 { __powitf2;     __divtc3;      __multc3; };
++  GCC_4.2.0 { __floatunditf; __floatunsitf; __floatuntitf; };
++  GCC_4.5.0 { __unordtf2; };
++#endif
++
++#if defined(__aarch64__) || defined(__i386__)
++  GLIBC_2.0 { __deregister_frame; __register_frame; };
++#endif
++
++#if defined(__i386__)
++  GCC_3.0   { __fixunsxfsi; __fixxfdi; __floatdixf; };
++  GCC_4.2.0 { __floatundixf; };
++
++  GLIBC_2.0 {
++    __register_frame_info; __register_frame_info_table; __register_frame_table;
++    __deregister_frame_info;
++  };
++#endif
++
++#if defined(__x86_64__)
++  GCC_3.0 {
++    __register_frame_info; __register_frame_info_table; __register_frame_table;
++    __deregister_frame;    __deregister_frame_info;     __register_frame;
++    __fixunsxfti;          __fixxfti;                   __floattixf;
++  };
++
++  GCC_4.2.0 { __floatuntixf; };
++  GCC_4.3.0 { __divtc3; __multc3; };
++#endif
+diff --git a/runtimes/CMakeLists.txt b/runtimes/CMakeLists.txt
+index 1400233b73..d4c5886908 100644
+--- a/runtimes/CMakeLists.txt
++++ b/runtimes/CMakeLists.txt
+@@ -178,6 +178,23 @@ if(LLVM_INCLUDE_TESTS)
+   set(LLVM_LIT_ARGS "${LIT_ARGS_DEFAULT}" CACHE STRING "Default options for lit")
+ endif()
+ 
++# llvm-libgcc incorporates both compiler-rt and libunwind as subprojects with very
++# specific flags, which causes clashes when they're independently built too.
++if("llvm-libgcc" IN_LIST runtimes)
++  if("compiler-rt" IN_LIST runtimes OR "compiler-rt" IN_LIST LLVM_ENABLE_PROJECTS)
++    message(FATAL_ERROR
++      "Attempting to build both compiler-rt and llvm-libgcc will cause irreconcilable "
++      "target clashes. Please choose one or the other, but not both.")
++  endif()
++
++  if("libunwind" IN_LIST runtimes)
++    message(
++      FATAL_ERROR
++      "Attempting to build both libunwind and llvm-libgcc will cause irreconcilable "
++      "target clashes. Please choose one or the other, but not both.")
++  endif()
++endif()
++
+ # We do this in two loops so that HAVE_* is set for each runtime before the
+ # other runtimes are added.
+ foreach(entry ${runtimes})
+-- 
+2.35.0
+
+
+From f59962cbdcc8e9e4ef08fdedd3852e7c4808308a Mon Sep 17 00:00:00 2001
+From: Trung Nguyen <trungnt282910@gmail.com>
+Date: Tue, 5 Jul 2022 21:35:34 +0700
+Subject: [llvm-libgcc] Haiku: Build support
+
+Provides build support for llvm-libgcc on Haiku, including:
+- Processing the version script so that Haiku's linker could understand
+(each version can only be mentioned once).
+- Properly linking libgcc_s.so.1.0 to the required start files.
+---
+ llvm-libgcc/lib/CMakeLists.txt             | 102 +++++++++++--
+ llvm-libgcc/lib/process_version_script.cpp | 164 +++++++++++++++++++++
+ 2 files changed, 253 insertions(+), 13 deletions(-)
+ create mode 100644 llvm-libgcc/lib/process_version_script.cpp
+
+diff --git a/llvm-libgcc/lib/CMakeLists.txt b/llvm-libgcc/lib/CMakeLists.txt
+index 652af46db4..4302a2ba55 100644
+--- a/llvm-libgcc/lib/CMakeLists.txt
++++ b/llvm-libgcc/lib/CMakeLists.txt
+@@ -3,34 +3,108 @@ include(GNUInstallDirs)
+ 
+ string(REPLACE "-Wl,-z,defs" "" CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
+ 
++add_executable(process_version_script
++  "${CMAKE_CURRENT_SOURCE_DIR}/process_version_script.cpp"
++)
++
++set_target_properties(process_version_script
++  PROPERTIES
++    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
++    OUTPUT_NAME "process_version_script"
++)
++
+ add_custom_target(gcc_s_ver ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/gcc_s.ver")
+ set(LLVM_LIBGCC_GCC_S_VER "${CMAKE_CURRENT_BINARY_DIR}/gcc_s.ver")
+ 
+-add_custom_target(gcc_s.ver ALL
++add_custom_target(gcc_s.tmp.ver ALL
+   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/gcc_s.ver"
+   COMMAND
+     "${CMAKE_C_COMPILER}"
+     "-E"
+     "-xc" "${CMAKE_CURRENT_SOURCE_DIR}/gcc_s.ver"
+-    "-o" "${CMAKE_CURRENT_BINARY_DIR}/gcc_s.ver"
++    "-o" "${CMAKE_CURRENT_BINARY_DIR}/gcc_s.tmp.ver"
+ )
++
++set_target_properties(gcc_s.tmp.ver PROPERTIES
++  OUTPUT_PATH "${CMAKE_CURRENT_BINARY_DIR}/gcc_s.tmp.ver")
++
++add_custom_target(gcc_s.ver ALL
++  DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/gcc_s.tmp.ver" "${CMAKE_CURRENT_BINARY_DIR}/process_version_script"
++  COMMAND
++    "${CMAKE_CURRENT_BINARY_DIR}/process_version_script"
++    "${CMAKE_CURRENT_BINARY_DIR}/gcc_s.tmp.ver"
++    "${CMAKE_CURRENT_BINARY_DIR}/gcc_s.ver"
++)
++
+ set_target_properties(gcc_s.ver PROPERTIES
+   OUTPUT_PATH "${CMAKE_CURRENT_BINARY_DIR}/gcc_s.ver")
+ 
+ add_library(libgcc_s SHARED blank.c)
+ add_dependencies(libgcc_s gcc_s_ver)
+-set_target_properties(libgcc_s
+-  PROPERTIES
+-    LINKER_LANGUAGE C
+-    OUTPUT_NAME "unwind"
+-    VERSION "1.0"
+-    SOVERSION "1"
+-    POSITION_INDEPENDENT_CODE ON)
++if(NOT LLVM_LIBGCC_IMITATE_NAME)
++  set_target_properties(libgcc_s
++    PROPERTIES
++      LINKER_LANGUAGE C
++      OUTPUT_NAME "unwind"
++      VERSION "1.0"
++      SOVERSION "1"
++      POSITION_INDEPENDENT_CODE ON)
++else()
++  set_target_properties(libgcc_s
++    PROPERTIES
++      LINKER_LANGUAGE C
++      OUTPUT_NAME "gcc_s"
++      VERSION "1.0"
++      SOVERSION "1"
++      POSITION_INDEPENDENT_CODE ON)
++endif()
+ string(REGEX MATCH "[^-]+" LLVM_LIBGCC_TARGET_ARCH ${CMAKE_C_COMPILER_TARGET})
+-target_link_libraries(libgcc_s PRIVATE
+-  $<TARGET_OBJECTS:unwind_static>
+-  $<TARGET_OBJECTS:clang_rt.builtins-${LLVM_LIBGCC_TARGET_ARCH}>
+-)
++
++if(HAIKU)
++  find_file(HAIKU_CRTI
++    crti.o
++    HINTS ${CMAKE_HAIKU_DEVELOP_LIB_DIRECTORIES}
++  )
++  find_file(HAIKU_CRTN
++    crtn.o
++    HINTS ${CMAKE_HAIKU_DEVELOP_LIB_DIRECTORIES}
++  )
++  find_file(HAIKU_INIT_TERM_DYN
++    init_term_dyn.o
++    HINTS ${CMAKE_HAIKU_DEVELOP_LIB_DIRECTORIES}
++  )
++
++  add_library(crtbegin OBJECT "../../compiler-rt/lib/crt/crtbegin.c")
++  add_library(crtend OBJECT "../../compiler-rt/lib/crt/crtend.c")
++
++  target_compile_definitions(crtbegin PRIVATE
++    -DCRT_HAS_INITFINI_ARRAY
++    -DEH_USE_FRAME_REGISTRY
++  )
++  target_compile_definitions(crtend PRIVATE
++    -DCRT_HAS_INITFINI_ARRAY
++    -DEH_USE_FRAME_REGISTRY
++  )
++
++  # The position is important. It must be:
++  # crti.o -> crtbegin.o -> Some other stuff -> crtend.o -> crtn.o
++  # Incorrect configurations might lead to segfaults due to
++  # the .eh_frame section not having a terminating entry.
++  target_link_libraries(libgcc_s PRIVATE
++    ${HAIKU_CRTI}
++    $<TARGET_OBJECTS:crtbegin>
++    ${HAIKU_INIT_TERM_DYN}
++    $<TARGET_OBJECTS:unwind_static>
++    $<TARGET_OBJECTS:clang_rt.builtins-${LLVM_LIBGCC_TARGET_ARCH}>
++    $<TARGET_OBJECTS:crtend>
++    ${HAIKU_CRTN}
++  )
++else()
++  target_link_libraries(libgcc_s PRIVATE
++    $<TARGET_OBJECTS:unwind_static>
++    $<TARGET_OBJECTS:clang_rt.builtins-${LLVM_LIBGCC_TARGET_ARCH}>
++  )
++endif(HAIKU)
+ target_link_options(libgcc_s PRIVATE
+   -nostdlib
+   -Wl,--version-script,$<TARGET_PROPERTY:gcc_s.ver,OUTPUT_PATH>)
+@@ -68,11 +142,13 @@ install(CODE "execute_process(
+                 create_symlink libunwind.a libgcc_eh.a
+                 WORKING_DIRECTORY \"\$ENV{DESTDIR}${LLVM_LIBGCC_LIBUNWIND_STATIC_ROOT}\")"
+         COMPONENT unwind)
++if(NOT LLVM_LIBGCC_IMITATE_NAME)
+ install(CODE "execute_process(
+                COMMAND \"\${CMAKE_COMMAND}\" -E
+                create_symlink libunwind.so libgcc_s.so.1.0
+                WORKING_DIRECTORY \"\$ENV{DESTDIR}${LLVM_LIBGCC_LIBUNWIND_STATIC_ROOT}\")"
+         COMPONENT unwind)
++endif()
+ install(CODE "execute_process(
+                 COMMAND \"\${CMAKE_COMMAND}\" -E
+                 create_symlink libgcc_s.so.1.0 libgcc_s.so.1
+diff --git a/llvm-libgcc/lib/process_version_script.cpp b/llvm-libgcc/lib/process_version_script.cpp
+new file mode 100644
+index 0000000000..3bf1179f5d
+--- /dev/null
++++ b/llvm-libgcc/lib/process_version_script.cpp
+@@ -0,0 +1,164 @@
++#include <cassert>
++#include <cctype>
++#include <fstream>
++#include <iostream>
++#include <string>
++#include <sstream>
++#include <vector>
++#include <unordered_map>
++
++struct Version
++{
++  std::string name;
++  std::vector<std::string> symbols;
++  std::string depends;
++};
++
++std::string trim(const std::string& source)
++{
++  auto begin = source.begin();
++  auto end = source.end();
++
++  while (begin < end && std::isspace(*begin))
++  {
++    ++begin;
++  }
++
++  while (end > begin && std::isspace(*std::prev(end)))
++  {
++    --end;
++  }
++
++  return std::string(begin, end);
++}
++
++int main(int argc, char** argv)
++{
++    if (argc != 3)
++    {
++        std::cout   << "Usage: "
++                    << argv[0]
++                    << " <input version script> <output verion script>"
++                    << std::endl;
++        return 1;
++    }
++
++    const char* inputFile = argv[1];
++    const char* outputFile = argv[2];
++
++    std::ifstream fin(inputFile);
++    std::ofstream fout(outputFile);
++
++    bool insideVersion = false;
++    bool endingVersion = false;
++    bool beginningVersion = false;
++
++    std::string currentLine;
++
++    std::unordered_map<std::string, Version> versions;
++
++    Version* currentVersion = nullptr;
++
++    while (fin)
++    {
++      std::getline(fin, currentLine);
++      currentLine = trim(currentLine);
++
++      if (currentLine[0] == '#')
++      {
++        continue;
++      }
++
++      std::stringstream lin(currentLine);
++
++      while (lin)
++      {
++        std::string currentToken;
++        lin >> currentToken;
++
++        if (currentToken.empty())
++        {
++          continue;
++        }
++
++        if (!insideVersion && !beginningVersion)
++        {
++          // Next token should be a version.
++          currentVersion = &versions[currentToken];
++          currentVersion->name = std::move(currentToken);
++          beginningVersion = true;
++        }
++        else if (!insideVersion && beginningVersion)
++        {
++          // Next token should be a brace.
++          assert(currentToken == "{");
++          insideVersion = true;
++          beginningVersion = false;
++        }
++        else if (insideVersion)
++        {
++          if (currentToken[0] == '}')
++          {
++            // Getting out of the current version.
++            insideVersion = false;
++            if (currentToken == "};")
++            {
++              // End this one for good.
++              currentVersion = nullptr;
++              endingVersion = false;
++            }
++            else
++            {
++              // Still waiting for something.
++              endingVersion = true;
++            }
++          }
++          else
++          {
++            // Put whatever we have in the vector.
++            currentVersion->symbols.emplace_back(std::move(currentToken));
++          }
++        }
++        else if (!insideVersion && endingVersion)
++        {
++          // Expecting either a token or a name.
++          if (currentToken == ";")
++          {
++            // End this one for good.
++            currentVersion = nullptr;
++            endingVersion = false;
++          }
++          else if (currentToken.back() == ';')
++          {
++            currentToken.pop_back();
++            currentVersion->depends = std::move(currentToken);
++            // End this one for good.
++            currentVersion = nullptr;
++            endingVersion = false;
++          }
++          else
++          {
++            currentVersion->depends = std::move(currentToken);
++          }
++        }
++      }
++    }
++
++    fin.close();
++
++    for (auto & kvp : versions)
++    {
++      currentVersion = &kvp.second;
++
++      fout << currentVersion->name << " { ";
++      for (const auto & sym : currentVersion->symbols)
++      {
++        fout << sym << " ";
++      }
++      fout << "}" << ((currentVersion->depends.length()) ? " " + currentVersion->depends : "") << ";\n";
++    }
++
++    fout.close();
++
++    return 0;
++}
+-- 
+2.35.0
+
+
+From e920d0d40c7c6efdf98fe4cee0cd2d48936d2a0c Mon Sep 17 00:00:00 2001
+From: Trung Nguyen <trungnt282910@gmail.com>
+Date: Tue, 5 Jul 2022 22:21:13 +0700
+Subject: [libunwind] Haiku: Implementation improvement
+
+- Optimize program startup time by lazily registring everything to
+a FrameRegistry and parse it when needed.
+- Clean up Haiku configuration, use _LIBUNWIND_TARGET_HAIKU when
+appropriate.
+- CMakeLists.txt now automatically detect required Haiku private
+headers.
+---
+ libunwind/CMakeLists.txt               |  4 ++
+ libunwind/include/__libunwind_config.h |  3 +
+ libunwind/src/AddressSpace.hpp         | 29 ++++++++
+ libunwind/src/CMakeLists.txt           | 15 ++++
+ libunwind/src/FrameRegistry.hpp        | 96 ++++++++++++++++++++++++++
+ libunwind/src/UnwindCursor.hpp         | 12 ++--
+ libunwind/src/UnwindLevel1-gcc-ext.c   | 17 ++++-
+ libunwind/src/config.h                 |  5 +-
+ libunwind/src/libunwind.cpp            | 47 +++++++++++++
+ libunwind/src/libunwind_ext.h          |  7 ++
+ 10 files changed, 224 insertions(+), 11 deletions(-)
+ create mode 100644 libunwind/src/FrameRegistry.hpp
+
+diff --git a/libunwind/CMakeLists.txt b/libunwind/CMakeLists.txt
+index 0a39d31c8b..045c4ecbe7 100644
+--- a/libunwind/CMakeLists.txt
++++ b/libunwind/CMakeLists.txt
+@@ -371,6 +371,10 @@ if (MSVC)
+   add_definitions(-D_CRT_SECURE_NO_WARNINGS)
+ endif()
+ 
++if (HAIKU)
++  add_definitions(-D_DEFAULT_SOURCE)
++endif()
++
+ # Disable DLL annotations on Windows for static builds.
+ if (WIN32 AND LIBUNWIND_ENABLE_STATIC AND NOT LIBUNWIND_ENABLE_SHARED)
+   add_definitions(-D_LIBUNWIND_HIDE_SYMBOLS)
+diff --git a/libunwind/include/__libunwind_config.h b/libunwind/include/__libunwind_config.h
+index e87bcf4003..84d935eece 100644
+--- a/libunwind/include/__libunwind_config.h
++++ b/libunwind/include/__libunwind_config.h
+@@ -32,6 +32,9 @@
+ # if defined(__linux__)
+ #  define _LIBUNWIND_TARGET_LINUX 1
+ # endif
++# if defined(__HAIKU__)
++#  define _LIBUNWIND_TARGET_HAIKU 1
++# endif
+ # if defined(__i386__)
+ #  define _LIBUNWIND_TARGET_I386
+ #  define _LIBUNWIND_CONTEXT_SIZE 8
+diff --git a/libunwind/src/AddressSpace.hpp b/libunwind/src/AddressSpace.hpp
+index 0c4dfeb4e6..027deb92c8 100644
+--- a/libunwind/src/AddressSpace.hpp
++++ b/libunwind/src/AddressSpace.hpp
+@@ -108,6 +108,10 @@ extern char __exidx_end;
+ 
+ #include <link.h>
+ 
++#elif defined(__HAIKU__)
++
++#include <kernel/image.h>
++
+ #endif
+ 
+ namespace libunwind {
+@@ -497,6 +501,12 @@ static int findUnwindSectionsByPhdr(struct dl_phdr_info *pinfo,
+ 
+ #endif  // defined(_LIBUNWIND_USE_DL_ITERATE_PHDR)
+ 
++#if defined(_LIBUNWIND_USE_EH_FRAME_REGISTRY)
++#include "FrameRegistry.hpp"
++
++static FrameRegistry TheFrameRegistry;
++#endif
++
+ 
+ inline bool LocalAddressSpace::findUnwindSections(pint_t targetAddr,
+                                                   UnwindInfoSections &info) {
+@@ -591,6 +601,25 @@ inline bool LocalAddressSpace::findUnwindSections(pint_t targetAddr,
+   dl_iterate_cb_data cb_data = {this, &info, targetAddr};
+   int found = dl_iterate_phdr(findUnwindSectionsByPhdr, &cb_data);
+   return static_cast<bool>(found);
++#elif defined(_LIBUNWIND_USE_EH_FRAME_REGISTRY) && defined(__HAIKU__)
++  image_info imgInfo;
++  int cookie = 0;
++  while (get_next_image_info(0, &cookie, &imgInfo) == B_OK) {
++    if ((pint_t)imgInfo.text <= targetAddr && targetAddr < (pint_t)imgInfo.text + (pint_t)imgInfo.text_size) {
++      FrameRegistry::object *obj = TheFrameRegistry.find(
++          (FrameRegistry::pint_t)imgInfo.text,
++          (FrameRegistry::pint_t)imgInfo.text + (FrameRegistry::pint_t)imgInfo.text_size);
++      if (obj != NULL) {
++        // FDEs in libunwind are grouped based on dso_base.
++        info.dso_base = (uintptr_t)obj->group;
++        info.dwarf_section = (uintptr_t)obj->eh_frame_start;
++        // We cannot accurately determine the length of the .eh_frame section
++        // in this context.
++        info.dwarf_section_length = SIZE_MAX;
++        return true;
++      }
++    }
++  }
+ #endif
+ 
+   return false;
+diff --git a/libunwind/src/CMakeLists.txt b/libunwind/src/CMakeLists.txt
+index 710198550a..3886a4e6e1 100644
+--- a/libunwind/src/CMakeLists.txt
++++ b/libunwind/src/CMakeLists.txt
+@@ -41,6 +41,7 @@ set(LIBUNWIND_HEADERS
+     DwarfParser.hpp
+     EHHeaderParser.hpp
+     FrameHeaderCache.hpp
++    FrameRegistry.hpp
+     libunwind_ext.h
+     Registers.hpp
+     RWMutex.hpp
+@@ -111,6 +112,20 @@ if (APPLE)
+   endif ()
+ endif ()
+ 
++if (HAIKU)
++  find_path(LIBUNWIND_HAIKU_PRIVATE_HEADERS
++            "commpage_defs.h"
++            PATHS ${CMAKE_SYSTEM_INCLUDE_PATH}
++            PATH_SUFFIXES "/private/system"
++            NO_DEFAULT_PATH
++            REQUIRED)
++
++  include_directories(SYSTEM "${LIBUNWIND_HAIKU_PRIVATE_HEADERS}")
++  if (${LIBUNWIND_TARGET_TRIPLE} MATCHES "^x86_64")
++    include_directories(SYSTEM "${LIBUNWIND_HAIKU_PRIVATE_HEADERS}/arch/x86_64")
++  endif()
++endif()
++
+ string(REPLACE ";" " " LIBUNWIND_COMPILE_FLAGS "${LIBUNWIND_COMPILE_FLAGS}")
+ string(REPLACE ";" " " LIBUNWIND_CXX_FLAGS "${LIBUNWIND_CXX_FLAGS}")
+ string(REPLACE ";" " " LIBUNWIND_C_FLAGS "${LIBUNWIND_C_FLAGS}")
+diff --git a/libunwind/src/FrameRegistry.hpp b/libunwind/src/FrameRegistry.hpp
+new file mode 100644
+index 0000000000..cfc9d701e8
+--- /dev/null
++++ b/libunwind/src/FrameRegistry.hpp
+@@ -0,0 +1,96 @@
++//===-FrameRegistry.hpp ---------------------------------------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++// Provides a frame object registry to store a linked list of objects
++// pass to __register_frame_info.
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef __FRAMEREGISTRY_HPP__
++#define __FRAMEREGISTRY_HPP__
++
++#include "config.h"
++#include "RWMutex.hpp"
++#include <limits.h>
++
++#ifdef _LIBUNWIND_DEBUG_FRAMEREGISTRY
++#define _LIBUNWIND_FRAMEREGISTRY_TRACE0(x) _LIBUNWIND_LOG0(x)
++#define _LIBUNWIND_FRAMEREGISTRY_TRACE(msg, ...)                            \
++  _LIBUNWIND_LOG(msg, __VA_ARGS__)
++#else
++#define _LIBUNWIND_FRAMEREGISTRY_TRACE0(x)
++#define _LIBUNWIND_FRAMEREGISTRY_TRACE(msg, ...)
++#endif
++
++class _LIBUNWIND_HIDDEN FrameRegistry {
++public:
++  typedef uintptr_t pint_t;
++  // The memory provided by __register_frame_info
++  // It could be anything that fits into an array of 8 void pointers.
++  struct object {
++    // The object's group (for later use with __deregister_frame_info)
++    void *group;
++    // The real start of the .eh_frame section.
++    void *eh_frame_start;
++    object *next;
++  };
++private:
++  object *Head = NULL;
++  libunwind::RWMutex Lock;
++public:
++  void add(object *obj) {
++    _LIBUNWIND_FRAMEREGISTRY_TRACE("FrameRegistry add: group: %p, eh_frame_start: %p",
++                                   obj->group, obj->eh_frame_start);
++    if (obj->next != NULL) {
++      _LIBUNWIND_FRAMEREGISTRY_TRACE0("FrameRegistry add: already in list");
++      return;
++    }
++    _LIBUNWIND_LOG_IF_FALSE(Lock.lock());
++    obj->next = Head;
++    Head = obj;
++    _LIBUNWIND_LOG_IF_FALSE(Lock.unlock());
++  }
++  object *remove(pint_t group) {
++    _LIBUNWIND_LOG_IF_FALSE(Lock.lock());
++    _LIBUNWIND_FRAMEREGISTRY_TRACE("FrameRegistry remove: %p", (void *)group);
++    object *prev = NULL;
++    object *cur = Head;
++    while (cur != NULL) {
++      if ((pint_t)cur->group == group) {
++        if (prev == NULL) {
++          Head = cur->next;
++        } else {
++          prev->next = cur->next;
++        }
++        cur->next = NULL;
++        _LIBUNWIND_LOG_IF_FALSE(Lock.unlock());
++        return cur;
++      }
++      prev = cur;
++      cur = cur->next;
++    }
++    _LIBUNWIND_LOG_IF_FALSE(Lock.unlock());
++    return NULL;
++  }
++  object *find(pint_t startAddress, pint_t endAddress) {
++    _LIBUNWIND_LOG_IF_FALSE(Lock.lock_shared());
++    _LIBUNWIND_FRAMEREGISTRY_TRACE("FrameRegistry find: start: %p, end: %p",
++                                   (void *)startAddress, (void *)endAddress);
++    object *cur = Head;
++    while (cur != NULL) {
++      if ((pint_t)cur->eh_frame_start >= startAddress &&
++          (pint_t)cur->eh_frame_start < endAddress) {
++        _LIBUNWIND_LOG_IF_FALSE(Lock.unlock_shared());
++        return cur;
++      }
++      cur = cur->next;
++    }
++    _LIBUNWIND_LOG_IF_FALSE(Lock.unlock_shared());
++    return NULL;
++  }
++};
++
++#endif // __FRAMEREGISTRY_HPP__
+diff --git a/libunwind/src/UnwindCursor.hpp b/libunwind/src/UnwindCursor.hpp
+index b794d24ad0..e549e9c187 100644
+--- a/libunwind/src/UnwindCursor.hpp
++++ b/libunwind/src/UnwindCursor.hpp
+@@ -954,7 +954,7 @@ private:
+   template <typename Registers> int stepThroughSigReturn(Registers &) {
+     return UNW_STEP_END;
+   }
+-#elif defined(__HAIKU__)
++#elif defined(_LIBUNWIND_TARGET_HAIKU)
+   bool setInfoForSigReturn();
+   int stepThroughSigReturn();
+ #endif
+@@ -1229,7 +1229,7 @@ private:
+   unw_proc_info_t  _info;
+   bool             _unwindInfoMissing;
+   bool             _isSignalFrame;
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(_LIBUNWIND_TARGET_HAIKU)
+   bool             _isSigReturn = false;
+ #endif
+ };
+@@ -1928,7 +1928,7 @@ bool UnwindCursor<A, R>::getInfoFromSEH(pint_t pc) {
+ 
+ template <typename A, typename R>
+ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(_LIBUNWIND_TARGET_HAIKU)
+   _isSigReturn = false;
+ #endif
+ 
+@@ -2030,7 +2030,7 @@ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
+   }
+ #endif // #if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
+ 
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(_LIBUNWIND_TARGET_HAIKU)
+   if (setInfoForSigReturn())
+     return;
+ #endif
+@@ -2099,7 +2099,7 @@ int UnwindCursor<A, R>::stepThroughSigReturn(Registers_arm64 &) {
+   _isSignalFrame = true;
+   return UNW_STEP_SUCCESS;
+ }
+-#elif defined(__HAIKU__)
++#elif defined(_LIBUNWIND_TARGET_HAIKU)
+ 
+ #include <commpage_defs.h>
+ #include <signal.h>
+@@ -2168,7 +2168,7 @@ int UnwindCursor<A, R>::step() {
+ 
+   // Use unwinding info to modify register set as if function returned.
+   int result;
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(_LIBUNWIND_TARGET_HAIKU)
+   if (_isSigReturn) {
+     result = this->stepThroughSigReturn();
+   } else
+diff --git a/libunwind/src/UnwindLevel1-gcc-ext.c b/libunwind/src/UnwindLevel1-gcc-ext.c
+index 73f1e01e7c..b79739fa42 100644
+--- a/libunwind/src/UnwindLevel1-gcc-ext.c
++++ b/libunwind/src/UnwindLevel1-gcc-ext.c
+@@ -266,9 +266,15 @@ _LIBUNWIND_EXPORT void __register_frame_info_bases(const void *fde, void *ob,
+ }
+ 
+ _LIBUNWIND_EXPORT void __register_frame_info(const void *fde, void *ob) {
+-  (void)ob;
+   _LIBUNWIND_TRACE_API("__register_frame_info(%p, %p)", fde, ob);
+-  __unw_add_dynamic_eh_frame_section((unw_word_t)(uintptr_t)fde);
++#if defined(_LIBUNWIND_USE_EH_FRAME_REGISTRY)
++  __unw_add_dynamic_eh_frame_section_to_registry((unw_word_t)(uintptr_t)fde,
++                                                 (unw_word_t)(uintptr_t)ob);
++#else
++  (void)fde;
++  (void)ob;
++  // do nothing, this function never worked in Mac OS X
++#endif
+ }
+ 
+ _LIBUNWIND_EXPORT void __register_frame_info_table_bases(const void *fde,
+@@ -298,8 +304,13 @@ _LIBUNWIND_EXPORT void __register_frame_table(const void *fde) {
+ 
+ _LIBUNWIND_EXPORT void *__deregister_frame_info(const void *fde) {
+   _LIBUNWIND_TRACE_API("__deregister_frame_info(%p)", fde);
+-  __unw_remove_dynamic_eh_frame_section((unw_word_t)(uintptr_t)fde);
++#if defined(_LIBUNWIND_USE_EH_FRAME_REGISTRY)
++  return __unw_remove_dynamic_eh_frame_section_from_registry((unw_word_t)(uintptr_t)fde);
++#else
++  (void)fde;
++  // do nothing, this function never worked in Mac OS X
+   return NULL;
++#endif
+ }
+ 
+ _LIBUNWIND_EXPORT void *__deregister_frame_info_bases(const void *fde) {
+diff --git a/libunwind/src/config.h b/libunwind/src/config.h
+index 4812aadb42..510b3c9cf7 100644
+--- a/libunwind/src/config.h
++++ b/libunwind/src/config.h
+@@ -43,11 +43,12 @@
+   // For ARM EHABI, Bionic didn't implement dl_iterate_phdr until API 21. After
+   // API 21, dl_iterate_phdr exists, but dl_unwind_find_exidx is much faster.
+   #define _LIBUNWIND_USE_DL_UNWIND_FIND_EXIDX 1
++#elif defined(__HAIKU__)
++  #define _LIBUNWIND_SUPPORT_DWARF_UNWIND 1
++  #define _LIBUNWIND_USE_EH_FRAME_REGISTRY 1
+ #else
+   // Assume an ELF system with a dl_iterate_phdr function.
+-#ifndef __HAIKU__
+   #define _LIBUNWIND_USE_DL_ITERATE_PHDR 1
+-#endif
+   #if !defined(_LIBUNWIND_ARM_EHABI)
+     #define _LIBUNWIND_SUPPORT_DWARF_UNWIND 1
+     #define _LIBUNWIND_SUPPORT_DWARF_INDEX 1
+diff --git a/libunwind/src/libunwind.cpp b/libunwind/src/libunwind.cpp
+index 03f8b75b5b..0a8b7c81bf 100644
+--- a/libunwind/src/libunwind.cpp
++++ b/libunwind/src/libunwind.cpp
+@@ -323,6 +323,53 @@ void __unw_remove_dynamic_eh_frame_section(unw_word_t eh_frame_start) {
+       (LocalAddressSpace::pint_t)eh_frame_start);
+ }
+ 
++#if defined(_LIBUNWIND_USE_EH_FRAME_REGISTRY)
++/// IPI: for __register_frame_info()
++void __unw_add_dynamic_eh_frame_section_to_registry(unw_word_t eh_frame_start,
++                                                    unw_word_t ob) {
++  auto &addressSpace = LocalAddressSpace::sThisAddressSpace;
++  if (ob != 0) {
++    FrameRegistry::object *obj = (FrameRegistry::object *)ob;
++    // This is most likely to be called during image initialization.
++    // Lazily remember the section address for later use.
++    obj->group = (void *)eh_frame_start;
++    obj->eh_frame_start = (void *)eh_frame_start;
++    obj->next = NULL;
++    // On Haiku, the pointer may point to the first FDE
++    // instead of the real start of the .eh_frame section.
++    // This often means skipping a CIE (the first one).
++    addr_t p = (addr_t)eh_frame_start;
++    addr_t length = (addr_t)addressSpace.get32(p);
++    p += 4;
++    if (length == 0xffffffff) {
++      length = (addr_t)addressSpace.get64(p);
++      p += 8;
++    }
++    if (length != 0) {
++      addr_t ciePointer = addressSpace.get32(p);
++      if (ciePointer != 0) {
++        addr_t cieStart = p - ciePointer;
++        if (cieStart < (addr_t)obj->eh_frame_start) {
++          obj->eh_frame_start = (void *)cieStart;
++        }
++      }
++    }
++    TheFrameRegistry.add(obj);
++    return;
++  }
++  return __unw_add_dynamic_eh_frame_section(eh_frame_start);
++}
++
++/// IPI: for __deregister_frame_info()
++void *
++__unw_remove_dynamic_eh_frame_section_from_registry(unw_word_t eh_frame_start) {
++  // The eh_frame section start serves as the mh_group
++  DwarfFDECache<LocalAddressSpace>::removeAllIn(
++      (LocalAddressSpace::pint_t)eh_frame_start);
++  return TheFrameRegistry.remove((FrameRegistry::pint_t)eh_frame_start);
++}
++
++#endif // defined(_LIBUNWIND_USE_EH_FRAME_REGISTRY)
+ #endif // defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
+ #endif // !defined(__USING_SJLJ_EXCEPTIONS__)
+ 
+diff --git a/libunwind/src/libunwind_ext.h b/libunwind/src/libunwind_ext.h
+index 7065ffcdae..5b7f435239 100644
+--- a/libunwind/src/libunwind_ext.h
++++ b/libunwind/src/libunwind_ext.h
+@@ -54,6 +54,13 @@ extern void __unw_remove_dynamic_fde(unw_word_t fde);
+ extern void __unw_add_dynamic_eh_frame_section(unw_word_t eh_frame_start);
+ extern void __unw_remove_dynamic_eh_frame_section(unw_word_t eh_frame_start);
+ 
++#if defined(_LIBUNWIND_USE_EH_FRAME_REGISTRY)
++extern void __unw_add_dynamic_eh_frame_section_to_registry(
++    unw_word_t eh_frame_start, unw_word_t ob);
++extern void *
++__unw_remove_dynamic_eh_frame_section_from_registry(unw_word_t eh_frame_start);
++#endif
++
+ #if defined(_LIBUNWIND_ARM_EHABI)
+ extern const uint32_t* decode_eht_entry(const uint32_t*, size_t*, size_t*);
+ extern _Unwind_Reason_Code _Unwind_VRS_Interpret(_Unwind_Context *context,
+-- 
+2.35.0
+
+
+From 32a3c4dc4d26b76fa2f1110226dc00f7495ac57a Mon Sep 17 00:00:00 2001
+From: Trung Nguyen <trungnt282910@gmail.com>
+Date: Wed, 6 Jul 2022 09:48:14 +0700
+Subject: [libunwind] Haiku: misc fixes
+
+---
+ libunwind/src/UnwindCursor.hpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/libunwind/src/UnwindCursor.hpp b/libunwind/src/UnwindCursor.hpp
+index e549e9c187..b7d90ec09c 100644
+--- a/libunwind/src/UnwindCursor.hpp
++++ b/libunwind/src/UnwindCursor.hpp
+@@ -101,7 +101,7 @@ private:
+ 
+   // These fields are all static to avoid needing an initializer.
+   // There is only one instance of this class per process.
+-  static RWMutex _lock;
++  static libunwind::RWMutex _lock;
+ #ifdef __APPLE__
+   static void dyldUnloadHook(const struct mach_header *mh, intptr_t slide);
+   static bool _registeredForDyldUnloads;
+@@ -128,7 +128,7 @@ template <typename A>
+ typename DwarfFDECache<A>::entry DwarfFDECache<A>::_initialBuffer[64];
+ 
+ template <typename A>
+-RWMutex DwarfFDECache<A>::_lock;
++libunwind::RWMutex DwarfFDECache<A>::_lock;
+ 
+ #ifdef __APPLE__
+ template <typename A>
+-- 
+2.35.0
+
+
+From 4dbd8c57b049d32773eeac5ff7497488f57304d8 Mon Sep 17 00:00:00 2001
+From: Trung Nguyen <trungnt282910@gmail.com>
+Date: Wed, 6 Jul 2022 10:29:36 +0700
+Subject: [libunwind] fix: Support for UNW_x86_64_RIP
+
+---
+ libunwind/src/UnwindCursor.hpp | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/libunwind/src/UnwindCursor.hpp b/libunwind/src/UnwindCursor.hpp
+index b7d90ec09c..eebc88558a 100644
+--- a/libunwind/src/UnwindCursor.hpp
++++ b/libunwind/src/UnwindCursor.hpp
+@@ -668,7 +668,8 @@ template <typename A, typename R>
+ unw_word_t UnwindCursor<A, R>::getReg(int regNum) {
+   switch (regNum) {
+ #if defined(_LIBUNWIND_TARGET_X86_64)
+-  case UNW_REG_IP: return _msContext.Rip;
++  case UNW_REG_IP:
++  case UNW_x86_64_RIP: return _msContext.Rip;
+   case UNW_X86_64_RAX: return _msContext.Rax;
+   case UNW_X86_64_RDX: return _msContext.Rdx;
+   case UNW_X86_64_RCX: return _msContext.Rcx;
+@@ -718,7 +719,8 @@ template <typename A, typename R>
+ void UnwindCursor<A, R>::setReg(int regNum, unw_word_t value) {
+   switch (regNum) {
+ #if defined(_LIBUNWIND_TARGET_X86_64)
+-  case UNW_REG_IP: _msContext.Rip = value; break;
++  case UNW_REG_IP:
++  case UNW_x86_64_RIP: _msContext.Rip = value; break;
+   case UNW_X86_64_RAX: _msContext.Rax = value; break;
+   case UNW_X86_64_RDX: _msContext.Rdx = value; break;
+   case UNW_X86_64_RCX: _msContext.Rcx = value; break;
+-- 
+2.35.0
+

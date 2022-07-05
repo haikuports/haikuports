@@ -1,0 +1,159 @@
+SUMMARY="Enabling libunwind as a replacement for libgcc on Haiku"
+DESCRIPTION="llvm-libgcc is not for the casual LLVM user. \
+It is intended to be used by distro managers who want to replace \
+libgcc with compiler-rt and libunwind, but cannot fully abandon \
+the libgcc family (e.g. because they are dependent on glibc). \
+Such managers must have worked out their compatibility \
+requirements ahead of using llvm-libgcc."
+HOMEPAGE="https://www.llvm.org/"
+COPYRIGHT="2003-2019 University of Illinois at Urbana-Champaign"
+LICENSE="Apache v2 with LLVM Exception"
+REVISION="1"
+SOURCE_URI="https://github.com/llvm/llvm-project/releases/download/llvmorg-$portVersion/llvm-project-$portVersion.src.tar.xz"
+SOURCE_DIR="llvm-project-$portVersion.src"
+CHECKSUM_SHA256="8b3cfd7bc695bd6cea0f37f53f0981f34f87496e79e2529874fd03a2f9dd3a8a"
+PATCHES="llvm_libgcc-$portVersion.patchset"
+
+ARCHITECTURES="x86_64 !x86_gcc2"
+
+libgccSoVersion="1"
+libgccLibVersion="1.0"
+
+PROVIDES="
+	llvm_libgcc$secondaryArchSuffix = $portVersion
+	lib:libunwind$secondaryArchSuffix = $portVersion
+	lib:libgcc_s$secondaryArchSuffix = $libgccLibVersion compat >= $libgccSoVersion
+	"
+REQUIRES="
+	haiku$secondaryArchSuffix
+	"
+
+PROVIDES_devel="
+	llvm_libgcc${secondaryArchSuffix}_devel = $portVersion
+	devel:libunwind$secondaryArchSuffix = $portVersion
+	devel:libgcc$secondaryArchSuffix = $libgccLibVersion compat >= $libgccSoVersion
+	devel:libgcc_eh$secondaryArchSuffix = $libgccLibVersion compat >= $libgccSoVersion
+	devel:libgcc_s$secondaryArchSuffix = $libgccLibVersion compat >= $libgccSoVersion
+	"
+REQUIRES_devel="
+	llvm_libgcc$secondaryArchSuffix == $portVersion base
+	"
+
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel
+	gcc${secondaryArchSuffix}_syslibs_devel
+	"
+BUILD_PREREQUIRES="
+	cmd:clang$secondaryArchSuffix >= 12.0.1
+	cmd:clang++$secondaryArchSuffix >= 12.0.1
+	cmd:cmake
+	cmd:gcc$secondaryArchSuffix
+	cmd:ninja
+	cmd:python3
+	"
+
+getTargetTriple()
+{
+	if [ $effectiveTargetArchitecture = x86_64 ]; then
+		targetTriple="x86_64-unknown-haiku"
+	fi
+}
+
+BUILD()
+{
+	getTargetTriple
+
+	local cmakeFlags
+	if [ $effectiveTargetArchitecture = x86_64 ]; then
+		cmakeFlags="-DLLVM_TARGETS_TO_BUILD=X86"
+		cmakeFlags="$cmakeFlags -DLLVM_DEFAULT_TARGET_TRIPLE=$targetTriple"
+	fi
+
+	# This project requires the clang compiler.
+	# 12.0.1 has been tested, but any version supporting
+	# C++14 should be fine.
+	#
+	# Building llvm-libgcc with GCC triggers
+	# false warnings and results in a binary
+	# with .eh_frame section mapped in the wrong place
+	# (mapped into .data instead of .text).
+	#
+	# GCC is still required during the link stage
+	# (lld does not work on Haiku yet).
+	#
+	# -fPIC is passed as clang requires this to produce
+	# Haiku binaries properly.
+
+	export 	CC="clang$secondaryArchSuffix" \
+			CXX="clang++$secondaryArchSuffix" \
+			CFLAGS="-fPIC" CXXFLAGS="-fPIC" \
+			CMAKE_BUILD_TYPE="Release"
+
+	cmake -GNinja -S llvm -B build-primary \
+		-DCMAKE_BUILD_TYPE=Release $cmakeFlags \
+		-DCMAKE_INSTALL_PREFIX="build-output" \
+		-DCMAKE_C_COMPILER="clang$secondaryArchSuffix" \
+		-DCMAKE_CXX_COMPILER="clang++$secondaryArchSuffix" \
+		-DLLVM_ENABLE_PROJECTS="" \
+		-DLLVM_ENABLE_RUNTIMES="llvm-libgcc" \
+		-DLLVM_LIBGCC_EXPLICIT_OPT_IN=Yes \
+		-DLLVM_LIBGCC_IMITATE_NAME=Yes
+
+	ninja -C build-primary runtimes/install -j$jobs
+}
+
+INSTALL()
+{
+	getTargetTriple
+
+	mkdir -p $libDir
+	mkdir -p $developLibDir
+	mkdir -p $includeDir
+
+	cp -a build-output/lib/$targetTriple/libgcc_s.so* $libDir
+	cp -a build-output/lib/$targetTriple/*.a $developLibDir
+	cp -a libunwind/include/*.h $includeDir
+
+	# For apps expecting libunwind.
+	ln -s $libDir/libgcc_s.so.$libgccLibVersion $libDir/libunwind.so
+
+	# These file conflict with the "real" libgcc.
+	# Touch them with a date in the far, far future
+	# so that they're preferred by the PackageFS.
+	touch -mht 203801181205.09 $libDir/libgcc_s.so*
+	touch -mht 203801181205.09 $developLibDir/libgcc*
+	touch -mht 203801181205.09 $includeDir/unwind.h
+
+	prepareInstalledDevelLibs libgcc_s libunwind
+	fixPkgconfig
+
+	# devel package
+	packageEntries devel $developDir
+}
+
+TEST()
+{
+	# All libunwind tests that are valid on Haiku.
+	# We cannot use LLVM's test framework here, as
+	# we're not compiling the whole project (with clang
+	# and other required stuff).
+	TESTS="libunwind_01.pass
+			libunwind_02.pass
+			signal_frame.pass
+			unw_getcontext.pass"
+
+	getTargetTriple
+
+	for t in $TESTS
+	do
+		echo "Running test $t"
+		clang++$secondaryArchSuffix -fPIC \
+			"libunwind/test/$t.cpp" \
+			-I"libunwind/include" \
+			-L"build-output/lib/$targetTriple/" \
+			-o "build-output/$t"
+
+		LD_PRELOAD="build-output/lib/$targetTriple/libgcc_s.so.1" \
+			./build-output/$t
+	done
+}
