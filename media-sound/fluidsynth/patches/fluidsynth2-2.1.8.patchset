@@ -1,4 +1,4 @@
-From 10f025af5784293e46582664eada1f3e401c4ba0 Mon Sep 17 00:00:00 2001
+From 60c811cc1eaa9892e3d212e884724e1b0e055615 Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
 Date: Sun, 14 Apr 2019 17:27:45 +1000
 Subject: Add Haiku MediaKit support
@@ -177,7 +177,7 @@ index ebd6652..3878fe2 100644
          fluid_synth_t *synth);
 diff --git a/src/drivers/fluid_haiku.cpp b/src/drivers/fluid_haiku.cpp
 new file mode 100644
-index 0000000..2871948
+index 0000000..4d86529
 --- /dev/null
 +++ b/src/drivers/fluid_haiku.cpp
 @@ -0,0 +1,140 @@
@@ -201,14 +201,15 @@ index 0000000..2871948
 + * 02110-1301, USA
 + */
 +
++
++#include <MediaKit.h>
++#include <SupportKit.h>
++
 +extern "C" {
 +#include "fluid_synth.h"
 +#include "fluid_adriver.h"
 +#include "fluid_settings.h"
 +}
-+
-+#include <MediaKit.h>
-+#include <SupportKit.h>
 +
 +typedef struct
 +{
@@ -320,7 +321,6 @@ index 0000000..2871948
 +	}
 +	FLUID_FREE(dev);
 +}
-+
 diff --git a/src/synth/fluid_synth.c b/src/synth/fluid_synth.c
 index 1e0b29f..ea26ed5 100644
 --- a/src/synth/fluid_synth.c
@@ -376,5 +376,343 @@ index 7c7db76..839fc29 100644
  #define fluid_munlock(_p,_n)    munlock(_p,_n)
  #else
 -- 
-2.30.0
+2.30.2
+
+
+From 9017d6ca450024ec6acad465c3ffba648e825aae Mon Sep 17 00:00:00 2001
+From: Cacodemon345 <wahil1976@outlook.com>
+Date: Thu, 17 Mar 2022 14:08:23 +0600
+Subject: Get rid of excessive realtime audio output latency
+
+
+diff --git a/src/drivers/fluid_haiku.cpp b/src/drivers/fluid_haiku.cpp
+index 4d86529..e68653f 100644
+--- a/src/drivers/fluid_haiku.cpp
++++ b/src/drivers/fluid_haiku.cpp
+@@ -73,16 +73,13 @@ new_fluid_haiku_audio_driver(fluid_settings_t *settings, fluid_synth_t *synth)
+     fluid_settings_getint(settings, "audio.periods", &periods);
+     fluid_settings_getint(settings, "audio.period-size", &period_size);    
+ 
+-    if(period_size < 1024) {
+-        period_size = 1024;
+-    } else {
+-        if((period_size & (period_size - 1)) != 0) {
+-            FLUID_LOG(FLUID_ERR, "\"audio.period-size\" must be a power of 2");
+-            return NULL;
+-        }
++    if(fluid_settings_str_equal(settings, "audio.sample-format", "float"))
++    {
++        FLUID_LOG(FLUID_DBG, "Selected 32 bit sample format");
++        sample_size = sizeof(float);
++        write_ptr   = fluid_synth_write_float;
+     }
+-
+-	if(fluid_settings_str_equal(settings, "audio.sample-format", "16bits"))
++   else if(fluid_settings_str_equal(settings, "audio.sample-format", "16bits"))
+     {
+         FLUID_LOG(FLUID_DBG, "Selected 16 bit sample format");
+         sample_size = sizeof(short);
+@@ -106,7 +103,7 @@ new_fluid_haiku_audio_driver(fluid_settings_t *settings, fluid_synth_t *synth)
+ 	media_raw_audio_format mediaKitFormat = {
+ 		(float)sample_rate,
+ 		(uint32)2,
+-		media_raw_audio_format::B_AUDIO_SHORT,
++       sample_size == sizeof(float) ? media_raw_audio_format::B_AUDIO_FLOAT : media_raw_audio_format::B_AUDIO_SHORT,
+ 		B_MEDIA_LITTLE_ENDIAN,
+ 		(uint32)periods * period_size * dev->frame_size
+ 	};
+-- 
+2.30.2
+
+
+From a0075845f29e91406d2df7131808ce283b061614 Mon Sep 17 00:00:00 2001
+From: Cacodemon345 <wahil1976@outlook.com>
+Date: Thu, 17 Mar 2022 14:09:10 +0600
+Subject: Add Haiku MidiKit2 MIDI backend
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index ba2bcb5..168d543 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -76,6 +76,7 @@ option ( enable-dsound "compile DirectSound support (if it is available)" on )
+ option ( enable-waveout "compile Windows WaveOut support (if it is available)" on )
+ option ( enable-winmidi "compile Windows MIDI support (if it is available)" on )
+ option ( enable-haiku "compile Haiku MediaKit audio support (if it is available)" on )
++option ( enable-midikit2 "compile Haiku MidiKit2 MIDI support (if it is available)" on )
+ option ( enable-sdl2 "compile SDL2 audio support (if it is available)" on )
+ option ( enable-pkgconfig "use pkg-config to locate fluidsynth's (mostly optional) dependencies" on )
+ option ( enable-pulseaudio "compile PulseAudio support (if it is available)" on )
+@@ -292,6 +293,9 @@ else ( WIN32 )
+   find_package ( Threads REQUIRED )
+ if ( HAIKU )
+   set ( LIBFLUID_LIBS "network;bsd;be;media" ${CMAKE_THREAD_LIBS_INIT} )
++  if ( enable-midikit2 )
++    set( LIBFLUID_LIBS "midi2" ${LIBFLUID_LIBS} )
++  endif ( enable-midikit2 )
+ else ( HAIKU )
+   set ( LIBFLUID_LIBS "m" ${CMAKE_THREAD_LIBS_INIT} )
+ endif ( HAIKU )
+@@ -613,10 +617,15 @@ else(NOT enable-pkgconfig)
+     endif ( enable-readline )
+ 
+     unset ( HAIKU_SUPPORT CACHE )
++    unset ( MIDIKIT2_SUPPORT CACHE )
+     if ( enable-haiku )
+         set ( HAIKU_SUPPORT 1 )
+     endif ( enable-haiku )
+ 
++    if ( enable-midikit2 )
++        set ( MIDIKIT2_SUPPORT 1 )
++    endif ( enable-midikit2 )
++
+ endif(NOT enable-pkgconfig)
+ 
+ unset ( AUFILE_SUPPORT CACHE )
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index a010df4..58c3c96 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -101,6 +101,10 @@ if ( HAIKU_SUPPORT )
+   set ( fluid_haiku_SOURCES drivers/fluid_haiku.cpp )
+ endif ( HAIKU_SUPPORT )
+ 
++if ( MIDIKIT2_SUPPORT )
++  set ( fluid_midikit2_SOURCES drivers/fluid_midikit2.cpp )
++endif ( MIDIKIT2_SUPPORT )
++
+ if ( OSS_SUPPORT )
+   set ( fluid_oss_SOURCES drivers/fluid_oss.c )
+ endif ( OSS_SUPPORT )
+@@ -286,6 +290,7 @@ add_library ( libfluidsynth-OBJ OBJECT
+     ${fluid_waveout_SOURCES}
+     ${fluid_winmidi_SOURCES}
+     ${fluid_haiku_SOURCES}
++    ${fluid_midikit2_SOURCES}
+     ${fluid_sdl2_SOURCES}
+     ${fluid_libinstpatch_SOURCES}
+     ${libfluidsynth_SOURCES}
+diff --git a/src/config.cmake b/src/config.cmake
+index ef36364..6800b67 100644
+--- a/src/config.cmake
++++ b/src/config.cmake
+@@ -205,6 +205,9 @@
+ /* Define to enable Haiku MediaKit audio driver */
+ #cmakedefine HAIKU_SUPPORT @HAIKU_SUPPORT@
+ 
++/* Define to enable Haiku MidiKit2 MIDI driver */
++#cmakedefine MIDIKIT2_SUPPORT @MIDIKIT2_SUPPORT@
++
+ /* Define to 1 if you have the ANSI C header files. */
+ #cmakedefine STDC_HEADERS @STDC_HEADERS@
+ 
+diff --git a/src/drivers/fluid_mdriver.c b/src/drivers/fluid_mdriver.c
+index 79b2097..ba9f32c 100644
+--- a/src/drivers/fluid_mdriver.c
++++ b/src/drivers/fluid_mdriver.c
+@@ -84,6 +84,14 @@ static const fluid_mdriver_definition_t fluid_midi_drivers[] =
+         NULL
+     },
+ #endif
++#if MIDIKIT2_SUPPORT
++    {
++        "midikit2",
++        new_fluid_midikit2_driver,
++        delete_fluid_midikit2_driver,
++        fluid_midikit2_driver_settings
++    },
++#endif
+ #if COREMIDI_SUPPORT
+     {
+         "coremidi",
+diff --git a/src/drivers/fluid_mdriver.h b/src/drivers/fluid_mdriver.h
+index 76b8b7b..7a2d701 100644
+--- a/src/drivers/fluid_mdriver.h
++++ b/src/drivers/fluid_mdriver.h
+@@ -88,6 +88,15 @@ fluid_midi_driver_t *new_fluid_midishare_midi_driver(fluid_settings_t *settings,
+ void delete_fluid_midishare_midi_driver(fluid_midi_driver_t *p);
+ #endif
+ 
++/* definitions for the MidiKit2 driver */
++#if MIDIKIT2_SUPPORT
++fluid_midi_driver_t *new_fluid_midikit2_driver(fluid_settings_t *settings,
++        handle_midi_event_func_t handler,
++        void *event_handler_data);
++void delete_fluid_midikit2_driver(fluid_midi_driver_t *p);
++void fluid_midikit2_driver_settings(fluid_settings_t *settings);
++#endif
++
+ /* definitions for the CoreMidi driver */
+ #if COREMIDI_SUPPORT
+ fluid_midi_driver_t *new_fluid_coremidi_driver(fluid_settings_t *settings,
+diff --git a/src/drivers/fluid_midikit2.cpp b/src/drivers/fluid_midikit2.cpp
+new file mode 100644
+index 0000000..8588e26
+--- /dev/null
++++ b/src/drivers/fluid_midikit2.cpp
+@@ -0,0 +1,161 @@
++/* Haiku MidiKit2 Driver for FluidSynth
++ *
++ * Copyright (C) 2022  Cacodemon345
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public License
++ * as published by the Free Software Foundation; either version 2.1 of
++ * the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free
++ * Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
++ * 02110-1301, USA
++ */
++
++/* Parts of code taken from the CoreMIDI driver. */
++#include <type_traits>
++
++extern "C" {
++#include "fluid_midi.h"
++#include "fluid_mdriver.h"
++#include "fluid_settings.h"
++}
++
++#include <MidiKit.h>
++#include <midi2/MidiRoster.h>
++#include <midi2/MidiConsumer.h>
++#include <midi2/MidiProducer.h>
++#include <SupportKit.h>
++
++typedef struct
++{
++    fluid_midi_driver_t driver;
++    fluid_midi_parser_t* parser;
++
++    BMidiLocalConsumer *m_consumer;
++    int autoconn_inputs;
++} fluid_midikit2_driver_t;
++
++class fluid_midikit2_input : public BMidiLocalConsumer
++{
++    void Data(uchar *data, size_t length, bool atomic, bigtime_t time) override
++    {
++        if (atomic && callback)
++        {
++            fluid_midi_event_t *event = NULL;
++            snooze_until(time, B_SYSTEM_TIMEBASE);
++            for (int i = 0; i < length; i++)
++            {
++                event = fluid_midi_parser_parse(callback->parser, data[i]);
++            }
++            if (event)
++            {
++                callback->driver.handler(callback->driver.data, event);
++            }
++        }
++    }
++public:
++    fluid_midikit2_driver_t* callback;
++};
++
++void fluid_midikit2_driver_settings(fluid_settings_t *settings)
++{
++    fluid_settings_register_str(settings, "midi.midikit2.id", "pid", 0);
++}
++
++static void fluid_coremidi_autoconnect(fluid_midikit2_driver_t *dev)
++{
++    int32 id = 0;
++    BMidiProducer* producer = NULL;
++    while ((producer = BMidiRoster::NextProducer(&id)) != NULL)
++    {
++        producer->Connect(dev->m_consumer);
++        producer->Release();
++    }
++}
++
++fluid_midi_driver_t*
++new_fluid_midikit2_driver(fluid_settings_t *settings, handle_midi_event_func_t handler, void *data)
++{
++    fluid_midikit2_driver_t* driver = NULL;
++    char* id = NULL;
++    char clientid[128];
++
++    memset(clientid, 0, sizeof(clientid));
++    driver = FLUID_MALLOC(sizeof(fluid_midikit2_driver_t));
++
++    if(driver == NULL)
++    {
++        FLUID_LOG(FLUID_ERR, "Out of memory");
++        return NULL;
++    }
++
++    driver->driver.handler = handler;
++    driver->driver.data = data;
++
++    driver->parser = new_fluid_midi_parser();
++
++    if(driver->parser == NULL)
++    {
++        FLUID_LOG(FLUID_ERR, "Out of memory");
++        FLUID_FREE(driver);
++        return NULL;
++    }
++
++    fluid_settings_dupstr(settings, "midi.midikit2.id", &id);
++    if(id != NULL)
++    {
++        if(FLUID_STRCMP(id, "pid") == 0)
++        {
++            FLUID_SNPRINTF(clientid, sizeof(clientid), "FluidSynth virtual port (%d)", getpid());
++        }
++        else
++        {
++            FLUID_SNPRINTF(clientid, sizeof(clientid), "FluidSynth virtual port (%s)", id);
++        }
++
++        FLUID_FREE(id);   /* -- free id string */
++    }
++    else strncpy(clientid, "FluidSynth virtual port", sizeof(clientid));
++
++    driver->m_consumer = new fluid_midikit2_input;
++    if(!driver->m_consumer->IsValid())
++    {
++        FLUID_LOG(FLUID_ERR, "Failed to create the MIDI consumer");
++        driver->m_consumer->Release();
++        delete_fluid_midi_parser(driver->parser);
++        FLUID_FREE(driver);
++        return NULL;
++    }
++
++    ((fluid_midikit2_input*)driver->m_consumer)->callback = driver;
++    driver->m_consumer->SetName(clientid);
++    driver->m_consumer->Register();
++    fluid_settings_getint(settings, "midi.autoconnect", &driver->autoconn_inputs);
++
++    if (driver->autoconn_inputs)
++    {
++        fluid_coremidi_autoconnect(driver);
++    }
++
++    return (fluid_midi_driver_t *)driver;
++}
++
++void
++delete_fluid_midikit2_driver(fluid_midi_driver_t *p)
++{
++    fluid_return_if_fail(p != NULL);
++    if (p)
++    {
++        fluid_midikit2_driver_t* driver = (fluid_midikit2_driver_t*)p;
++        driver->m_consumer->Unregister();
++        driver->m_consumer->Release();
++        delete_fluid_midi_parser(driver->parser);
++        FLUID_FREE(driver);
++    }
++}
+-- 
+2.30.2
 
