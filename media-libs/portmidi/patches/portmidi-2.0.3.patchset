@@ -1,6 +1,6 @@
-From 4c5ad48138c5133af1af448717ee2088cbb56302 Mon Sep 17 00:00:00 2001
+From c54d087ea14f69faf910dece4340d8ba744e8411 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
-Date: Sun, 15 May 2022 15:27:10 +0200
+Date: Sat, 6 Aug 2022 20:02:59 +0200
 Subject: fix build on Haiku
 
 
@@ -26,6 +26,16 @@ index 5011311..bdbc03e 100644
 -add_test(pmlist)
 +#add_test(pmlist)
  endif(WIN32)
+-- 
+2.36.1
+
+
+From 1f25c8dc03deac630d5dc66cfb5bef67ac69220e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Sat, 6 Aug 2022 20:03:47 +0200
+Subject: fix build on Haiku (temporary Linux code)
+
+
 diff --git a/porttime/ptlinux.c b/porttime/ptlinux.c
 index 367bdd3..b977818 100755
 --- a/porttime/ptlinux.c
@@ -49,5 +59,316 @@ index 367bdd3..b977818 100755
      ms = (now.tv_nsec - time_offset.tv_nsec) / 1000000; /* round down */
      return seconds * 1000 + ms;
 -- 
-2.30.2
+2.36.1
+
+
+From 735fe99777145cde35b037db22e299ce3edcdd13 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Sat, 6 Aug 2022 19:56:47 +0200
+Subject: gcc2 fixes
+
+
+diff --git a/pm_common/pminternal.h b/pm_common/pminternal.h
+index b8af9c9..d28f5fb 100755
+--- a/pm_common/pminternal.h
++++ b/pm_common/pminternal.h
+@@ -175,8 +175,7 @@ void pm_read_short(PmInternal *midi, PmEvent *event);
+ #define success_poll pm_success_fn
+ 
+ #define MIDI_REALTIME_MASK 0xf8
+-#define is_real_time(msg) \
+-    ((Pm_MessageStatus(msg) & MIDI_REALTIME_MASK) == MIDI_REALTIME_MASK)
++#define is_real_time(msg) ((Pm_MessageStatus(msg) & MIDI_REALTIME_MASK) == MIDI_REALTIME_MASK)
+ 
+ int pm_find_default_device(char *pattern, int is_input);
+ 
+diff --git a/pm_common/portmidi.c b/pm_common/portmidi.c
+index 9e0ce98..7b7cebe 100755
+--- a/pm_common/portmidi.c
++++ b/pm_common/portmidi.c
+@@ -841,6 +841,7 @@ PmError pm_create_internal(PmInternal **stream, PmDeviceID device_id,
+                            int is_input, int latency, PmTimeProcPtr time_proc,
+                            void *time_info, int buffer_size)
+ {
++    PmInternal *midi;
+     if (device_id < 0 || device_id >= pm_descriptor_len) {
+        return pmInvalidDeviceId;
+     }
+@@ -848,7 +849,7 @@ PmError pm_create_internal(PmInternal **stream, PmDeviceID device_id,
+         latency = 0;
+     }
+     /* create portMidi internal data */
+-    PmInternal *midi = (PmInternal *) pm_alloc(sizeof(PmInternal)); 
++    midi = (PmInternal *) pm_alloc(sizeof(PmInternal)); 
+     *stream = midi;
+     if (!midi) {
+         return pmInsufficientMemory;
+diff --git a/pm_test/fast.c b/pm_test/fast.c
+index b3290c0..102697e 100644
+--- a/pm_test/fast.c
++++ b/pm_test/fast.c
+@@ -75,15 +75,20 @@ void fast_test()
+     char line[STRING_MAX];
+     int pause = FALSE;  /* pause if this is a virtual output port */
+     PmError err = pmNoError;
++    /* output buffer size should be a little more than
++       msgrate * latency / 1000. PortMidi will guarantee
++       a minimum of latency / 2 */
++    int buffer_size = msgrate * latency / 900;
++    PmTimestamp start, now;
++    int msgcnt = 0;
++    int polling_count = 0;
++    int pitch = 60;
++    int printtime = 1000;
+ 
+     /* It is recommended to start timer before PortMidi */
+     TIME_START;
+ 
+     /* open output device */
+-    /* output buffer size should be a little more than
+-       msgrate * latency / 1000. PortMidi will guarantee
+-       a minimum of latency / 2 */
+-    int buffer_size = msgrate * latency / 900;
+     if (deviceno == Pm_CountDevices()) {
+         deviceno = Pm_CreateVirtualOutput("fast", NULL, DEVICE_INFO);
+         if (deviceno >= 0) {
+@@ -110,7 +115,7 @@ void fast_test()
+         while (getchar() != '\n') ;
+     }
+     /* wait a sec after printing previous line */
+-    PmTimestamp start = get_time(NULL) + 1000;
++    start = get_time(NULL) + 1000;
+     while (start > get_time(NULL)) {
+         Sleep(10);
+     }
+@@ -118,11 +123,7 @@ void fast_test()
+     fflush(stdout); /* make sure message goes to console */
+ 
+     /* every 10ms send on/off pairs at timestamps set to current time */
+-    PmTimestamp now = get_time(NULL);
+-    int msgcnt = 0;
+-    int polling_count = 0;
+-    int pitch = 60;
+-    int printtime = 1000;
++    now = get_time(NULL);
+     /* if expired_timestamps, we want to send timestamps that have
+      * expired. They should be sent immediately, but there's a suggestion
+      * that negative delay might cause problems in the ALSA implementation
+diff --git a/pm_test/fastrcv.c b/pm_test/fastrcv.c
+index d751c70..daee40c 100644
+--- a/pm_test/fastrcv.c
++++ b/pm_test/fastrcv.c
+@@ -84,6 +84,16 @@ void fastrcv_test()
+     PmStream * midi;
+     PmError status, length;
+     PmEvent buffer[1];
++    PmTimestamp start;
++    /* every 10ms read all messages, keep counts */
++    /* every 1000ms, print report */
++    int msgcnt = 0;
++    /* expect repeating sequence of 60 through 71, alternating on/off */
++    int expected_pitch = 60;
++    int expected_on = TRUE;
++    int report_time;
++    PmTimestamp last_timestamp = -1;
++    PmTimestamp last_delta = -1;
+ 
+     /* It is recommended to start timer before PortMidi */
+     TIME_START;
+@@ -101,20 +111,12 @@ void fastrcv_test()
+     printf("Midi Input opened.\n");
+ 
+     /* wait a sec after printing previous line */
+-    PmTimestamp start = Pt_Time() + 1000;
++    start = Pt_Time() + 1000;
+     while (start > Pt_Time()) {
+         Sleep(10);
+     }
+ 
+-    /* every 10ms read all messages, keep counts */
+-    /* every 1000ms, print report */
+-    int msgcnt = 0;
+-    /* expect repeating sequence of 60 through 71, alternating on/off */
+-    int expected_pitch = 60;
+-    int expected_on = TRUE;
+-    int report_time = Pt_Time() + 1000;  /* report every 1s */
+-    PmTimestamp last_timestamp = -1;
+-    PmTimestamp last_delta = -1;
++    report_time = Pt_Time() + 1000;  /* report every 1s */
+     while (TRUE) {
+         PmTimestamp now = Pt_Time();
+         status = Pm_Poll(midi);
+diff --git a/pm_test/midithru.c b/pm_test/midithru.c
+index 36d201f..eba4356 100755
+--- a/pm_test/midithru.c
++++ b/pm_test/midithru.c
+@@ -316,8 +316,9 @@ void initialize(int input, int output, int virtual)
+                       NULL /* time info */,
+                       0 /* Latency */);
+     } else { /* send to virtual port */
++        int id;
+         printf("Opening virtual output device \"midithru\"\n");
+-        int id = Pm_CreateVirtualOutput("midithru", NULL, NULL);
++        id = Pm_CreateVirtualOutput("midithru", NULL, NULL);
+         if (id < 0) checkerror(id);  /* error reporting */
+         checkerror(Pm_OpenOutput(&midi_out, id, NULL, OUT_QUEUE_SIZE,
+                                  &midithru_time_proc, NULL, 0));
+@@ -342,8 +343,9 @@ void initialize(int input, int output, int virtual)
+                      &midithru_time_proc,
+                      NULL /* time info */);
+     } else { /* receive from virtual port */
++        int id;
+         printf("Opening virtual input device \"midithru\"\n");
+-        int id = Pm_CreateVirtualInput("midithru", NULL, NULL);
++        id = Pm_CreateVirtualInput("midithru", NULL, NULL);
+         if (id < 0) checkerror(id);  /* error reporting */
+         checkerror(Pm_OpenInput(&midi_in, id, NULL, 0,
+                                 &midithru_time_proc, NULL));
+diff --git a/pm_test/recvvirtual.c b/pm_test/recvvirtual.c
+index 26c6fa6..8ac97be 100644
+--- a/pm_test/recvvirtual.c
++++ b/pm_test/recvvirtual.c
+@@ -45,13 +45,15 @@ void main_test_input(int num)
+     PmStream *midi;
+     PmError status, length;
+     PmEvent buffer[1];
++    int id;
++    int i = 0; /* count messages as they arrive */
+     /* It is recommended to start timer before Midi; otherwise, PortMidi may
+        start the timer with its (default) parameters
+      */
+     TIME_START;
+ 
+     /* create a virtual input device */
+-    int id = checkerror(Pm_CreateVirtualInput("portmidi", NULL, DRIVER_INFO));
++    id = checkerror(Pm_CreateVirtualInput("portmidi", NULL, DRIVER_INFO));
+     checkerror(Pm_OpenInput(&midi, id, NULL, 0, NULL, NULL));
+ 
+     printf("Midi Input opened. Reading %d Midi messages...\n", num);
+@@ -62,7 +64,6 @@ void main_test_input(int num)
+         Pm_Read(midi, buffer, 1);
+     }
+     /* now start paying attention to messages */
+-    int i = 0; /* count messages as they arrive */
+     while (i < num) {
+         status = Pm_Poll(midi);
+         if (status == TRUE) {
+diff --git a/pm_test/sendvirtual.c b/pm_test/sendvirtual.c
+index 2b74b7f..14c6e9e 100644
+--- a/pm_test/sendvirtual.c
++++ b/pm_test/sendvirtual.c
+@@ -62,6 +62,7 @@ void main_test_output(int num)
+     PmEvent buffer[1];
+     PmTimestamp timestamp;
+     int pitch = 60;
++    int id;
+ 
+     /* It is recommended to start timer before Midi; otherwise, PortMidi may
+        start the timer with its (default) parameters
+@@ -69,7 +70,7 @@ void main_test_output(int num)
+     TIME_START;
+ 
+     /* create a virtual output device */
+-    int id = checkerror(Pm_CreateVirtualOutput("portmidi", NULL, DEVICE_INFO));
++    id = checkerror(Pm_CreateVirtualOutput("portmidi", NULL, DEVICE_INFO));
+     checkerror(Pm_OpenOutput(&midi, id, DRIVER_INFO, OUTPUT_BUFFER_SIZE,
+                              TIME_PROC, TIME_INFO, latency));
+ 
+diff --git a/pm_test/testio.c b/pm_test/testio.c
+index 97387b5..c71ae08 100755
+--- a/pm_test/testio.c
++++ b/pm_test/testio.c
+@@ -156,6 +156,8 @@ void main_test_output(int isochronous_test)
+     Pm_Write(midi, buffer, 1);
+ 
+     if (isochronous_test) { // play 4 notes per sec for 20s 
++        int count;
++        PmTimestamp start;
+         if (latency < 100) {
+             printf("Warning: latency < 100, but this test sends messages"
+                    " at times that are jittered by up to 100ms, so you"
+@@ -163,15 +165,15 @@ void main_test_output(int isochronous_test)
+         }
+         printf("Starting in 1s..."); fflush(stdout);
+         Pt_Sleep(1000);
+-        int count;
+-        PmTimestamp start = Pt_Time();
++        start = Pt_Time();
+         for (count = 0; count < 80; count++) {
++            PmTimestamp next_time;
+             buffer[0].timestamp = start + count * 250;
+             buffer[0].message = Pm_Message(0x90, 69, 100);
+             buffer[1].timestamp = start + count * 250 + 200;
+             buffer[1].message = Pm_Message(0x90, 69, 0);
+             Pm_Write(midi, buffer, 2);
+-            PmTimestamp next_time = start + (count + 1) * 250;
++            next_time = start + (count + 1) * 250;
+             // sleep for a random time up to 100ms to add jitter to
+             // the times at which we send messages. PortMidi timing
+             // should remove the jitter if latency > 100
+diff --git a/pm_test/virttest.c b/pm_test/virttest.c
+index ba8b502..1aeb09b 100644
+--- a/pm_test/virttest.c
++++ b/pm_test/virttest.c
+@@ -167,7 +167,8 @@ void check_ports(int cnt, int in_id, char in_stat,
+ 
+ void devices_list()
+ {
+-    for (int i = 0; i < Pm_CountDevices(); i++) {
++    int i;
++    for (i = 0; i < Pm_CountDevices(); i++) {
+         const PmDeviceInfo *info = Pm_GetDeviceInfo(i);
+         if (info) {
+             printf("%d: %s %s %s %s\n", i, info->name,
+@@ -189,12 +190,13 @@ void test2()
+     PmTimestamp timestamp;
+     int pitch = 60;
+     int device_count = 0;
++    int i;
+ 
+     printf("This must be virttest instance #2\n");
+ 
+     /* find and open portmidi in and out */
+     device_count = Pm_CountDevices();
+-    for (int i = 0; i < device_count; i++) {
++    for (i = 0; i < device_count; i++) {
+         const PmDeviceInfo *info = Pm_GetDeviceInfo(i);
+         if (info && strcmp(info->name, "portmidi") == 0) {
+             if (info->input) {
+@@ -326,8 +328,8 @@ void test()
+ 
+ int main(int argc, char *argv[])
+ {
+-    show_usage();
+     int i;
++    show_usage();
+     for (i = 0; i < 3; i++) {
+         test();
+     }    
+-- 
+2.36.1
+
+
+From 7e0471962a07e126d557177683cc8a7720b6f459 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Sat, 6 Aug 2022 20:00:59 +0200
+Subject: gcc2 fixes (Linux code)
+
+
+diff --git a/pm_linux/finddefault.c b/pm_linux/finddefault.c
+index 7984b4f..d336d0f 100644
+--- a/pm_linux/finddefault.c
++++ b/pm_linux/finddefault.c
+@@ -56,8 +56,8 @@ PmDeviceID find_default_device(char *path, int input, PmDeviceID id)
+     if (*path == '/') path++; // skip initial slash in path
+     path_ptr = strrchr(path, '/'); 
+     if (path_ptr) { // copy up to slash after full_name
+-        path_ptr++;
+         int offset = strlen(full_name);
++        path_ptr++;
+         memcpy(full_name + offset, path, path_ptr - path);
+         full_name[offset + path_ptr - path] = 0; // end of string
+     } else {
+-- 
+2.36.1
 
