@@ -1,0 +1,212 @@
+From d80bbe2bfdbecd939303fd196d806e7a46166d30 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 2 Oct 2022 20:28:04 +1000
+Subject: Enable OpenAL (wasm) audio backend for Haiku
+
+
+diff --git a/src/multimedia/CMakeLists.txt b/src/multimedia/CMakeLists.txt
+index 651c7ee..6b97620 100644
+--- a/src/multimedia/CMakeLists.txt
++++ b/src/multimedia/CMakeLists.txt
+@@ -212,7 +212,7 @@ qt_internal_extend_target(Multimedia CONDITION QT_FEATURE_wmf
+         ksuser
+ )
+ 
+-qt_internal_extend_target(Multimedia CONDITION WASM
++qt_internal_extend_target(Multimedia CONDITION WASM OR HAIKU
+     SOURCES
+         wasm/qwasmmediadevices.cpp wasm/qwasmmediadevices_p.h
+         wasm/qwasmaudiosource.cpp wasm/qwasmaudiosource_p.h
+diff --git a/src/multimedia/configure.cmake b/src/multimedia/configure.cmake
+index efcadfc..72a7d5f 100644
+--- a/src/multimedia/configure.cmake
++++ b/src/multimedia/configure.cmake
+@@ -73,7 +73,7 @@ qt_feature("ffmpeg" PRIVATE
+     LABEL "FFmpeg"
+     ENABLE INPUT_ffmpeg STREQUAL 'yes'
+     DISABLE INPUT_ffmpeg STREQUAL 'no'
+-    CONDITION FFmpeg_FOUND AND (APPLE OR WIN32 OR ANDROID OR QNX OR QT_FEATURE_pulseaudio)
++    CONDITION FFmpeg_FOUND AND (APPLE OR WIN32 OR ANDROID OR QNX OR HAIKU OR QT_FEATURE_pulseaudio)
+ )
+ qt_feature("alsa" PUBLIC PRIVATE
+     LABEL "ALSA (experimental)"
+@@ -200,5 +200,5 @@ qt_configure_end_summary_section() # end of "Qt Multimedia" section
+ qt_configure_add_report_entry(
+     TYPE WARNING
+     MESSAGE "No backend for low level audio found."
+-    CONDITION NOT QT_FEATURE_alsa AND NOT QT_FEATURE_pulseaudio AND NOT QT_FEATURE_mmrenderer AND NOT QT_FEATURE_coreaudio AND NOT QT_FEATURE_wmsdk AND NOT ANDROID AND NOT WASM
++    CONDITION NOT QT_FEATURE_alsa AND NOT QT_FEATURE_pulseaudio AND NOT QT_FEATURE_mmrenderer AND NOT QT_FEATURE_coreaudio AND NOT QT_FEATURE_wmsdk AND NOT ANDROID AND NOT WASM AND NOT HAIKU
+ )
+diff --git a/src/multimedia/platform/qplatformmediadevices.cpp b/src/multimedia/platform/qplatformmediadevices.cpp
+index 26e62d6..bab5ae5 100644
+--- a/src/multimedia/platform/qplatformmediadevices.cpp
++++ b/src/multimedia/platform/qplatformmediadevices.cpp
+@@ -22,7 +22,7 @@
+ #include <qpulseaudiomediadevices_p.h>
+ #elif defined(Q_OS_QNX)
+ #include <qqnxmediadevices_p.h>
+-#elif defined(Q_OS_WASM)
++#elif defined(Q_OS_WASM) || defined(Q_OS_HAIKU)
+ #include <private/qwasmmediadevices_p.h>
+ #endif
+ 
+@@ -63,7 +63,7 @@ QPlatformMediaDevices *QPlatformMediaDevices::instance()
+     holder.nativeInstance = new QPulseAudioMediaDevices;
+ #elif defined(Q_OS_QNX)
+     holder.nativeInstance = new QQnxMediaDevices;
+-#elif defined(Q_OS_WASM)
++#elif defined(Q_OS_WASM) || defined(Q_OS_HAIKU)
+     holder.nativeInstance = new QWasmMediaDevices;
+ #endif
+ 
+diff --git a/src/multimedia/wasm/qwasmaudiodevice.cpp b/src/multimedia/wasm/qwasmaudiodevice.cpp
+index b8f3532..81ebebd 100644
+--- a/src/multimedia/wasm/qwasmaudiodevice.cpp
++++ b/src/multimedia/wasm/qwasmaudiodevice.cpp
+@@ -2,9 +2,11 @@
+ // SPDX-License-Identifier: LicenseRef-Qt-Commercial OR LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
+ 
+ #include "qwasmaudiodevice_p.h"
++#ifndef Q_OS_HAIKU
+ #include <emscripten.h>
+ #include <emscripten/val.h>
+ #include <emscripten/bind.h>
++#endif
+ 
+ #include <AL/al.h>
+ #include <AL/alc.h>
+@@ -35,6 +37,7 @@ QWasmAudioDevice::QWasmAudioDevice(const char *device, const char *desc, bool is
+     // FIXME: firefox
+     // An AudioContext was prevented from starting automatically.
+     // It must be created or resumed after a user gesture on the page.
++#ifndef Q_OS_HAIKU
+     emscripten::val audioContext = emscripten::val::global("window")["AudioContext"].new_();
+     if (audioContext == emscripten::val::undefined())
+         audioContext = emscripten::val::global("window")["webkitAudioContext"].new_();
+@@ -44,6 +47,7 @@ QWasmAudioDevice::QWasmAudioDevice(const char *device, const char *desc, bool is
+         audioContext.call<void>("close");
+         preferredFormat.setSampleRate(sRate);
+     }
++#endif
+ 
+     auto f = QAudioFormat::Float;
+ 
+diff --git a/src/multimedia/wasm/qwasmaudiosink.cpp b/src/multimedia/wasm/qwasmaudiosink.cpp
+index 7c6a5cf..ee63fcf 100644
+--- a/src/multimedia/wasm/qwasmaudiosink.cpp
++++ b/src/multimedia/wasm/qwasmaudiosink.cpp
+@@ -4,7 +4,9 @@
+ #include "qwasmaudiosink_p.h"
+ 
+ 
++#ifndef Q_OS_HAIKU
+ #include <emscripten.h>
++#endif
+ #include <AL/al.h>
+ #include <AL/alc.h>
+ #include <QDebug>
+@@ -209,7 +211,7 @@ void QWasmAudioSink::resume()
+     alSourcePlay(aldata->source);
+ }
+ 
+-int QWasmAudioSink::bytesFree() const
++qsizetype QWasmAudioSink::bytesFree() const
+ {
+     int processed;
+     alGetSourcei(aldata->source, AL_BUFFERS_PROCESSED, &processed);
+@@ -217,7 +219,7 @@ int QWasmAudioSink::bytesFree() const
+                                                + processed) : 0;
+ }
+ 
+-void QWasmAudioSink::setBufferSize(int value)
++void QWasmAudioSink::setBufferSize(qsizetype value)
+ {
+     if (m_running)
+         return;
+@@ -225,7 +227,7 @@ void QWasmAudioSink::setBufferSize(int value)
+     m_bufferSize = value;
+ }
+ 
+-int QWasmAudioSink::bufferSize() const
++qsizetype QWasmAudioSink::bufferSize() const
+ {
+     return m_bufferSize;
+ }
+diff --git a/src/multimedia/wasm/qwasmaudiosink_p.h b/src/multimedia/wasm/qwasmaudiosink_p.h
+index c165f28..be00ecf 100644
+--- a/src/multimedia/wasm/qwasmaudiosink_p.h
++++ b/src/multimedia/wasm/qwasmaudiosink_p.h
+@@ -69,9 +69,9 @@ public:
+     void reset() override;
+     void suspend() override;
+     void resume() override;
+-    int bytesFree() const override;
+-    void setBufferSize(int value) override;
+-    int bufferSize() const override;
++    qsizetype bytesFree() const override;
++    void setBufferSize(qsizetype value) override;
++    qsizetype bufferSize() const override;
+     qint64 processedUSecs() const override;
+     QAudio::Error error() const override;
+     QAudio::State state() const override;
+diff --git a/src/multimedia/wasm/qwasmaudiosource.cpp b/src/multimedia/wasm/qwasmaudiosource.cpp
+index bc7b34b..628720a 100644
+--- a/src/multimedia/wasm/qwasmaudiosource.cpp
++++ b/src/multimedia/wasm/qwasmaudiosource.cpp
+@@ -3,7 +3,10 @@
+ 
+ #include "qwasmaudiosource_p.h"
+ 
++#ifndef Q_OS_HAIKU
+ #include <emscripten.h>
++#endif
++
+ #include <AL/al.h>
+ #include <AL/alc.h>
+ #include <QDataStream>
+@@ -215,7 +218,7 @@ void QWasmAudioSource::resume()
+     alcCaptureStart(aldata->device);
+ }
+ 
+-int QWasmAudioSource::bytesReady() const
++qsizetype QWasmAudioSource::bytesReady() const
+ {
+     if (!m_running)
+         return 0;
+@@ -224,14 +227,14 @@ int QWasmAudioSource::bytesReady() const
+     return m_format.bytesForFrames(samples);
+ }
+ 
+-void QWasmAudioSource::setBufferSize(int value)
++void QWasmAudioSource::setBufferSize(qsizetype value)
+ {
+     if (!m_running)
+         return;
+     m_bufferSize = value;
+ }
+ 
+-int QWasmAudioSource::bufferSize() const
++qsizetype QWasmAudioSource::bufferSize() const
+ {
+     return m_bufferSize;
+ }
+diff --git a/src/multimedia/wasm/qwasmaudiosource_p.h b/src/multimedia/wasm/qwasmaudiosource_p.h
+index 96cb94d..f08455c 100644
+--- a/src/multimedia/wasm/qwasmaudiosource_p.h
++++ b/src/multimedia/wasm/qwasmaudiosource_p.h
+@@ -55,9 +55,9 @@ public:
+     void reset() override;
+     void suspend() override;
+     void resume() override;
+-    int bytesReady() const override;
+-    void setBufferSize(int value) override;
+-    int bufferSize() const override;
++    qsizetype bytesReady() const override;
++    void setBufferSize(qsizetype value) override;
++    qsizetype bufferSize() const override;
+     qint64 processedUSecs() const override;
+     QAudio::Error error() const override;
+     QAudio::State state() const override;
+-- 
+2.36.1
+
