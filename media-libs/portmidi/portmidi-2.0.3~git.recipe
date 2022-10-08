@@ -26,48 +26,67 @@ REQUIRES="
 
 PROVIDES_devel="
 	portmidi${secondaryArchSuffix}_devel = $portVersion
-	devel:libpmjni$secondaryArchSuffix = $portVersionCompat
 	devel:libportmidi$secondaryArchSuffix = $portVersionCompat
 	"
 REQUIRES_devel="
 	portmidi$secondaryArchSuffix == $portVersion base
-	portmidi${secondaryArchSuffix}_java == $portVersion
-	"
-
-PROVIDES_java="
-	portmidi${secondaryArchSuffix}_java = $portVersion
-	lib:libpmjni$secondaryArchSuffix = $portVersionCompat
-	"
-REQUIRES_java="
-	haiku${secondaryArchSuffix}
-	portmidi$secondaryArchSuffix == $portVersion base
-	cmd:java
-	java:runtime
 	"
 
 BUILD_REQUIRES="
 	haiku${secondaryArchSuffix}_devel
-	java:environment
 	"
 
 BUILD_PREREQUIRES="
 	cmd:cmake
 	cmd:gcc${secondaryArchSuffix}
-	cmd:javac
 	cmd:ld${secondaryArchSuffix}
 	cmd:make
 	cmd:pkg_config$secondaryArchSuffix
 	"
 
+# the java bindings do not work with x86_gcc2 because java is not available for it
+# (it would build but fail at runtime with an "UnsatisfiedLinkError: missing library")
+if [ "$effectiveTargetArchitecture" != x86_gcc2 ]; then
+	PROVIDES_devel+="
+		devel:libpmjni$secondaryArchSuffix = $portVersionCompat
+		"
+	REQUIRES_devel+="
+		portmidi${secondaryArchSuffix}_java == $portVersion
+		"
+
+	SUMMARY_java="Cross-Platform MIDI IO (Java bindings)"
+	PROVIDES_java="
+		portmidi${secondaryArchSuffix}_java = $portVersion
+		lib:libpmjni$secondaryArchSuffix = $portVersionCompat
+		"
+	REQUIRES_java="
+		haiku${secondaryArchSuffix}
+		portmidi$secondaryArchSuffix == $portVersion base
+		cmd:java
+		java:runtime
+		"
+
+	BUILD_REQUIRES+="
+		java:environment
+		"
+
+	BUILD_PREREQUIRES+="
+		cmd:javac
+		"
+fi
+
 BUILD()
 {
-	source /system/data/profile.d/openjdk.sh
-
 	mkdir -p build
 	cd build
-	cmake -DCMAKE_BUILD_TYPE=Release $cmakeDirArgs \
-		-DBUILD_PORTMIDI_TESTS=ON -DBUILD_JAVA_NATIVE_INTERFACE=ON -DBUILD_PMDEFAULTS=ON \
-		..
+
+	extraCMakeArgs=
+	if [ "$effectiveTargetArchitecture" != x86_gcc2 ]; then
+		source /system/data/profile.d/openjdk.sh
+		extraCMakeArgs="-DBUILD_JAVA_NATIVE_INTERFACE=ON -DBUILD_PMDEFAULTS=ON"
+	fi
+	cmake .. -DCMAKE_BUILD_TYPE=Release $cmakeDirArgs \
+		-DBUILD_PORTMIDI_TESTS=ON $extraCMakeArgs
 	make $jobArgs
 }
 
@@ -77,48 +96,56 @@ INSTALL()
 	make install
 	cd ..
 
-	cp pm_java/pmdefaults/pmdefaults.jar $libDir
+	if [ "$effectiveTargetArchitecture" != x86_gcc2 ]; then
+		cp pm_java/pmdefaults/pmdefaults.jar $libDir
 
-	mkdir $preferencesDir
-	cat <<- EOF > "$preferencesDir/PortMidi Setup"
-	#!/bin/sh
-	java -jar $libDir/pmdefaults.jar > /dev/null
-	EOF
+		mkdir $preferencesDir
 
-	chmod +x "$preferencesDir/PortMidi Setup"
+		# the included pmdefaults script would need changes anyway, so we just create our own
+		cat <<- EOF > "$preferencesDir/PortMidi Setup"
+		#!/bin/sh
+		java -Djava.library.path=$libDir -jar $libDir/pmdefaults.jar > /dev/null
+		EOF
 
-	local MAJOR="`echo "$portVersion" | cut -d. -f1`"
-	local MIDDLE="`echo "$portVersion" | cut -d. -f2`"
-	local MINOR="`echo "$portVersion" | cut -d. -f3 | cut -d~ -f1`"
-	sed \
-		-e "s|@MAJOR@|$MAJOR|" \
-		-e "s|@MIDDLE@|$MIDDLE|" \
-		-e "s|@MINOR@|$MINOR|" \
-		$portDir/additional-files/pmdefaults.rdef.in \
-			> pmdefaults.rdef
+		chmod +x "$preferencesDir/PortMidi Setup"
 
-	rc pmdefaults.rdef
-	settype -t application/x-vnd.Be-elfexecutable "$preferencesDir/PortMidi Setup"
-	resattr -o "$preferencesDir/PortMidi Setup" pmdefaults.rsrc
+		local MAJOR="`echo "$portVersion" | cut -d. -f1`"
+		local MIDDLE="`echo "$portVersion" | cut -d. -f2`"
+		local MINOR="`echo "$portVersion" | cut -d. -f3 | cut -d~ -f1`"
+		sed \
+			-e "s|@MAJOR@|$MAJOR|" \
+			-e "s|@MIDDLE@|$MIDDLE|" \
+			-e "s|@MINOR@|$MINOR|" \
+			$portDir/additional-files/pmdefaults.rdef.in \
+				> pmdefaults.rdef
 
-	prepareInstalledDevelLibs libportmidi libpmjni
+		rc pmdefaults.rdef
+		settype -t application/x-vnd.Be-elfexecutable "$preferencesDir/PortMidi Setup"
+		resattr -o "$preferencesDir/PortMidi Setup" pmdefaults.rsrc
+
+		addPreferencesDeskbarSymlink "$preferencesDir/PortMidi Setup"
+
+		prepareInstalledDevelLib libpmjni
+
+		# the java bindings need an unversioned libpmjni.so
+		ln -s libpmjni.so.${portVersion%~*} $libDir/libpmjni.so
+	fi
+
+	prepareInstalledDevelLib libportmidi
 
 	fixPkgconfig
-
-	# the java bindings need an unversioned libpmjni.so
-	ln -s libpmjni.so.${portVersion%~*} $libDir/libpmjni.so
-
-	addPreferencesDeskbarSymlink "$preferencesDir/PortMidi Setup"
 
 	packageEntries devel \
 		$developDir \
 		$libDir/cmake
 
-	packageEntries java \
-		$libDir/libpmjni.so* \
-		$libDir/pmdefaults.jar \
-		"$preferencesDir/PortMidi Setup" \
-		$dataDir # this contains the Deskbar symlink
+	if [ "$effectiveTargetArchitecture" != x86_gcc2 ]; then
+		packageEntries java \
+			$libDir/libpmjni.so* \
+			$libDir/pmdefaults.jar \
+			"$preferencesDir/PortMidi Setup" \
+			$dataDir # this contains the Deskbar symlink
+	fi
 }
 
 TEST()
