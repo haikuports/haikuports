@@ -1,0 +1,271 @@
+From df494f4c930677160743252015ea35022db84480 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Sun, 2 Oct 2022 19:42:19 +0000
+Subject: gcc2 patch
+
+
+diff --git a/src/iperf_api.c b/src/iperf_api.c
+index 16f93dc..e70d34c 100644
+--- a/src/iperf_api.c
++++ b/src/iperf_api.c
+@@ -2343,6 +2343,8 @@ send_results(struct iperf_test *test)
+ 		cJSON_AddItemReferenceToObject(j, "server_output_json", test->json_top);
+ 	    }
+ 	    else {
++		char *output;
++
+ 		/* Add textual output */
+ 		size_t buflen = 0;
+ 
+@@ -2353,7 +2355,7 @@ send_results(struct iperf_test *test)
+ 		}
+ 
+ 		/* Allocate and build it up from the component lines */
+-		char *output = calloc(buflen + 1, 1);
++		output = calloc(buflen + 1, 1);
+ 		TAILQ_FOREACH(t, &(test->server_output_list), textlineentries) {
+ 		    strncat(output, t->line, buflen);
+ 		    buflen -= strlen(t->line);
+@@ -2883,6 +2885,7 @@ iperf_free_test(struct iperf_test *test)
+ {
+     struct protocol *prot;
+     struct iperf_stream *sp;
++    struct iperf_textline *t;
+ 
+     /* Free streams */
+     while (!SLIST_EMPTY(&test->streams)) {
+@@ -2977,7 +2980,6 @@ iperf_free_test(struct iperf_test *test)
+     }
+ 
+     /* Free output line buffers, if any (on the server only) */
+-    struct iperf_textline *t;
+     while (!TAILQ_EMPTY(&test->server_output_list)) {
+ 	t = TAILQ_FIRST(&test->server_output_list);
+ 	TAILQ_REMOVE(&test->server_output_list, t, textlineentries);
+@@ -3013,6 +3015,7 @@ void
+ iperf_reset_test(struct iperf_test *test)
+ {
+     struct iperf_stream *sp;
++    struct iperf_textline *t;
+     int i;
+ 
+     /* Free streams */
+@@ -3124,7 +3127,6 @@ iperf_reset_test(struct iperf_test *test)
+     }
+ 
+     /* Free output line buffers, if any (on the server only) */
+-    struct iperf_textline *t;
+     while (!TAILQ_EMPTY(&test->server_output_list)) {
+ 	t = TAILQ_FIRST(&test->server_output_list);
+ 	TAILQ_REMOVE(&test->server_output_list, t, textlineentries);
+@@ -3295,8 +3297,9 @@ iperf_print_intermediate(struct iperf_test *test)
+     SLIST_FOREACH(sp, &test->streams, streams) {
+ 	irp = TAILQ_LAST(&sp->result->interval_results, irlisthead);
+ 	if (irp) {
++	    double interval_len;
+ 	    iperf_time_diff(&irp->interval_start_time, &irp->interval_end_time, &temp_time);
+-	    double interval_len = iperf_time_in_secs(&temp_time);
++	    interval_len = iperf_time_in_secs(&temp_time);
+ 	    if (test->debug) {
+ 		printf("interval_len %f bytes_transferred %" PRIu64 "\n", interval_len, irp->bytes_transferred);
+ 	    }
+@@ -4625,6 +4628,7 @@ iperf_json_start(struct iperf_test *test)
+ int
+ iperf_json_finish(struct iperf_test *test)
+ {
++    char *str;
+     if (test->title)
+ 	cJSON_AddStringToObject(test->json_top, "title", test->title);
+     if (test->extra_data)
+@@ -4639,7 +4643,7 @@ iperf_json_finish(struct iperf_test *test)
+     // Get ASCII rendering of JSON structure.  Then make our
+     // own copy of it and return the storage that cJSON allocated
+     // on our behalf.  We keep our own copy around.
+-    char *str = cJSON_Print(test->json_top);
++    str = cJSON_Print(test->json_top);
+     if (str == NULL)
+ 	return -1;
+     test->json_output_string = strdup(str);
+diff --git a/src/iperf_auth.c b/src/iperf_auth.c
+index 867c55f..21e575d 100644
+--- a/src/iperf_auth.c
++++ b/src/iperf_auth.c
+@@ -357,6 +357,8 @@ int decode_auth_setting(int enable_debug, const char *authtoken, EVP_PKEY *priva
+ ssize_t iperf_getpass (char **lineptr, size_t *n, FILE *stream) {
+     struct termios old, new;
+     ssize_t nread;
++    char *buf;
++    int i;
+ 
+     /* Turn echoing off and fail if we can't. */
+     if (tcgetattr (fileno (stream), &old) != 0)
+@@ -374,8 +376,7 @@ ssize_t iperf_getpass (char **lineptr, size_t *n, FILE *stream) {
+     (void) tcsetattr (fileno (stream), TCSAFLUSH, &old);
+ 
+     //strip the \n or \r\n chars
+-    char *buf = *lineptr;
+-    int i;
++    buf = *lineptr;
+     for (i = 0; buf[i] != '\0'; i++){
+         if (buf[i] == '\n' || buf[i] == '\r'){
+             buf[i] = '\0';
+diff --git a/src/iperf_client_api.c b/src/iperf_client_api.c
+index fbe1a61..c505f6a 100644
+--- a/src/iperf_client_api.c
++++ b/src/iperf_client_api.c
+@@ -54,18 +54,19 @@
+ int
+ iperf_create_streams(struct iperf_test *test, int sender)
+ {
+-    if (NULL == test)
+-    {
+-        iperf_err(NULL, "No test\n");
+-        return -1;
+-    }
+     int i, s;
+ #if defined(HAVE_TCP_CONGESTION)
+     int saved_errno;
+ #endif /* HAVE_TCP_CONGESTION */
+     struct iperf_stream *sp;
++    int orig_bind_port;
+ 
+-    int orig_bind_port = test->bind_port;
++    if (NULL == test)
++    {
++        iperf_err(NULL, "No test\n");
++        return -1;
++    }
++    orig_bind_port = test->bind_port;
+     for (i = 0; i < test->num_streams; ++i) {
+ 
+         test->bind_port = orig_bind_port;
+@@ -260,6 +261,7 @@ iperf_handle_message_client(struct iperf_test *test)
+ {
+     int rval;
+     int32_t err;
++    signed char oldstate;
+ 
+     if (NULL == test)
+     {
+@@ -327,7 +329,7 @@ iperf_handle_message_client(struct iperf_test *test)
+ 	     * Temporarily be in DISPLAY_RESULTS phase so we can get
+ 	     * ending summary statistics.
+ 	     */
+-	    signed char oldstate = test->state;
++	    oldstate = test->state;
+ 	    cpu_util(test->cpu_util);
+ 	    test->state = DISPLAY_RESULTS;
+ 	    test->reporter_callback(test);
+@@ -364,6 +366,7 @@ iperf_connect(struct iperf_test *test)
+ {
+     int opt;
+     socklen_t len;
++    int flag;
+ 
+     if (NULL == test)
+     {
+@@ -385,7 +388,7 @@ iperf_connect(struct iperf_test *test)
+     }
+ 
+     // set TCP_NODELAY for lower latency on control messages
+-    int flag = 1;
++    flag = 1;
+     if (setsockopt(test->ctrl_sck, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int))) {
+         i_errno = IESETNODELAY;
+         return -1;
+@@ -478,12 +481,12 @@ iperf_connect(struct iperf_test *test)
+ int
+ iperf_client_end(struct iperf_test *test)
+ {
++    struct iperf_stream *sp;
+     if (NULL == test)
+     {
+         iperf_err(NULL, "No test\n");
+         return -1;
+     }
+-    struct iperf_stream *sp;
+ 
+     /* Close all stream sockets */
+     SLIST_FOREACH(sp, &test->streams, streams) {
+diff --git a/src/iperf_server_api.c b/src/iperf_server_api.c
+index d3551b0..eed846e 100644
+--- a/src/iperf_server_api.c
++++ b/src/iperf_server_api.c
+@@ -121,10 +121,11 @@ iperf_accept(struct iperf_test *test)
+     }
+ 
+     if (test->ctrl_sck == -1) {
++        int flag;
+         /* Server free, accept new client */
+         test->ctrl_sck = s;
+         // set TCP_NODELAY for lower latency on control messages
+-        int flag = 1;
++        flag = 1;
+         if (setsockopt(test->ctrl_sck, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int))) {
+             i_errno = IESETNODELAY;
+             return -1;
+@@ -183,6 +184,7 @@ iperf_handle_message_server(struct iperf_test *test)
+ {
+     int rval;
+     struct iperf_stream *sp;
++    signed char oldstate;
+ 
+     // XXX: Need to rethink how this behaves to fit API
+     if ((rval = Nread(test->ctrl_sck, (char*) &test->state, sizeof(signed char), Ptcp)) <= 0) {
+@@ -226,7 +228,7 @@ iperf_handle_message_server(struct iperf_test *test)
+ 
+ 	    // Temporarily be in DISPLAY_RESULTS phase so we can get
+ 	    // ending summary statistics.
+-	    signed char oldstate = test->state;
++	    oldstate = test->state;
+ 	    cpu_util(test->cpu_util);
+ 	    test->state = DISPLAY_RESULTS;
+ 	    test->reporter_callback(test);
+@@ -492,6 +494,7 @@ iperf_run_server(struct iperf_test *test)
+     rcv_timeout_us = (test->settings->rcv_timeout.secs * SEC_TO_US) + test->settings->rcv_timeout.usecs;
+ 
+     while (test->state != IPERF_DONE) {
++		    iperf_size_t total_requested_rate;
+ 
+         // Check if average transfer rate was exceeded (condition set in the callback routines)
+ 	if (test->bitrate_limit_exceeded) {
+@@ -610,7 +613,6 @@ iperf_run_server(struct iperf_test *test)
+ 		    }
+ 
+                     if (!is_closed(s)) {
+-
+ #if defined(HAVE_TCP_USER_TIMEOUT)
+ 		    if (test->protocol->id == Ptcp) {
+                         int opt;
+@@ -753,7 +755,7 @@ iperf_run_server(struct iperf_test *test)
+                     test->prot_listener = -1;
+ 
+ 		    /* Ensure that total requested data rate is not above limit */
+-		    iperf_size_t total_requested_rate = test->num_streams * test->settings->rate * (test->mode == BIDIRECTIONAL? 2 : 1);
++		    total_requested_rate = test->num_streams * test->settings->rate * (test->mode == BIDIRECTIONAL? 2 : 1);
+ 		    if (test->settings->bitrate_limit > 0 && total_requested_rate > test->settings->bitrate_limit) {
+                         if (iperf_get_verbose(test))
+                             iperf_err(test, "Client total requested throughput rate of %" PRIu64 " bps exceeded %" PRIu64 " bps limit",
+diff --git a/src/t_api.c b/src/t_api.c
+index d822f55..9f13a84 100644
+--- a/src/t_api.c
++++ b/src/t_api.c
+@@ -65,6 +65,7 @@ main(int argc, char **argv)
+     const char *ver;
+     struct iperf_test *test;
+     int sint, gint;
++    int ret;
+ 
+     ver = iperf_get_iperf_version();
+     assert(strcmp(ver, IPERF_VERSION) == 0);
+@@ -79,7 +80,6 @@ main(int argc, char **argv)
+     gint = iperf_get_test_connect_timeout(test);
+     assert(sint == gint);
+ 
+-    int ret;
+     ret = test_iperf_set_test_bind_port(test);
+ 
+     ret += test_iperf_set_mss(test);
+-- 
+2.37.3
+
