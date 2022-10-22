@@ -1,0 +1,114 @@
+From d733c86fb176daa2c5bec57155fe5bc7f39a50d1 Mon Sep 17 00:00:00 2001
+From: Ulrich Telle <ulrich.telle@gmx.de>
+Date: Tue, 21 Jun 2022 10:58:37 +0200
+Subject: Fix wxUILocaleImplUnix::GetLocalizedName() on non-Linux systems
+
+On non-Linux-like systems the `_NL_*` symbols for retrieving localized
+strings from a locale are typically not available, causing compile-time
+errors.
+
+We now check for Linux-like systems, and resort to accessing our own
+language database otherwise.
+
+Closes #22558.
+
+diff --git a/src/unix/uilocale.cpp b/src/unix/uilocale.cpp
+index 3dfb63f..01556f2 100644
+--- a/src/unix/uilocale.cpp
++++ b/src/unix/uilocale.cpp
+@@ -78,11 +78,14 @@ private:
+     // Call nl_langinfo_l() if available, or nl_langinfo() otherwise.
+     const char* GetLangInfo(nl_item item) const;
+ 
++#ifdef __LINUX__
+     // Call GetLangInfo() using either the native or English item depending on
+     // the form needed.
+     wxString GetFormOfLangInfo(wxLocaleForm form,
+                                nl_item nlNative,
+                                nl_item nlEnglish) const;
++#endif
++
+ #endif // HAVE_LANGINFO_H
+ 
+     wxLocaleIdent m_locId;
+@@ -373,6 +376,7 @@ wxUILocaleImplUnix::GetLangInfo(nl_item item) const
+     return nl_langinfo(item);
+ }
+ 
++#ifdef __LINUX__
+ wxString
+ wxUILocaleImplUnix::GetFormOfLangInfo(wxLocaleForm form,
+                                       nl_item nlNative,
+@@ -397,6 +401,7 @@ wxUILocaleImplUnix::GetFormOfLangInfo(wxLocaleForm form,
+ 
+     return wxString(GetLangInfo(item), wxCSConv(m_codeset));
+ }
++#endif
+ 
+ #endif // HAVE_LANGINFO_H
+ 
+@@ -452,8 +457,8 @@ wxUILocaleImplUnix::GetInfo(wxLocaleInfo index, wxLocaleCategory cat) const
+ wxString
+ wxUILocaleImplUnix::GetLocalizedName(wxLocaleName name, wxLocaleForm form) const
+ {
+-#ifdef HAVE_LANGINFO_H
+     wxString str;
++#if defined(HAVE_LANGINFO_H) && defined(__LINUX__)
+     switch (name)
+     {
+         case wxLOCALE_NAME_LOCALE:
+@@ -487,13 +492,45 @@ wxUILocaleImplUnix::GetLocalizedName(wxLocaleName name, wxLocaleForm form) const
+         default:
+             wxFAIL_MSG("unknown wxLocaleName");
+     }
++#else // !HAVE_LANGINFO_H || !__LINUX__
++    // If HAVE_LANGINFO_H is not available, or system is not Linux-like,
++    // use our own language database to retrieve the requested information.
++    const wxLanguageInfo* langInfo = wxUILocale::FindLanguageInfo(wxLocaleIdent::FromTag(GetName()));
++    if (langInfo)
++    {
++        wxString langDesc;
++        switch ( form )
++        {
++            case wxLOCALE_FORM_NATIVE:
++                langDesc = langInfo->Description;
++                break;
++
++            case wxLOCALE_FORM_ENGLISH:
++                langDesc = langInfo->DescriptionNative;
++                break;
++            default:
++                break;
++        }
++        switch (name)
++        {
++            case wxLOCALE_NAME_LOCALE:
++                str = langDesc;
++                break;
++
++            case wxLOCALE_NAME_LANGUAGE:
++                str = langDesc.BeforeFirst('(').Trim();
++                break;
++
++            case wxLOCALE_NAME_COUNTRY:
++                str = langDesc.AfterFirst('(').BeforeLast(')');
++                break;
++
++            default:
++                wxFAIL_MSG("unknown wxLocaleName");
++        }
++    }
++#endif // HAVE_LANGINFO_H && __LINUX__/!HAVE_LANGINFO_H || !__LINUX__
+     return str;
+-#else // !HAVE_LANGINFO_H
+-    // If HAVE_LANGINFO_H is not available, we could use our own language database
+-    // to retrieve the requested information.
+-    // For now, just return an empty string.
+-    return wxString();
+-#endif // HAVE_LANGINFO_H/!HAVE_LANGINFO_H
+ }
+ 
+ wxLayoutDirection
+-- 
+2.37.3
+
