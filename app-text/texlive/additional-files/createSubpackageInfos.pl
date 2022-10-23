@@ -55,6 +55,16 @@ for my $collectionPkgName (@collections) {
 		print "DESCRIPTION_$collection=\"$longdesc\"\n" if $longdesc;
 		print "PROVIDES_$collection=\"\n";
 		print "\ttexlive_$collection = \$portVersion\n";
+		for my $dep (@depends) {
+			if ($dep !~ /^collection-/) {
+				my $version = $tlpdb->get_package($dep)->cataloguedata()->{'version'};
+				$dep =~ s/-/_/g;
+				print "\ttex:", $dep;
+				# ignore version for now, they would need some transformation to be usable
+				# print " = $version" if $version;
+				print "\n";
+			}
+		}
 		print "\t\"\n";
 		print "REQUIRES_$collection=\"\n";
 		print "\thaiku\n";
