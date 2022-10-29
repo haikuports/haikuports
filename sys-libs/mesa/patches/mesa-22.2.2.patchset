@@ -1,4 +1,4 @@
-From 494a3744ebe8aa0e6fba8e165d6a46160c625581 Mon Sep 17 00:00:00 2001
+From 0074c333ba4c8b90f5d1f1d6c0a3b45be161cfb2 Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
 Date: Sun, 8 Aug 2021 22:34:39 +1000
 Subject: Fix build for Haiku
@@ -106,7 +106,7 @@ index 804593f..9e061c4 100644
 2.37.3
 
 
-From 52846954e321f4effc531c5061a18053b1669c25 Mon Sep 17 00:00:00 2001
+From f3659d06b7145f54c0217805719e74d714c13d8b Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
 Date: Sun, 8 Aug 2021 22:35:54 +1000
 Subject: Add any color_space support
@@ -241,7 +241,7 @@ index 96f19ae..6939e53 100644
 2.37.3
 
 
-From f385354fb8386cda1353a2192711fc3f6eb81a1b Mon Sep 17 00:00:00 2001
+From cd5f29a03dd5f588286ca5b281160894339ef1b3 Mon Sep 17 00:00:00 2001
 From: X512 <danger_mail@list.ru>
 Date: Mon, 7 Feb 2022 13:01:04 +0900
 Subject: osmesa: fix framebuffer leak on resize
@@ -266,7 +266,7 @@ index 91a250d..9f08709 100644
 2.37.3
 
 
-From fd1184c660b5e710bfd33e436af42d8e23e7b3bf Mon Sep 17 00:00:00 2001
+From 260493bc1614fa1324c58a5f36568dc1bc8605fe Mon Sep 17 00:00:00 2001
 From: Ken Mays <kmays2000@gmail.com>
 Date: Sun, 23 Oct 2022 04:12:24 +1000
 Subject: Fix Static_Assert build issue
@@ -286,6 +286,1520 @@ index 88a4c51..8e7c420 100644
  
  /* Compute the size of an array */
  #ifndef ARRAY_SIZE
+-- 
+2.37.3
+
+
+From 6d381adb619c0f468a2563babe26b1f92081ca3a Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Sat, 29 Oct 2022 06:23:16 +0900
+Subject: EGL: implement Haiku driver over Gallium
+
+
+diff --git a/src/egl/drivers/haiku/egl_haiku.cpp b/src/egl/drivers/haiku/egl_haiku.cpp
+index 18c73c9..9a61f32 100644
+--- a/src/egl/drivers/haiku/egl_haiku.cpp
++++ b/src/egl/drivers/haiku/egl_haiku.cpp
+@@ -27,6 +27,8 @@
+ #include <stdint.h>
+ #include <stdio.h>
+ 
++#include <algorithm>
++
+ #include "eglconfig.h"
+ #include "eglcontext.h"
+ #include "egldevice.h"
+@@ -38,8 +40,28 @@
+ #include "eglimage.h"
+ #include "egltypedefs.h"
+ 
+-#include <InterfaceKit.h>
+-#include <OpenGLKit.h>
++#include <mapi/glapi/glapi.h>
++#include "u_atomic.h"
++#include "pipe/p_context.h"
++
++#include "hgl_context.h"
++#include "hgl_sw_winsys.h"
++
++#include "target-helpers/inline_sw_helper.h"
++
++#define BGL_RGB				0
++#define BGL_INDEX			1
++#define BGL_SINGLE			0
++#define BGL_DOUBLE			2
++#define BGL_DIRECT			0
++#define BGL_INDIRECT		4
++#define BGL_ACCUM			8
++#define BGL_ALPHA			16
++#define BGL_DEPTH			32
++#define BGL_OVERLAY			64
++#define BGL_UNDERLAY		128
++#define BGL_STENCIL			512
++#define BGL_SHARE_CONTEXT	1024
+ 
+ 
+ #ifdef DEBUG
+@@ -55,20 +77,24 @@
+ _EGL_DRIVER_STANDARD_TYPECASTS(haiku_egl)
+ 
+ 
+-struct haiku_egl_config
++struct haiku_egl_display
+ {
+-	_EGLConfig         base;
++	int ref_count;
++	struct hgl_display *disp;
+ };
+ 
+-struct haiku_egl_context
+-{
+-	_EGLContext	ctx;
++struct haiku_egl_config {
++	_EGLConfig base;
+ };
+ 
+-struct haiku_egl_surface
+-{
+-	_EGLSurface surf;
+-	BGLView* gl;
++struct haiku_egl_context {
++	_EGLContext base;
++	struct hgl_context *ctx;
++};
++
++struct haiku_egl_surface {
++	_EGLSurface base;
++	struct hgl_buffer *fb;
+ };
+ 
+ 
+@@ -76,55 +102,76 @@ struct haiku_egl_surface
+  * Called via eglCreateWindowSurface(), drv->CreateWindowSurface().
+  */
+ static _EGLSurface *
+-haiku_create_window_surface(_EGLDisplay *disp,
+-	_EGLConfig *conf, void *native_window, const EGLint *attrib_list)
++haiku_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf, void *native_window, const EGLint *attrib_list)
+ {
+-	CALLED();
+-
+-	struct haiku_egl_surface* surface;
+-	surface = (struct haiku_egl_surface*) calloc(1, sizeof (*surface));
+-	if (!surface) {
+-		_eglError(EGL_BAD_ALLOC, "haiku_create_window_surface");
++	printf("haiku_create_window_surface\n");
++	struct haiku_egl_display *hgl_dpy = haiku_egl_display(disp);
++	
++	struct haiku_egl_surface *wgl_surf = (struct haiku_egl_surface*)calloc(1, sizeof(*wgl_surf));
++	if (!wgl_surf)
+ 		return NULL;
+-	}
+ 
+-	if (!_eglInitSurface(&surface->surf, disp, EGL_WINDOW_BIT,
+-		conf, attrib_list, native_window)) {
+-		free(surface);
++	if (!_eglInitSurface(&wgl_surf->base, disp, EGL_WINDOW_BIT, conf, attrib_list, NULL)) {
++		free(wgl_surf);
+ 		return NULL;
+ 	}
+ 
+-	(&surface->surf)->SwapInterval = 1;
+-
+-	TRACE("Creating window\n");
+-	BWindow* win = (BWindow*)native_window;
++	_EGLContext *ctx = _eglGetCurrentContext();
++	struct haiku_egl_context *hglCtx = haiku_egl_context(ctx);
+ 
+-	TRACE("Creating GL view\n");
+-	surface->gl = new BGLView(win->Bounds(), "OpenGL", B_FOLLOW_ALL_SIDES, 0,
+-		BGL_RGB | BGL_DOUBLE | BGL_ALPHA);
++	 struct st_visual visual;
++	hgl_get_st_visual(&visual, BGL_DOUBLE|BGL_DEPTH);
+ 
+-	TRACE("Adding GL\n");
+-	win->AddChild(surface->gl);
++	wgl_surf->fb = hgl_create_st_framebuffer(hgl_dpy->disp, &visual, native_window);
++	if (!wgl_surf->fb) {
++		free(wgl_surf);
++		return NULL;
++	}
+ 
+-	TRACE("Showing window\n");
+-	win->Show();
+-	return &surface->surf;
++	return &wgl_surf->base;
+ }
+ 
+ 
+ static _EGLSurface *
+-haiku_create_pixmap_surface(_EGLDisplay *disp,
+-	_EGLConfig *conf, void *native_pixmap, const EGLint *attrib_list)
++haiku_create_pixmap_surface(_EGLDisplay *disp, _EGLConfig *conf, void *native_pixmap, const EGLint *attrib_list)
+ {
++	printf("haiku_create_pixmap_surface\n");
+ 	return NULL;
+ }
+ 
+ 
+ static _EGLSurface *
+-haiku_create_pbuffer_surface(_EGLDisplay *disp,
+-	_EGLConfig *conf, const EGLint *attrib_list)
++haiku_create_pbuffer_surface(_EGLDisplay *disp, _EGLConfig *conf, const EGLint *attrib_list)
+ {
+-	return NULL;
++	printf("haiku_create_pbuffer_surface\n");
++	struct haiku_egl_display *hgl_dpy = haiku_egl_display(disp);
++	
++	struct haiku_egl_surface *wgl_surf = (struct haiku_egl_surface*)calloc(1, sizeof(*wgl_surf));
++	if (!wgl_surf)
++		return NULL;
++
++	if (!_eglInitSurface(&wgl_surf->base, disp, EGL_PBUFFER_BIT, conf, attrib_list, NULL)) {
++		free(wgl_surf);
++		return NULL;
++	}
++
++	_EGLContext *ctx = _eglGetCurrentContext();
++	struct haiku_egl_context *hglCtx = haiku_egl_context(ctx);
++
++	 struct st_visual visual;
++	hgl_get_st_visual(&visual, BGL_DOUBLE|BGL_DEPTH);
++
++	wgl_surf->fb = hgl_create_st_framebuffer(hgl_dpy->disp, &visual, NULL);
++	if (!wgl_surf->fb) {
++		free(wgl_surf);
++		return NULL;
++	}
++	
++	wgl_surf->fb->newWidth = wgl_surf->base.Width;
++	wgl_surf->fb->newHeight = wgl_surf->base.Height;
++	p_atomic_inc(&wgl_surf->fb->stfbi->stamp);
++
++	return &wgl_surf->base;
+ }
+ 
+ 
+@@ -132,7 +179,8 @@ static EGLBoolean
+ haiku_destroy_surface(_EGLDisplay *disp, _EGLSurface *surf)
+ {
+ 	if (_eglPutSurface(surf)) {
+-		// XXX: detach haiku_egl_surface::gl from the native window and destroy it
++		struct haiku_egl_surface *hgl_surf = haiku_egl_surface(surf);
++		hgl_destroy_st_framebuffer(hgl_surf->fb);
+ 		free(surf);
+ 	}
+ 	return EGL_TRUE;
+@@ -159,9 +207,9 @@ haiku_add_configs_for_visuals(_EGLDisplay *disp)
+ 	conf->base.AlphaSize = 8;
+ 	conf->base.ColorBufferType = EGL_RGB_BUFFER;
+ 	conf->base.BufferSize = conf->base.RedSize
+-	                      + conf->base.GreenSize
+-	                      + conf->base.BlueSize
+-	                      + conf->base.AlphaSize;
++								 + conf->base.GreenSize
++								 + conf->base.BlueSize
++								 + conf->base.AlphaSize;
+ 	conf->base.ConfigCaveat = EGL_NONE;
+ 	conf->base.ConfigID = 1;
+ 	conf->base.BindToTextureRGB = EGL_FALSE;
+@@ -176,10 +224,10 @@ haiku_add_configs_for_visuals(_EGLDisplay *disp)
+ 	conf->base.Samples = conf->base.SampleBuffers == 0 ? 0 : 0;
+ 	conf->base.DepthSize = 24; // TODO: How to get the right value ?
+ 	conf->base.Level = 0;
+-	conf->base.MaxPbufferWidth = 0; // TODO: How to get the right value ?
+-	conf->base.MaxPbufferHeight = 0; // TODO: How to get the right value ?
++	conf->base.MaxPbufferWidth = _EGL_MAX_PBUFFER_WIDTH;
++	conf->base.MaxPbufferHeight = _EGL_MAX_PBUFFER_HEIGHT;
+ 	conf->base.MaxPbufferPixels = 0; // TODO: How to get the right value ?
+-	conf->base.SurfaceType = EGL_WINDOW_BIT /*| EGL_PIXMAP_BIT | EGL_PBUFFER_BIT*/;
++	conf->base.SurfaceType = EGL_WINDOW_BIT | EGL_PIXMAP_BIT | EGL_PBUFFER_BIT;
+ 
+ 	TRACE("Config configuated\n");
+ 	if (!_eglValidateConfig(&conf->base, EGL_FALSE)) {
+@@ -202,58 +250,135 @@ cleanup:
+ 	return EGL_FALSE;
+ }
+ 
++static void
++haiku_display_destroy(_EGLDisplay *disp)
++{
++	struct haiku_egl_display *hgl_dpy = haiku_egl_display(disp);
+ 
+-extern "C"
+-EGLBoolean
++	struct pipe_screen* screen = hgl_dpy->disp->manager->screen;
++	hgl_destroy_display(hgl_dpy->disp); hgl_dpy->disp = NULL;
++	screen->destroy(screen); // destroy will deallocate object
++
++	free(hgl_dpy);
++}
++
++static EGLBoolean
++haiku_initialize_impl(_EGLDisplay *disp, void *platformDisplay)
++{
++	struct haiku_egl_display *wgl_dpy;
++	const char* err;
++
++	wgl_dpy = (struct haiku_egl_display*)calloc(1, sizeof(struct haiku_egl_display));
++	if (!wgl_dpy)
++		return _eglError(EGL_BAD_ALLOC, "eglInitialize");
++
++	disp->DriverData = (void *)wgl_dpy;
++	
++	struct sw_winsys* winsys = hgl_create_sw_winsys();
++	struct pipe_screen* screen = sw_screen_create(winsys);
++	wgl_dpy->disp = hgl_create_display(screen);
++
++	disp->ClientAPIs = 0;
++	if (_eglIsApiValid(EGL_OPENGL_API))
++		disp->ClientAPIs |= EGL_OPENGL_BIT;
++	if (_eglIsApiValid(EGL_OPENGL_ES_API))
++		disp->ClientAPIs |= EGL_OPENGL_ES_BIT | EGL_OPENGL_ES2_BIT | EGL_OPENGL_ES3_BIT_KHR;
++
++	disp->Extensions.KHR_no_config_context = EGL_TRUE;
++	disp->Extensions.KHR_surfaceless_context = EGL_TRUE;
++	disp->Extensions.MESA_query_driver = EGL_TRUE;
++
++	/* Report back to EGL the bitmask of priorities supported */
++	disp->Extensions.IMG_context_priority =
++		wgl_dpy->disp->manager->screen->get_param(wgl_dpy->disp->manager->screen, PIPE_CAP_CONTEXT_PRIORITY_MASK);
++
++	disp->Extensions.EXT_pixel_format_float = EGL_TRUE;
++
++	if (wgl_dpy->disp->manager->screen->is_format_supported(wgl_dpy->disp->manager->screen,
++			PIPE_FORMAT_B8G8R8A8_SRGB,
++			PIPE_TEXTURE_2D, 0, 0,
++			PIPE_BIND_RENDER_TARGET))
++		disp->Extensions.KHR_gl_colorspace = EGL_TRUE;
++
++	disp->Extensions.KHR_create_context = EGL_TRUE;
++	disp->Extensions.KHR_reusable_sync = EGL_TRUE;
++	
++	haiku_add_configs_for_visuals(disp);
++
++	return EGL_TRUE;
++
++cleanup:
++	haiku_display_destroy(disp);
++	return _eglError(EGL_NOT_INITIALIZED, err);
++}
++
++
++static EGLBoolean
+ init_haiku(_EGLDisplay *disp)
+ {
+-	_EGLDevice *dev;
+-	CALLED();
++	EGLBoolean ret = EGL_FALSE;
++	struct haiku_egl_display *hgl_dpy = haiku_egl_display(disp);
++
++	if (hgl_dpy) {
++		hgl_dpy->ref_count++;
++		return EGL_TRUE;
++	}
+ 
+-	dev = _eglAddDevice(-1, true);
+-	if (!dev) {
+-		_eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
++	switch (disp->Platform) {
++	case _EGL_PLATFORM_SURFACELESS:
++	case _EGL_PLATFORM_HAIKU:
++		ret = haiku_initialize_impl(disp, NULL);
++		break;
++	case _EGL_PLATFORM_DEVICE:
++		ret = haiku_initialize_impl(disp, disp->PlatformDisplay);
++		break;
++	default:
++		unreachable("Callers ensure we cannot get here.");
+ 		return EGL_FALSE;
+ 	}
+-	disp->Device = dev;
+ 
+-	TRACE("Add configs\n");
+-	if (!haiku_add_configs_for_visuals(disp))
++	if (!ret)
+ 		return EGL_FALSE;
+ 
+-	TRACE("Initialization finished\n");
++	hgl_dpy = haiku_egl_display(disp);
++	hgl_dpy->ref_count++;
+ 
+ 	return EGL_TRUE;
+ }
+ 
+ 
+-extern "C"
+-EGLBoolean
++static EGLBoolean
+ haiku_terminate(_EGLDisplay *disp)
+ {
+ 	return EGL_TRUE;
+ }
+ 
+ 
+-extern "C"
+-_EGLContext*
++static _EGLContext*
+ haiku_create_context(_EGLDisplay *disp, _EGLConfig *conf,
+ 	_EGLContext *share_list, const EGLint *attrib_list)
+ {
+ 	CALLED();
++	
++	struct haiku_egl_display *hgl_dpy = haiku_egl_display(disp);
++
++	struct st_visual visual;
++	hgl_get_st_visual(&visual, BGL_DOUBLE|BGL_DEPTH);
+ 
+-	struct haiku_egl_context* context;
+-	context = (struct haiku_egl_context*) calloc(1, sizeof (*context));
++	struct haiku_egl_context* context = (struct haiku_egl_context*) calloc(1, sizeof (*context));
+ 	if (!context) {
+ 		_eglError(EGL_BAD_ALLOC, "haiku_create_context");
+ 		return NULL;
+ 	}
+ 
+-	if (!_eglInitContext(&context->ctx, disp, conf, attrib_list))
++	if (!_eglInitContext(&context->base, disp, conf, attrib_list))
++		goto cleanup;
++
++	context->ctx = hgl_create_context(hgl_dpy->disp, &visual, share_list == NULL ? NULL : haiku_egl_context(share_list)->ctx->st);
++	if (context->ctx == NULL)
+ 		goto cleanup;
+ 
+-	TRACE("Context created\n");
+-	return &context->ctx;
++	return &context->base;
+ 
+ cleanup:
+ 	free(context);
+@@ -261,50 +386,89 @@ cleanup:
+ }
+ 
+ 
+-extern "C"
+-EGLBoolean
++static EGLBoolean
+ haiku_destroy_context(_EGLDisplay *disp, _EGLContext* ctx)
+ {
+-	struct haiku_egl_context* context = haiku_egl_context(ctx);
+-
+ 	if (_eglPutContext(ctx)) {
+-		// XXX: teardown the context ?
+-		free(context);
++		struct haiku_egl_context* hgl_ctx = haiku_egl_context(ctx);
++		hgl_destroy_context(hgl_ctx->ctx);
++		free(ctx);
+ 		ctx = NULL;
+ 	}
+ 	return EGL_TRUE;
+ }
+ 
+ 
+-extern "C"
+-EGLBoolean
+-haiku_make_current(_EGLDisplay *disp, _EGLSurface *dsurf,
+-	_EGLSurface *rsurf, _EGLContext *ctx)
++static void
++update_size(struct hgl_buffer *buffer)
++{
++	uint32_t newWidth, newHeight;
++	((BitmapHook*)buffer->winsysContext)->GetSize(newWidth, newHeight);
++	if (buffer->newWidth != newWidth || buffer->newHeight != newHeight) {
++		buffer->newWidth = newWidth;
++		buffer->newHeight = newHeight;
++		p_atomic_inc(&buffer->stfbi->stamp);
++	}
++}
++
++
++static EGLBoolean
++haiku_make_current(_EGLDisplay *disp, _EGLSurface *dsurf, _EGLSurface *rsurf, _EGLContext *ctx)
+ {
+ 	CALLED();
+ 
+-	struct haiku_egl_context* cont = haiku_egl_context(ctx);
+-	struct haiku_egl_surface* surf = haiku_egl_surface(dsurf);
++	struct haiku_egl_display *hgl_dpy = haiku_egl_display(disp);
++	struct haiku_egl_context* hgl_ctx = haiku_egl_context(ctx);
++	struct haiku_egl_surface* hgl_dsurf = haiku_egl_surface(dsurf);
+ 	_EGLContext *old_ctx;
+ 	_EGLSurface *old_dsurf, *old_rsurf;
+ 
+ 	if (!_eglBindContext(ctx, dsurf, rsurf, &old_ctx, &old_dsurf, &old_rsurf))
+ 		return EGL_FALSE;
+ 
+-	//cont->ctx.DrawSurface=&surf->surf;
+-	surf->gl->LockGL();
++	if (ctx == NULL) {
++		hgl_dpy->disp->api->make_current(hgl_dpy->disp->api, NULL, NULL, NULL);
++	} else {
++		if (dsurf != NULL && dsurf != old_dsurf)
++			update_size(hgl_dsurf->fb);
++
++		hgl_dpy->disp->api->make_current(hgl_dpy->disp->api, hgl_ctx->ctx->st, hgl_dsurf == NULL ? NULL : hgl_dsurf->fb->stfbi, hgl_dsurf == NULL ? NULL : hgl_dsurf->fb->stfbi);
++	}
++
+ 	return EGL_TRUE;
+ }
+ 
+ 
+-extern "C"
+-EGLBoolean
++static EGLBoolean
+ haiku_swap_buffers(_EGLDisplay *disp, _EGLSurface *surf)
+ {
+-	struct haiku_egl_surface* surface = haiku_egl_surface(surf);
++	struct haiku_egl_display *hgl_dpy = haiku_egl_display(disp);
++	struct haiku_egl_surface* hgl_surf = haiku_egl_surface(surf);
++	struct haiku_egl_context* hgl_ctx = haiku_egl_context(surf->CurrentContext);
++	if (hgl_ctx == NULL)
++		return EGL_FALSE;
++
++	struct st_context_iface *st = hgl_ctx->ctx->st;
++	struct pipe_screen *screen = hgl_dpy->disp->manager->screen;
++
++	struct pipe_fence_handle *fence = NULL;
++	st->flush(st, ST_FLUSH_FRONT, &fence, NULL, NULL);
++   if (fence) {
++      screen->fence_finish(screen, NULL, fence, PIPE_TIMEOUT_INFINITE);
++      screen->fence_reference(screen, &fence, NULL);
++   }
++
++	struct hgl_buffer* buffer = hgl_surf->fb;
++
++	// flush back buffer and swap buffers if double buffering is used
++	if (buffer->textures[ST_ATTACHMENT_BACK_LEFT] != NULL) {
++		screen->flush_frontbuffer(screen, st->pipe, buffer->textures[ST_ATTACHMENT_BACK_LEFT],
++			0, 0, buffer->winsysContext, NULL);
++		std::swap(buffer->textures[ST_ATTACHMENT_FRONT_LEFT], buffer->textures[ST_ATTACHMENT_BACK_LEFT]);
++		p_atomic_inc(&buffer->stfbi->stamp);
++	}
++	update_size(buffer);
+ 
+-	surface->gl->SwapBuffers();
+-	//gl->Render();
+ 	return EGL_TRUE;
+ }
+ 
+@@ -321,4 +485,5 @@ const _EGLDriver _eglDriver = {
+ 	.CreatePbufferSurface = haiku_create_pbuffer_surface,
+ 	.DestroySurface = haiku_destroy_surface,
+ 	.SwapBuffers = haiku_swap_buffers,
++	.GetProcAddress = _glapi_get_proc_address,
+ };
+diff --git a/src/egl/meson.build b/src/egl/meson.build
+index c04d363..194f6c6 100644
+--- a/src/egl/meson.build
++++ b/src/egl/meson.build
+@@ -142,8 +142,9 @@ elif with_platform_haiku
+     '-D_EGL_BUILT_IN_DRIVER_HAIKU',
+   ]
+   files_egl += files('drivers/haiku/egl_haiku.cpp')
+-  link_for_egl += libgl
+-  deps_for_egl += cpp.find_library('be')
++  incs_for_egl += [include_directories('../mapi', '../mesa', '../gallium/auxiliary', '../gallium/drivers', '../gallium/winsys', '../gallium/frontends/hgl', '../gallium/winsys/sw/hgl')]
++  link_for_egl += [libmesa, libgallium, libswhgl, libsthgl]
++  deps_for_egl += [cpp.find_library('be'), driver_swrast]
+ elif with_platform_windows
+   c_args_for_egl += [
+     '-DEGLAPI=', '-DPUBLIC='
+-- 
+2.37.3
+
+
+From 2aea012153643cafec0008aec6f94c64fef425c9 Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Sat, 29 Oct 2022 06:23:16 +0900
+Subject: Fix Mesa sys/util files for Haiku
+
+
+diff --git a/src/util/libsync.h b/src/util/libsync.h
+index 8ac7657..162ba36 100644
+--- a/src/util/libsync.h
++++ b/src/util/libsync.h
+@@ -37,6 +37,9 @@
+ #include <sys/poll.h>
+ #include <unistd.h>
+ #include <time.h>
++#if defined(__HAIKU__)
++#include <sys/ioccom.h>
++#endif
+ 
+ #if defined(__cplusplus)
+ extern "C" {
+diff --git a/src/util/u_math.h b/src/util/u_math.h
+index 21037cb..20d9f33 100644
+--- a/src/util/u_math.h
++++ b/src/util/u_math.h
+@@ -48,6 +48,9 @@
+ #include "bitscan.h"
+ #include "u_endian.h" /* for UTIL_ARCH_BIG_ENDIAN */
+ 
++#include <sys/param.h>
++#undef ALIGN
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+diff --git a/src/util/xmlconfig.h b/src/util/xmlconfig.h
+index 1b2daf8..f6a7f2c 100644
+--- a/src/util/xmlconfig.h
++++ b/src/util/xmlconfig.h
+@@ -39,7 +39,7 @@
+ extern "C" {
+ #endif
+ 
+-#if defined(ANDROID) || defined(_WIN32)
++#if defined(ANDROID) || defined(_WIN32) || defined(__HAIKU__)
+ #define WITH_XMLCONFIG 0
+ #else
+ #define WITH_XMLCONFIG 1
+diff --git a/src/vulkan/wsi/meson.build b/src/vulkan/wsi/meson.build
+index deaaeae..be6a235 100644
+--- a/src/vulkan/wsi/meson.build
++++ b/src/vulkan/wsi/meson.build
+@@ -20,7 +20,7 @@
+ 
+ files_vulkan_wsi = files('wsi_common.c')
+ 
+-if dep_libdrm.found()
++if dep_libdrm.found() and not with_platform_haiku
+   files_vulkan_wsi += files('wsi_common_drm.c')
+ endif
+ 
+diff --git a/src/vulkan/wsi/wsi_common.c b/src/vulkan/wsi/wsi_common.c
+index 5cafaf3..edea865 100644
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -896,7 +896,7 @@ wsi_signal_semaphore_for_image(struct vk_device *device,
+ 
+    vk_semaphore_reset_temporary(device, semaphore);
+ 
+-#ifdef HAVE_LIBDRM
++#if defined(HAVE_LIBDRM) && !defined(__HAIKU__)
+    VkResult result = wsi_create_sync_for_dma_buf_wait(chain, image,
+                                                       VK_SYNC_FEATURE_GPU_WAIT,
+                                                       &semaphore->temporary);
+@@ -928,7 +928,7 @@ wsi_signal_fence_for_image(struct vk_device *device,
+ 
+    vk_fence_reset_temporary(device, fence);
+ 
+-#ifdef HAVE_LIBDRM
++#if defined(HAVE_LIBDRM) && !defined(__HAIKU__)
+    VkResult result = wsi_create_sync_for_dma_buf_wait(chain, image,
+                                                       VK_SYNC_FEATURE_CPU_WAIT,
+                                                       &fence->temporary);
+@@ -1107,7 +1107,7 @@ wsi_common_queue_present(const struct wsi_device *wsi,
+       VkFence fence = swapchain->fences[image_index];
+ 
+       bool has_signal_dma_buf = false;
+-#ifdef HAVE_LIBDRM
++#if defined(HAVE_LIBDRM) && !defined(__HAIKU__)
+       result = wsi_prepare_signal_dma_buf_from_semaphore(swapchain, image);
+       if (result == VK_SUCCESS) {
+          assert(submit_info.signalSemaphoreCount == 0);
+@@ -1140,7 +1140,7 @@ wsi_common_queue_present(const struct wsi_device *wsi,
+       if (result != VK_SUCCESS)
+          goto fail_present;
+ 
+-#ifdef HAVE_LIBDRM
++#if defined(HAVE_LIBDRM) && !defined(__HAIKU__)
+       if (has_signal_dma_buf) {
+          result = wsi_signal_dma_buf_from_semaphore(swapchain, image);
+          if (result != VK_SUCCESS)
+-- 
+2.37.3
+
+
+From 630236f26bc51ecc22ebdc364e19847ae439e798 Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Sat, 29 Oct 2022 06:23:16 +0900
+Subject: Fix AMD RADV for Haiku
+
+
+diff --git a/src/amd/vulkan/meson.build b/src/amd/vulkan/meson.build
+index 2135a2e..1fcd080 100644
+--- a/src/amd/vulkan/meson.build
++++ b/src/amd/vulkan/meson.build
+@@ -207,6 +207,10 @@ if with_platform_windows
+   icd_file_name = 'vulkan_radeon.dll'
+ endif
+ 
++if with_platform_haiku
++	icd_lib_path = '.'
++endif
++
+ icd_command = [
+   prog_python, '@INPUT0@',
+   '--api-version', '1.3', '--xml', '@INPUT1@',
+diff --git a/src/amd/vulkan/radv_device.c b/src/amd/vulkan/radv_device.c
+index c8cc768..290ef3a 100644
+--- a/src/amd/vulkan/radv_device.c
++++ b/src/amd/vulkan/radv_device.c
+@@ -29,7 +29,7 @@
+ #include <stdbool.h>
+ #include <string.h>
+ 
+-#ifdef __FreeBSD__
++#if defined(__FreeBSD__) || defined(__HAIKU__)
+ #include <sys/types.h>
+ #endif
+ #ifdef MAJOR_IN_MKDEV
+@@ -7192,7 +7192,7 @@ radv_GetPhysicalDeviceCalibrateableTimeDomainsEXT(VkPhysicalDevice physicalDevic
+    return vk_outarray_status(&out);
+ }
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__HAIKU__)
+ static uint64_t
+ radv_clock_gettime(clockid_t clock_id)
+ {
+-- 
+2.37.3
+
+
+From 32adbc5af8e0bb409dd995dfafbbc57a91852ca0 Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Sat, 29 Oct 2022 06:23:16 +0900
+Subject: HGL: refactor HGL frontend
+
+
+diff --git a/src/gallium/frontends/hgl/hgl.c b/src/gallium/frontends/hgl/hgl.c
+index 0e100e2..eba75bd 100644
+--- a/src/gallium/frontends/hgl/hgl.c
++++ b/src/gallium/frontends/hgl/hgl.c
+@@ -17,6 +17,7 @@
+ #include "util/u_memory.h"
+ #include "util/u_inlines.h"
+ #include "state_tracker/st_gl_api.h" /* for st_gl_api_create */
++#include "state_tracker/st_context.h"
+ 
+ #include "GLView.h"
+ 
+@@ -45,7 +46,7 @@ hgl_st_context(struct st_context_iface *stctxi)
+ 
+ // Perform a safe void to hgl_buffer cast
+ //static inline struct hgl_buffer*
+-struct hgl_buffer*
++static struct hgl_buffer*
+ hgl_st_framebuffer(struct st_framebuffer_iface *stfbi)
+ {
+ 	struct hgl_buffer* buffer;
+@@ -110,17 +111,17 @@ hgl_st_framebuffer_validate_textures(struct st_framebuffer_iface *stfbi,
+ 		enum pipe_format format;
+ 		unsigned bind;
+ 
+-		if (((1 << i) & buffer->visual->buffer_mask) && buffer->textures[i] == NULL) {
++		if (((1 << i) & buffer->visual.buffer_mask) && buffer->textures[i] == NULL) {
+ 			switch (i) {
+ 				case ST_ATTACHMENT_FRONT_LEFT:
+ 				case ST_ATTACHMENT_BACK_LEFT:
+ 				case ST_ATTACHMENT_FRONT_RIGHT:
+ 				case ST_ATTACHMENT_BACK_RIGHT:
+-					format = buffer->visual->color_format;
++					format = buffer->visual.color_format;
+ 					bind = PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_RENDER_TARGET;
+ 					break;
+ 				case ST_ATTACHMENT_DEPTH_STENCIL:
+-					format = buffer->visual->depth_stencil_format;
++					format = buffer->visual.depth_stencil_format;
+ 					bind = PIPE_BIND_DEPTH_STENCIL;
+ 					break;
+ 				default:
+@@ -158,7 +159,6 @@ hgl_st_framebuffer_validate(struct st_context_iface *stctxi,
+ 	struct st_framebuffer_iface *stfbi, const enum st_attachment_type *statts,
+ 	unsigned count, struct pipe_resource **out)
+ {
+-	struct hgl_context* context;
+ 	struct hgl_buffer* buffer;
+ 	unsigned stAttachmentMask, newMask;
+ 	unsigned i;
+@@ -166,7 +166,6 @@ hgl_st_framebuffer_validate(struct st_context_iface *stctxi,
+ 
+ 	CALLED();
+ 
+-	context = hgl_st_context(stctxi);
+ 	buffer = hgl_st_framebuffer(stfbi);
+ 
+ 	// Build mask of current attachments
+@@ -176,16 +175,16 @@ hgl_st_framebuffer_validate(struct st_context_iface *stctxi,
+ 
+ 	newMask = stAttachmentMask & ~buffer->mask;
+ 
+-	resized = (buffer->width != context->width)
+-		|| (buffer->height != context->height);
++	resized = (buffer->width != buffer->newWidth)
++		|| (buffer->height != buffer->newHeight);
+ 
+ 	if (resized || newMask) {
+ 		boolean ret;
+ 		TRACE("%s: resize event. old:  %d x %d; new: %d x %d\n", __func__,
+-			buffer->width, buffer->height, context->width, context->height);
++			buffer->width, buffer->height, buffer->newWidth, buffer->newHeight);
+ 
+ 		ret = hgl_st_framebuffer_validate_textures(stfbi, 
+-			context->width, context->height, stAttachmentMask);
++			buffer->newWidth, buffer->newHeight, stAttachmentMask);
+ 
+ 		if (!ret)
+ 			return ret;
+@@ -218,15 +217,14 @@ static uint32_t hgl_fb_ID = 0;
+  * Create new framebuffer
+  */
+ struct hgl_buffer *
+-hgl_create_st_framebuffer(struct hgl_context* context, void *winsysContext)
++hgl_create_st_framebuffer(struct hgl_display *display, struct st_visual* visual, void *winsysContext)
+ {
+ 	struct hgl_buffer *buffer;
+ 	CALLED();
+ 
+ 	// Our requires before creating a framebuffer
+-	assert(context);
+-	assert(context->display);
+-	assert(context->stVisual);
++	assert(display);
++	assert(visual);
+ 
+ 	buffer = CALLOC_STRUCT(hgl_buffer);
+ 	assert(buffer);
+@@ -236,8 +234,8 @@ hgl_create_st_framebuffer(struct hgl_context* context, void *winsysContext)
+ 	assert(buffer->stfbi);
+ 
+ 	// Prepare our buffer
+-	buffer->visual = context->stVisual;
+-	buffer->screen = context->display->manager->screen;
++	buffer->visual = *visual;
++	buffer->screen = display->manager->screen;
+ 	buffer->winsysContext = winsysContext;
+ 
+ 	if (buffer->screen->get_param(buffer->screen, PIPE_CAP_NPOT_TEXTURES))
+@@ -248,12 +246,12 @@ hgl_create_st_framebuffer(struct hgl_context* context, void *winsysContext)
+ 	// Prepare our frontend interface
+ 	buffer->stfbi->flush_front = hgl_st_framebuffer_flush_front;
+ 	buffer->stfbi->validate = hgl_st_framebuffer_validate;
+-	buffer->stfbi->visual = context->stVisual;
++	buffer->stfbi->visual = &buffer->visual;
+ 
+ 	p_atomic_set(&buffer->stfbi->stamp, 1);
+ 	buffer->stfbi->st_manager_private = (void*)buffer;
+ 	buffer->stfbi->ID = p_atomic_inc_return(&hgl_fb_ID);
+-	buffer->stfbi->state_manager = context->display->manager;
++	buffer->stfbi->state_manager = display->manager;
+ 
+ 	return buffer;
+ }
+@@ -273,22 +271,61 @@ hgl_destroy_st_framebuffer(struct hgl_buffer *buffer)
+ }
+ 
+ 
+-struct st_api*
+-hgl_create_st_api()
++struct hgl_context*
++hgl_create_context(struct hgl_display *display, struct st_visual* visual, struct st_context_iface* shared)
+ {
+-	CALLED();
+-	return st_gl_api_create();
++	struct hgl_context* context = CALLOC_STRUCT(hgl_context);
++	assert(context);
++	context->display = display;
++	
++	struct st_context_attribs attribs;
++	memset(&attribs, 0, sizeof(attribs));
++	attribs.options.force_glsl_extensions_warn = false;
++	attribs.profile = ST_PROFILE_DEFAULT;
++	attribs.visual = *visual;
++	attribs.major = 1;
++	attribs.minor = 0;
++
++	enum st_context_error result;
++	context->st = display->api->create_context(display->api, display->manager, &attribs, &result, shared);
++	if (context->st == NULL) {
++		FREE(context);
++		return NULL;
++	}
++
++	assert(!context->st->st_manager_private);
++	context->st->st_manager_private = (void*)context;
++
++	struct st_context *stContext = (struct st_context*)context->st;
++
++	// Init Gallium3D Post Processing
++	// TODO: no pp filters are enabled yet through postProcessEnable
++	context->postProcess = pp_init(stContext->pipe, context->postProcessEnable, stContext->cso_context, &stContext->iface);
++
++	return context;
+ }
+ 
+ 
+-struct st_visual*
+-hgl_create_st_visual(ulong options)
++void
++hgl_destroy_context(struct hgl_context* context)
+ {
+-	struct st_visual* visual;
++	if (context->st) {
++		context->st->flush(context->st, 0, NULL, NULL, NULL);
++		context->st->destroy(context->st);
++	}
++
++	if (context->postProcess)
++		pp_free(context->postProcess);
+ 
++	FREE(context);
++}
++
++
++void
++hgl_get_st_visual(struct st_visual* visual, ulong options)
++{
+ 	CALLED();
+ 
+-	visual = CALLOC_STRUCT(st_visual);
+ 	assert(visual);
+ 
+ 	// Determine color format
+@@ -316,30 +353,19 @@ hgl_create_st_visual(ulong options)
+ 		visual->buffer_mask |= ST_ATTACHMENT_BACK_LEFT_MASK;
+ 	}
+ 
+-	#if 0
++#if 0
+ 	if ((options & BGL_STEREO) != 0) {
+ 		visual->buffer_mask |= ST_ATTACHMENT_FRONT_RIGHT_MASK;
+ 		if ((options & BGL_DOUBLE) != 0)
+ 			visual->buffer_mask |= ST_ATTACHMENT_BACK_RIGHT_MASK;
+-    }
+-	#endif
++  }
++#endif
+ 
+ 	if ((options & BGL_DEPTH) || (options & BGL_STENCIL))
+ 		visual->buffer_mask |= ST_ATTACHMENT_DEPTH_STENCIL_MASK;
+ 
+ 	TRACE("%s: Visual color format: %s\n", __func__,
+ 		util_format_name(visual->color_format));
+-
+-	return visual;
+-}
+-
+-
+-void
+-hgl_destroy_st_visual(struct st_visual* visual)
+-{
+-	CALLED();
+-
+-	FREE(visual);
+ }
+ 
+ 
+diff --git a/src/gallium/frontends/hgl/hgl_context.h b/src/gallium/frontends/hgl/hgl_context.h
+index 0b3b534..24035fc 100644
+--- a/src/gallium/frontends/hgl/hgl_context.h
++++ b/src/gallium/frontends/hgl/hgl_context.h
+@@ -16,8 +16,6 @@
+ 
+ #include "frontend/api.h"
+ 
+-#include "bitmap_wrapper.h"
+-
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -32,10 +30,12 @@ typedef int64 context_id;
+ struct hgl_buffer
+ {
+ 	struct st_framebuffer_iface *stfbi;
+-	struct st_visual* visual;
++	struct st_visual visual;
+ 
+ 	unsigned width;
+ 	unsigned height;
++	unsigned newWidth;
++	unsigned newHeight;
+ 	unsigned mask;
+ 
+ 	struct pipe_screen* screen;
+@@ -43,8 +43,6 @@ struct hgl_buffer
+ 
+ 	enum pipe_texture_target target;
+ 	struct pipe_resource* textures[ST_ATTACHMENT_COUNT];
+-
+-	void *map;
+ };
+ 
+ 
+@@ -61,38 +59,21 @@ struct hgl_context
+ {
+ 	struct hgl_display* display;
+ 	struct st_context_iface* st;
+-	struct st_visual* stVisual;
+ 
+ 	// Post processing
+ 	struct pp_queue_t* postProcess;
+ 	unsigned int postProcessEnable[PP_FILTERS];
+-
+-	// Desired viewport size
+-	unsigned width;
+-	unsigned height;
+-
+-	mtx_t fbMutex;
+-
+-	struct hgl_buffer* buffer;
+ };
+ 
+-// hgl_buffer from statetracker interface
+-struct hgl_buffer* hgl_st_framebuffer(struct st_framebuffer_iface *stfbi);
+-
+-// hgl frontend
+-struct st_api* hgl_create_st_api(void);
+-
+ // hgl framebuffer
+-struct hgl_buffer* hgl_create_st_framebuffer(struct hgl_context* context, void *winsysContext);
++struct hgl_buffer* hgl_create_st_framebuffer(struct hgl_display *display, struct st_visual* visual, void *winsysContext);
+ void hgl_destroy_st_framebuffer(struct hgl_buffer *buffer);
+ 
+-// hgl manager
+-struct st_manager* hgl_create_st_manager(struct hgl_context* screen);
+-void hgl_destroy_st_manager(struct st_manager *manager);
++struct hgl_context* hgl_create_context(struct hgl_display *display, struct st_visual* visual, struct st_context_iface* shared);
++void hgl_destroy_context(struct hgl_context* context);
+ 
+ // hgl visual
+-struct st_visual* hgl_create_st_visual(ulong options);
+-void hgl_destroy_st_visual(struct st_visual* visual);
++void hgl_get_st_visual(struct st_visual* visual, ulong options);
+ 
+ // hgl display
+ struct hgl_display* hgl_create_display(struct pipe_screen* screen);
+diff --git a/src/gallium/frontends/hgl/meson.build b/src/gallium/frontends/hgl/meson.build
+index 8987715..d66c287 100644
+--- a/src/gallium/frontends/hgl/meson.build
++++ b/src/gallium/frontends/hgl/meson.build
+@@ -19,8 +19,6 @@
+ # SOFTWARE.
+ 
+ files_libsthgl = files(
+-  'bitmap_wrapper.cpp',
+-  'bitmap_wrapper.h',
+   'hgl_context.h',
+   'hgl.c',
+ )
+diff --git a/src/gallium/targets/haiku-softpipe/GalliumContext.cpp b/src/gallium/targets/haiku-softpipe/GalliumContext.cpp
+index 760381a..119821d 100644
+--- a/src/gallium/targets/haiku-softpipe/GalliumContext.cpp
++++ b/src/gallium/targets/haiku-softpipe/GalliumContext.cpp
+@@ -15,8 +15,6 @@
+ 
+ #include "GLView.h"
+ 
+-#include "bitmap_wrapper.h"
+-
+ #include "glapi/glapi.h"
+ #include "pipe/p_format.h"
+ //#include "state_tracker/st_cb_fbo.h"
+@@ -29,9 +27,11 @@
+ #include "util/u_memory.h"
+ #include "util/u_framebuffer.h"
+ 
++extern "C" {
++#include "gallium/drivers/zink/zink_public.h"
+ #include "target-helpers/inline_sw_helper.h"
+ #include "target-helpers/inline_debug_helper.h"
+-
++}
+ 
+ #ifdef DEBUG
+ #	define TRACE(x...) printf("GalliumContext: " x)
+@@ -94,7 +94,11 @@ GalliumContext::CreateDisplay()
+ 		return B_ERROR;
+ 	}
+ 
++#ifdef GALLIUM_ZINK
++	struct pipe_screen* screen = zink_create_screen(winsys, NULL);
++#else
+ 	struct pipe_screen* screen = sw_screen_create(winsys);
++#endif
+ 
+ 	if (screen == NULL) {
+ 		ERROR("%s: Couldn't create screen!\n", __FUNCTION__);
+@@ -134,41 +138,13 @@ GalliumContext::DestroyDisplay()
+ 
+ 
+ context_id
+-GalliumContext::CreateContext(HGLWinsysContext *wsContext)
++GalliumContext::CreateContext(BitmapHook *wsContext)
+ {
+ 	CALLED();
+ 
+-	struct hgl_context* context = CALLOC_STRUCT(hgl_context);
+-
+-	if (!context) {
+-		ERROR("%s: Couldn't create pipe context!\n", __FUNCTION__);
+-		return 0;
+-	}
+-
+-	// Set up the initial things our context needs
+-	context->display = fDisplay;
+-
+ 	// Create state tracker visual
+-	context->stVisual = hgl_create_st_visual(fOptions);
+-
+-	// Create state tracker framebuffers
+-	context->buffer = hgl_create_st_framebuffer(context, wsContext);
+-
+-	if (!context->buffer) {
+-		ERROR("%s: Problem allocating framebuffer!\n", __func__);
+-		FREE(context->stVisual);
+-		return -1;
+-	}
+-
+-	// Build state tracker attributes
+-	struct st_context_attribs attribs;
+-	memset(&attribs, 0, sizeof(attribs));
+-	attribs.options.force_glsl_extensions_warn = false;
+-	attribs.profile = ST_PROFILE_DEFAULT;
+-	attribs.visual = *context->stVisual;
+-	attribs.major = 1;
+-	attribs.minor = 0;
+-	//attribs.flags |= ST_CONTEXT_FLAG_DEBUG;
++	struct st_visual visual;
++	hgl_get_st_visual(&visual, fOptions);
+ 
+ 	struct st_context_iface* shared = NULL;
+ 
+@@ -177,52 +153,20 @@ GalliumContext::CreateContext(HGLWinsysContext *wsContext)
+ 		TRACE("shared context: %p\n", shared);
+ 	}
+ 
+-	// Create context using state tracker api call
+-	enum st_context_error result;
+-	context->st = fDisplay->api->create_context(fDisplay->api, fDisplay->manager,
+-		&attribs, &result, shared);
++	struct hgl_context* context = hgl_create_context(fDisplay, &visual, shared);
+ 
+-	if (!context->st) {
+-		ERROR("%s: Couldn't create mesa state tracker context!\n",
+-			__func__);
+-		switch (result) {
+-			case ST_CONTEXT_SUCCESS:
+-				ERROR("%s: State tracker error: SUCCESS?\n", __func__);
+-				break;
+-			case ST_CONTEXT_ERROR_NO_MEMORY:
+-				ERROR("%s: State tracker error: NO_MEMORY\n", __func__);
+-				break;
+-			case ST_CONTEXT_ERROR_BAD_API:
+-				ERROR("%s: State tracker error: BAD_API\n", __func__);
+-				break;
+-			case ST_CONTEXT_ERROR_BAD_VERSION:
+-				ERROR("%s: State tracker error: BAD_VERSION\n", __func__);
+-				break;
+-			case ST_CONTEXT_ERROR_BAD_FLAG:
+-				ERROR("%s: State tracker error: BAD_FLAG\n", __func__);
+-				break;
+-			case ST_CONTEXT_ERROR_UNKNOWN_ATTRIBUTE:
+-				ERROR("%s: State tracker error: BAD_ATTRIBUTE\n", __func__);
+-				break;
+-			case ST_CONTEXT_ERROR_UNKNOWN_FLAG:
+-				ERROR("%s: State tracker error: UNKNOWN_FLAG\n", __func__);
+-				break;
+-		}
+-
+-		hgl_destroy_st_visual(context->stVisual);
+-		FREE(context);
+-		return -1;
++	if (!context) {
++		ERROR("%s: Couldn't create pipe context!\n", __FUNCTION__);
++		return 0;
+ 	}
+ 
+-	assert(!context->st->st_manager_private);
+-	context->st->st_manager_private = (void*)context;
+-
+-	struct st_context *stContext = (struct st_context*)context->st;
++	// Create state tracker framebuffers
++	fFramebuffer = hgl_create_st_framebuffer(fDisplay, &visual, wsContext);
+ 
+-	// Init Gallium3D Post Processing
+-	// TODO: no pp filters are enabled yet through postProcessEnable
+-	context->postProcess = pp_init(stContext->pipe, context->postProcessEnable,
+-		stContext->cso_context, &stContext->iface);
++	if (!fFramebuffer) {
++		ERROR("%s: Problem allocating framebuffer!\n", __func__);
++		return -1;
++	}
+ 
+ 	context_id contextNext = -1;
+ 	Lock();
+@@ -239,7 +183,6 @@ GalliumContext::CreateContext(HGLWinsysContext *wsContext)
+ 		ERROR("%s: The next context is invalid... something went wrong!\n",
+ 			__func__);
+ 		//st_destroy_context(context->st);
+-		FREE(context->stVisual);
+ 		FREE(context);
+ 		return -1;
+ 	}
+@@ -260,22 +203,11 @@ GalliumContext::DestroyContext(context_id contextID)
+ 	if (!fContext[contextID])
+ 		return;
+ 
+-	if (fContext[contextID]->st) {
+-		fContext[contextID]->st->flush(fContext[contextID]->st, 0, NULL, NULL, NULL);
+-		fContext[contextID]->st->destroy(fContext[contextID]->st);
+-	}
+-
+-	if (fContext[contextID]->postProcess)
+-		pp_free(fContext[contextID]->postProcess);
++	hgl_destroy_context(fContext[contextID]);
++	fContext[contextID] = NULL;
+ 
+-	// Delete state tracker framebuffer objects
+-	if (fContext[contextID]->buffer)
+-		hgl_destroy_st_framebuffer(fContext[contextID]->buffer);
+-
+-	if (fContext[contextID]->stVisual)
+-		hgl_destroy_st_visual(fContext[contextID]->stVisual);
+-
+-	FREE(fContext[contextID]);
++	hgl_destroy_st_framebuffer(fFramebuffer);
++	fFramebuffer = NULL;
+ }
+ 
+ 
+@@ -315,8 +247,8 @@ GalliumContext::SetCurrentContext(bool set, context_id contextID)
+ 	}
+ 
+ 	// We need to lock and unlock framebuffers before accessing them
+-	fDisplay->api->make_current(fDisplay->api, context->st, context->buffer->stfbi,
+-		context->buffer->stfbi);
++	fDisplay->api->make_current(fDisplay->api, context->st, fFramebuffer->stfbi,
++		fFramebuffer->stfbi);
+ 	Unlock();
+ 
+ 	return B_OK;
+@@ -340,11 +272,11 @@ GalliumContext::SwapBuffers(context_id contextID)
+ 	// will flush front buffer if no double buffering is used
+ 	context->st->flush(context->st, ST_FLUSH_FRONT, NULL, NULL, NULL);
+ 
+-	struct hgl_buffer* buffer = context->buffer;
++	struct hgl_buffer* buffer = fFramebuffer;
+ 
+ 	// flush back buffer and swap buffers if double buffering is used
+ 	if (buffer->textures[ST_ATTACHMENT_BACK_LEFT] != NULL) {
+-		buffer->screen->flush_frontbuffer(buffer->screen, NULL, buffer->textures[ST_ATTACHMENT_BACK_LEFT],
++		buffer->screen->flush_frontbuffer(buffer->screen, context->st->pipe, buffer->textures[ST_ATTACHMENT_BACK_LEFT],
+ 			0, 0, buffer->winsysContext, NULL);
+ 		std::swap(buffer->textures[ST_ATTACHMENT_FRONT_LEFT], buffer->textures[ST_ATTACHMENT_BACK_LEFT]);
+ 		p_atomic_inc(&buffer->stfbi->stamp);
+@@ -365,12 +297,12 @@ GalliumContext::Draw(context_id contextID, BRect updateRect)
+ 		return;
+ 	}
+ 
+-	struct hgl_buffer* buffer = context->buffer;
++	struct hgl_buffer* buffer = fFramebuffer;
+ 
+ 	if (buffer->textures[ST_ATTACHMENT_FRONT_LEFT] == NULL)
+ 		return;
+ 
+-	buffer->screen->flush_frontbuffer(buffer->screen, NULL, buffer->textures[ST_ATTACHMENT_FRONT_LEFT],
++	buffer->screen->flush_frontbuffer(buffer->screen, context->st->pipe, buffer->textures[ST_ATTACHMENT_FRONT_LEFT],
+ 		0, 0, buffer->winsysContext, NULL);
+ }
+ 
+@@ -379,12 +311,11 @@ bool
+ GalliumContext::Validate(uint32 width, uint32 height)
+ {
+ 	CALLED();
+-
+ 	if (!fContext[fCurrentContext])
+ 		return false;
+ 
+-	if (fContext[fCurrentContext]->width != width + 1
+-		|| fContext[fCurrentContext]->height != height + 1) {
++	if (fFramebuffer->newWidth != width + 1
++		|| fFramebuffer->newHeight != height + 1) {
+ 		Invalidate(width, height);
+ 		return false;
+ 	}
+@@ -396,15 +327,14 @@ void
+ GalliumContext::Invalidate(uint32 width, uint32 height)
+ {
+ 	CALLED();
+-
+ 	assert(fContext[fCurrentContext]);
+ 
+ 	// Update st_context dimensions 
+-	fContext[fCurrentContext]->width = width + 1;
+-	fContext[fCurrentContext]->height = height + 1;
++	fFramebuffer->newWidth = width + 1;
++	fFramebuffer->newHeight = height + 1;
+ 
+ 	// Is this the best way to invalidate?
+-	p_atomic_inc(&fContext[fCurrentContext]->buffer->stfbi->stamp);
++	p_atomic_inc(&fFramebuffer->stfbi->stamp);
+ }
+ 
+ 
+@@ -422,4 +352,3 @@ GalliumContext::Unlock()
+ 	CALLED();
+ 	mtx_unlock(&fMutex);
+ }
+-/* vim: set tabstop=4: */
+diff --git a/src/gallium/targets/haiku-softpipe/GalliumContext.h b/src/gallium/targets/haiku-softpipe/GalliumContext.h
+index 1947b96..9a2ab64 100644
+--- a/src/gallium/targets/haiku-softpipe/GalliumContext.h
++++ b/src/gallium/targets/haiku-softpipe/GalliumContext.h
+@@ -29,7 +29,7 @@ public:
+ 		void				Lock();
+ 		void				Unlock();
+ 
+-		context_id			CreateContext(HGLWinsysContext *wsContext);
++		context_id			CreateContext(BitmapHook *wsContext);
+ 		void				DestroyContext(context_id contextID);
+ 		context_id			GetCurrentContext() { return fCurrentContext; };
+ 		status_t			SetCurrentContext(bool set, context_id contextID);
+@@ -49,6 +49,8 @@ private:
+ 		static int32		fDisplayRefCount;
+ 		static hgl_display*	fDisplay;
+ 
++		struct hgl_buffer *fFramebuffer;
++
+ 		// Context Management
+ 		struct hgl_context*	fContext[CONTEXT_MAX];
+ 		context_id			fCurrentContext;
+diff --git a/src/gallium/targets/haiku-softpipe/SoftwareRenderer.cpp b/src/gallium/targets/haiku-softpipe/SoftwareRenderer.cpp
+index 6939e53..842df27 100644
+--- a/src/gallium/targets/haiku-softpipe/SoftwareRenderer.cpp
++++ b/src/gallium/targets/haiku-softpipe/SoftwareRenderer.cpp
+@@ -14,7 +14,6 @@
+ 
+ #include <Autolock.h>
+ #include <interface/DirectWindowPrivate.h>
+-#include <interface/ColorConversion.h>
+ #include <GraphicsDefs.h>
+ #include <Screen.h>
+ #include <stdio.h>
+@@ -41,50 +40,44 @@ instantiate_gl_renderer(BGLView *view, ulong opts)
+ 	return new SoftwareRenderer(view, opts);
+ }
+ 
+-struct RasBuffer
++struct RasBuf32
+ {
+ 	int32 width, height, stride;
+ 	int32 orgX, orgY;
+-	void *colors;
+-	color_space pixel_format;
+-	int32 pixel_size;	
++	int32 *colors;
+ 
+-	RasBuffer(int32 width, int32 height, int32 stride, int32 orgX, int32 orgY, void *colors):
++	RasBuf32(int32 width, int32 height, int32 stride, int32 orgX, int32 orgY, int32 *colors):
+ 		width(width), height(height), stride(stride), orgX(orgX), orgY(orgY), colors(colors)
+ 	{}
+ 
+-	RasBuffer(BBitmap *bmp)
++	RasBuf32(BBitmap *bmp)
+ 	{
+ 		width  = bmp->Bounds().IntegerWidth()  + 1;
+ 		height = bmp->Bounds().IntegerHeight() + 1;
+-		stride = bmp->BytesPerRow();
++		stride = bmp->BytesPerRow()/4;
+ 		orgX   = 0;
+ 		orgY   = 0;
+-		pixel_format = bmp->ColorSpace();
+-		pixel_size = stride / width;
+-		colors = bmp->Bits();
++		colors = (int32*)bmp->Bits();
+ 	}
+ 
+-	RasBuffer(direct_buffer_info *info)
++	RasBuf32(direct_buffer_info *info)
+ 	{
+ 		width  = 0x7fffffff;
+ 		height = 0x7fffffff;
+-		stride = info->bytes_per_row;
++		stride = info->bytes_per_row/4;
+ 		orgX   = 0;
+ 		orgY   = 0;
+-		pixel_format = info->pixel_format;
+-		pixel_size = info->bits_per_pixel / 8;
+-		colors = info->bits;
++		colors = (int32*)info->bits;
+ 	}
+ 
+ 	void ClipSize(int32 x, int32 y, int32 w, int32 h)
+ 	{
+ 		if (x < 0) {w += x; x = 0;}
+ 		if (y < 0) {h += y; y = 0;}
+-		if (x + w > width) {w = width  - x;}
++		if (x + w >  width) {w = width  - x;}
+ 		if (y + h > height) {h = height - y;}
+ 		if ((w > 0) && (h > 0)) {
+-			colors += (y * stride) + (x * pixel_size);
++			colors += y*stride + x;
+ 			width  = w;
+ 			height = h;
+ 		} else {
+@@ -105,21 +98,27 @@ struct RasBuffer
+ 		orgY += dy;
+ 	}
+ 
+-	void Blit(RasBuffer src)
++	void Clear(int32 color)
+ 	{
+-		RasBuffer dst = *this;
++		RasBuf32 dst = *this;
++		dst.stride -= dst.width;
++		for (; dst.height > 0; dst.height--) {
++			for (int32 i = dst.width; i > 0; i--)
++				*dst.colors++ = color;
++			dst.colors += dst.stride;
++		}
++	}
++
++	void Blit(RasBuf32 src)
++	{
++		RasBuf32 dst = *this;
+ 		int32 x, y;
+ 		x = src.orgX - orgX;
+ 		y = src.orgY - orgY;
+ 		dst.ClipSize(x, y, src.width, src.height);
+ 		src.ClipSize(-x, -y, width, height);
+ 		for (; dst.height > 0; dst.height--) {
+-			if (src.pixel_format == dst.pixel_format) {
+-				memcpy(dst.colors, src.colors, src.width * src.pixel_size);
+-			} else {
+-				BPrivate::ConvertBits(src.colors, dst.colors, src.stride, dst.stride,
+-					src.stride, dst.stride, src.pixel_format, dst.pixel_format, src.width, 1);
+-			}
++			memcpy(dst.colors, src.colors, 4*dst.width);
+ 			dst.colors += dst.stride;
+ 			src.colors += src.stride;
+ 		}
+@@ -216,7 +215,16 @@ SoftwareRenderer::UnlockGL()
+ 
+ 
+ void
+-SoftwareRenderer::Display(BBitmap *bitmap, BRect *updateRect)
++SoftwareRenderer::GetSize(uint32_t &width, uint32_t &height)
++{
++	BAutolock lock(fInfoLocker);
++	width = fWidth;
++	height = fHeight;
++}
++
++
++BBitmap*
++SoftwareRenderer::SetBitmap(BBitmap* bitmap)
+ {
+ //	CALLED();
+ 
+@@ -229,17 +237,19 @@ SoftwareRenderer::Display(BBitmap *bitmap, BRect *updateRect)
+ 	} else {
+ 		BAutolock lock(fInfoLocker);
+ 		if (fInfo != NULL) {
+-			RasBuffer srcBuf(bitmap);
+-			RasBuffer dstBuf(fInfo);
++			RasBuf32 srcBuf(bitmap);
++			RasBuf32 dstBuf(fInfo);
+ 			for (uint32 i = 0; i < fInfo->clip_list_count; i++) {
+ 				clipping_rect *clip = &fInfo->clip_list[i];
+-				RasBuffer dstClip = dstBuf;
++				RasBuf32 dstClip = dstBuf;
+ 				dstClip.ClipRect(clip->left, clip->top, clip->right + 1, clip->bottom + 1);
+ 				dstClip.Shift(-fInfo->window_bounds.left, -fInfo->window_bounds.top);
+ 				dstClip.Blit(srcBuf);
+ 			}
+ 		}
+ 	}
++
++	return NULL;
+ }
+ 
+ 
+diff --git a/src/gallium/targets/haiku-softpipe/SoftwareRenderer.h b/src/gallium/targets/haiku-softpipe/SoftwareRenderer.h
+index 66ff71c..9a81d28 100644
+--- a/src/gallium/targets/haiku-softpipe/SoftwareRenderer.h
++++ b/src/gallium/targets/haiku-softpipe/SoftwareRenderer.h
+@@ -18,7 +18,7 @@
+ #include "GalliumContext.h"
+ 
+ 
+-class SoftwareRenderer : public BGLRenderer, public HGLWinsysContext {
++class SoftwareRenderer : public BGLRenderer, public BitmapHook {
+ public:
+ 								SoftwareRenderer(BGLView *view,
+ 									ulong bgl_options);
+@@ -27,7 +27,8 @@ public:
+ 			void				LockGL();
+ 			void				UnlockGL();
+ 
+-			void				Display(BBitmap* bitmap, BRect* updateRect);
++			void				GetSize(uint32_t &width, uint32_t &height) override;
++			BBitmap*		SetBitmap(BBitmap* bmp) override;
+ 
+ 			void				SwapBuffers(bool vsync = false);
+ 			void				Draw(BRect updateRect);
+diff --git a/src/gallium/winsys/sw/hgl/hgl_sw_winsys.cpp b/src/gallium/winsys/sw/hgl/hgl_sw_winsys.cpp
+index 564f9f6..39a4d9e 100644
+--- a/src/gallium/winsys/sw/hgl/hgl_sw_winsys.cpp
++++ b/src/gallium/winsys/sw/hgl/hgl_sw_winsys.cpp
+@@ -132,6 +132,7 @@ hgl_winsys_displaytarget_create(struct sw_winsys* winsys,
+ 		haikuDisplayTarget->data = NULL;
+ 		haikuDisplayTarget->bitmap = new BBitmap(
+ 			BRect(0, 0, width - 1, height - 1),
++			0,
+ 			haikuDisplayTarget->colorSpace,
+ 			haikuDisplayTarget->stride);
+ 	} else {
+@@ -217,8 +218,8 @@ hgl_winsys_displaytarget_display(struct sw_winsys* winsys,
+ 	struct haiku_displaytarget* haikuDisplayTarget
+ 		= hgl_sw_displaytarget(displayTarget);
+ 
+-	HGLWinsysContext *context = (HGLWinsysContext*)contextPrivate;
+-	context->Display(haikuDisplayTarget->bitmap, NULL);
++	BitmapHook *context = (BitmapHook*)contextPrivate;
++	context->SetBitmap(haikuDisplayTarget->bitmap);
+ }
+ 
+ 
+diff --git a/src/gallium/winsys/sw/hgl/hgl_sw_winsys.h b/src/gallium/winsys/sw/hgl/hgl_sw_winsys.h
+index d20c193..3628a8a 100644
+--- a/src/gallium/winsys/sw/hgl/hgl_sw_winsys.h
++++ b/src/gallium/winsys/sw/hgl/hgl_sw_winsys.h
+@@ -31,9 +31,11 @@
+ class BBitmap;
+ class BRect;
+ 
+-class HGLWinsysContext {
++class BitmapHook {
+ public:
+-	virtual void Display(BBitmap *bitmap, BRect *updateRect) = 0;
++	virtual ~BitmapHook() {};
++	virtual void GetSize(uint32_t &width, uint32_t &height) = 0;
++	virtual BBitmap *SetBitmap(BBitmap *bmp) = 0;
+ };
+ #endif
+ 
+diff --git a/src/hgl/GLView.cpp b/src/hgl/GLView.cpp
+index 3462c88..6e6d879 100644
+--- a/src/hgl/GLView.cpp
++++ b/src/hgl/GLView.cpp
+@@ -77,7 +77,7 @@ BGLView::UnlockGL()
+ 	thread_id lockerThread = fDisplayLock.LockingThread();
+ 	thread_id callerThread = find_thread(NULL);
+ 
+-	if (lockerThread != B_ERROR && lockerThread != callerThread) {
++	if (false && lockerThread != B_ERROR && lockerThread != callerThread) {
+ 		printf("UnlockGL is called from wrong thread, lockerThread: %d, callerThread: %d\n",
+ 			(int)lockerThread, (int)callerThread);
+ 		debugger("[!]");
+@@ -632,4 +632,3 @@ glview_direct_info::~glview_direct_info()
+ {
+ 	free(direct_info);
+ }
+-
 -- 
 2.37.3
 
