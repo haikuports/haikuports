@@ -1,0 +1,321 @@
+From 2574804c7277f39edc0cba39f0f7cfc4a1db77df Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 18 Nov 2022 23:26:23 +1000
+Subject: Fix build for Haiku
+
+
+diff --git a/extensions/meson.build b/extensions/meson.build
+index 4c40775..a4bc366 100644
+--- a/extensions/meson.build
++++ b/extensions/meson.build
+@@ -1 +1 @@
+-subdir('goat-exercises')
++#subdir('goat-exercises')
+diff --git a/libgimpbase/gimputils.c b/libgimpbase/gimputils.c
+index 227efd5..a891ef6 100644
+--- a/libgimpbase/gimputils.c
++++ b/libgimpbase/gimputils.c
+@@ -50,7 +50,9 @@
+ 
+ /* For thread IDs. */
+ #include <sys/types.h>
++#ifndef __HAIKU__
+ #include <sys/syscall.h>
++#endif
+ 
+ #ifdef HAVE_SYS_PRCTL_H
+ #include <sys/prctl.h>
+diff --git a/meson.build b/meson.build
+index daae225..e951060 100644
+--- a/meson.build
++++ b/meson.build
+@@ -150,6 +150,10 @@ if platform_osx
+   conf.set('PLATFORM_OSX', 1)
+ endif
+ 
++platform_haiku = (
++  host_os.contains('haiku')
++)
++
+ if platform_windows
+   windows = import('windows')
+   # AC_CHECK_PROG(ms_librarian, lib.exe, yes, no)
+@@ -585,7 +589,7 @@ detailed_backtraces = (
+ ################################################################################
+ # Check for x11 support
+ 
+-x11_target = gtk3.get_variable(pkgconfig: 'targets').contains('x11')
++x11_target = false
+ 
+ x11   = x11_target ? dependency('x11')    : no_dep
+ xmu   = x11_target ? dependency('xmu')    : no_dep
+@@ -1486,10 +1490,7 @@ endif
+ 
+ 
+ # git-version.h is already present and not generated if dist tarball
+-is_git_repository = run_command('python3', '-c',
+-  'import sys,os; sys.exit(0 if os.path.exists(".git") else 1)',
+-  check: false
+-).returncode() == 0
++is_git_repository = false
+ 
+ has_version_h = run_command('python3', '-c',
+   'import sys,os; sys.exit(0 if os.path.exists("git-version.h") else 1)',
+diff --git a/plug-ins/meson.build b/plug-ins/meson.build
+index 22556d6..c687610 100644
+--- a/plug-ins/meson.build
++++ b/plug-ins/meson.build
+@@ -28,7 +28,7 @@ subdir('metadata')
+ subdir('pagecurl')
+ subdir('print')
+ subdir('python')
+-subdir('screenshot')
++#subdir('screenshot')
+ subdir('script-fu')
+ subdir('selection-to-path')
+ subdir('twain')
+diff --git a/plug-ins/script-fu/server/script-fu-server.c b/plug-ins/script-fu/server/script-fu-server.c
+index d9544f1..c278be7 100644
+--- a/plug-ins/script-fu/server/script-fu-server.c
++++ b/plug-ins/script-fu/server/script-fu-server.c
+@@ -115,7 +115,7 @@ typedef short sa_family_t; /* Not defined by winsock */
+ #define difftime(a,b) (((gdouble)(a)) - ((gdouble)(b)))
+ #endif
+ 
+-#ifndef NO_FD_SET
++#if !defined(NO_FD_SET) || defined(__HAIKU__)
+ #  define SELECT_MASK fd_set
+ #else
+ #  ifndef _AIX
+-- 
+2.37.3
+
+
+From cbd1cab2d925a02f25f854fc537b9a15cdf761ab Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 18 Nov 2022 23:26:58 +1000
+Subject: Use load_image instead g_spawn_async
+
+
+diff --git a/app/core/gimp-spawn.c b/app/core/gimp-spawn.c
+index bfa08e8..6aeb5b4 100644
+--- a/app/core/gimp-spawn.c
++++ b/app/core/gimp-spawn.c
+@@ -22,6 +22,10 @@
+ 
+ #include <glib-object.h>
+ 
++#ifdef __HAIKU__
++#undef HAVE_VFORK
++#endif
++
+ #ifdef HAVE_VFORK
+ #include <sys/types.h>
+ #include <sys/wait.h>
+@@ -38,6 +42,11 @@
+ #include <io.h>
+ #endif
+ 
++#ifdef __HAIKU__
++#include <stdio.h>
++#include <image.h>
++#endif
++
+ #include "core-types.h"
+ 
+ #include "gimp-spawn.h"
+@@ -166,6 +175,25 @@ gimp_spawn_async (gchar       **argv,
+ {
+   g_return_val_if_fail (argv != NULL, FALSE);
+   g_return_val_if_fail (argv[0] != NULL, FALSE);
++  
++#ifdef __HAIKU__
++
++  int argc = 0;
++  while (argv[argc] != NULL) argc++;
++  team_id team = load_image(argc, argv, envp);
++  if (team < 0) {
++		g_set_error (error,
++		             G_SPAWN_ERROR,
++		             G_SPAWN_ERROR_FORK,
++		             _("Failed to fork (%s)"),
++		             g_strerror (team));
++  	return FALSE;
++  }
++  resume_thread(team);
++  *child_pid = team;
++  return TRUE;
++
++#else
+ 
+ #ifdef HAVE_VFORK
+   if (flags == (G_SPAWN_LEAVE_DESCRIPTORS_OPEN |
+@@ -235,6 +263,7 @@ gimp_spawn_async (gchar       **argv,
+ #endif /* HAVE_VFORK */
+ 
+   return g_spawn_async (NULL, argv, envp, flags, NULL, NULL, child_pid, error);
++#endif /* __HAIKU__ */
+ }
+ 
+ void
+-- 
+2.37.3
+
+
+From 34cd6ce1744147e8e13db144ea27c6f6d659e0fc Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 18 Nov 2022 23:27:18 +1000
+Subject: Fix preferences dialog freeze
+
+
+diff --git a/app/dialogs/preferences-dialog.c b/app/dialogs/preferences-dialog.c
+index e1d3402..80b0d18 100644
+--- a/app/dialogs/preferences-dialog.c
++++ b/app/dialogs/preferences-dialog.c
+@@ -1370,6 +1370,7 @@ prefs_dialog_new (Gimp       *gimp,
+    * which case the feature is always available.
+    */
+   hbox = NULL;
++#if 0
+   if (! gimp_stack_trace_available (TRUE))
+     {
+ #ifndef HAVE_EXECINFO_H
+@@ -1381,6 +1382,7 @@ prefs_dialog_new (Gimp       *gimp,
+                                  _("This feature is more efficient with \"gdb\" or \"lldb\" installed on your system."));
+ #endif /* ! HAVE_EXECINFO_H */
+     }
++#endif
+   if (hbox)
+     gtk_box_pack_start (GTK_BOX (vbox2), hbox, FALSE, FALSE, 0);
+ 
+-- 
+2.37.3
+
+
+From 2268073ff3476307b22a2b0d20005306e17dc244 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 18 Nov 2022 23:28:02 +1000
+Subject: Dirty hack for XDG variables
+
+
+diff --git a/app/main.c b/app/main.c
+index e25edd1..aba431b 100644
+--- a/app/main.c
++++ b/app/main.c
+@@ -555,6 +555,14 @@ main (int    argc,
+   gint            retval;
+   gint            i;
+ 
++#ifdef __HAIKU__
++  g_setenv ("XDG_CONFIG_DIRS", "/boot/system/settings", FALSE);
++  g_setenv ("XDG_DATA_HOME", "/boot/home/config/non-packaged/data", FALSE);
++  g_setenv ("XDG_CONFIG_HOME", "/boot/home/config/settings", FALSE);
++  g_setenv ("XDG_CACHE_HOME", "/boot/home/config/cache", FALSE);
++  g_setenv ("XDG_DATA_DIRS", "/boot/system/non-packaged/data:/boot/system/data", FALSE);
++#endif
++
+ #ifdef ENABLE_WIN32_DEBUG_CONSOLE
+   gimp_open_console_window ();
+ #endif
+-- 
+2.37.3
+
+
+From ef6450e32859648bf76c180a74749d5c3ec0a863 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 18 Nov 2022 23:28:33 +1000
+Subject: Disable signal handlers
+
+
+diff --git a/app/main.c b/app/main.c
+index aba431b..2c801c5 100644
+--- a/app/main.c
++++ b/app/main.c
+@@ -603,7 +603,7 @@ main (int    argc,
+   gimp_backtrace_init ();
+ 
+   /* Start signal handlers early. */
+-  gimp_init_signal_handlers (&backtrace_file);
++  //gimp_init_signal_handlers (&backtrace_file);
+ 
+ #ifdef G_OS_WIN32
+   /* Reduce risks */
+diff --git a/libgimp/gimp.c b/libgimp/gimp.c
+index 136740d..b6819f9 100644
+--- a/libgimp/gimp.c
++++ b/libgimp/gimp.c
+@@ -270,8 +270,8 @@ gimp_main (GType  plug_in_type,
+     /* Similar to core crash handling in app/signals.c, the order here
+      * is very important!
+      */
+-    if (! _prevExceptionFilter)
+-      _prevExceptionFilter = SetUnhandledExceptionFilter (gimp_plugin_sigfatal_handler);
++//    if (! _prevExceptionFilter)
++//      _prevExceptionFilter = SetUnhandledExceptionFilter (gimp_plugin_sigfatal_handler);
+ 
+     ExcHndlInit ();
+     ExcHndlSetLogFileNameA (plug_in_backtrace_path);
+@@ -395,15 +395,15 @@ gimp_main (GType  plug_in_type,
+    * about the program error, and offer debugging if the plug-in
+    * has been built with MSVC, and the user has MSVC installed.
+    */
+-  gimp_signal_private (SIGHUP,  gimp_plugin_sigfatal_handler, 0);
+-  gimp_signal_private (SIGINT,  gimp_plugin_sigfatal_handler, 0);
+-  gimp_signal_private (SIGQUIT, gimp_plugin_sigfatal_handler, 0);
+-  gimp_signal_private (SIGTERM, gimp_plugin_sigfatal_handler, 0);
+-
+-  gimp_signal_private (SIGABRT, gimp_plugin_sigfatal_handler, 0);
+-  gimp_signal_private (SIGBUS,  gimp_plugin_sigfatal_handler, 0);
+-  gimp_signal_private (SIGSEGV, gimp_plugin_sigfatal_handler, 0);
+-  gimp_signal_private (SIGFPE,  gimp_plugin_sigfatal_handler, 0);
++//  gimp_signal_private (SIGHUP,  gimp_plugin_sigfatal_handler, 0);
++//  gimp_signal_private (SIGINT,  gimp_plugin_sigfatal_handler, 0);
++//  gimp_signal_private (SIGQUIT, gimp_plugin_sigfatal_handler, 0);
++//  gimp_signal_private (SIGTERM, gimp_plugin_sigfatal_handler, 0);
++
++//  gimp_signal_private (SIGABRT, gimp_plugin_sigfatal_handler, 0);
++//  gimp_signal_private (SIGBUS,  gimp_plugin_sigfatal_handler, 0);
++//  gimp_signal_private (SIGSEGV, gimp_plugin_sigfatal_handler, 0);
++//  gimp_signal_private (SIGFPE,  gimp_plugin_sigfatal_handler, 0);
+ 
+   /* Ignore SIGPIPE from crashing Gimp */
+   gimp_signal_private (SIGPIPE, SIG_IGN, 0);
+diff --git a/libgimpbase/gimpsignal.c b/libgimpbase/gimpsignal.c
+index 4e334f6..ca190a2 100644
+--- a/libgimpbase/gimpsignal.c
++++ b/libgimpbase/gimpsignal.c
+@@ -69,7 +69,7 @@ gimp_signal_private (gint                   signum,
+                      GimpSignalHandlerFunc  handler,
+                      gint                   flags)
+ {
+-#ifndef G_OS_WIN32
++#if !defined(G_OS_WIN32) && !defined(__HAIKU__)
+   gint ret;
+   struct sigaction sa;
+   struct sigaction osa;
+-- 
+2.37.3
+
+
+From 3737516789be91e1ff470813d8330cf961a5e7c4 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 18 Nov 2022 23:29:16 +1000
+Subject: Disable introspection
+
+
+diff --git a/libgimp/meson.build b/libgimp/meson.build
+index 82a91e4..fa92bb8 100644
+--- a/libgimp/meson.build
++++ b/libgimp/meson.build
+@@ -418,7 +418,7 @@ libgimpui_introspectable_files = [
+   libgimpwidgets_introspectable,
+ ]
+ 
+-if meson.is_cross_build() and not get_option('can-crosscompile-gir')
++if (meson.is_cross_build() and not get_option('can-crosscompile-gir')) or host_os.contains('haiku')
+   have_gobject_introspection = false
+   gobject_introspection_warning = '\n      '.join(['',
+     'GObject Introspection is disabled while cross-compiling because',
+-- 
+2.37.3
+
