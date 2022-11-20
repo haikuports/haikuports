@@ -1,0 +1,580 @@
+From d7e354fde9acfd0a5a4862941c80d8912c25e54e Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Mon, 7 Nov 2022 16:36:35 +1000
+Subject: Fix for Haiku
+
+
+diff --git a/Source/JavaScriptCore/b3/B3WasmBoundsCheckValue.cpp b/Source/JavaScriptCore/b3/B3WasmBoundsCheckValue.cpp
+index 597d086..7cf69d4 100644
+--- a/Source/JavaScriptCore/b3/B3WasmBoundsCheckValue.cpp
++++ b/Source/JavaScriptCore/b3/B3WasmBoundsCheckValue.cpp
+@@ -50,7 +50,7 @@ WasmBoundsCheckValue::WasmBoundsCheckValue(Origin origin, Value* ptr, unsigned o
+     , m_offset(offset)
+     , m_boundsType(Type::Maximum)
+ {
+-#if ENABLE(WEBASSEMBLY)
++#if ENABLE(WEBASSEMBLY_SIGNALING_MEMORY)
+     size_t redzoneLimit = static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) + Wasm::Memory::fastMappedRedzoneBytes();
+     ASSERT_UNUSED(redzoneLimit, maximum <= redzoneLimit);
+ #endif
+diff --git a/Source/JavaScriptCore/heap/BlockDirectory.cpp b/Source/JavaScriptCore/heap/BlockDirectory.cpp
+index e2a3540..6c72cc5 100644
+--- a/Source/JavaScriptCore/heap/BlockDirectory.cpp
++++ b/Source/JavaScriptCore/heap/BlockDirectory.cpp
+@@ -60,7 +60,7 @@ void BlockDirectory::setSubspace(Subspace* subspace)
+ void BlockDirectory::updatePercentageOfPagedOutPages(SimpleStats& stats)
+ {
+     // FIXME: We should figure out a solution for Windows.
+-#if OS(UNIX)
++#if OS(UNIX) && !OS(HAIKU)
+     size_t pageSize = WTF::pageSize();
+     ASSERT(!(MarkedBlock::blockSize % pageSize));
+     auto numberOfPagesInMarkedBlock = MarkedBlock::blockSize / pageSize;
+diff --git a/Source/JavaScriptCore/inspector/remote/Socket.cmake b/Source/JavaScriptCore/inspector/remote/Socket.cmake
+index e52143c..4ac504c 100644
+--- a/Source/JavaScriptCore/inspector/remote/Socket.cmake
++++ b/Source/JavaScriptCore/inspector/remote/Socket.cmake
+@@ -33,3 +33,9 @@ else ()
+         wsock32
+     )
+ endif ()
++
++if (HAIKU)
++    list(APPEND JavaScriptCore_LIBRARIES
++        network
++    )
++endif ()
+diff --git a/Source/JavaScriptCore/inspector/scripts/codegen/preprocess.pl b/Source/JavaScriptCore/inspector/scripts/codegen/preprocess.pl
+index 0b08d2a..d3c8a9b 100644
+--- a/Source/JavaScriptCore/inspector/scripts/codegen/preprocess.pl
++++ b/Source/JavaScriptCore/inspector/scripts/codegen/preprocess.pl
+@@ -1,4 +1,4 @@
+-#! /usr/bin/env perl
++#! /bin/env perl
+ #
+ #   This file is part of the WebKit project
+ #
+@@ -43,7 +43,7 @@ if (!$preprocessor) {
+         $preprocessor = $ENV{CC} || "cl";
+         push(@args, qw(/nologo /EP /TP /C));
+     } else {
+-        $preprocessor = $ENV{CC} || (-x "/usr/bin/clang" ? "/usr/bin/clang" : "/usr/bin/gcc");
++        $preprocessor = $ENV{CC} || (-x "/bin/clang" ? "/bin/clang" : "/bin/gcc");
+         push(@args, qw(-E -P -x c++ -C));
+     }
+ }
+@@ -64,7 +64,7 @@ my $pid = 0;
+ if ($Config{osname} eq "cygwin") {
+     $ENV{PATH} = "$ENV{PATH}:/cygdrive/c/cygwin/bin";
+     my @preprocessorAndFlags;
+-    if ($preprocessor eq "/usr/bin/gcc") {
++    if ($preprocessor eq "/bin/gcc") {
+         @preprocessorAndFlags = split(' ', $preprocessor);
+     } else {
+         $preprocessor =~ /"(.*)"/;
+diff --git a/Source/ThirdParty/ANGLE/src/common/system_utils_posix.cpp b/Source/ThirdParty/ANGLE/src/common/system_utils_posix.cpp
+index cc8c618..8b9d638 100644
+--- a/Source/ThirdParty/ANGLE/src/common/system_utils_posix.cpp
++++ b/Source/ThirdParty/ANGLE/src/common/system_utils_posix.cpp
+@@ -199,10 +199,12 @@ void *OpenSystemLibraryWithExtensionAndGetError(const char *libraryName,
+     }
+ 
+     int extraFlags = 0;
++#ifndef __HAIKU__
+     if (searchType == SearchType::AlreadyLoaded)
+     {
+         extraFlags = RTLD_NOLOAD;
+     }
++#endif
+ 
+     std::string fullPath = directory + libraryName;
+ #if ANGLE_PLATFORM_IOS
+diff --git a/Source/WTF/wtf/FileSystem.cpp b/Source/WTF/wtf/FileSystem.cpp
+index 90dbf5a..a1eaf5b 100644
+--- a/Source/WTF/wtf/FileSystem.cpp
++++ b/Source/WTF/wtf/FileSystem.cpp
+@@ -40,6 +40,10 @@
+ #include <unistd.h>
+ #endif
+ 
++#if OS(HAIKU)
++#define MAP_FILE 0
++#endif
++
+ #if USE(GLIB)
+ #include <gio/gfiledescriptorbased.h>
+ #include <gio/gio.h>
+@@ -665,9 +669,13 @@ bool createSymbolicLink(const String& targetPath, const String& symbolicLinkPath
+ 
+ bool hardLink(const String& targetPath, const String& linkPath)
+ {
++#if OS(HAIKU)
++	return hardLinkOrCopyFile(targetPath, linkPath);
++#else
+     std::error_code ec;
+     std::filesystem::create_hard_link(toStdFileSystemPath(targetPath), toStdFileSystemPath(linkPath), ec);
+     return !ec;
++#endif
+ }
+ 
+ bool hardLinkOrCopyFile(const String& targetPath, const String& linkPath)
+diff --git a/Source/WTF/wtf/InlineASM.h b/Source/WTF/wtf/InlineASM.h
+index 8379a69..aba12e0 100644
+--- a/Source/WTF/wtf/InlineASM.h
++++ b/Source/WTF/wtf/InlineASM.h
+@@ -69,6 +69,7 @@
+     || OS(FREEBSD)             \
+     || OS(FUCHSIA)             \
+     || OS(OPENBSD)             \
++    || OS(HAIKU)               \
+     || OS(HPUX)                \
+     || OS(NETBSD)
+     // ELF platform
+@@ -87,6 +88,7 @@
+     || OS(FUCHSIA)             \
+     || OS(OPENBSD)             \
+     || OS(HURD)                \
++    || OS(HAIKU)               \
+     || OS(NETBSD)              \
+     || COMPILER(MINGW)
+     // GNU as-compatible syntax.
+diff --git a/Source/WTF/wtf/PlatformHave.h b/Source/WTF/wtf/PlatformHave.h
+index 7893367..def1eb3 100644
+--- a/Source/WTF/wtf/PlatformHave.h
++++ b/Source/WTF/wtf/PlatformHave.h
+@@ -389,7 +389,7 @@
+ #define HAVE_STACK_BOUNDS_FOR_NEW_THREAD 1
+ #endif
+ 
+-#if !OS(WINDOWS) && !PLATFORM(PLAYSTATION)
++#if !OS(WINDOWS) && !PLATFORM(PLAYSTATION) && !OS(HAIKU)
+ #define HAVE_MEMMEM 1
+ #endif
+ 
+diff --git a/Source/WTF/wtf/PlatformOS.h b/Source/WTF/wtf/PlatformOS.h
+index e61715f..06bd6c5 100644
+--- a/Source/WTF/wtf/PlatformOS.h
++++ b/Source/WTF/wtf/PlatformOS.h
+@@ -57,6 +57,11 @@
+ #define WTF_OS_DARWIN 1
+ #endif
+ 
++/* OS(HAIKU) - Haiku */
++#if defined(__HAIKU__)
++#define WTF_OS_HAIKU 1
++#endif
++
+ /* OS(IOS_FAMILY) - iOS family, including iOS, iPadOS, macCatalyst, tvOS, watchOS */
+ #if OS(DARWIN) && TARGET_OS_IPHONE
+ #define WTF_OS_IOS_FAMILY 1
+@@ -126,6 +131,7 @@
+     || OS(FUCHSIA)          \
+     || OS(HURD)             \
+     || OS(LINUX)            \
++    || OS(HAIKU)            \
+     || OS(NETBSD)           \
+     || OS(OPENBSD)          \
+     || defined(unix)        \
+diff --git a/Source/WTF/wtf/PlatformRegisters.h b/Source/WTF/wtf/PlatformRegisters.h
+index b981c13..76cfd55 100644
+--- a/Source/WTF/wtf/PlatformRegisters.h
++++ b/Source/WTF/wtf/PlatformRegisters.h
+@@ -34,6 +34,8 @@
+ #include <signal.h>
+ #elif OS(WINDOWS)
+ #include <windows.h>
++#elif OS(HAIKU)
++#include <signal.h>
+ #elif OS(OPENBSD)
+ typedef ucontext_t mcontext_t;
+ #else
+diff --git a/Source/WTF/wtf/StackBounds.cpp b/Source/WTF/wtf/StackBounds.cpp
+index e9d9d58..bc4d1c7 100644
+--- a/Source/WTF/wtf/StackBounds.cpp
++++ b/Source/WTF/wtf/StackBounds.cpp
+@@ -42,6 +42,12 @@
+ #include <unistd.h>
+ #endif
+ 
++#if OS(HAIKU)
++extern "C" {
++	int pthread_attr_get_np(pthread_t thread, pthread_attr_t *_attr);
++}
++#endif
++
+ #endif
+ 
+ namespace WTF {
+@@ -95,7 +101,7 @@ StackBounds StackBounds::newThreadStackBounds(PlatformThreadHandle thread)
+ 
+     pthread_attr_t sattr;
+     pthread_attr_init(&sattr);
+-#if HAVE(PTHREAD_NP_H) || OS(NETBSD)
++#if HAVE(PTHREAD_NP_H) || OS(NETBSD) || OS(HAIKU)
+     // e.g. on FreeBSD 5.4, neundorf@kde.org
+     pthread_attr_get_np(thread, &sattr);
+ #else
+diff --git a/Source/WebCore/bindings/scripts/preprocessor.pm b/Source/WebCore/bindings/scripts/preprocessor.pm
+index 31a991f..c512764 100644
+--- a/Source/WebCore/bindings/scripts/preprocessor.pm
++++ b/Source/WebCore/bindings/scripts/preprocessor.pm
+@@ -50,7 +50,7 @@ sub applyPreprocessor
+             $preprocessor = $ENV{CC} || "cl";
+             push(@args, qw(/EP));
+         } else {
+-            $preprocessor = $ENV{CC} || (-x "/usr/bin/clang" ? "/usr/bin/clang" : "/usr/bin/gcc");
++            $preprocessor = $ENV{CC} || (-x "/bin/clang" ? "/bin/clang" : "/bin/gcc");
+             push(@args, qw(-E -P -x c++));
+             if ($keepComments) {
+                 push(@args, qw(-C));
+diff --git a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+index 54d6b1c..761ebca 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+@@ -2219,6 +2219,8 @@ void MediaPlayerPrivateGStreamer::configureDownloadBuffer(GstElement* element)
+         GUniquePtr<char> defaultValue(g_build_filename(G_DIR_SEPARATOR_S, "var", "tmp", nullptr));
+         mediaDiskCachePath.swap(defaultValue);
+     }
++#elif defined(__HAIKU__)
++	GUniquePtr<char> mediaDiskCachePath(g_build_filename(G_DIR_SEPARATOR_S, "system", "cache", "tmp", nullptr));
+ #else
+     GUniquePtr<char> mediaDiskCachePath(g_build_filename(G_DIR_SEPARATOR_S, "var", "tmp", nullptr));
+ #endif
+diff --git a/Source/WebKit/CMakeLists.txt b/Source/WebKit/CMakeLists.txt
+index ebd7542..f05c803 100644
+--- a/Source/WebKit/CMakeLists.txt
++++ b/Source/WebKit/CMakeLists.txt
+@@ -404,6 +404,10 @@ if (UNIX)
+     endif ()
+ endif ()
+ 
++if (HAIKU)
++    list(APPEND WebKit_PRIVATE_LIBRARIES network)
++endif ()
++
+ macro(ADD_WEBKIT_PREFIX_HEADER _target)
+     if (WebKit_USE_PREFIX_HEADER)
+         get_target_property(OLD_COMPILE_FLAGS ${_target} COMPILE_FLAGS)
+diff --git a/Source/WebKit/Platform/IPC/unix/ConnectionUnix.cpp b/Source/WebKit/Platform/IPC/unix/ConnectionUnix.cpp
+index 42185f2..7188a6b 100644
+--- a/Source/WebKit/Platform/IPC/unix/ConnectionUnix.cpp
++++ b/Source/WebKit/Platform/IPC/unix/ConnectionUnix.cpp
+@@ -270,7 +270,7 @@ bool Connection::processMessage()
+     return true;
+ }
+ 
+-static ssize_t readBytesFromSocket(int socketDescriptor, Vector<uint8_t>& buffer, Vector<int>& fileDescriptors)
++static ssize_t readBytesFromSocket(int socketDescriptor, Vector<uint8_t>& buffer, Vector<int>& fileDescriptors, size_t size)
+ {
+     struct msghdr message;
+     memset(&message, 0, sizeof(message));
+@@ -286,7 +286,7 @@ static ssize_t readBytesFromSocket(int socketDescriptor, Vector<uint8_t>& buffer
+     size_t previousBufferSize = buffer.size();
+     buffer.grow(buffer.capacity());
+     iov[0].iov_base = buffer.data() + previousBufferSize;
+-    iov[0].iov_len = buffer.size() - previousBufferSize;
++    iov[0].iov_len = size;
+ 
+     message.msg_iov = iov;
+     message.msg_iovlen = 1;
+@@ -337,6 +337,20 @@ static ssize_t readBytesFromSocket(int socketDescriptor, Vector<uint8_t>& buffer
+     return -1;
+ }
+ 
++static ssize_t readBytesFromSocket(int socketDescriptor, Vector<uint8_t>& buffer, Vector<int>& fileDescriptors)
++{
++    ssize_t bytesRead = readBytesFromSocket(socketDescriptor, buffer, fileDescriptors, sizeof(MessageInfo));
++    if (bytesRead <= 0) return bytesRead;
++    uint8_t* messageData = buffer.data();
++    MessageInfo messageInfo;
++    memcpy(static_cast<void*>(&messageInfo), messageData, sizeof(messageInfo));
++    messageData += sizeof(messageInfo);
++    size_t messageLength = messageInfo.attachmentCount() * sizeof(AttachmentInfo) + (messageInfo.isBodyOutOfLine() ? 0 : messageInfo.bodySize());
++    if (messageLength == 0) return bytesRead;
++    bytesRead = readBytesFromSocket(socketDescriptor, buffer, fileDescriptors, messageLength);
++    return bytesRead;
++}
++
+ void Connection::readyReadHandler()
+ {
+     while (true) {
+@@ -609,7 +623,11 @@ bool Connection::sendOutputMessage(UnixMessage& outputMessage)
+ Connection::SocketPair Connection::createPlatformConnection(unsigned options)
+ {
+     int sockets[2];
++#ifdef __HAIKU__
++	RELEASE_ASSERT(socketpair(AF_LOCAL, SOCK_STREAM, 0, sockets) != -1);
++#else
+     RELEASE_ASSERT(socketpair(AF_UNIX, SOCKET_TYPE, 0, sockets) != -1);
++#endif
+ 
+     if (options & SetCloexecOnServer) {
+         // Don't expose the child socket to the parent process.
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitProtocolHandler.cpp b/Source/WebKit/UIProcess/API/glib/WebKitProtocolHandler.cpp
+index f4318de..71ff0d8 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitProtocolHandler.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitProtocolHandler.cpp
+@@ -118,6 +118,8 @@ static const char* hardwareAccelerationPolicy(WebKitURISchemeRequest* request)
+ {
+ #if PLATFORM(WPE)
+     return "always";
++#elif defined(__HAIKU__)
++	return "never";
+ #elif PLATFORM(GTK)
+     auto* webView = webkit_uri_scheme_request_get_web_view(request);
+     ASSERT(webView);
+@@ -147,6 +149,8 @@ static const char* openGLAPI()
+     if (epoxy_is_desktop_gl())
+         return "OpenGL (libepoxy)";
+     return "OpenGL ES 2 (libepoxy)";
++#elif defined(__HAIKU__)
++	return "OpenGL";
+ #else
+ #if USE(GLX)
+     if (PlatformDisplay::sharedDisplay().type() == PlatformDisplay::Type::X11)
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.cpp
+index 6bc7442..16f4326 100644
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.cpp
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.cpp
+@@ -487,7 +487,7 @@ void DrawingAreaCoordinatedGraphics::didUpdate()
+     displayTimerFired();
+ }
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+ void DrawingAreaCoordinatedGraphics::adjustTransientZoom(double scale, FloatPoint origin)
+ {
+     if (!m_transientZoom) {
+@@ -620,7 +620,7 @@ void DrawingAreaCoordinatedGraphics::resumePainting()
+ 
+ void DrawingAreaCoordinatedGraphics::enterAcceleratedCompositingMode(GraphicsLayer* graphicsLayer)
+ {
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     if (!m_alwaysUseCompositing) {
+         m_webPage.corePage()->settings().setForceCompositingMode(true);
+         m_alwaysUseCompositing = true;
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.h
+index dbef365..bf5f205 100644
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.h
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.h
+@@ -85,7 +85,7 @@ private:
+     void targetRefreshRateDidChange(unsigned rate) override;
+     void didUpdate() override;
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     void adjustTransientZoom(double scale, WebCore::FloatPoint origin) override;
+     void commitTransientZoom(double scale, WebCore::FloatPoint origin) override;
+ #endif
+@@ -157,7 +157,7 @@ private:
+ 
+     RunLoop::Timer<DrawingAreaCoordinatedGraphics> m_displayTimer;
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     bool m_transientZoom { false };
+     WebCore::FloatPoint m_transientZoomInitialOrigin;
+ #endif
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
+index 60d596e..20d3026 100644
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
+@@ -147,7 +147,7 @@ void LayerTreeHost::layerFlushTimerFired()
+         m_coordinator.forceFrameSync();
+ 
+     OptionSet<FinalizeRenderingUpdateFlags> flags;
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     if (!m_transientZoom)
+         flags.add(FinalizeRenderingUpdateFlags::ApplyScrollingTreeLayerPositions);
+ #else
+@@ -156,7 +156,7 @@ void LayerTreeHost::layerFlushTimerFired()
+ 
+     bool didSync = m_coordinator.flushPendingLayerChanges(flags);
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     // If we have an active transient zoom, we want the zoom to win over any changes
+     // that WebCore makes to the relevant layers, so re-apply our changes after flushing.
+     if (m_transientZoom)
+@@ -204,7 +204,7 @@ void LayerTreeHost::forceRepaint()
+ 
+     if (!m_isWaitingForRenderer) {
+         OptionSet<FinalizeRenderingUpdateFlags> flags;
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+         if (!m_transientZoom)
+             flags.add(FinalizeRenderingUpdateFlags::ApplyScrollingTreeLayerPositions);
+ #else
+@@ -458,7 +458,7 @@ void LayerTreeHost::renderNextFrame(bool forceRepaint)
+     }
+ }
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+ FloatPoint LayerTreeHost::constrainTransientZoomOrigin(double scale, FloatPoint origin) const
+ {
+     FrameView& frameView = *m_webPage.mainFrameView();
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h
+index 1dfae4a..69f1889 100644
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h
+@@ -99,7 +99,7 @@ public:
+ 
+     WebCore::PlatformDisplayID displayID() const { return m_displayID; }
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     void adjustTransientZoom(double, WebCore::FloatPoint);
+     void commitTransientZoom(double, WebCore::FloatPoint);
+ #endif
+@@ -125,7 +125,7 @@ private:
+     void requestDisplayRefreshMonitorUpdate();
+     void handleDisplayRefreshMonitorUpdate(bool);
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     WebCore::FloatPoint constrainTransientZoomOrigin(double, WebCore::FloatPoint) const;
+     WebCore::CoordinatedGraphicsLayer* layerForTransientZoom() const;
+     void applyTransientZoomToLayers(double, WebCore::FloatPoint);
+@@ -212,7 +212,7 @@ private:
+ #endif // USE(COORDINATED_GRAPHICS)
+     WebCore::PlatformDisplayID m_displayID;
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     bool m_transientZoom { false };
+     double m_transientZoomScale { 1 };
+     WebCore::FloatPoint m_transientZoomOrigin;
+@@ -241,7 +241,7 @@ inline void LayerTreeHost::didChangeViewportAttributes(WebCore::ViewportAttribut
+ inline void LayerTreeHost::setIsDiscardable(bool) { }
+ inline void LayerTreeHost::deviceOrPageScaleFactorChanged() { }
+ inline RefPtr<WebCore::DisplayRefreshMonitor> LayerTreeHost::createDisplayRefreshMonitor(WebCore::PlatformDisplayID) { return nullptr; }
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+ inline void LayerTreeHost::adjustTransientZoom(double, WebCore::FloatPoint) { }
+ inline void LayerTreeHost::commitTransientZoom(double, WebCore::FloatPoint) { }
+ #endif
+diff --git a/Source/WebKit/WebProcess/WebProcess.cpp b/Source/WebKit/WebProcess/WebProcess.cpp
+index 6d6e4f6..2a16fd3 100644
+--- a/Source/WebKit/WebProcess/WebProcess.cpp
++++ b/Source/WebKit/WebProcess/WebProcess.cpp
+@@ -264,7 +264,7 @@ namespace WebKit {
+ using namespace JSC;
+ using namespace WebCore;
+ 
+-#if !PLATFORM(GTK) && !PLATFORM(WPE)
++#if (!PLATFORM(GTK) && !PLATFORM(WPE)) || defined(__HAIKU__)
+ NO_RETURN static void callExit(IPC::Connection*)
+ {
+ #if OS(WINDOWS)
+@@ -375,13 +375,13 @@ void WebProcess::initializeConnection(IPC::Connection* connection)
+ 
+ // Do not call exit in background queue for GTK and WPE because we need to ensure
+ // atexit handlers are called in the main thread to cleanup resources like EGL displays.
+-#if !PLATFORM(GTK) && !PLATFORM(WPE)
++#if (!PLATFORM(GTK) && !PLATFORM(WPE)) || defined(__HAIKU__)
+     // We call _exit() directly from the background queue in case the main thread is unresponsive
+     // and AuxiliaryProcess::didClose() does not get called.
+     connection->setDidCloseOnConnectionWorkQueueCallback(callExit);
+ #endif
+ 
+-#if !PLATFORM(GTK) && !PLATFORM(WPE) && !ENABLE(IPC_TESTING_API)
++#if (!PLATFORM(GTK) && !PLATFORM(WPE) && !ENABLE(IPC_TESTING_API)) || defined(__HAIKU__)
+     connection->setShouldExitOnSyncMessageSendFailure(true);
+ #endif
+ 
+diff --git a/Source/cmake/WebKitCommon.cmake b/Source/cmake/WebKitCommon.cmake
+index cd78c8c..87cb5a5 100644
+--- a/Source/cmake/WebKitCommon.cmake
++++ b/Source/cmake/WebKitCommon.cmake
+@@ -159,7 +159,9 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
+     set(WebKit_LIBRARY_TYPE SHARED)
+     set(WebCoreTestSupport_LIBRARY_TYPE STATIC)
+ 
+-    set(CMAKE_POSITION_INDEPENDENT_CODE True)
++	if (NOT HAIKU)
++    	set(CMAKE_POSITION_INDEPENDENT_CODE True)
++    endif ()
+ 
+     # -----------------------------------------------------------------------------
+     # Install JavaScript shell
+-- 
+2.37.3
+
+
+From b5fce2345ff851d378e67a47797ea99784c92938 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 11 Nov 2022 16:48:40 +1000
+Subject: Thread naming
+
+
+diff --git a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
+index e5f4761..a485dfa 100644
+--- a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
++++ b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
+@@ -42,6 +42,10 @@
+ #include <wtf/WTFConfig.h>
+ #include <wtf/WordLock.h>
+ 
++#if OS(HAIKU)
++#include <OS.h>
++#endif
++
+ #if OS(LINUX)
+ #include <sched.h>
+ #include <sys/prctl.h>
+@@ -318,6 +322,8 @@ void Thread::initializeCurrentThreadInternal(const char* threadName)
+ {
+ #if HAVE(PTHREAD_SETNAME_NP)
+     pthread_setname_np(normalizeThreadName(threadName));
++#elif OS(HAIKU)
++	rename_thread(find_thread(NULL), normalizeThreadName(threadName));
+ #elif OS(LINUX)
+     prctl(PR_SET_NAME, normalizeThreadName(threadName));
+ #else
+-- 
+2.37.3
+
+
+From ddfd8bc153dfe0d9c0b4a3cff5a5695e888931df Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 11 Nov 2022 16:49:03 +1000
+Subject: Fix memory reserve
+
+
+diff --git a/Source/WTF/wtf/posix/OSAllocatorPOSIX.cpp b/Source/WTF/wtf/posix/OSAllocatorPOSIX.cpp
+index 7510126..0be4d44 100644
+--- a/Source/WTF/wtf/posix/OSAllocatorPOSIX.cpp
++++ b/Source/WTF/wtf/posix/OSAllocatorPOSIX.cpp
+@@ -115,7 +115,7 @@ void* OSAllocator::tryReserveAndCommit(size_t bytes, Usage usage, bool writable,
+ 
+ void* OSAllocator::tryReserveUncommitted(size_t bytes, Usage usage, bool writable, bool executable, bool jitCageEnabled, bool includesGuardPages)
+ {
+-#if OS(LINUX)
++#if OS(LINUX) || OS(HAIKU)
+     UNUSED_PARAM(usage);
+     UNUSED_PARAM(jitCageEnabled);
+     UNUSED_PARAM(includesGuardPages);
+@@ -232,7 +232,7 @@ void* OSAllocator::reserveAndCommit(size_t bytes, Usage usage, bool writable, bo
+ 
+ void OSAllocator::commit(void* address, size_t bytes, bool writable, bool executable)
+ {
+-#if OS(LINUX)
++#if OS(LINUX) || OS(HAIKU)
+     UNUSED_PARAM(writable);
+     UNUSED_PARAM(executable);
+     while (madvise(address, bytes, MADV_WILLNEED) == -1 && errno == EAGAIN) { }
+@@ -251,7 +251,7 @@ void OSAllocator::commit(void* address, size_t bytes, bool writable, bool execut
+ 
+ void OSAllocator::decommit(void* address, size_t bytes)
+ {
+-#if OS(LINUX)
++#if OS(LINUX) || OS(HAIKU)
+     while (madvise(address, bytes, MADV_DONTNEED) == -1 && errno == EAGAIN) { }
+ #elif HAVE(MADV_FREE_REUSE)
+     while (madvise(address, bytes, MADV_FREE_REUSABLE) == -1 && errno == EAGAIN) { }
+-- 
+2.37.3
+
