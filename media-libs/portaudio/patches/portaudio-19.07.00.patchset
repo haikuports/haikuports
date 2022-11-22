@@ -1,59 +1,1089 @@
-From 3fbfa49f74cfe8ff7413f1bf9a48bfeaeab1f4e9 Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
-Date: Wed, 30 Jul 2014 01:38:19 +0200
-Subject: Add a case for Haiku in configure.in
+From 9a29fac0f0f565ce106694196c50246ead2c39eb Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 23 Nov 2022 00:41:57 +1000
+Subject: Add hostapi module for Haiku
 
 
+diff --git a/Makefile.in b/Makefile.in
+index 8eb7342..a5fa1b6 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -144,6 +144,7 @@ SRC_DIRS = \
+ 	src/hostapi/asio \
+ 	src/hostapi/coreaudio \
+ 	src/hostapi/dsound \
++	src/hostapi/haiku \
+ 	src/hostapi/jack \
+ 	src/hostapi/oss \
+ 	src/hostapi/skeleton \
 diff --git a/configure.in b/configure.in
-index 13816fb..5c48cf7 100644
+index bb4ae96..bcb296e 100644
 --- a/configure.in
 +++ b/configure.in
-@@ -390,6 +390,22 @@ case "${host_os}" in
+@@ -385,6 +385,22 @@ case "${host_os}" in
          SHARED_FLAGS=""
          ;;
  
 +  haiku* )
 +        dnl Haiku configuration
 +
-+        dnl AC_DEFINE(PA_USE_HAIKU,1)
-+        AC_DEFINE(PA_USE_SKELETON,1)
++        AC_DEFINE(PA_USE_HAIKU,1)
 +
 +        CFLAGS="$CFLAGS -I\$(top_srcdir)/src/os/unix"
 +        # -Werror
 +        LIBS="-lmedia"
 +
 +        SHARED_FLAGS="$LIBS -shared"
-+        #CFLAGS="$CFLAGS"
++        CXXFLAGS="$CFLAGS"
 +        OTHER_OBJS="src/os/unix/pa_unix_hostapis.o src/os/unix/pa_unix_util.o src/common/pa_ringbuffer.o"
++        OTHER_OBJS="$OTHER_OBJS src/hostapi/haiku/pa_audio_input_haiku.o src/hostapi/haiku/pa_hostapi_haiku.o"
 +        PADLL="libportaudio.so"
 +        ;;
 +
    *)
          dnl Unix configuration
  
+diff --git a/include/portaudio.h b/include/portaudio.h
+index 5d84731..db9a960 100644
+--- a/include/portaudio.h
++++ b/include/portaudio.h
+@@ -283,7 +283,7 @@ typedef enum PaHostApiTypeId
+     paOSS=7,
+     paALSA=8,
+     paAL=9,
+-    paBeOS=10,
++    paHaiku=10,
+     paWDMKS=11,
+     paJACK=12,
+     paWASAPI=13,
+diff --git a/src/common/pa_hostapi.h b/src/common/pa_hostapi.h
+index 4ac3ab6..88aed89 100644
+--- a/src/common/pa_hostapi.h
++++ b/src/common/pa_hostapi.h
+@@ -106,6 +106,13 @@ are defaulted to 1.
+ #define PA_USE_WDMKS 1
+ #endif
+ 
++#ifndef PA_USE_HAIKU
++#define PA_USE_HAIKU 0
++#elif (PA_USE_HAIKU != 0) && (PA_USE_HAIKU != 1)
++#undef PA_USE_HAIKU
++#define PA_USE_HAIKU 1
++#endif
++
+ /* Set default values for Unix based APIs. */
+ #if defined(PA_NO_OSS) || defined(PA_NO_ALSA) || defined(PA_NO_JACK) || defined(PA_NO_COREAUDIO) || defined(PA_NO_SGI) || defined(PA_NO_ASIHPI)
+ #error "Portaudio: PA_NO_<APINAME> is no longer supported, please remove definition and use PA_USE_<APINAME> instead"
+diff --git a/src/hostapi/haiku/pa_audio_input_haiku.cpp b/src/hostapi/haiku/pa_audio_input_haiku.cpp
+new file mode 100644
+index 0000000..ad059d8
+--- /dev/null
++++ b/src/hostapi/haiku/pa_audio_input_haiku.cpp
+@@ -0,0 +1,204 @@
++/*
++ * Copyright 2022, Gerasim Troeglazov <3dEyes@gmail.com>
++ * All rights reserved. Distributed under the terms of the MIT License.
++ */
++
++#include "pa_audio_input_haiku.h"
++
++HaikuAudioRecorder::HaikuAudioRecorder(const char *node_name)
++	: nodeName(node_name)
++	, fMediaRoster(NULL)
++	, fMediaRecorder(NULL)
++	, isInited(false)
++	, isOpened(false)
++	, isRecording(false)
++{
++	if (node_name == NULL) {
++		nodeName.SetTo("PortAudio");
++
++		app_info appInfo;
++		if (be_app->GetAppInfo(&appInfo) == B_OK) {
++			BPath path(&appInfo.ref);
++			nodeName.SetTo(path.Leaf());
++		}
++	}
++
++	status_t error;
++	fMediaRoster = BMediaRoster::Roster(&error);
++	if (error == B_OK)
++		isInited = true;
++}
++
++HaikuAudioRecorder::~HaikuAudioRecorder()
++{
++	Close();
++}
++
++bool
++HaikuAudioRecorder::SetCallbacks(BMediaRecorder::ProcessFunc record_func,
++		BMediaRecorder::NotifyFunc notify_func, void* cookie)
++{
++	if (fMediaRecorder->SetHooks(record_func, notify_func, cookie) < B_OK) {
++		fMediaRecorder->SetHooks(NULL, NULL, NULL);
++		return false;
++	}
++	return true;
++}
++
++bool
++HaikuAudioRecorder::Open()
++{
++	if (!isInited || isOpened)
++		return false;
++
++	status_t error;
++
++	error = fMediaRoster->GetAudioInput(&fAudioInputNode);
++	if (error < B_OK)
++		return false;
++
++	error = fMediaRoster->GetAudioMixer(&fAudioMixerNode);
++	if (error < B_OK)
++		return false;
++
++	fMediaRecorder = new BMediaRecorder(nodeName, B_MEDIA_RAW_AUDIO);
++	if (fMediaRecorder->InitCheck() < B_OK) {
++		delete fMediaRecorder;
++		fMediaRecorder = NULL;
++		return false;
++	}
++
++	media_format output_format;
++	output_format.type = B_MEDIA_RAW_AUDIO;
++	output_format.u.raw_audio = media_raw_audio_format::wildcard;
++	fMediaRecorder->SetAcceptedFormat(output_format);
++
++	const int maxInputCount = 64;
++	dormant_node_info dni[maxInputCount];
++
++	int32 real_count = maxInputCount;
++
++	error = fMediaRoster->GetDormantNodes(dni, &real_count, 0, &output_format,
++		0, B_BUFFER_PRODUCER | B_PHYSICAL_INPUT);
++	if (real_count > maxInputCount)
++		real_count = maxInputCount;
++	char selected_name[B_MEDIA_NAME_LENGTH] = "Default input";
++
++	for (int i = 0; i < real_count; i++) {
++		media_node_id ni[12];
++		int32 ni_count = 12;
++		error = fMediaRoster->GetInstancesFor(dni[i].addon, dni[i].flavor_id, ni, &ni_count);
++		if (error == B_OK) {
++			for (int j = 0; j < ni_count; j++) {
++				if (ni[j] == fAudioInputNode.node) {
++					strcpy(selected_name, dni[i].name);
++					break;
++				}
++			}
++		}
++	}
++
++	if (!fMediaRecorder->IsConnected()) {
++		int32 count = 0;
++		error = fMediaRoster->GetFreeOutputsFor(fAudioInputNode, &fAudioOutput,
++			1, &count, B_MEDIA_RAW_AUDIO);
++		if (error < B_OK || count < 1) {
++			delete fMediaRecorder;
++			fMediaRecorder = NULL;
++			return false;
++		}
++		fRecordFormat.u.raw_audio = fAudioOutput.format.u.raw_audio;
++	} else {
++		fRecordFormat.u.raw_audio = fMediaRecorder->AcceptedFormat().u.raw_audio;
++	}
++
++	fRecordFormat.type = B_MEDIA_RAW_AUDIO;
++
++	isOpened = true;
++
++	return true;
++}
++
++void
++HaikuAudioRecorder::Close()
++{
++	if (!isOpened)
++		return;
++
++	isOpened = false;
++	
++	if (isRecording)
++		Stop();
++		
++	if (fMediaRecorder->IsConnected())
++		fMediaRecorder->Disconnect();
++
++	if (fMediaRecorder)
++		delete fMediaRecorder;
++
++	fMediaRecorder = NULL;
++}
++
++void
++HaikuAudioRecorder::Start()
++{
++	if (fMediaRecorder == NULL || !isInited || isRecording)
++		return;
++	
++	if (!fMediaRecorder->IsConnected()) {
++		if (fMediaRecorder->Connect(fAudioInputNode, &fAudioOutput, &fRecordFormat) < B_OK) {
++			fMediaRecorder->SetHooks(NULL, NULL, NULL);
++			return;
++		}
++	}
++
++	isRecording = true;
++	fMediaRecorder->Start();
++}
++
++void
++HaikuAudioRecorder::Stop()
++{
++	isRecording = false;
++	fMediaRecorder->Stop();
++}
++
++bigtime_t
++HaikuAudioRecorder::Latency()
++{
++	bigtime_t latency;
++	if (fMediaRoster->GetLatencyFor(fAudioInputNode, &latency) == B_OK && isRecording)
++		return latency;
++	return 0;
++}
++
++PaSampleFormat
++HaikuAudioRecorder::Format()
++{
++	PaSampleFormat sample_format = paInt32;
++
++	switch(fRecordFormat.u.raw_audio.format) {
++		case media_raw_audio_format::B_AUDIO_CHAR:
++			sample_format = paInt8;
++			break;
++		case media_raw_audio_format::B_AUDIO_UCHAR:
++			sample_format = paUInt8;
++			break;
++		case media_raw_audio_format::B_AUDIO_SHORT:
++			sample_format = paInt16;
++			break;
++		case media_raw_audio_format::B_AUDIO_INT:
++			sample_format = paInt32;
++			break;
++		case media_raw_audio_format::B_AUDIO_FLOAT:
++			sample_format = paFloat32;
++			break;
++	}
++	return sample_format;
++}
++
++int
++HaikuAudioRecorder::Channels()
++{
++	return fRecordFormat.u.raw_audio.channel_count;
++}
+diff --git a/src/hostapi/haiku/pa_audio_input_haiku.h b/src/hostapi/haiku/pa_audio_input_haiku.h
+new file mode 100644
+index 0000000..878ba3c
+--- /dev/null
++++ b/src/hostapi/haiku/pa_audio_input_haiku.h
+@@ -0,0 +1,67 @@
++/*
++ * Copyright 2022, Gerasim Troeglazov <3dEyes@gmail.com>
++ * All rights reserved. Distributed under the terms of the MIT License.
++ */
++
++#ifndef PA_AUDIO_INPUT_HAIKU_H_
++#define PA_AUDIO_INPUT_HAIKU_H_
++
++#include <OS.h>
++#include <Path.h>
++#include <Roster.h>
++#include <String.h>
++#include <Application.h>
++#include <MediaAddOn.h>
++#include <MediaFile.h>
++#include <MediaNode.h>
++#include <MediaRecorder.h>
++#include <MediaRoster.h>
++#include <MediaTrack.h>
++#include <TimeSource.h>
++#include <NodeInfo.h>
++
++#include "portaudio.h"
++
++class HaikuAudioRecorder {
++public:
++	HaikuAudioRecorder(const char *node_name = NULL);
++	~HaikuAudioRecorder();
++	
++	bool SetCallbacks(BMediaRecorder::ProcessFunc record_func = NULL,
++		BMediaRecorder::NotifyFunc notify_func = NULL,
++		void* cookie = NULL);
++	
++	bool Open();
++	void Close();
++	void Start();
++	void Stop();
++
++	bigtime_t Latency();
++	BMediaRoster *MediaRoster() { return fMediaRoster; }
++
++	PaSampleFormat Format();
++	int Channels();
++	int SampleRate() { return static_cast<int>(fRecordFormat.u.raw_audio.frame_rate); }
++	int FramesPerBuffer() { return fRecordFormat.u.raw_audio.buffer_size / fRecordFormat.AudioFrameSize(); }
++
++	bool IsOpened() { return isOpened; }
++	bool IsRecording() { return isRecording; }
++	bool InitCheck() { return isInited; }
++
++private:
++	BString nodeName;
++
++	BMediaRoster *fMediaRoster;
++	BMediaRecorder *fMediaRecorder;
++
++	media_format fRecordFormat;
++	media_node fAudioInputNode;
++	media_node fAudioMixerNode;
++	media_output fAudioOutput;
++
++	bool isInited;
++	bool isOpened;
++	bool isRecording;
++};
++
++#endif  // PA_AUDIO_INPUT_HAIKU_H_
+diff --git a/src/hostapi/haiku/pa_hostapi_haiku.cpp b/src/hostapi/haiku/pa_hostapi_haiku.cpp
+new file mode 100644
+index 0000000..7a36c53
+--- /dev/null
++++ b/src/hostapi/haiku/pa_hostapi_haiku.cpp
+@@ -0,0 +1,697 @@
++/*
++ * Copyright 2022, Gerasim Troeglazov <3dEyes@gmail.com>
++ * All rights reserved. Distributed under the terms of the MIT License.
++ */
++
++#include <string.h>
++#include <stdio.h>
++
++#include <OS.h>
++#include <Path.h>
++#include <Roster.h>
++#include <String.h>
++#include <Application.h>
++#include <SoundPlayer.h>
++#include <MediaAddOn.h>
++#include <MediaFile.h>
++#include <MediaNode.h>
++#include <MediaRecorder.h>
++#include <MediaRoster.h>
++#include <MediaTrack.h>
++#include <TimeSource.h>
++#include <NodeInfo.h>
++
++#include "pa_util.h"
++#include "pa_allocation.h"
++#include "pa_hostapi.h"
++#include "pa_stream.h"
++#include "pa_cpuload.h"
++#include "pa_process.h"
++
++#include "pa_audio_input_haiku.h"
++
++static char defaultHostName[] = "MediaKit";
++static char defaultOutputDeviceName[] = "Default Output";
++static char defaultInputDeviceName[] = "Default Input";
++static char defaultProcessName[] = "PortAudio";
++
++#ifdef __cplusplus
++extern "C"
++{
++#endif
++PaError PaHaiku_Initialize(PaUtilHostApiRepresentation **hostApi, PaHostApiIndex index);
++#ifdef __cplusplus
++}
++#endif
++
++
++static void Terminate(struct PaUtilHostApiRepresentation *hostApi);
++static PaError IsFormatSupported(struct PaUtilHostApiRepresentation *hostApi,
++		const PaStreamParameters *inputParameters,
++		const PaStreamParameters *outputParameters,
++		double sampleRate );
++static PaError OpenStream(struct PaUtilHostApiRepresentation *hostApi,
++		PaStream** s,
++		const PaStreamParameters *inputParameters,
++		const PaStreamParameters *outputParameters,
++		double sampleRate,
++		unsigned long framesPerBuffer,
++		PaStreamFlags streamFlags,
++		PaStreamCallback *streamCallback,
++		void *userData);
++static PaError CloseStream(PaStream* stream);
++static PaError StartStream(PaStream *stream);
++static PaError StopStream(PaStream *stream);
++static PaError AbortStream(PaStream *stream);
++static PaError IsStreamStopped(PaStream *stream);
++static PaError IsStreamActive(PaStream *stream);
++static PaTime GetStreamTime(PaStream *stream);
++static double GetStreamCpuLoad(PaStream* stream);
++static PaError ReadStream(PaStream* stream, void *buffer, unsigned long frames);
++static PaError WriteStream(PaStream* stream, const void *buffer, unsigned long frames);
++static signed long GetStreamReadAvailable(PaStream* stream);
++static signed long GetStreamWriteAvailable(PaStream* stream);
++static void HostProcessingLoop(void *inputBuffer, void *outputBuffer, void *userData);
++
++#define PA_HAIKU_SET_LAST_HOST_ERROR( errorCode, errorText ) \
++	PaUtil_SetLastHostErrorInfo( paInDevelopment, errorCode, errorText )
++
++typedef struct
++{
++	PaUtilHostApiRepresentation inheritedHostApiRep;
++	PaUtilStreamInterface callbackStreamInterface;
++	PaUtilStreamInterface blockingStreamInterface;
++
++	PaUtilAllocationGroup *allocations;
++
++	HaikuAudioRecorder *soundRecorder;
++} PaHaikuHostApiRepresentation;
++
++typedef struct PaHaikuStream
++{
++	PaUtilStreamRepresentation streamRepresentation;
++	PaUtilCpuLoadMeasurer cpuLoadMeasurer;
++	PaUtilBufferProcessor bufferProcessor;
++
++	HaikuAudioRecorder *soundRecorder;
++
++	BSoundPlayer *soundPlayer;
++	media_raw_audio_format format;
++
++	int isActive;
++	int isStopped;
++	int isRecording;
++} PaHaikuStream;
++
++
++static void
++soundPlayerCallback(void *cookie, void *buffer, size_t len, const media_raw_audio_format &)
++{
++	PaHaikuStream *stream = (PaHaikuStream *)cookie;
++
++	if (stream->isActive)
++		HostProcessingLoop(NULL, buffer, cookie);
++	else
++		memset((char*)buffer, 0, len);
++}
++
++
++static void
++soundRecorderCallback(void* cookie, bigtime_t, void* buffer, size_t len, const media_format &format)
++{
++	PaHaikuStream *stream = (PaHaikuStream *)cookie;
++
++	if (stream->isActive && stream->isRecording)
++		HostProcessingLoop(buffer, NULL, cookie);
++}
++
++
++static void
++soundRecorderNotifyCallback(void * cookie, BMediaRecorder::notification code, ...)
++{
++	PaHaikuStream *stream = (PaHaikuStream *)cookie;
++	if (code == BMediaRecorder::B_WILL_STOP) {
++		if (stream->isRecording == 1) {
++			stream->soundRecorder->Stop();
++			stream->isRecording = 0;
++			stream->isStopped = 1;
++		}
++	}
++}
++
++
++PaError
++PaHaiku_Initialize(PaUtilHostApiRepresentation **hostApi, PaHostApiIndex hostApiIndex)
++{
++	PaError result = paNoError;
++	int i, deviceCount;
++	PaHaikuHostApiRepresentation *haikuHostApi;
++	PaDeviceInfo *deviceInfoArray;
++	PaDeviceInfo *deviceInfo;
++
++	haikuHostApi = (PaHaikuHostApiRepresentation*)PaUtil_AllocateMemory(sizeof(PaHaikuHostApiRepresentation));
++	if (!haikuHostApi) {
++		result = paInsufficientMemory;
++		goto error;
++	}
++
++	haikuHostApi->allocations = PaUtil_CreateAllocationGroup();
++	if (!haikuHostApi->allocations) {
++		result = paInsufficientMemory;
++		goto error;
++	}
++
++	deviceCount = 1;
++	haikuHostApi->soundRecorder = new HaikuAudioRecorder();
++	if (haikuHostApi->soundRecorder->Open())
++		deviceCount++;
++
++	*hostApi = &haikuHostApi->inheritedHostApiRep;
++	(*hostApi)->info.structVersion = 1;
++	(*hostApi)->info.type = paHaiku;
++	(*hostApi)->info.name = defaultHostName;
++
++	(*hostApi)->info.defaultOutputDevice = paNoDevice;
++	(*hostApi)->info.defaultInputDevice = paNoDevice;
++
++	(*hostApi)->info.deviceCount = 0;
++
++	(*hostApi)->deviceInfos = (PaDeviceInfo**)PaUtil_GroupAllocateMemory(haikuHostApi->allocations, sizeof(PaDeviceInfo*) * deviceCount);
++	if (!(*hostApi)->deviceInfos) {
++		result = paInsufficientMemory;
++		goto error;
++	}
++
++	deviceInfoArray = (PaDeviceInfo*)PaUtil_GroupAllocateMemory(haikuHostApi->allocations, sizeof(PaDeviceInfo) * deviceCount);
++	if (!deviceInfoArray) {
++		result = paInsufficientMemory;
++		goto error;
++	}
++
++	// Output device #0
++	deviceInfo = &deviceInfoArray[0];
++	deviceInfo->structVersion = 2;
++	deviceInfo->hostApi = hostApiIndex;
++	deviceInfo->name = strdup(defaultOutputDeviceName);
++	deviceInfo->maxInputChannels = 0;
++	deviceInfo->maxOutputChannels = 2;
++	deviceInfo->defaultLowInputLatency = 0;
++	deviceInfo->defaultLowOutputLatency = 0;
++	deviceInfo->defaultHighInputLatency = 0;
++	deviceInfo->defaultHighOutputLatency = 0;
++	deviceInfo->defaultSampleRate = 48000.0;
++	(*hostApi)->deviceInfos[0] = deviceInfo;
++	(*hostApi)->info.defaultOutputDevice = 0;
++	++(*hostApi)->info.deviceCount;
++
++	// Input device #1
++	if (deviceCount > 1) {
++		deviceInfo = &deviceInfoArray[1];
++		deviceInfo->structVersion = 2;
++		deviceInfo->hostApi = hostApiIndex;
++		deviceInfo->name = strdup(defaultInputDeviceName);
++		deviceInfo->maxInputChannels = haikuHostApi->soundRecorder->Channels();
++		deviceInfo->maxOutputChannels = 0;
++		deviceInfo->defaultLowInputLatency = (double)haikuHostApi->soundRecorder->Latency() / 1000000.0;
++		deviceInfo->defaultLowOutputLatency = 0;
++		deviceInfo->defaultHighInputLatency = (double)haikuHostApi->soundRecorder->Latency() / 1000000.0;
++		deviceInfo->defaultHighOutputLatency = 0;
++		deviceInfo->defaultSampleRate = haikuHostApi->soundRecorder->SampleRate();
++		(*hostApi)->deviceInfos[1] = deviceInfo;
++		(*hostApi)->info.defaultInputDevice = 1;
++		++(*hostApi)->info.deviceCount;
++
++		haikuHostApi->soundRecorder->Close();
++	}
++
++	(*hostApi)->Terminate = Terminate;
++	(*hostApi)->OpenStream = OpenStream;
++	(*hostApi)->IsFormatSupported = IsFormatSupported;
++
++	PaUtil_InitializeStreamInterface(&haikuHostApi->callbackStreamInterface, CloseStream, StartStream,
++		StopStream, AbortStream, IsStreamStopped, IsStreamActive,
++		GetStreamTime, GetStreamCpuLoad,
++		PaUtil_DummyRead, PaUtil_DummyWrite,
++		PaUtil_DummyGetReadAvailable, PaUtil_DummyGetWriteAvailable );
++
++	PaUtil_InitializeStreamInterface(&haikuHostApi->blockingStreamInterface, CloseStream, StartStream,
++		StopStream, AbortStream, IsStreamStopped, IsStreamActive,
++		GetStreamTime, PaUtil_DummyGetCpuLoad,
++		ReadStream, WriteStream, GetStreamReadAvailable, GetStreamWriteAvailable);
++
++	return result;
++
++error:
++	if (haikuHostApi) {
++		if (haikuHostApi->allocations) {
++			PaUtil_FreeAllAllocations(haikuHostApi->allocations);
++			PaUtil_DestroyAllocationGroup(haikuHostApi->allocations);
++		}
++
++		PaUtil_FreeMemory(haikuHostApi);
++	}
++	return result;
++}
++
++
++static void
++Terminate(struct PaUtilHostApiRepresentation *hostApi)
++{
++	PaHaikuHostApiRepresentation *haikuHostApi = (PaHaikuHostApiRepresentation*)hostApi;
++
++	if (haikuHostApi->allocations ) {
++		PaUtil_FreeAllAllocations(haikuHostApi->allocations);
++		PaUtil_DestroyAllocationGroup(haikuHostApi->allocations);
++	}
++
++	PaUtil_FreeMemory(haikuHostApi);
++}
++
++
++static PaError
++IsFormatSupported(struct PaUtilHostApiRepresentation *hostApi,
++		const PaStreamParameters *inputParameters,
++		const PaStreamParameters *outputParameters,
++		double sampleRate)
++{
++	int inputChannelCount, outputChannelCount;
++	PaSampleFormat inputSampleFormat, outputSampleFormat;
++	PaHaikuHostApiRepresentation *haikuHostApi = (PaHaikuHostApiRepresentation*)hostApi;
++
++	if (inputParameters && haikuHostApi->inheritedHostApiRep.info.deviceCount > 1) {
++		inputChannelCount = inputParameters->channelCount;
++		inputSampleFormat = inputParameters->sampleFormat;
++
++		if (inputSampleFormat & paCustomFormat)
++			return paSampleFormatNotSupported;
++
++		if (!inputSampleFormat & haikuHostApi->soundRecorder->Format())
++			return paSampleFormatNotSupported;
++
++		if (inputParameters->device == paUseHostApiSpecificDeviceSpecification)
++			return paInvalidDevice;
++
++		if (inputChannelCount != haikuHostApi->soundRecorder->Channels())
++			return paInvalidChannelCount;
++
++		if ((int)sampleRate != haikuHostApi->soundRecorder->SampleRate())
++			return paInvalidSampleRate;
++
++		if (inputParameters->hostApiSpecificStreamInfo)
++			return paIncompatibleHostApiSpecificStreamInfo;
++	} else {
++		inputChannelCount = 0;
++	}
++
++	if (outputParameters) {
++		outputChannelCount = outputParameters->channelCount;
++		outputSampleFormat = outputParameters->sampleFormat;
++
++		if (outputSampleFormat & paCustomFormat)
++			return paSampleFormatNotSupported;
++
++		if (outputParameters->device == paUseHostApiSpecificDeviceSpecification)
++			return paInvalidDevice;
++
++		if (outputChannelCount > hostApi->deviceInfos[outputParameters->device]->maxOutputChannels)
++			return paInvalidChannelCount;
++
++		if (outputParameters->hostApiSpecificStreamInfo)
++			return paIncompatibleHostApiSpecificStreamInfo;
++	} else {
++		outputChannelCount = 0;
++	}
++
++	return paFormatIsSupported;
++}
++
++
++static PaError
++OpenStream(struct PaUtilHostApiRepresentation *hostApi,
++		PaStream** s,
++		const PaStreamParameters *inputParameters,
++		const PaStreamParameters *outputParameters,
++		double sampleRate,
++		unsigned long framesPerBuffer,
++		PaStreamFlags streamFlags,
++		PaStreamCallback *streamCallback,
++		void *userData )
++{
++	PaError result = paNoError;
++	PaHaikuHostApiRepresentation *haikuHostApi = (PaHaikuHostApiRepresentation*)hostApi;
++	PaHaikuStream *stream = 0;
++	unsigned long framesPerHostBuffer = framesPerBuffer;
++	int inputChannelCount, outputChannelCount;
++	PaSampleFormat inputSampleFormat, outputSampleFormat;
++	PaSampleFormat hostInputSampleFormat, hostOutputSampleFormat;
++
++	BString processName(defaultProcessName);
++	app_info appInfo;
++
++	if (be_app->GetAppInfo(&appInfo) == B_OK) {
++		BPath path(&appInfo.ref);
++		processName.SetTo(path.Leaf());
++	}
++
++   if (framesPerBuffer == paFramesPerBufferUnspecified)
++		framesPerBuffer = ((uint32)sampleRate / 100) * 2;
++
++	framesPerHostBuffer = framesPerBuffer;
++
++	if( inputParameters ) {
++		inputChannelCount = inputParameters->channelCount;
++		inputSampleFormat = inputParameters->sampleFormat;
++
++		if( inputParameters->device == paUseHostApiSpecificDeviceSpecification )
++			return paInvalidDevice;
++
++		if( inputChannelCount > hostApi->deviceInfos[ inputParameters->device ]->maxInputChannels )
++			return paInvalidChannelCount;
++
++		if (inputChannelCount != haikuHostApi->soundRecorder->Channels())
++			return paInvalidChannelCount;
++
++		if ((int)sampleRate != haikuHostApi->soundRecorder->SampleRate())
++			return paInvalidSampleRate;
++
++		if( inputParameters->hostApiSpecificStreamInfo )
++			return paIncompatibleHostApiSpecificStreamInfo;
++
++		hostInputSampleFormat = PaUtil_SelectClosestAvailableFormat(
++			haikuHostApi->soundRecorder->Format(), inputSampleFormat);
++	} else {
++		inputChannelCount = 0;
++		inputSampleFormat = hostInputSampleFormat = paInt16;
++	}
++
++	if (outputParameters) {
++		outputChannelCount = outputParameters->channelCount;
++		outputSampleFormat = outputParameters->sampleFormat;
++
++		if (outputParameters->device == paUseHostApiSpecificDeviceSpecification)
++			return paInvalidDevice;
++
++		if (outputChannelCount > hostApi->deviceInfos[outputParameters->device]->maxOutputChannels)
++			return paInvalidChannelCount;
++
++		if (outputParameters->hostApiSpecificStreamInfo)
++			return paIncompatibleHostApiSpecificStreamInfo;
++
++		hostOutputSampleFormat = PaUtil_SelectClosestAvailableFormat(
++			paInt8 | paUInt8 | paInt16 | paInt32 | paFloat32, outputSampleFormat);
++	} else {
++		outputChannelCount = 0;
++		outputSampleFormat = hostOutputSampleFormat = paInt16;
++	}
++
++	if ((streamFlags & paPlatformSpecificFlags) != 0)
++		return paInvalidFlag;
++
++	stream = (PaHaikuStream*)PaUtil_AllocateMemory(sizeof(PaHaikuStream));
++	if (!stream) {
++		result = paInsufficientMemory;
++		goto error;
++	}
++
++	if (streamCallback) {
++		PaUtil_InitializeStreamRepresentation( &stream->streamRepresentation,
++			&haikuHostApi->callbackStreamInterface, streamCallback, userData );
++	} else {
++		PaUtil_InitializeStreamRepresentation( &stream->streamRepresentation,
++			&haikuHostApi->blockingStreamInterface, streamCallback, userData );
++	}
++
++	stream->isActive = 0;
++	stream->isRecording = 0;
++	stream->isStopped = 1;
++	stream->soundPlayer = NULL;
++	stream->soundRecorder = NULL;
++
++	if (outputChannelCount > 0) {
++		stream->format.frame_rate = (float)sampleRate;
++		stream->format.channel_count = (uint32)outputChannelCount;
++		stream->format.format = media_raw_audio_format::B_AUDIO_SHORT;
++		stream->format.byte_order = B_MEDIA_LITTLE_ENDIAN;
++		stream->format.buffer_size = framesPerBuffer * outputChannelCount * sizeof(uint16);
++
++		switch(hostOutputSampleFormat)
++		{
++			case paUInt8:
++				stream->format.format = media_raw_audio_format::B_AUDIO_UCHAR;
++				stream->format.buffer_size = framesPerBuffer * outputChannelCount;
++				break;
++			case paInt8:
++				stream->format.format = media_raw_audio_format::B_AUDIO_CHAR;
++				stream->format.buffer_size = framesPerBuffer * outputChannelCount;
++				break;
++			case paInt16:
++				stream->format.format = media_raw_audio_format::B_AUDIO_SHORT;
++				stream->format.buffer_size = framesPerBuffer * outputChannelCount * sizeof(uint16);
++				break;
++			case paInt32:
++				stream->format.format = media_raw_audio_format::B_AUDIO_INT;
++				stream->format.buffer_size = framesPerBuffer * outputChannelCount * sizeof(uint32);
++				break;
++			case paFloat32:
++				stream->format.format = media_raw_audio_format::B_AUDIO_FLOAT;
++				stream->format.buffer_size = framesPerBuffer * outputChannelCount * sizeof(float);
++				break;
++			default:
++				goto error;
++		}
++
++		stream->soundPlayer = new BSoundPlayer(&stream->format, processName.String(),
++			soundPlayerCallback, NULL, (void*)stream);
++	
++		if(stream->soundPlayer->InitCheck() != B_OK)
++			goto error;
++	}
++	
++	if (inputChannelCount > 0) {
++		if (!haikuHostApi->soundRecorder->Open())
++			goto error;
++
++		if (!haikuHostApi->soundRecorder->SetCallbacks(soundRecorderCallback, soundRecorderNotifyCallback, (void*)stream))
++			goto error;
++
++		stream->soundRecorder = haikuHostApi->soundRecorder;
++
++		inputChannelCount = haikuHostApi->soundRecorder->Channels();
++		sampleRate = haikuHostApi->soundRecorder->SampleRate();
++		hostInputSampleFormat = haikuHostApi->soundRecorder->Format();
++		framesPerHostBuffer = haikuHostApi->soundRecorder->FramesPerBuffer();
++	}
++
++	PaUtil_InitializeCpuLoadMeasurer(&stream->cpuLoadMeasurer, sampleRate);
++
++	result =  PaUtil_InitializeBufferProcessor( &stream->bufferProcessor,
++			  inputChannelCount, inputSampleFormat, hostInputSampleFormat,
++			  outputChannelCount, outputSampleFormat, hostOutputSampleFormat,
++			  sampleRate, streamFlags, framesPerBuffer,
++			  framesPerHostBuffer, paUtilFixedHostBufferSize,
++			  streamCallback, userData);
++
++	if( result != paNoError )
++		goto error;
++
++	stream->streamRepresentation.streamInfo.inputLatency =
++			(PaTime)PaUtil_GetBufferProcessorInputLatencyFrames(&stream->bufferProcessor) / sampleRate;
++	stream->streamRepresentation.streamInfo.outputLatency =
++			(PaTime)PaUtil_GetBufferProcessorOutputLatencyFrames(&stream->bufferProcessor) / sampleRate;
++	stream->streamRepresentation.streamInfo.sampleRate = sampleRate;
++
++	*s = (PaStream*)stream;
++
++	return result;
++
++error:
++	if (stream)
++		PaUtil_FreeMemory(stream);
++
++	return result;
++}
++
++static void
++HostProcessingLoop(void *inputBuffer, void *outputBuffer, void *userData)
++{
++	PaHaikuStream *stream = (PaHaikuStream*)userData;
++	PaStreamCallbackTimeInfo timeInfo = {0,0,0};
++	int callbackResult;
++	unsigned long framesProcessed;
++
++	PaUtil_BeginCpuLoadMeasurement(&stream->cpuLoadMeasurer);
++	PaUtil_BeginBufferProcessing(&stream->bufferProcessor, &timeInfo, 0);
++
++	if (inputBuffer != NULL) {
++	    PaUtil_SetInputFrameCount(&stream->bufferProcessor, 0);
++	    PaUtil_SetInterleavedInputChannels(&stream->bufferProcessor, 0, inputBuffer, 0);
++	}
++	
++	if (outputBuffer != NULL) {
++	    PaUtil_SetOutputFrameCount(&stream->bufferProcessor, 0);
++	    PaUtil_SetInterleavedOutputChannels( &stream->bufferProcessor, 0, outputBuffer, 0);
++	}
++
++	callbackResult = paContinue;
++	framesProcessed = PaUtil_EndBufferProcessing(&stream->bufferProcessor, &callbackResult);
++
++	PaUtil_EndCpuLoadMeasurement(&stream->cpuLoadMeasurer, framesProcessed);
++
++	if (callbackResult == paContinue) {
++		/* nothing special to do */
++	} else if (callbackResult == paAbort){
++		/* IMPLEMENT ME - finish playback immediately  */
++		/* once finished, call the finished callback */
++		if( stream->streamRepresentation.streamFinishedCallback != 0 )
++			stream->streamRepresentation.streamFinishedCallback( stream->streamRepresentation.userData );
++	} else {
++		/* User callback has asked us to stop with paComplete or other non-zero value */
++		/* IMPLEMENT ME - finish playback once currently queued audio has completed  */
++		/* once finished, call the finished callback */
++		if( stream->streamRepresentation.streamFinishedCallback != 0 )
++			stream->streamRepresentation.streamFinishedCallback( stream->streamRepresentation.userData );
++	}
++}
++
++
++static PaError
++CloseStream(PaStream* s)
++{
++	PaError result = paNoError;
++	PaHaikuStream *stream = (PaHaikuStream*)s;
++
++	stream->isStopped = 1;
++	stream->isRecording = 0;
++
++	if (stream->soundPlayer != NULL) {
++		stream->soundPlayer->SetHasData(false);
++		stream->soundPlayer->Stop();
++		delete stream->soundPlayer;
++		stream->soundPlayer = NULL;
++	}
++
++	if (stream->soundRecorder != NULL) {
++		stream->soundRecorder->Close();
++	}
++
++	PaUtil_TerminateBufferProcessor( &stream->bufferProcessor );
++	PaUtil_TerminateStreamRepresentation( &stream->streamRepresentation );
++	PaUtil_FreeMemory( stream );
++
++	return result;
++}
++
++
++static PaError
++StartStream(PaStream *s)
++{
++	PaError result = paNoError;
++	PaHaikuStream *stream = (PaHaikuStream*)s;
++
++	PaUtil_ResetBufferProcessor( &stream->bufferProcessor );
++
++	if (stream->soundPlayer != NULL) {
++		stream->isActive = 1;
++		stream->isStopped = 0;
++
++		stream->soundPlayer->Start();
++		stream->soundPlayer->SetHasData(true);
++	}
++
++	if (stream->soundRecorder != NULL) {
++		stream->isActive = 1;
++		stream->isStopped = 0;
++		stream->isRecording = 1;
++		stream->soundRecorder->Start();
++	}
++
++	return result;
++}
++
++
++static PaError
++StopStream(PaStream *s)
++{
++	PaError result = paNoError;
++	PaHaikuStream *stream = (PaHaikuStream*)s;
++
++	if (stream->soundPlayer != NULL) {
++		stream->isStopped = 1;
++
++		stream->soundPlayer->SetHasData(false);
++		stream->soundPlayer->Stop();
++	}
++	
++	if (stream->soundRecorder != NULL) {
++		stream->isStopped = 1;
++		stream->soundRecorder->Stop();
++	}
++
++	return result;
++}
++
++
++static PaError
++AbortStream(PaStream *s)
++{
++	PaHaikuStream *stream = (PaHaikuStream*)s;
++	return StopStream(s);;
++}
++
++
++static PaError
++IsStreamStopped(PaStream *s)
++{
++	PaHaikuStream *stream = (PaHaikuStream*)s;
++	return stream->isStopped;
++}
++
++
++static PaError
++IsStreamActive(PaStream *s)
++{
++	PaHaikuStream *stream = (PaHaikuStream*)s;
++	return stream->isActive;
++}
++
++
++static PaTime
++GetStreamTime(PaStream *s)
++{
++	return PaUtil_GetTime();
++}
++
++
++static double
++GetStreamCpuLoad(PaStream* s)
++{
++	PaHaikuStream *stream = (PaHaikuStream*)s;
++	return PaUtil_GetCpuLoad(&stream->cpuLoadMeasurer);
++}
++
++static PaError
++ReadStream(PaStream* s, void *buffer, unsigned long frames)
++{
++	return paNoError;
++}
++
++
++static PaError
++WriteStream(PaStream* s, const void *buffer, unsigned long frames)
++{
++	return paNoError;
++}
++
++
++static signed long
++GetStreamReadAvailable(PaStream* s)
++{
++	return 0;
++}
++
++
++static signed long
++GetStreamWriteAvailable(PaStream* s)
++{
++	return 0;
++}
+diff --git a/src/os/unix/pa_unix_hostapis.c b/src/os/unix/pa_unix_hostapis.c
+index 7f1a51f..fc52bc5 100644
+--- a/src/os/unix/pa_unix_hostapis.c
++++ b/src/os/unix/pa_unix_hostapis.c
+@@ -51,6 +51,8 @@ PaError PaSGI_Initialize( PaUtilHostApiRepresentation **hostApi, PaHostApiIndex
+ PaError PaAsiHpi_Initialize( PaUtilHostApiRepresentation **hostApi, PaHostApiIndex index );
+ PaError PaMacCore_Initialize( PaUtilHostApiRepresentation **hostApi, PaHostApiIndex index );
+ PaError PaSkeleton_Initialize( PaUtilHostApiRepresentation **hostApi, PaHostApiIndex index );
++/* Haiku */
++PaError PaHaiku_Initialize( PaUtilHostApiRepresentation **hostApi, PaHostApiIndex index );
+ 
+ /** Note that on Linux, ALSA is placed before OSS so that the former is preferred over the latter.
+  */
+@@ -79,6 +81,10 @@ PaUtilHostApiInitializer *paHostApiInitializers[] =
+ 
+ #endif  /* __linux__ */
+ 
++#if PA_USE_HAIKU
++		PaHaiku_Initialize,
++#endif
++
+ #if PA_USE_JACK
+         PaJack_Initialize,
+ #endif
 -- 
-2.30.2
-
-
-From 271d0b016f107c7850bdfeac8c0726b710165447 Mon Sep 17 00:00:00 2001
-From: Ken Mays <kmays2000@gmail.com>
-Date: Sat, 25 Dec 2021 06:19:07 +0200
-Subject: Fix OSS detect for Haiku
-
-
-diff --git a/configure.in b/configure.in
-index 5c48cf7..7941bbf 100644
---- a/configure.in
-+++ b/configure.in
-@@ -127,7 +127,7 @@ fi
- have_libossaudio=no
- have_oss=no
- if test "x$with_oss" != "xno"; then
--    AC_CHECK_HEADERS([sys/soundcard.h linux/soundcard.h machine/soundcard.h], [have_oss=yes])
-+    AC_CHECK_HEADERS([private/audio/soundcard.h sys/soundcard.h linux/soundcard.h machine/soundcard.h], [have_oss=yes])
-     if test "x$have_oss" = "xyes"; then
-         AC_CHECK_LIB(ossaudio, _oss_ioctl, have_libossaudio=yes, have_libossaudio=no)
-     fi
--- 
-2.30.2
+2.37.3
 
