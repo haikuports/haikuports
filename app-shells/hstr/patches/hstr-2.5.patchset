@@ -1,0 +1,233 @@
+From 727dd4c7f6459ff37d7f5f62f305de38d794c11c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Zolt=C3=A1n=20Mizsei?= <zmizsei@extrowerk.com>
+Date: Sat, 27 Oct 2018 12:51:57 +0200
+Subject: Haiku supporting patches
+
+
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 7640d21..328353c 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -35,6 +35,6 @@ hstr_SOURCES = 						\
+ 
+ # create hstr > hh hard link on installation
+ install-exec-hook:
+-	ln $(DESTDIR)$(bindir)/hstr$(EXEEXT) $(DESTDIR)$(bindir)/hh$(EXEEXT)
++	ln -s $(DESTDIR)$(bindir)/hstr$(EXEEXT) $(DESTDIR)$(bindir)/hh$(EXEEXT)
+ 
+ hstr_LDADD = $(NCURSES_LIBS)
+diff --git a/src/hstr_utils.c b/src/hstr_utils.c
+index 12ec8fb..eb5c80a 100644
+--- a/src/hstr_utils.c
++++ b/src/hstr_utils.c
+@@ -106,7 +106,7 @@ void hstr_chop(char *s)
+     }
+ }
+ 
+-#if !defined(__MS_WSL__) && !defined(__CYGWIN__) && !defined(DEBUG_NO_TIOCSTI)
++#if !defined(__MS_WSL__) && !defined(__CYGWIN__) && !defined(DEBUG_NO_TIOCSTI) && !defined(__HAIKU__)
+ void tiocsti()
+ {
+     char buf[] = DEFAULT_COMMAND;
+@@ -120,7 +120,7 @@ void tiocsti()
+ void fill_terminal_input(char* cmd, bool padding)
+ {
+     if(cmd && strlen(cmd)>0) {
+-#if defined(__MS_WSL__) || defined(__CYGWIN__) || defined(DEBUG_NO_TIOCSTI)
++#if defined(__MS_WSL__) || defined(__CYGWIN__) || defined(DEBUG_NO_TIOCSTI) || defined(__HAIKU__)
+         fprintf(stderr, "%s", cmd);
+         if(padding) fprintf(stderr, "%s", "\n");
+ #else
+diff --git a/src/include/hstr.h b/src/include/hstr.h
+index 5eac881..be248d3 100644
+--- a/src/include/hstr.h
++++ b/src/include/hstr.h
+@@ -25,6 +25,8 @@
+   #include <curses.h>
+ #elif defined(__FreeBSD__)
+   #include <ncurses.h>
++#elif defined(__HAIKU__)
++  #include <ncurses.h>
+ #else
+   #include <ncursesw/curses.h>
+ #endif
+diff --git a/src/include/hstr_curses.h b/src/include/hstr_curses.h
+index 8a50ab9..de92e58 100644
+--- a/src/include/hstr_curses.h
++++ b/src/include/hstr_curses.h
+@@ -21,6 +21,8 @@
+ 
+ #ifdef __APPLE__
+ #include <curses.h>
++#elif defined(__HAIKU__)
++#include <ncurses.h>
+ #elif defined(__FreeBSD__)
+ #include <ncurses.h>
+ #else
+-- 
+2.37.3
+
+
+From 6099e00c93c0b98ba4ecc3a57fa5e1323830a82d Mon Sep 17 00:00:00 2001
+From: Oscar Lesta <oscar.lesta@gmail.com>
+Date: Mon, 3 Oct 2022 06:59:40 -0300
+Subject: Updated Haiku support patch.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Modeled after the part of Zoltán Mizsei's 2.0 patch that was not
+applying cleanly anymore.
+
+diff --git a/src/hstr_utils.c b/src/hstr_utils.c
+index eb5c80a..15c0b60 100644
+--- a/src/hstr_utils.c
++++ b/src/hstr_utils.c
+@@ -168,7 +168,11 @@ char* get_home_file_path(char* filename)
+ {
+     char* home = getenv(ENV_VAR_HOME);
+     char* path = malloc(strlen(home) + 1 + strlen(filename) + 1);
++#ifndef __HAIKU__
+     strcat(strcat(strcpy(path, home), "/"), filename);
++#else
++    strcat(strcat(strcpy(path, home), "/config/settings/"), filename);
++#endif
+     return path;
+ }
+ 
+-- 
+2.37.3
+
+
+From 72755e1794ab4c4c139450e509a39ee36cc06d1f Mon Sep 17 00:00:00 2001
+From: Oscar Lesta <oscar.lesta@gmail.com>
+Date: Sun, 9 Oct 2022 10:43:02 -0300
+Subject: Fix configuration instructions under Haiku.
+
+* Use the proper configuration instructions for bash in Haiu.
+  Big thanks to madmax for finding the issue!.
+* Show the correct locations for config files under Haiku.
+
+The issue was that, on platforms that lack the TIOCSTI ioctl, a
+workaround is needed to be able to insert text on the shell's command
+line. The workaround relies on defining a shell function,
+and keybinding said function so it gets handled by readline.
+
+Now, following the "hstr --show-configuration" instructions will
+result in C-r working as expected, at least for bash.
+
+It still won't under zsh (for the lack of a similar workaround,
+but implemented as a zsh function).
+
+diff --git a/src/hstr.c b/src/hstr.c
+index b0ee33f..cefe572 100644
+--- a/src/hstr.c
++++ b/src/hstr.c
+@@ -158,7 +158,11 @@ static const char* HSTR_CASE_LABELS[]={
+ };
+ 
+ static const char* INSTALL_BASH_STRING=
++#if defined(__HAIKU__)
++        "\n# HSTR configuration - add this to ~/config/settings/profile"
++#else
+         "\n# HSTR configuration - add this to ~/.bashrc"
++#endif
+         "\nalias hh=hstr                    # hh to be alias for hstr"
+         "\nexport HSTR_CONFIG=hicolor       # get more colors"
+         "\nshopt -s histappend              # append new history items to .bash_history"
+@@ -190,24 +194,28 @@ static const char* INSTALL_BASH_STRING=
+         "\n  READLINE_POINT=${#READLINE_LINE}"
+         "\n}"
+         "\nif [[ $- =~ .*i.* ]]; then bind -x '\"\\C-r\": \"hstrwsl\"'; fi"
+-#elif defined(__CYGWIN__)
+-        "\nfunction hstrcygwin {"
++#elif defined(__CYGWIN__) || defined(__HAIKU__)
++        "\nfunction hstr_helper {"
+         "\n  offset=${READLINE_POINT}"
+         "\n  READLINE_POINT=0"
+         "\n  { READLINE_LINE=$(</dev/tty hstr ${READLINE_LINE:0:offset} 2>&1 1>&$hstrout); } {hstrout}>&1"
+         "\n  READLINE_POINT=${#READLINE_LINE}"
+         "\n}"
+-        "\nif [[ $- =~ .*i.* ]]; then bind -x '\"\\C-r\": \"hstrcygwin\"'; fi"
++        "\nif [[ $- =~ .*i.* ]]; then bind -x '\"\\C-r\": \"hstr_helper\"'; fi"
+ #else
+         "\nif [[ $- =~ .*i.* ]]; then bind '\"\\C-r\": \"\\C-a hstr -- \\C-j\"'; fi"
++#endif
+         "\n# if this is interactive shell, then bind 'kill last command' to Ctrl-x k"
+         "\nif [[ $- =~ .*i.* ]]; then bind '\"\\C-xk\": \"\\C-a hstr -k \\C-j\"'; fi"
+-#endif
+         "\n\n";
+ 
+ // zsh doc: http://zsh.sourceforge.net/Guide/zshguide.html
+ static const char* INSTALL_ZSH_STRING=
++#if defined(__HAIKU__)
++        "\n# HSTR configuration - add this to ~/config/settings/zsh/.zshrc"
++#else
+         "\n# HSTR configuration - add this to ~/.zshrc"
++#endif
+         "\nalias hh=hstr                    # hh to be alias for hstr"
+         "\nsetopt histignorespace           # skip cmds w/ leading space from history"
+         // HISTFILE should not be needed - HSTR must work on blank environment as well
+@@ -228,7 +236,7 @@ static const char* INSTALL_ZSH_STRING=
+         "\n#bindkey -s \"\\C-r\" \"\\eqhstr_winwsl\\n\""
+         "\n"
+         "\nbindkey -s \"\\C-r\" \"\\eqhstr\\n\"     # bind hstr to Ctrl-r (for Vi mode check doc)"
+-#elif defined(__CYGWIN__)
++#elif defined(__CYGWIN__) || defined(__HAIKU__)
+         // TODO binding to be rewritten for zsh@Cygwin as it's done for bash - hstr_cygwin() like function to be implemented to make it work under Cygwin
+ 
+         "\n# Function and binding below is bash script that makes command completion work under Cygwin."
+@@ -260,8 +268,13 @@ static const char* HELP_STRING=
+         "\n  --favorites              -f ... show favorites view"
+         "\n  --kill-last-command      -k ... delete last command in history"
+         "\n  --non-interactive        -n ... print filtered history and exit"
++#if defined(__HAIKU__)
++        "\n  --show-configuration     -s ... show configuration to be added to ~/config/settings/profile"
++        "\n  --show-zsh-configuration -z ... show zsh configuration to be added to ~/config/settings/zsh/.zshrc"
++#else
+         "\n  --show-configuration     -s ... show configuration to be added to ~/.bashrc"
+         "\n  --show-zsh-configuration -z ... show zsh configuration to be added to ~/.zshrc"
++#endif
+         "\n  --show-blacklist         -b ... show commands to skip on history indexation"
+         "\n  --insert-in-terminal=[c] -i ... insert command c in terminal prompt and exit"
+         "\n  --version                -V ... show version details"
+-- 
+2.37.3
+
+
+From c079ab287f685d1ba01988c0c8c8944d6b9e59a6 Mon Sep 17 00:00:00 2001
+From: Oscar Lesta <oscar.lesta@gmail.com>
+Date: Sun, 9 Oct 2022 18:19:00 -0300
+Subject: Adjust location of history files.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Idea taken from the previous v2.0 patch by Zoltán Mizsei.
+
+diff --git a/src/include/hstr_history.h b/src/include/hstr_history.h
+index f715672..ea4bf23 100644
+--- a/src/include/hstr_history.h
++++ b/src/include/hstr_history.h
+@@ -32,9 +32,15 @@
+ 
+ #define ENV_VAR_HISTFILE "HISTFILE"
+ 
+-#define FILE_DEFAULT_HISTORY ".bash_history"
+-#define FILE_ZSH_HISTORY ".zsh_history"
+-#define FILE_ZSH_ZHISTORY ".zhistory"
++#ifndef __HAIKU__
++    #define FILE_DEFAULT_HISTORY ".bash_history"
++    #define FILE_ZSH_HISTORY ".zsh_history"
++    #define FILE_ZSH_ZHISTORY ".zhistory"
++#else
++    #define FILE_DEFAULT_HISTORY "bash_history"
++    #define FILE_ZSH_HISTORY "zsh/.zsh_history"
++    #define FILE_ZSH_ZHISTORY "zsh/.zhistory"
++#endif
+ 
+ #define ZSH_HISTORY_EXT_DIGITS 10
+ 
+-- 
+2.37.3
+

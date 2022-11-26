@@ -1,0 +1,175 @@
+From 6d85ccb6890dd3c732d24af48a6658b69813d3ee Mon Sep 17 00:00:00 2001
+From: Augustin Cavalier <waddlesplash@gmail.com>
+Date: Mon, 24 Jan 2022 17:27:43 -0500
+Subject: Fix build without Poppler.
+
+
+diff --git a/CMakeScripts/DefineDependsandFlags.cmake b/CMakeScripts/DefineDependsandFlags.cmake
+index b42c0aa..59da925 100644
+--- a/CMakeScripts/DefineDependsandFlags.cmake
++++ b/CMakeScripts/DefineDependsandFlags.cmake
+@@ -189,9 +189,11 @@ else()
+     set(ENABLE_POPPLER_CAIRO OFF)
+ endif()
+ 
+-list(APPEND INKSCAPE_INCS_SYS ${POPPLER_INCLUDE_DIRS})
+-list(APPEND INKSCAPE_LIBS     ${POPPLER_LIBRARIES})
+-add_definitions(${POPPLER_DEFINITIONS})
++if(ENABLE_POPPLER_CAIRO)
++    list(APPEND INKSCAPE_INCS_SYS ${POPPLER_INCLUDE_DIRS})
++    list(APPEND INKSCAPE_LIBS     ${POPPLER_LIBRARIES})
++    add_definitions(${POPPLER_DEFINITIONS})
++endif()
+ 
+ if(WITH_LIBWPG)
+     pkg_check_modules(LIBWPG libwpg-0.3 librevenge-0.0 librevenge-stream-0.0)
+-- 
+2.37.3
+
+
+From 1f98b8cddf38321d681609db23023c6e5d46947d Mon Sep 17 00:00:00 2001
+From: Augustin Cavalier <waddlesplash@gmail.com>
+Date: Mon, 24 Jan 2022 20:07:10 -0500
+Subject: tracedialog: Fix build under Haiku.
+
+
+diff --git a/src/ui/dialog/tracedialog.cpp b/src/ui/dialog/tracedialog.cpp
+index 114e341..29a6b8b 100644
+--- a/src/ui/dialog/tracedialog.cpp
++++ b/src/ui/dialog/tracedialog.cpp
+@@ -32,6 +32,10 @@
+ #include "trace/potrace/inkscape-potrace.h"
+ #include "ui/util.h"
+ 
++#ifdef __HAIKU__
++#undef B_OK
++#endif
++
+ // This maps the column ids in the glade file to useful enums
+ static const std::map<std::string, Inkscape::Trace::Potrace::TraceType> trace_types = {
+     {"SS_BC", Inkscape::Trace::Potrace::TRACE_BRIGHTNESS},
+-- 
+2.37.3
+
+
+From 6113773bf22e1ae206134d46ae1db99224e2bc68 Mon Sep 17 00:00:00 2001
+From: Augustin Cavalier <waddlesplash@gmail.com>
+Date: Wed, 26 Jan 2022 12:17:06 -0500
+Subject: Add mechanism to get the program path under Haiku.
+
+
+diff --git a/src/path-prefix.cpp b/src/path-prefix.cpp
+index 1d61748..a8e8da1 100644
+--- a/src/path-prefix.cpp
++++ b/src/path-prefix.cpp
+@@ -31,6 +31,10 @@
+ #include <sys/sysctl.h>
+ #endif
+ 
++#ifdef __HAIKU__
++#include <kernel/image.h>
++#endif
++
+ #include <cassert>
+ #include <glib.h>
+ #include <glibmm.h>
+@@ -152,6 +156,16 @@ char const *get_program_name()
+        } else {
+            g_warning("get_program_name() - sysctl failed");
+        }      
++#elif defined(__HAIKU__)
++		int32 cookie = 0;
++		image_info info;
++		while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
++			if (info.type != B_APP_IMAGE)
++				continue;
++
++			program_name = realpath(info.name, nullptr);
++			break;
++		}
+ #else
+ #warning get_program_name() - no known way to obtain executable name on this platform
+         g_info("get_program_name() - no known way to obtain executable name on this platform");
+-- 
+2.37.3
+
+
+From 045d782d52ba864e5b3a352ee2d414b98360fcc9 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 28 Jan 2022 08:26:36 +1000
+Subject: Use glib for datadir
+
+
+diff --git a/src/inkscape-main.cpp b/src/inkscape-main.cpp
+index 7ac16f8..a7445b2 100644
+--- a/src/inkscape-main.cpp
++++ b/src/inkscape-main.cpp
+@@ -16,6 +16,10 @@
+ #include <boost/algorithm/string/join.hpp>
+ #endif
+ 
++#ifdef __HAIKU__
++#include <boost/algorithm/string/join.hpp>
++#endif
++
+ #include "inkscape-application.h"
+ #include "path-prefix.h"
+ 
+@@ -70,7 +74,7 @@ static void set_themes_env()
+ 
+     if (xdg_data_dirs.empty()) {
+         // initialize with reasonable defaults (should match what glib would do if the variable were unset!)
+-#ifdef _WIN32
++#if defined(_WIN32) || defined(__HAIKU__)
+         // g_get_system_data_dirs is actually not cached on Windows,
+         // so we can just call it directly and modify XDG_DATA_DIRS later
+         auto data_dirs = Glib::get_system_data_dirs();
+-- 
+2.37.3
+
+
+From e606b4b0fe30a3b5c89dc89574edcec1bbc719e1 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 18 Nov 2022 22:06:30 +1000
+Subject: Dirty hack for XDG variables
+
+
+diff --git a/src/inkscape-main.cpp b/src/inkscape-main.cpp
+index a7445b2..6b76cbe 100644
+--- a/src/inkscape-main.cpp
++++ b/src/inkscape-main.cpp
+@@ -248,6 +248,12 @@ int main(int argc, char *argv[])
+             set_macos_app_bundle_env(program_dir);
+         }
+     }
++#elif defined __HAIKU__
++    g_setenv ("XDG_CONFIG_DIRS", "/boot/system/settings", FALSE);
++    g_setenv ("XDG_DATA_HOME", "/boot/home/config/non-packaged/data", FALSE);
++    g_setenv ("XDG_CONFIG_HOME", "/boot/home/config/settings", FALSE);
++    g_setenv ("XDG_CACHE_HOME", "/boot/home/config/cache", FALSE);
++    g_setenv ("XDG_DATA_DIRS", "/boot/system/non-packaged/data:/boot/system/data", FALSE);
+ #elif defined _WIN32
+     // temporarily switch console encoding to UTF8 while Inkscape runs
+     // as everything else is a mess and it seems to work just fine
+diff --git a/src/inkview-main.cpp b/src/inkview-main.cpp
+index 5d60945..61a9ae4 100644
+--- a/src/inkview-main.cpp
++++ b/src/inkview-main.cpp
+@@ -32,6 +32,14 @@ int main(int argc, char *argv[])
+     _setmode(_fileno(stdout), _O_BINARY); // binary mode seems required for this to work properly
+ #endif
+ 
++#ifdef __HAIKU__
++    g_setenv ("XDG_CONFIG_DIRS", "/boot/system/settings", FALSE);
++    g_setenv ("XDG_DATA_HOME", "/boot/home/config/non-packaged/data", FALSE);
++    g_setenv ("XDG_CONFIG_HOME", "/boot/home/config/settings", FALSE);
++    g_setenv ("XDG_CACHE_HOME", "/boot/home/config/cache", FALSE);
++    g_setenv ("XDG_DATA_DIRS", "/boot/system/non-packaged/data:/boot/system/data", FALSE);
++#endif
++
+     auto application = InkviewApplication::create();
+     int ret = application->run(argc, argv);
+ 
+-- 
+2.37.3
+

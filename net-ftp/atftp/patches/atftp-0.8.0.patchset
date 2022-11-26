@@ -1,0 +1,221 @@
+From a8e25a34fe914b39af7e0af2d8656a5c8ff8d9bc Mon Sep 17 00:00:00 2001
+From: Augustin Cavalier <waddlesplash@gmail.com>
+Date: Fri, 27 Feb 2015 01:14:25 -0500
+Subject: [PATCH] Merging Axel's patches from trunk.
+
+
+diff --git a/logger.c b/logger.c
+index b9243b1..742b6d4 100644
+--- a/logger.c
++++ b/logger.c
+@@ -20,7 +20,9 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <sys/types.h>
++#ifndef __HAIKU__
+ #include <sys/stat.h>
++#endif
+ #include <fcntl.h>
+ #include <stdarg.h>
+ #include <string.h>
+diff --git a/tftp_def.c b/tftp_def.c
+index fd60bae..982ee4b 100644
+--- a/tftp_def.c
++++ b/tftp_def.c
+@@ -152,7 +152,6 @@ int Gethostbyname(char *addr, struct hostent *host)
+      struct hostent *hp;
+      char *tmpbuf;
+      size_t tmpbuflen;
+-     int res;
+      int herr;
+      
+      tmpbuflen = 1024;
+@@ -160,12 +159,12 @@ int Gethostbyname(char *addr, struct hostent *host)
+      if ((tmpbuf = (char *)malloc(tmpbuflen)) == NULL)
+           return ERR;
+ 
+-     res = gethostbyname_r(addr, host, tmpbuf, tmpbuflen, &hp, &herr);
++     hp = gethostbyname_r(addr, host, tmpbuf, tmpbuflen, &hp, &herr);
+ 
+      free(tmpbuf);
+ 
+      /*  Check for errors. */
+-     if (res != 0)
++     if (hp != 0)
+      {
+           logger(LOG_ERR, "%s: %d: gethostbyname_r: %s",
+                  __FILE__, __LINE__, strerror(herr));
+diff --git a/tftp_io.c b/tftp_io.c
+index 1487e89..6157936 100644
+--- a/tftp_io.c
++++ b/tftp_io.c
+@@ -217,8 +217,6 @@ int tftp_get_packet(int sock1, int sock2, int *sock, struct sockaddr_storage *sa
+ 
+      struct msghdr msg;         /* used to get client's packet info */
+      struct cmsghdr *cmsg;
+-     struct in_pktinfo *pktinfo4;
+-     struct in6_pktinfo *pktinfo6;
+      struct iovec iov;
+      char cbuf[1024];
+ 
+@@ -289,11 +287,13 @@ int tftp_get_packet(int sock1, int sock2, int *sock, struct sockaddr_storage *sa
+                     cmsg != NULL && cmsg->cmsg_len >= sizeof(*cmsg);
+                     cmsg = CMSG_NXTHDR(&msg, cmsg))
+                {
++#ifndef __HAIKU__
+ #if defined(SOL_IP) && defined(IP_PKTINFO)
+                     if (cmsg->cmsg_level == SOL_IP
+                         && cmsg->cmsg_type == IP_PKTINFO)
+                     {
+-                         pktinfo4 = (struct in_pktinfo *)CMSG_DATA(cmsg);
++                         struct in_pktinfo *pktinfo4;
++						 pktinfo4 = (struct in_pktinfo *)CMSG_DATA(cmsg);
+                          sa_to->ss_family = AF_INET;
+                          ((struct sockaddr_in *)sa_to)->sin_addr =
+                               pktinfo4->ipi_addr;
+@@ -303,11 +303,20 @@ int tftp_get_packet(int sock1, int sock2, int *sock, struct sockaddr_storage *sa
+                     if (cmsg->cmsg_level == SOL_IPV6
+                         && cmsg->cmsg_type == IPV6_PKTINFO)
+                     {
+-                         pktinfo6 = (struct in6_pktinfo *)CMSG_DATA(cmsg);
++                         struct in6_pktinfo *pktinfo6;
++						 pktinfo6 = (struct in6_pktinfo *)CMSG_DATA(cmsg);
+                          sa_to->ss_family = AF_INET6;
+                          ((struct sockaddr_in6 *)sa_to)->sin6_addr =
+                               pktinfo6->ipi6_addr;
+                     }
++#endif
++#else	// !__HAIKU__
++                    if (cmsg->cmsg_level == IPPROTO_IP
++                        && cmsg->cmsg_type == IP_RECVDSTADDR)
++                    {
++                         struct in_addr *addr = (struct in_addr *)CMSG_DATA(cmsg);
++                         ((struct sockaddr_in *)sa_to)->sin_addr = *addr;
++                    }
+ #endif
+                     break;
+                }
+diff --git a/tftpd.c b/tftpd.c
+index 29d21ff..e77c8e6 100644
+--- a/tftpd.c
++++ b/tftpd.c
+@@ -368,9 +368,13 @@ int main(int argc, char **argv)
+           open_logger("atftpd", log_file, logging_level);
+      }
+ 
+-#if defined(SOL_IP) && defined(IP_PKTINFO)
++#if defined(SOL_IP) && defined(IP_PKTINFO) || defined(__HAIKU__)
+      /* We need to retieve some information from incoming packets */
++#ifndef __HAIKU__
+      if (setsockopt(0, SOL_IP, IP_PKTINFO, &one, sizeof(one)) != 0)
++#else
++     if (setsockopt(0, IPPROTO_IP, IP_RECVDSTADDR, &one, sizeof(one)) != 0)
++#endif
+      {
+           logger(LOG_WARNING, "Failed to set socket option: %s", strerror(errno));
+      }
+-- 
+2.37.3
+
+
+From c5d55c6caf2d2ad918323cb4a554fc1b83363568 Mon Sep 17 00:00:00 2001
+From: Augustin Cavalier <waddlesplash@gmail.com>
+Date: Fri, 27 Feb 2015 01:26:36 -0500
+Subject: [PATCH] Disable IPv6.
+
+
+diff --git a/tftp_file.c b/tftp_file.c
+index 163af45..cc314aa 100644
+--- a/tftp_file.c
++++ b/tftp_file.c
+@@ -524,10 +524,12 @@ int tftp_receive_file(struct client_data *data)
+                               err = setsockopt(mcast_sockfd, IPPROTO_IP,
+                                                IP_ADD_MEMBERSHIP,
+                                                &mreq.v4, sizeof(mreq.v4));
++#ifdef USE_IPV6
+                          else
+                               err = setsockopt(mcast_sockfd, IPPROTO_IPV6,
+                                                IPV6_ADD_MEMBERSHIP,
+                                                &mreq.v6, sizeof(mreq.v6));
++#endif
+                          if (err < 0)
+                          {
+                               perror("setsockopt");
+@@ -629,10 +631,12 @@ int tftp_receive_file(struct client_data *data)
+                          err = setsockopt(mcast_sockfd, IPPROTO_IP,
+                                           IP_DROP_MEMBERSHIP,
+                                           &mreq.v4, sizeof(mreq.v4));
++#ifdef USE_IPV6
+                     else
+                          err = setsockopt(mcast_sockfd, IPPROTO_IPV6,
+                                           IPV6_DROP_MEMBERSHIP,
+                                           &mreq.v6, sizeof(mreq.v6));
++#endif
+                     if (err < 0)
+                     {
+                          perror("setsockopt");
+diff --git a/tftp_mtftp.c b/tftp_mtftp.c
+index dd3ecc5..b2242cf 100644
+--- a/tftp_mtftp.c
++++ b/tftp_mtftp.c
+@@ -213,9 +213,11 @@ int tftp_mtftp_receive_file(struct client_data *data)
+      if (sa_mcast_group.ss_family == AF_INET)
+           err = setsockopt(mcast_sockfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, 
+                            &mreq.v4, sizeof(mreq.v4));
++#ifdef USE_IPV6
+      else
+           err = setsockopt(mcast_sockfd, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP,
+                            &mreq.v6, sizeof(mreq.v6));
++#endif
+      if (err < 0)
+      {
+ 	  perror("atftp: setsockopt");
+@@ -512,10 +514,12 @@ int tftp_mtftp_receive_file(struct client_data *data)
+                     err = setsockopt(mcast_sockfd, IPPROTO_IP,
+                                      IP_DROP_MEMBERSHIP, 
+                                      &mreq.v4, sizeof(mreq.v4));
++#ifdef USE_IPV6
+                else
+                     err = setsockopt(mcast_sockfd, IPPROTO_IPV6,
+                                      IPV6_DROP_MEMBERSHIP,
+                                      &mreq.v6, sizeof(mreq.v6));
++#endif
+                if (err < 0)
+                {
+                     perror("setsockopt");
+diff --git a/tftpd_file.c b/tftpd_file.c
+index adfd0fd..3498c15 100644
+--- a/tftpd_file.c
++++ b/tftpd_file.c
+@@ -767,9 +767,11 @@ int tftpd_send_file(struct thread_data *data)
+                if (data->sa_mcast.ss_family == AF_INET)
+                     setsockopt(data->sockfd, IPPROTO_IP, IP_MULTICAST_TTL,
+                                &data->mcast_ttl, sizeof(data->mcast_ttl));
++#ifdef USE_IPV6
+                else
+                     setsockopt(data->sockfd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS,
+                                &data->mcast_ttl, sizeof(data->mcast_ttl));
++#endif
+ 
+                /* set options data for OACK */
+                opt_set_multicast(data->tftp_options, data->mc_addr,
+diff --git a/tftpd_mtftp.c b/tftpd_mtftp.c
+index 76a9c67..805e723 100644
+--- a/tftpd_mtftp.c
++++ b/tftpd_mtftp.c
+@@ -488,10 +488,11 @@ void *tftpd_mtftp_server(void *arg)
+                if (thread->sa_mcast.ss_family == AF_INET)
+                     setsockopt(thread->mcast_sockfd, IPPROTO_IP, IP_MULTICAST_TTL,
+                                &data->mcast_ttl, sizeof(data->mcast_ttl));
++#ifdef USE_IPV6
+                else
+                     setsockopt(thread->mcast_sockfd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS,
+                                &data->mcast_ttl, sizeof(data->mcast_ttl));
+-
++#endif
+                /* give server thread access to mtftp options */
+                thread->mtftp_data = data;
+ 
+-- 
+2.37.3
+

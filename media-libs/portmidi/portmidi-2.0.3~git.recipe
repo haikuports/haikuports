@@ -1,0 +1,188 @@
+SUMMARY="Cross-Platform MIDI IO"
+DESCRIPTION="PortMidi is a cross-platform MIDI input/output library."
+HOMEPAGE="https://github.com/PortMidi/portmidi"
+COPYRIGHT="1999-2000 Ross Bencina and Phil Burk
+	2001-2009 Roger B. Dannenberg"
+LICENSE="MIT"
+REVISION="2"
+srcGitRev="7db20989f1571b27bd01cf9418361e988bdcf99a"
+SOURCE_URI="https://github.com/PortMidi/portmidi/archive/$srcGitRev.tar.gz"
+CHECKSUM_SHA256="96872e3c89339c9cbe44d5d86de1745ced7d803563a3ef71840aa9b120497e60"
+SOURCE_DIR="portmidi-$srcGitRev"
+ADDITIONAL_FILES="pmdefaults.rdef.in"
+
+ARCHITECTURES="all"
+SECONDARY_ARCHITECTURES="x86"
+
+portVersionCompat="$portVersion compat >= ${portVersion%%.*}"
+
+PROVIDES="
+	portmidi$secondaryArchSuffix = $portVersion
+	lib:libportmidi$secondaryArchSuffix = $portVersionCompat
+	"
+REQUIRES="
+	haiku${secondaryArchSuffix}
+	"
+
+PROVIDES_devel="
+	portmidi${secondaryArchSuffix}_devel = $portVersion
+	devel:libportmidi$secondaryArchSuffix = $portVersionCompat
+	"
+REQUIRES_devel="
+	portmidi$secondaryArchSuffix == $portVersion base
+	"
+
+PROVIDES_tools="
+	portmidi${secondaryArchSuffix}_tools = $portVersion
+	cmd:portmidi_fast$secondaryArchSuffix = $portVersion
+	cmd:portmidi_fastrcv$secondaryArchSuffix = $portVersion
+	cmd:portmidi_latency$secondaryArchSuffix = $portVersion
+	cmd:portmidi_midiclock$secondaryArchSuffix = $portVersion
+	cmd:portmidi_midithread$secondaryArchSuffix = $portVersion
+	cmd:portmidi_midithru$secondaryArchSuffix = $portVersion
+	cmd:portmidi_mm$secondaryArchSuffix = $portVersion
+	cmd:portmidi_multivirtual$secondaryArchSuffix = $portVersion
+	cmd:portmidi_pmlist$secondaryArchSuffix = $portVersion
+	cmd:portmidi_qtest$secondaryArchSuffix = $portVersion
+	cmd:portmidi_recvvirtual$secondaryArchSuffix = $portVersion
+	cmd:portmidi_sendvirtual$secondaryArchSuffix = $portVersion
+	cmd:portmidi_sysex$secondaryArchSuffix = $portVersion
+	cmd:portmidi_testio$secondaryArchSuffix = $portVersion
+	cmd:portmidi_virttest$secondaryArchSuffix = $portVersion
+	"
+REQUIRES_tools="
+	haiku$secondaryArchSuffix
+	portmidi$secondaryArchSuffix == $portVersion base
+	"
+
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel
+	"
+
+BUILD_PREREQUIRES="
+	cmd:cmake
+	cmd:gcc$secondaryArchSuffix
+	cmd:ld$secondaryArchSuffix
+	cmd:make
+	cmd:pkg_config$secondaryArchSuffix
+	"
+
+# the java bindings do not work with x86_gcc2 because java is not available for it
+# (it would build but fail at runtime with an "UnsatisfiedLinkError: missing library")
+if [ "$effectiveTargetArchitecture" != x86_gcc2 ]; then
+	PROVIDES_devel+="
+		devel:libpmjni$secondaryArchSuffix = $portVersionCompat
+		"
+	REQUIRES_devel+="
+		portmidi${secondaryArchSuffix}_java == $portVersion
+		"
+
+	SUMMARY_java="Cross-Platform MIDI IO (Java bindings)"
+	PROVIDES_java="
+		portmidi${secondaryArchSuffix}_java = $portVersion
+		lib:libpmjni$secondaryArchSuffix = $portVersionCompat
+		"
+	REQUIRES_java="
+		haiku$secondaryArchSuffix
+		portmidi$secondaryArchSuffix == $portVersion base
+		java:runtime == 11
+		"
+
+	BUILD_REQUIRES+="
+		java:environment == 11
+		"
+
+	BUILD_PREREQUIRES+="
+		cmd:javac
+		"
+fi
+
+BUILD()
+{
+	mkdir -p build
+	cd build
+
+	extraCMakeArgs=
+	if [ "$effectiveTargetArchitecture" != x86_gcc2 ]; then
+		source /system/data/profile.d/openjdk.sh
+		extraCMakeArgs="-DBUILD_JAVA_NATIVE_INTERFACE=ON -DBUILD_PMDEFAULTS=ON"
+	fi
+	cmake .. -DCMAKE_BUILD_TYPE=Release $cmakeDirArgs \
+		-DBUILD_PORTMIDI_TESTS=ON $extraCMakeArgs
+	make $jobArgs
+}
+
+INSTALL()
+{
+	cd build
+	make install
+	cd ..
+
+	if [ "$effectiveTargetArchitecture" != x86_gcc2 ]; then
+		cp pm_java/pmdefaults/pmdefaults.jar $libDir
+
+		mkdir $preferencesDir
+
+		# the included pmdefaults script would need changes anyway, so we just create our own
+		cat <<- EOF > "$preferencesDir/PortMidi Setup"
+		#!/bin/sh
+		$JAVA_HOME/bin/java -Djava.library.path=$libDir -jar $libDir/pmdefaults.jar
+		EOF
+
+		chmod +x "$preferencesDir/PortMidi Setup"
+
+		local MAJOR="`echo "$portVersion" | cut -d. -f1`"
+		local MIDDLE="`echo "$portVersion" | cut -d. -f2`"
+		local MINOR="`echo "$portVersion" | cut -d. -f3 | cut -d~ -f1`"
+		sed \
+			-e "s|@MAJOR@|$MAJOR|" \
+			-e "s|@MIDDLE@|$MIDDLE|" \
+			-e "s|@MINOR@|$MINOR|" \
+			$portDir/additional-files/pmdefaults.rdef.in \
+				> pmdefaults.rdef
+
+		rc pmdefaults.rdef
+		settype -t application/x-vnd.Be-elfexecutable "$preferencesDir/PortMidi Setup"
+		resattr -o "$preferencesDir/PortMidi Setup" pmdefaults.rsrc
+
+		addPreferencesDeskbarSymlink "$preferencesDir/PortMidi Setup"
+
+		prepareInstalledDevelLib libpmjni
+
+		# the java bindings need an unversioned libpmjni.so
+		ln -s libpmjni.so.${portVersion%~*} $libDir/libpmjni.so
+	fi
+
+	# install test tools
+	mkdir -p $binDir
+	for tool in fast fastrcv latency midiclock midithread midithru mm multivirtual pmlist \
+		qtest recvvirtual sendvirtual sysex testio virttest
+	do
+		cp build/pm_test/$tool $binDir/portmidi-$tool
+	done
+
+	prepareInstalledDevelLib libportmidi
+
+	fixPkgconfig
+
+	packageEntries devel \
+		$developDir \
+		$libDir/cmake
+
+	packageEntries tools \
+		$binDir
+
+	if [ "$effectiveTargetArchitecture" != x86_gcc2 ]; then
+		packageEntries java \
+			$libDir/libpmjni.so* \
+			$libDir/pmdefaults.jar \
+			"$preferencesDir/PortMidi Setup" \
+			$dataDir # this contains the Deskbar symlink
+	fi
+}
+
+TEST()
+{
+	# the tests are individual commands that need to be run interactively
+	true
+}

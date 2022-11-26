@@ -1,0 +1,246 @@
+From 830f24a86cbcb87f356ae1221abec199d5b280e3 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Mon, 22 Nov 2021 14:22:20 +0000
+Subject: Haiku: implement pcap_lib_version
+
+
+diff --git a/pcap-haiku.cpp b/pcap-haiku.cpp
+index 701cac38..aba37b44 100644
+--- a/pcap-haiku.cpp
++++ b/pcap-haiku.cpp
+@@ -280,3 +280,12 @@ pcap_platform_finddevs(pcap_if_list_t* _allDevices, char* errorBuffer)
+ 	return pcap_findalldevs_interfaces(_allDevices, errorBuffer, can_be_bound,
+ 		get_if_flags);
+ }
++
++/*
++ * Libpcap version string.
++ */
++extern "C" const char *
++pcap_lib_version(void)
++{
++	return (PCAP_VERSION_STRING);
++}
+-- 
+2.37.3
+
+
+From 88347e5a7cda2c3e912b9d53b64ddceb42123b0c Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Mon, 22 Nov 2021 14:25:46 +0000
+Subject: Haiku: adjust snaplen
+
+
+diff --git a/pcap-haiku.cpp b/pcap-haiku.cpp
+index aba37b44..8b0009c5 100644
+--- a/pcap-haiku.cpp
++++ b/pcap-haiku.cpp
+@@ -160,6 +160,17 @@ pcap_activate_haiku(pcap_t *handle)
+ 	handle->getnonblock_op = pcap_getnonblock_fd;
+ 	handle->setnonblock_op = pcap_setnonblock_fd;
+ 
++	/*
++	 * Turn a negative snapshot value (invalid), a snapshot value of
++	 * 0 (unspecified), or a value bigger than the normal maximum
++	 * value, into the maximum allowed value.
++	 *
++	 * If some application really *needs* a bigger snapshot
++	 * length, we should just increase MAXIMUM_SNAPLEN.
++	 */
++	if (handle->snapshot <= 0 || handle->snapshot > MAXIMUM_SNAPLEN)
++		handle->snapshot = MAXIMUM_SNAPLEN;
++
+ 	handlep->device	= strdup(device);
+ 	if (handlep->device == NULL) {
+ 		pcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,
+-- 
+2.37.3
+
+
+From 69e186892c58010477a63c578341bfb5da51e395 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Fri, 8 Jul 2022 23:24:43 +0200
+Subject: Fix build on Haiku
+
+This fixes #1114.
+
+C++11 forbids declaring types inside typeof and offsetof,
+so we drop the macro call and declare the struct separately
+for the only use of the call.
+
+diff --git a/pcap-haiku.cpp b/pcap-haiku.cpp
+index 8b0009c5..4606ca0e 100644
+--- a/pcap-haiku.cpp
++++ b/pcap-haiku.cpp
+@@ -249,7 +249,11 @@ pcap_create_interface(const char *device, char *errorBuffer)
+ 		return NULL;
+ 	}
+ 
+-	pcap_t* handle = PCAP_CREATE_COMMON(errorBuffer, struct pcap_haiku);
++	struct wrapper_struct { pcap_t __common; struct pcap_haiku __private; };
++	pcap_t* handle = pcap_create_common(errorBuffer,
++		sizeof (struct wrapper_struct),
++		offsetof (struct wrapper_struct, __private));
++
+ 	if (handle == NULL) {
+ 		snprintf(errorBuffer, PCAP_ERRBUF_SIZE, "malloc: %s", strerror(errno));
+ 		close(socket);
+-- 
+2.37.3
+
+
+From 7f4909d3433c571f27bef46ae44064e80f6a0090 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Sat, 9 Jul 2022 01:07:53 +0200
+Subject: On Haiku, add a check for libbsd which has getpass
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b83fbbd7..d566d8b2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -596,6 +596,15 @@ else(WIN32)
+             set(PCAP_LINK_LIBRARIES str ${PCAP_LINK_LIBRARIES})
+         endif(LIBSTR_HAS_PUTMSG)
+     endif(NOT STDLIBS_HAVE_PUTMSG)
++
++    # Haiku has getpass in libbsd
++    check_function_exists(getpass STDLIBS_HAVE_GETPASS)
++    if(NOT STDLIBS_HAVE_GETPASS)
++        check_library_exists(bsd getpass "" LIBBSD_HAS_GETPASS)
++        if(LIBBSD_HAS_GETPASS)
++            set(PCAP_LINK_LIBRARIES bsd ${PCAP_LINK_LIBRARIES})
++        endif(LIBBSD_HAS_GETPASS)
++    endif(NOT STDLIBS_HAVE_GETPASS)
+ endif(WIN32)
+ 
+ #
+diff --git a/configure.ac b/configure.ac
+index edb25ae4..9cf303fd 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -91,6 +91,10 @@ haiku*)
+ 	# Haiku needs _BSD_SOURCE for the _IO* macros because it doesn't use them.
+ 	#
+ 	CFLAGS="$CFLAGS -D_BSD_SOURCE"
++	#
++	# Haiku has getpass in libbsd.
++	#
++	AC_CHECK_LIB(bsd, getpass)
+ 	;;
+ esac
+ 
+-- 
+2.37.3
+
+
+From 84000a878e3c7c6a9e621d55b3479a9016ddd7db Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Sat, 9 Jul 2022 01:23:29 +0200
+Subject: Avoid redeclaring uint8 & friends on Haiku
+
+Haiku declares and uses them for itself but in a different way.
+
+diff --git a/rpcap-protocol.h b/rpcap-protocol.h
+index a69cf802..88d5133a 100644
+--- a/rpcap-protocol.h
++++ b/rpcap-protocol.h
+@@ -132,10 +132,12 @@
+  * XXX - use the C99 types?  Microsoft's newer versions of Visual Studio
+  * support them.
+  */
++#ifndef __HAIKU__
+ typedef unsigned char uint8;	/* 8-bit unsigned integer */
+ typedef unsigned short uint16;	/* 16-bit unsigned integer */
+ typedef unsigned int uint32;	/* 32-bit unsigned integer */
+ typedef int int32;		/* 32-bit signed integer */
++#endif
+ 
+ /* Common header for all the RPCAP messages */
+ struct rpcap_header
+-- 
+2.37.3
+
+
+From 8a2a3070b230fcb4e9585337187ab0eb90e1d692 Mon Sep 17 00:00:00 2001
+From: Guy Harris <gharris@sonic.net>
+Date: Fri, 8 Jul 2022 23:02:37 -0700
+Subject: Regenerate configure script.
+
+
+diff --git a/config.h.in b/config.h.in
+index a1e371a9..438141fe 100644
+--- a/config.h.in
++++ b/config.h.in
+@@ -72,6 +72,9 @@
+ /* Define to 1 if you have the <inttypes.h> header file. */
+ #undef HAVE_INTTYPES_H
+ 
++/* Define to 1 if you have the `bsd' library (-lbsd). */
++#undef HAVE_LIBBSD
++
+ /* Define to 1 if you have the `dag' library (-ldag). */
+ #undef HAVE_LIBDAG
+ 
+diff --git a/configure b/configure
+index 15a5e681..ad9c4d8a 100755
+--- a/configure
++++ b/configure
+@@ -5326,6 +5326,54 @@ haiku*)
+ 	# Haiku needs _BSD_SOURCE for the _IO* macros because it doesn't use them.
+ 	#
+ 	CFLAGS="$CFLAGS -D_BSD_SOURCE"
++	#
++	# Haiku has getpass in libbsd.
++	#
++	{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for getpass in -lbsd" >&5
++$as_echo_n "checking for getpass in -lbsd... " >&6; }
++if ${ac_cv_lib_bsd_getpass+:} false; then :
++  $as_echo_n "(cached) " >&6
++else
++  ac_check_lib_save_LIBS=$LIBS
++LIBS="-lbsd  $LIBS"
++cat confdefs.h - <<_ACEOF >conftest.$ac_ext
++/* end confdefs.h.  */
++
++/* Override any GCC internal prototype to avoid an error.
++   Use char because int might match the return type of a GCC
++   builtin and then its argument prototype would still apply.  */
++#ifdef __cplusplus
++extern "C"
++#endif
++char getpass ();
++int
++main ()
++{
++return getpass ();
++  ;
++  return 0;
++}
++_ACEOF
++if ac_fn_c_try_link "$LINENO"; then :
++  ac_cv_lib_bsd_getpass=yes
++else
++  ac_cv_lib_bsd_getpass=no
++fi
++rm -f core conftest.err conftest.$ac_objext \
++    conftest$ac_exeext conftest.$ac_ext
++LIBS=$ac_check_lib_save_LIBS
++fi
++{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_bsd_getpass" >&5
++$as_echo "$ac_cv_lib_bsd_getpass" >&6; }
++if test "x$ac_cv_lib_bsd_getpass" = xyes; then :
++  cat >>confdefs.h <<_ACEOF
++#define HAVE_LIBBSD 1
++_ACEOF
++
++  LIBS="-lbsd $LIBS"
++
++fi
++
+ 	;;
+ esac
+ 
+-- 
+2.37.3
+
