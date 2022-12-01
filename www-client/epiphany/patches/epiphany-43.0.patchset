@@ -1,0 +1,152 @@
+From 0ff654a88da66d819042764a8ef330bfc885fa09 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 2 Nov 2022 22:52:29 +1000
+Subject: Fix for Haiku
+
+
+diff --git a/lib/ephy-sync-utils.c b/lib/ephy-sync-utils.c
+index 75c08fc..156a730 100644
+--- a/lib/ephy-sync-utils.c
++++ b/lib/ephy-sync-utils.c
+@@ -35,6 +35,10 @@
+ #elif defined(__FreeBSD__) || defined(__OpenBSD__)
+ #include <unistd.h>
+ #endif
++#if defined(__HAIKU__)
++#include <unistd.h>
++#include <fcntl.h>
++#endif
+ 
+ static const char hex_digits[] = "0123456789abcdef";
+ 
+@@ -187,6 +191,12 @@ ephy_sync_utils_generate_random_bytes (void   *random_ctx,
+   if (getentropy (out, num_bytes) == -1) {
+     g_error ("Failed to get entropy: %s", g_strerror (errno));
+   }
++#elif defined(__HAIKU__)
++  {
++    int fd = open("/dev/random", O_RDONLY);
++    read(fd, out, num_bytes);
++    close(fd);
++  }
+ #else
+   do {
+     ret = getrandom (out, num_bytes, 0);
+diff --git a/meson.build b/meson.build
+index 8dd7a93..3d95be6 100644
+--- a/meson.build
++++ b/meson.build
+@@ -159,8 +159,8 @@ subdir('embed')
+ subdir('src')
+ subdir('tests')
+ 
+-gnome.post_install(
+-  gtk_update_icon_cache: true,
+-  glib_compile_schemas: true,
+-  update_desktop_database: true
+-)
++#gnome.post_install(
++#  gtk_update_icon_cache: true,
++#  glib_compile_schemas: true,
++#  update_desktop_database: true
++#)
+diff --git a/src/ephy-main.c b/src/ephy-main.c
+index be9b6db..870ae05 100644
+--- a/src/ephy-main.c
++++ b/src/ephy-main.c
+@@ -178,6 +178,14 @@ main (int   argc,
+   EphyFileHelpersFlags flags;
+   GDesktopAppInfo *desktop_info = NULL;
+ 
++#ifdef __HAIKU__
++  g_setenv ("XDG_CONFIG_DIRS", "/boot/system/settings", FALSE);
++  g_setenv ("XDG_DATA_HOME", "/boot/home/config/non-packaged/data", FALSE);
++  g_setenv ("XDG_CONFIG_HOME", "/boot/home/config/settings", FALSE);
++  g_setenv ("XDG_CACHE_HOME", "/boot/home/config/cache", FALSE);
++  g_setenv ("XDG_DATA_DIRS", "/boot/system/non-packaged/data:/boot/system/data", FALSE);
++#endif
++
+ #if DEVELOPER_MODE
+   g_setenv ("GSETTINGS_SCHEMA_DIR", BUILD_ROOT "/data", FALSE);
+ #endif
+diff --git a/src/ephy-window.c b/src/ephy-window.c
+index f557397..758aa7e 100644
+--- a/src/ephy-window.c
++++ b/src/ephy-window.c
+@@ -3678,12 +3678,12 @@ ephy_window_constructed (GObject *object)
+   window->action_bar = setup_action_bar (window);
+   box = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 0));
+   window->titlebar_box = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 0));
+-
++#ifndef __HAIKU__
+   if (g_settings_get_boolean (EPHY_SETTINGS_MAIN, EPHY_PREFS_ASK_FOR_DEFAULT) &&
+       !is_browser_default () &&
+       !ephy_profile_dir_is_web_application ())
+     add_default_browser_question (box);
+-
++#endif
+   gtk_container_add (GTK_CONTAINER (window->tab_bar_revealer), GTK_WIDGET (window->tab_bar));
+   gtk_box_pack_start (window->titlebar_box, GTK_WIDGET (window->window_handle), FALSE, TRUE, 0);
+   gtk_box_pack_start (window->titlebar_box, GTK_WIDGET (window->tab_bar_revealer), FALSE, TRUE, 0);
+-- 
+2.37.3
+
+
+From 02a91a90192f77f4f46fadcf9002f04d6a3fffb4 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Thu, 1 Dec 2022 13:53:16 +1000
+Subject: Add open handler for Haiku
+
+
+diff --git a/lib/ephy-file-helpers.c b/lib/ephy-file-helpers.c
+index 18017f7..6f4d58d 100644
+--- a/lib/ephy-file-helpers.c
++++ b/lib/ephy-file-helpers.c
+@@ -490,7 +490,7 @@ ephy_file_helpers_init (const char            *profile_dir,
+     }
+   }
+ 
+-  global_portal = xdp_portal_new ();
++  //global_portal = xdp_portal_new ();
+ 
+   return ret;
+ }
+@@ -658,6 +658,27 @@ ephy_file_launch_handler (GFile *file)
+   return ret;
+ }
+ 
++#ifdef __HAIKU__
++static gboolean
++open_in_default_handler (const char *uri,
++                         const char *mime_type,
++                         GdkScreen  *screen)
++{
++  char *command;
++  GError *error = NULL;
++
++  command = g_strdup_printf ("open %s ", uri);
++
++  g_spawn_command_line_async (command, &error);
++
++  if (error) {
++    g_warning ("Couldn't open uri: %s", error->message);
++    g_error_free (error);
++  }
++
++  g_free (command);
++}
++#else
+ static gboolean
+ open_in_default_handler (const char *uri,
+                          const char *mime_type,
+@@ -687,6 +708,7 @@ open_in_default_handler (const char *uri,
+ 
+   return TRUE;
+ }
++#endif
+ 
+ gboolean
+ ephy_file_open_uri_in_default_browser (const char *uri,
+-- 
+2.37.3
+
