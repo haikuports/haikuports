@@ -1,9 +1,2190 @@
-From e0845801f73195f4e5cd90e590a23a294aba91e6 Mon Sep 17 00:00:00 2001
+From 199d9d71562cd34eb6b3c8a4324649e90cef1c5e Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Wed, 21 Dec 2022 19:44:54 +1000
-Subject: Core patches for Haiku.
+Date: Sat, 24 Dec 2022 21:11:16 +1000
+Subject: Add Haiku support
 
 
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 811cd39..4766a94 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -599,6 +599,16 @@ if(OPENBSD)
+ 	set(WITH_WAYLAND "OFF")
+ endif()
+ 
++# Haiku
++if(HAIKU)
++	set(WITH_MANPAGES "ON")
++	set(WITH_ALSA "OFF")
++	set(WITH_PULSE "OFF")
++	set(WITH_OSS "OFF")
++	set(WITH_MEDIA_KIT "ON")
++	set(WITH_WAYLAND "OFF")
++endif()
++
+ # Android
+ if(ANDROID)
+ 	set(WITH_LIBRARY_VERSIONING "OFF")
+diff --git a/channels/rdpsnd/client/CMakeLists.txt b/channels/rdpsnd/client/CMakeLists.txt
+index 70f4aa2..d3fb3cd 100644
+--- a/channels/rdpsnd/client/CMakeLists.txt
++++ b/channels/rdpsnd/client/CMakeLists.txt
+@@ -37,6 +37,10 @@ if(WITH_ALSA)
+ 	add_channel_client_subsystem(${MODULE_PREFIX} ${CHANNEL_NAME} "alsa" "")
+ endif()
+ 
++if(WITH_MEDIA_KIT)
++	add_channel_client_subsystem(${MODULE_PREFIX} ${CHANNEL_NAME} "haiku" "")
++endif()
++
+ if(WITH_IOSAUDIO)
+ 	add_channel_client_subsystem(${MODULE_PREFIX} ${CHANNEL_NAME} "ios" "")
+ endif()
+diff --git a/channels/rdpsnd/client/haiku/CMakeLists.txt b/channels/rdpsnd/client/haiku/CMakeLists.txt
+new file mode 100644
+index 0000000..b8eec21
+--- /dev/null
++++ b/channels/rdpsnd/client/haiku/CMakeLists.txt
+@@ -0,0 +1,43 @@
++# FreeRDP: A Remote Desktop Protocol Implementation
++# FreeRDP cmake build script
++#
++# Copyright 2012 Laxmikant Rashinkar <LK.Rashinkar@gmail.com>
++# Copyright 2012 Marc-Andre Moreau <marcandre.moreau@gmail.com>
++# Copyright 2013 Corey Clayton <can.of.tuna@gmail.com>
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++define_channel_client_subsystem("rdpsnd" "haiku" "")
++
++FIND_LIBRARY(LIB_MEDIA media)
++FIND_LIBRARY(LIB_BE be)
++
++set(${MODULE_PREFIX}_SRCS
++	rdpsnd_haiku.cpp
++	ring_buffer.cpp )
++
++include_directories(..)
++
++add_channel_client_subsystem_library(${MODULE_PREFIX} ${MODULE_NAME} ${CHANNEL_NAME} "" TRUE "")
++
++
++
++set(${MODULE_PREFIX}_LIBS ${${MODULE_PREFIX}_LIBS} 
++    ${LIB_MEDIA}
++    ${LIB_BE} )
++
++set(${MODULE_PREFIX}_LIBS ${${MODULE_PREFIX}_LIBS} freerdp)
++
++target_link_libraries(${MODULE_NAME} ${${MODULE_PREFIX}_LIBS})
++
++set_property(TARGET ${MODULE_NAME} PROPERTY FOLDER "Channels/${CHANNEL_NAME}/Client/haiku")
+diff --git a/channels/rdpsnd/client/haiku/rdpsnd_haiku.cpp b/channels/rdpsnd/client/haiku/rdpsnd_haiku.cpp
+new file mode 100644
+index 0000000..3925eb3
+--- /dev/null
++++ b/channels/rdpsnd/client/haiku/rdpsnd_haiku.cpp
+@@ -0,0 +1,218 @@
++/**
++ * FreeRDP: A Remote Desktop Protocol Implementation
++ *
++ * Copyright 2018-2022 Gerasim Troeglazov <3deyes@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifdef HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#include <winpr/wtypes.h>
++
++#include <freerdp/types.h>
++#include <freerdp/codec/dsp.h>
++
++#include <SoundPlayer.h>
++
++#include "ring_buffer.h"
++#include "rdpsnd_main.h"
++
++#define INPUT_BUFFER_SIZE 32768
++#define CIRCULAR_BUFFER_SIZE (INPUT_BUFFER_SIZE * 4)
++
++typedef struct rdpsnd_haiku_plugin
++{
++	rdpsndDevicePlugin device;
++	BSoundPlayer *player;
++	RingBuffer *buffer;
++	BOOL is_opened;
++	BOOL is_playing;
++} rdpsndHaikuPlugin;
++
++#define THIS(__ptr) ((rdpsndHaikuPlugin*)__ptr)
++
++static void rdpsnd_haiku_soundplayer_callback(void *cookie, void *buffer, size_t len, const media_raw_audio_format &format)
++{
++	rdpsndHaikuPlugin* p = THIS(cookie);
++	unsigned char* ptr = (unsigned char*)buffer;
++
++	int readed = p->buffer->Read(ptr, len);
++
++	if (readed < len)
++		memset(ptr + readed, 0, len - readed);
++}
++
++static BOOL rdpsnd_haiku_format_supported(rdpsndDevicePlugin* __unused device, const AUDIO_FORMAT* format)
++{
++	if (format->wFormatTag == WAVE_FORMAT_PCM)
++	{
++		return 1;
++	}
++
++	return 0;
++}
++
++static BOOL rdpsnd_haiku_set_volume(rdpsndDevicePlugin* __unused device, UINT32 __unused value)
++{
++	return TRUE;
++}
++
++static void rdpsnd_haiku_start(rdpsndDevicePlugin* device)
++{
++	rdpsndHaikuPlugin* p = THIS(device);
++
++	if (!p->is_playing)
++	{
++		int32_t available_bytes = p->buffer->GetReadAvailable();
++
++		if (available_bytes > 0)
++		{
++			p->is_playing = 1;
++			p->player->Start();
++			p->player->SetHasData(true);
++		}
++	}
++}
++
++static void rdpsnd_haiku_stop(rdpsndDevicePlugin* device)
++{
++	rdpsndHaikuPlugin* p = THIS(device);
++
++	if (p->is_playing)
++	{
++		p->player->SetHasData(false);
++		p->player->Stop();
++		p->is_playing = 0;
++		p->buffer->Empty();
++	}
++}
++
++static UINT rdpsnd_haiku_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
++{
++	rdpsndHaikuPlugin* p = THIS(device);
++    unsigned char *src_ptr = (unsigned char *)data;
++    
++    int len = size;
++    while ( len > 0 && len % 4 )
++        len--;
++
++    if ( len <= 0 )
++        return 0;
++
++    for (;;)
++    {
++        int writed = p->buffer->Write(src_ptr, len);
++
++        if (writed == len)
++        	break;
++
++        len -= writed;
++        src_ptr += writed;
++
++        snooze(100);
++    }
++    
++	rdpsnd_haiku_start(device);
++
++	return 10;
++}
++
++static int rdpsnd_haiku_open(rdpsndDevicePlugin* device, const AUDIO_FORMAT* format, unsigned int __unused latency)
++{
++	rdpsndHaikuPlugin* p = THIS(device);
++
++	if (p->is_opened)
++		return TRUE;
++
++    media_raw_audio_format form = {
++        format->nSamplesPerSec,
++        format->nChannels,
++        media_raw_audio_format::B_AUDIO_SHORT,
++        B_MEDIA_LITTLE_ENDIAN,
++        INPUT_BUFFER_SIZE
++    };
++
++    p->buffer = new RingBuffer(CIRCULAR_BUFFER_SIZE);
++    if (p->buffer->InitCheck() != B_OK)
++    {
++        delete p->buffer;
++        p->buffer = NULL;
++        return FALSE;
++    }
++
++    p->player = new BSoundPlayer(&form, "FreeRDP", rdpsnd_haiku_soundplayer_callback, nullptr, (void*)device);
++
++    if (p->player->InitCheck() != B_OK)
++    {
++        delete p->player;
++        p->player = NULL;
++        delete p->buffer;
++        p->buffer = NULL;
++        return FALSE;
++    }
++
++	p->is_opened = 1;
++	return TRUE;
++}
++
++static void rdpsnd_haiku_close(rdpsndDevicePlugin* device)
++{
++	rdpsndHaikuPlugin* p = THIS(device);
++	rdpsnd_haiku_stop(device);
++
++	if (p->is_opened)
++	{
++		delete p->player;
++		p->player = NULL;
++		p->is_opened = 0;
++		delete p->buffer;
++	}
++}
++
++static void rdpsnd_haiku_free(rdpsndDevicePlugin* device)
++{
++	rdpsndHaikuPlugin* p = THIS(device);
++	rdpsnd_haiku_close(device);
++	free(p);
++}
++
++extern "C" {
++
++#ifdef BUILTIN_CHANNELS
++#define freerdp_rdpsnd_client_subsystem_entry haiku_freerdp_rdpsnd_client_subsystem_entry
++#else
++#define freerdp_rdpsnd_client_subsystem_entry FREERDP_API freerdp_rdpsnd_client_subsystem_entry
++#endif
++
++UINT freerdp_rdpsnd_client_subsystem_entry(PFREERDP_RDPSND_DEVICE_ENTRY_POINTS pEntryPoints)
++{
++	rdpsndHaikuPlugin* p = (rdpsndHaikuPlugin*)calloc(1, sizeof(rdpsndHaikuPlugin));
++
++	if (!p)
++		return CHANNEL_RC_NO_MEMORY;
++
++	p->device.Open = rdpsnd_haiku_open;
++	p->device.FormatSupported = rdpsnd_haiku_format_supported;
++	p->device.SetVolume = rdpsnd_haiku_set_volume;
++	p->device.Play = rdpsnd_haiku_play;
++	p->device.Start = rdpsnd_haiku_start;
++	p->device.Close = rdpsnd_haiku_close;
++	p->device.Free = rdpsnd_haiku_free;
++	pEntryPoints->pRegisterRdpsndDevice(pEntryPoints->rdpsnd, (rdpsndDevicePlugin*)p);
++
++	return CHANNEL_RC_OK;
++}
++}
+diff --git a/channels/rdpsnd/client/haiku/ring_buffer.cpp b/channels/rdpsnd/client/haiku/ring_buffer.cpp
+new file mode 100644
+index 0000000..aed0929
+--- /dev/null
++++ b/channels/rdpsnd/client/haiku/ring_buffer.cpp
+@@ -0,0 +1,132 @@
++/**
++ * FreeRDP: A Remote Desktop Protocol Implementation
++ *
++ * Copyright 2018-2022 Gerasim Troeglazov <3deyes@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "ring_buffer.h"
++
++RingBuffer::RingBuffer(int size)
++{
++    initialized = false;
++    reader = 0;
++    writer = 0;
++    writeBytesAvailable = size;
++
++    Buffer = new unsigned char[size];
++
++    if (Buffer)
++    {
++        memset( Buffer, 0, size );
++        BufferSize = size;
++    }
++    else
++    {
++        BufferSize = 0;
++    }
++
++    if((locker=create_sem(1,"locker")) >= B_OK)
++        initialized = true;
++    else
++        delete[] Buffer;
++}
++
++RingBuffer::~RingBuffer()
++{
++    if (initialized)
++    {
++        delete[] Buffer;
++        delete_sem(locker);
++    }
++}
++
++bool
++RingBuffer::Empty(void)
++{
++    memset(Buffer, 0, BufferSize);
++    reader = 0;
++    writer = 0;
++    writeBytesAvailable = BufferSize;
++    return true;
++}
++
++int
++RingBuffer::Read(unsigned char *data, int size)
++{
++    acquire_sem(locker);
++
++    if (data == 0 || size <= 0 || writeBytesAvailable == BufferSize)
++    {
++        release_sem(locker);
++        return 0;
++    }
++
++    int readBytesAvailable = BufferSize - writeBytesAvailable;
++
++    if (size > readBytesAvailable)
++        size = readBytesAvailable;
++
++    if (size > BufferSize - reader)
++    {
++        int len = BufferSize - reader;
++        memcpy(data, Buffer + reader, len);
++        memcpy(data + len, Buffer, size-len);
++    }
++    else
++    {
++        memcpy(data, Buffer + reader, size);
++    }
++
++    reader = (reader + size) % BufferSize;
++    writeBytesAvailable += size;
++
++    release_sem(locker);
++    return size;
++}
++
++int
++RingBuffer::Write(unsigned char *data, int size)
++{
++    acquire_sem(locker);
++
++    if( data == 0 || size <= 0 || writeBytesAvailable == 0 ) {
++        release_sem(locker);
++        return 0;
++    }
++
++    if( size > writeBytesAvailable )
++        size = writeBytesAvailable;
++
++    if(size > BufferSize - writer)
++    {
++        int len = BufferSize - writer;
++        memcpy(Buffer + writer, data, len);
++        memcpy(Buffer, data+len, size-len);
++    }
++    else
++    {
++        memcpy(Buffer + writer, data, size);
++    }
++
++    writer = (writer + size) % BufferSize;
++    writeBytesAvailable -= size;
++
++    release_sem(locker);
++    return size;
++}
+diff --git a/channels/rdpsnd/client/haiku/ring_buffer.h b/channels/rdpsnd/client/haiku/ring_buffer.h
+new file mode 100644
+index 0000000..f286916
+--- /dev/null
++++ b/channels/rdpsnd/client/haiku/ring_buffer.h
+@@ -0,0 +1,50 @@
++/**
++ * FreeRDP: A Remote Desktop Protocol Implementation
++ *
++ * Copyright 2018-2022 Gerasim Troeglazov <3deyes@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef FREERDP_RDPSND_MEDIAKIT_RINGBUFFER_H
++#define FREERDP_RDPSND_MEDIAKIT_RINGBUFFER_H
++
++#include <OS.h>
++
++class RingBuffer {
++
++public:
++    RingBuffer(int size);
++    ~RingBuffer();
++    int Read(unsigned char* dataPtr, int numBytes);
++    int Write(unsigned char *dataPtr, int numBytes);
++
++    bool Empty(void);
++    int GetSize() { return BufferSize; }
++    int GetWriteAvailable() { return writeBytesAvailable;}
++    int GetReadAvailable() { return BufferSize - writeBytesAvailable;}
++
++    status_t InitCheck() { return initialized ? B_OK : B_ERROR; }
++private:
++    unsigned char *Buffer;
++    int BufferSize;
++    int reader;
++    int writer;
++    int writeBytesAvailable;
++
++    sem_id locker;
++
++    bool initialized;
++};
++
++#endif // FREERDP_RDPSND_MEDIAKIT_RINGBUFFER_H
+diff --git a/channels/rdpsnd/client/rdpsnd_main.c b/channels/rdpsnd/client/rdpsnd_main.c
+index f624058..0bc3a6c 100644
+--- a/channels/rdpsnd/client/rdpsnd_main.c
++++ b/channels/rdpsnd/client/rdpsnd_main.c
+@@ -995,6 +995,9 @@ static UINT rdpsnd_process_connect(rdpsndPlugin* rdpsnd)
+ #if defined(WITH_ALSA)
+ 		{ "alsa", "default" },
+ #endif
++#if defined(WITH_MEDIA_KIT)
++		{ "haiku", "default" },
++#endif
+ #if defined(WITH_OSS)
+ 		{ "oss", "" },
+ #endif
+diff --git a/client/.gitignore b/client/.gitignore
+index 7c1ea95..ee0bf56 100644
+--- a/client/.gitignore
++++ b/client/.gitignore
+@@ -4,6 +4,7 @@
+ !/iOS
+ !/Mac
+ !/Sample
++!/Haiku
+ !/Windows
+ !/X11
+ !/Wayland
+diff --git a/client/CMakeLists.txt b/client/CMakeLists.txt
+index af7606b..ec26961 100644
+--- a/client/CMakeLists.txt
++++ b/client/CMakeLists.txt
+@@ -54,6 +54,11 @@ if(FREERDP_VENDOR AND WITH_CLIENT)
+ 		message(STATUS "Adding Android client")
+ 		add_subdirectory(Android)
+ 	endif()
++
++	if(HAIKU)
++		message(STATUS "Adding Haiku client")
++		add_subdirectory(Haiku)
++	endif()
+ endif()
+ 
+ # Pick up other clients
+diff --git a/client/Haiku/CMakeLists.txt b/client/Haiku/CMakeLists.txt
+new file mode 100644
+index 0000000..7fd05cc
+--- /dev/null
++++ b/client/Haiku/CMakeLists.txt
+@@ -0,0 +1,36 @@
++# FreeRDP: A Remote Desktop Protocol Implementation
++# FreeRDP Haiku UI cmake build script
++#
++# Copyright 2018 Gerasim Troeglazov <3dEyes@gmail.com>
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++set(MODULE_NAME "FreeRDP")
++set(MODULE_PREFIX "FREERDP_CLIENT_HAIKU")
++set(CMAKE_POSITION_INDEPENDENT_CODE OFF)
++
++set(${MODULE_PREFIX}_SRCS
++	haiku_freerdp.cpp haiku_window.cpp haiku_view.cpp haiku_clipboard.cpp)
++
++add_executable(${MODULE_NAME} ${${MODULE_PREFIX}_SRCS})
++
++set(${MODULE_PREFIX}_LIBS ${${MODULE_PREFIX}_LIBS} ${CMAKE_DL_LIBS})
++set(${MODULE_PREFIX}_LIBS ${${MODULE_PREFIX}_LIBS} freerdp-client freerdp)
++set(${MODULE_PREFIX}_LIBS ${${MODULE_PREFIX}_LIBS} be network media translation)
++target_link_libraries(${MODULE_NAME} ${${MODULE_PREFIX}_LIBS})
++
++ADD_CUSTOM_COMMAND(TARGET ${MODULE_NAME} COMMAND rc -o haiku_resources.rsrc ${CMAKE_CURRENT_SOURCE_DIR}/haiku_resources.rdef COMMENT "Compiling resources")
++ADD_CUSTOM_COMMAND(TARGET ${MODULE_NAME} COMMAND xres -o ${MODULE_NAME} haiku_resources.rsrc COMMENT "Adding resources to executable")
++ADD_CUSTOM_COMMAND(TARGET ${MODULE_NAME} COMMAND mimeset --all ${MODULE_NAME} COMMENT "Adjusting MIME types")
++
++set_property(TARGET ${MODULE_NAME} PROPERTY FOLDER "Client/Haiku")
+diff --git a/client/Haiku/ModuleOptions.cmake b/client/Haiku/ModuleOptions.cmake
+new file mode 100644
+index 0000000..130bfa1
+--- /dev/null
++++ b/client/Haiku/ModuleOptions.cmake
+@@ -0,0 +1,4 @@
++
++set(FREERDP_CLIENT_NAME "hfreerdp")
++set(FREERDP_CLIENT_PLATFORM "Haiku")
++set(FREERDP_CLIENT_VENDOR "FreeRDP")
+diff --git a/client/Haiku/haiku_clipboard.cpp b/client/Haiku/haiku_clipboard.cpp
+new file mode 100644
+index 0000000..8f6c1db
+--- /dev/null
++++ b/client/Haiku/haiku_clipboard.cpp
+@@ -0,0 +1,433 @@
++/**
++ * FreeRDP: A Remote Desktop Protocol Implementation
++ *
++ * Copyright 2018-2022 Gerasim Troeglazov <3deyes@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifdef HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#include "haiku_freerdp.h"
++#include "haiku_clipboard.h"
++
++#include <Clipboard.h>
++
++UINT haiku_cliprdr_send_client_format_list(CliprdrClientContext* cliprdr)
++{
++	UINT rc = ERROR_INTERNAL_ERROR;
++	UINT32 index;
++	UINT32 formatId;
++	UINT32 numFormats;
++	UINT32* pFormatIds;
++	const char* formatName;
++	CLIPRDR_FORMAT* formats;
++	CLIPRDR_FORMAT_LIST formatList;
++
++	if (!cliprdr)
++		return ERROR_INVALID_PARAMETER;
++
++	HaikuContext* hfc = (HaikuContext*)cliprdr->custom;
++
++	if (!hfc || !hfc->cliprdr)
++		return ERROR_INVALID_PARAMETER;
++
++	ZeroMemory(&formatList, sizeof(CLIPRDR_FORMAT_LIST));
++	pFormatIds = NULL;
++	numFormats = ClipboardGetFormatIds(hfc->clipboard, &pFormatIds);
++	formats = (CLIPRDR_FORMAT*)calloc(numFormats, sizeof(CLIPRDR_FORMAT));
++
++	if (!formats)
++		goto fail;
++
++	for (index = 0; index < numFormats; index++)
++	{
++		formatId = pFormatIds[index];
++		formatName = ClipboardGetFormatName(hfc->clipboard, formatId);
++		formats[index].formatId = formatId;
++		formats[index].formatName = NULL;
++
++		if ((formatId > CF_MAX) && formatName)
++		{
++			formats[index].formatName = _strdup(formatName);
++
++			if (!formats[index].formatName)
++				goto fail;
++		}
++	}
++
++	formatList.msgFlags = CB_RESPONSE_OK;
++	formatList.numFormats = numFormats;
++	formatList.formats = formats;
++	formatList.msgType = CB_FORMAT_LIST;
++
++	if (!hfc->cliprdr->ClientFormatList)
++		goto fail;
++
++	rc = hfc->cliprdr->ClientFormatList(hfc->cliprdr, &formatList);
++
++fail:
++	free(pFormatIds);
++	free(formats);
++
++	return rc;
++}
++
++static UINT haiku_cliprdr_send_client_format_data_request(CliprdrClientContext* cliprdr,
++                                                            UINT32 formatId)
++{
++	UINT rc = ERROR_INVALID_PARAMETER;
++	CLIPRDR_FORMAT_DATA_REQUEST formatDataRequest;
++	HaikuContext* hfc;
++
++	if (!cliprdr)
++		goto fail;
++
++	hfc = (HaikuContext*)cliprdr->custom;
++
++	if (!hfc || !hfc->clipboardRequestEvent || !cliprdr->ClientFormatDataRequest)
++		goto fail;
++
++	ZeroMemory(&formatDataRequest, sizeof(CLIPRDR_FORMAT_DATA_REQUEST));
++	formatDataRequest.msgType = CB_FORMAT_DATA_REQUEST;
++	formatDataRequest.msgFlags = 0;
++	formatDataRequest.requestedFormatId = formatId;
++	hfc->requestedFormatId = formatId;
++	ResetEvent(hfc->clipboardRequestEvent);
++	rc = cliprdr->ClientFormatDataRequest(cliprdr, &formatDataRequest);
++
++fail:
++	return rc;
++}
++
++static UINT haiku_cliprdr_send_client_capabilities(CliprdrClientContext* cliprdr)
++{
++	CLIPRDR_CAPABILITIES capabilities;
++	CLIPRDR_GENERAL_CAPABILITY_SET generalCapabilitySet;
++
++	if (!cliprdr || !cliprdr->ClientCapabilities)
++		return ERROR_INVALID_PARAMETER;
++
++	capabilities.cCapabilitiesSets = 1;
++	capabilities.capabilitySets = (CLIPRDR_CAPABILITY_SET*)&(generalCapabilitySet);
++	generalCapabilitySet.capabilitySetType = CB_CAPSTYPE_GENERAL;
++	generalCapabilitySet.capabilitySetLength = 12;
++	generalCapabilitySet.version = CB_CAPS_VERSION_2;
++	generalCapabilitySet.generalFlags = CB_USE_LONG_FORMAT_NAMES;
++
++	return cliprdr->ClientCapabilities(cliprdr, &capabilities);
++}
++
++static UINT haiku_cliprdr_monitor_ready(CliprdrClientContext* cliprdr,
++                                          const CLIPRDR_MONITOR_READY* monitorReady)
++{
++	UINT rc;
++
++	HaikuContext* hfc;
++
++	if (!cliprdr || !monitorReady)
++		return ERROR_INVALID_PARAMETER;
++
++	hfc = (HaikuContext*)cliprdr->custom;
++
++	if (!hfc)
++		return ERROR_INVALID_PARAMETER;
++
++	if ((rc = haiku_cliprdr_send_client_capabilities(cliprdr)) != CHANNEL_RC_OK)
++		return rc;
++
++	if ((rc = haiku_cliprdr_send_client_format_list(cliprdr)) != CHANNEL_RC_OK)
++		return rc;
++
++	hfc->clipboardSync = TRUE;
++
++	return CHANNEL_RC_OK;
++}
++
++static UINT haiku_cliprdr_server_capabilities(CliprdrClientContext* cliprdr,
++                                                const CLIPRDR_CAPABILITIES* capabilities)
++{
++	UINT32 index;
++	CLIPRDR_CAPABILITY_SET* capabilitySet;
++
++	HaikuContext* hfc;
++
++	if (!cliprdr || !capabilities)
++		return ERROR_INVALID_PARAMETER;
++
++	hfc = (HaikuContext*)cliprdr->custom;
++
++	if (!hfc)
++		return ERROR_INVALID_PARAMETER;
++
++	for (index = 0; index < capabilities->cCapabilitiesSets; index++)
++	{
++		capabilitySet = &(capabilities->capabilitySets[index]);
++
++		if ((capabilitySet->capabilitySetType == CB_CAPSTYPE_GENERAL) &&
++		    (capabilitySet->capabilitySetLength >= CB_CAPSTYPE_GENERAL_LEN))
++		{
++			CLIPRDR_GENERAL_CAPABILITY_SET* generalCapabilitySet =
++			    (CLIPRDR_GENERAL_CAPABILITY_SET*)capabilitySet;
++			hfc->clipboardCapabilities = generalCapabilitySet->generalFlags;
++			break;
++		}
++	}
++
++	return CHANNEL_RC_OK;
++}
++
++static UINT haiku_cliprdr_server_format_list(CliprdrClientContext* cliprdr,
++                                               const CLIPRDR_FORMAT_LIST* formatList)
++{
++	UINT rc;
++	UINT32 index;
++	CLIPRDR_FORMAT* format;
++	HaikuContext* hfc;
++
++	if (!cliprdr || !formatList)
++		return ERROR_INVALID_PARAMETER;
++
++	hfc = (HaikuContext*)cliprdr->custom;
++
++	if (!hfc)
++		return ERROR_INVALID_PARAMETER;
++
++	if (hfc->serverFormats)
++	{
++		for (index = 0; index < hfc->numServerFormats; index++)
++			free(hfc->serverFormats[index].formatName);
++
++		free(hfc->serverFormats);
++		hfc->serverFormats = NULL;
++		hfc->numServerFormats = 0;
++	}
++
++	if (formatList->numFormats < 1)
++		return CHANNEL_RC_OK;
++
++	hfc->numServerFormats = formatList->numFormats;
++	hfc->serverFormats = (CLIPRDR_FORMAT*)calloc(hfc->numServerFormats, sizeof(CLIPRDR_FORMAT));
++
++	if (!hfc->serverFormats)
++		return CHANNEL_RC_NO_MEMORY;
++
++	for (index = 0; index < hfc->numServerFormats; index++)
++	{
++		hfc->serverFormats[index].formatId = formatList->formats[index].formatId;
++		hfc->serverFormats[index].formatName = NULL;
++
++		if (formatList->formats[index].formatName)
++		{
++			hfc->serverFormats[index].formatName = _strdup(formatList->formats[index].formatName);
++
++			if (!hfc->serverFormats[index].formatName)
++				return CHANNEL_RC_NO_MEMORY;
++		}
++	}
++
++	for (index = 0; index < hfc->numServerFormats; index++)
++	{
++		format = &(hfc->serverFormats[index]);
++
++		if (format->formatId == CF_UNICODETEXT)
++		{
++			if ((rc = haiku_cliprdr_send_client_format_data_request(cliprdr, CF_UNICODETEXT)) != CHANNEL_RC_OK)
++				return rc;
++			break;
++		}
++		else if (format->formatId == CF_TEXT)
++		{
++			if ((rc = haiku_cliprdr_send_client_format_data_request(cliprdr, CF_TEXT)) != CHANNEL_RC_OK)
++				return rc;
++			break;
++		}
++	}
++
++	return CHANNEL_RC_OK;
++}
++
++static UINT
++haiku_cliprdr_server_format_list_response(CliprdrClientContext* cliprdr,
++                                            const CLIPRDR_FORMAT_LIST_RESPONSE* formatListResponse)
++{
++	return CHANNEL_RC_OK;
++}
++
++static UINT
++haiku_cliprdr_server_lock_clipboard_data(CliprdrClientContext* cliprdr,
++                                           const CLIPRDR_LOCK_CLIPBOARD_DATA* lockClipboardData)
++{
++	return CHANNEL_RC_OK;
++}
++
++static UINT haiku_cliprdr_server_unlock_clipboard_data(
++    CliprdrClientContext* cliprdr, const CLIPRDR_UNLOCK_CLIPBOARD_DATA* unlockClipboardData)
++{
++	return CHANNEL_RC_OK;
++}
++
++static UINT
++haiku_cliprdr_server_format_data_request(CliprdrClientContext* cliprdr,
++                                           const CLIPRDR_FORMAT_DATA_REQUEST* formatDataRequest)
++{
++	UINT rc;
++	BYTE* data;
++	UINT32 size;
++	UINT32 formatId;
++	CLIPRDR_FORMAT_DATA_RESPONSE response;
++	HaikuContext* hfc;
++
++	if (!cliprdr || !formatDataRequest || !cliprdr->ClientFormatDataResponse)
++		return ERROR_INVALID_PARAMETER;
++
++	hfc = (HaikuContext*)cliprdr->custom;
++
++	if (!hfc)
++		return ERROR_INVALID_PARAMETER;
++
++	ZeroMemory(&response, sizeof(CLIPRDR_FORMAT_DATA_RESPONSE));
++	formatId = formatDataRequest->requestedFormatId;
++	data = (BYTE*)ClipboardGetData(hfc->clipboard, formatId, &size);
++	response.msgFlags = CB_RESPONSE_OK;
++	response.dataLen = size;
++	response.requestedFormatData = data;
++
++	if (!data)
++	{
++		response.msgFlags = CB_RESPONSE_FAIL;
++		response.dataLen = 0;
++		response.requestedFormatData = NULL;
++	}
++
++	rc = cliprdr->ClientFormatDataResponse(cliprdr, &response);
++	free(data);
++	return rc;
++}
++
++static UINT
++haiku_cliprdr_server_format_data_response(CliprdrClientContext* cliprdr,
++                                            const CLIPRDR_FORMAT_DATA_RESPONSE* formatDataResponse)
++{
++	char* data;
++	UINT32 size;
++	UINT32 index;
++	UINT32 formatId;
++	CLIPRDR_FORMAT* format = NULL;
++	HaikuContext* hfc;
++	freerdp* instance;
++
++	if (!cliprdr || !formatDataResponse)
++		return ERROR_INVALID_PARAMETER;
++
++	hfc = (HaikuContext*)cliprdr->custom;
++
++	if (!hfc)
++		return ERROR_INVALID_PARAMETER;
++
++	instance = ((rdpContext*)hfc)->instance;
++
++	if (!instance)
++		return ERROR_INVALID_PARAMETER;
++
++	for (index = 0; index < hfc->numServerFormats; index++)
++	{
++		if (hfc->requestedFormatId == hfc->serverFormats[index].formatId)
++			format = &(hfc->serverFormats[index]);
++	}
++
++	if (!format)
++	{
++		SetEvent(hfc->clipboardRequestEvent);
++		return ERROR_INTERNAL_ERROR;
++	}
++
++	if (format->formatName)
++		formatId = ClipboardRegisterFormat(hfc->clipboard, format->formatName);
++	else
++		formatId = format->formatId;
++
++	size = formatDataResponse->dataLen;
++
++	if (!ClipboardSetData(hfc->clipboard, formatId, formatDataResponse->requestedFormatData, size))
++		return ERROR_INTERNAL_ERROR;
++
++	SetEvent(hfc->clipboardRequestEvent);
++
++	if ((formatId == CF_TEXT) || (formatId == CF_UNICODETEXT))
++	{
++		formatId = ClipboardRegisterFormat(hfc->clipboard, "UTF8_STRING");
++		data = (char*)ClipboardGetData(hfc->clipboard, formatId, &size);
++
++		BMessage *clip = NULL;
++		if(be_clipboard->Lock() && size != 0)
++		{
++			be_clipboard->Clear();
++			if((clip = be_clipboard->Data()))
++			{
++				clip->AddData("text/plain", B_MIME_TYPE, data, size + 1);
++				be_clipboard->Commit();
++			}
++			be_clipboard->Unlock();
++		}
++	}
++
++	return CHANNEL_RC_OK;
++}
++
++static UINT haiku_cliprdr_server_file_contents_request(
++    CliprdrClientContext* cliprdr, const CLIPRDR_FILE_CONTENTS_REQUEST* fileContentsRequest)
++{
++	return CHANNEL_RC_OK;
++}
++
++static UINT haiku_cliprdr_server_file_contents_response(
++    CliprdrClientContext* cliprdr, const CLIPRDR_FILE_CONTENTS_RESPONSE* fileContentsResponse)
++{
++	return CHANNEL_RC_OK;
++}
++
++BOOL haiku_cliprdr_init(HaikuContext* hfc, CliprdrClientContext* cliprdr)
++{
++	cliprdr->custom = (void *)hfc;
++	hfc->cliprdr = cliprdr;
++
++	hfc->clipboard = ClipboardCreate();
++	hfc->clipboardRequestEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
++
++	cliprdr->MonitorReady = haiku_cliprdr_monitor_ready;
++	cliprdr->ServerCapabilities = haiku_cliprdr_server_capabilities;
++	cliprdr->ServerFormatList = haiku_cliprdr_server_format_list;
++	cliprdr->ServerFormatListResponse = haiku_cliprdr_server_format_list_response;
++	cliprdr->ServerLockClipboardData = haiku_cliprdr_server_lock_clipboard_data;
++	cliprdr->ServerUnlockClipboardData = haiku_cliprdr_server_unlock_clipboard_data;
++	cliprdr->ServerFormatDataRequest = haiku_cliprdr_server_format_data_request;
++	cliprdr->ServerFormatDataResponse = haiku_cliprdr_server_format_data_response;
++	cliprdr->ServerFileContentsRequest = haiku_cliprdr_server_file_contents_request;
++	cliprdr->ServerFileContentsResponse = haiku_cliprdr_server_file_contents_response;
++
++	return TRUE;
++}
++
++BOOL haiku_cliprdr_uninit(HaikuContext* hfc, CliprdrClientContext* cliprdr)
++{
++	cliprdr->custom = NULL;
++	hfc->cliprdr = NULL;
++
++	ClipboardDestroy(hfc->clipboard);
++	CloseHandle(hfc->clipboardRequestEvent);
++
++	return TRUE;
++}
+diff --git a/client/Haiku/haiku_clipboard.h b/client/Haiku/haiku_clipboard.h
+new file mode 100644
+index 0000000..49cfa3b
+--- /dev/null
++++ b/client/Haiku/haiku_clipboard.h
+@@ -0,0 +1,28 @@
++/**
++ * FreeRDP: A Remote Desktop Protocol Implementation
++ *
++ * Copyright 2018-2022 Gerasim Troeglazov <3deyes@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef FREERDP_CLIENT_HAIKU_CLIPRDR_H
++#define FREERDP_CLIENT_HAIKU_CLIPRDR_H
++
++#include "haiku_freerdp.h"
++
++FREERDP_LOCAL UINT haiku_cliprdr_send_client_format_list(CliprdrClientContext* cliprdr);
++FREERDP_LOCAL BOOL haiku_cliprdr_init(haiku_context* afc, CliprdrClientContext* cliprdr);
++FREERDP_LOCAL BOOL haiku_cliprdr_uninit(haiku_context* afc, CliprdrClientContext* cliprdr);
++
++#endif // FREERDP_CLIENT_HAIKU_CLIPRDR_H
+diff --git a/client/Haiku/haiku_freerdp.cpp b/client/Haiku/haiku_freerdp.cpp
+new file mode 100644
+index 0000000..b1f1fd0
+--- /dev/null
++++ b/client/Haiku/haiku_freerdp.cpp
+@@ -0,0 +1,392 @@
++/**
++ * FreeRDP: A Remote Desktop Protocol Implementation
++ *
++ * Copyright 2018-2022 Gerasim Troeglazov <3deyes@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifdef HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#include <errno.h>
++#include <stdio.h>
++#include <string.h>
++#include <sched.h>
++
++#include "haiku_freerdp.h"
++#include "haiku_window.h"
++#include "haiku_view.h"
++#include "haiku_clipboard.h"
++
++#include <Application.h>
++#include <Window.h>
++#include <SupportDefs.h>
++#include <Bitmap.h>
++#include <Screen.h>
++#include <View.h>
++#include <Rect.h>
++
++#define TAG CLIENT_TAG("haiku")
++
++static void haiku_OnChannelConnectedEventHandler(void* context, ChannelConnectedEventArgs* e)
++{
++	rdpSettings* settings;
++	HaikuContext* hfc;
++
++	if (!context || !e)
++	{
++		WLog_FATAL(TAG, "%s(context=%p, EventArgs=%p", __FUNCTION__, context, (void*)e);
++		return;
++	}
++
++	hfc = (HaikuContext*)context;
++
++	if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0)
++		haiku_cliprdr_init(hfc, (CliprdrClientContext*)e->pInterface);
++}
++
++static void haiku_OnChannelDisconnectedEventHandler(void* context,
++                                                      ChannelDisconnectedEventArgs* e)
++{
++	rdpSettings* settings;
++	HaikuContext* hfc;
++
++	if (!context || !e)
++	{
++		WLog_FATAL(TAG, "%s(context=%p, EventArgs=%p", __FUNCTION__, context, (void*)e);
++		return;
++	}
++
++	hfc = (HaikuContext*)context;
++
++	if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0)
++		haiku_cliprdr_uninit(hfc, (CliprdrClientContext*)e->pInterface);
++}
++
++static int haiku_logon_error_info(freerdp* instance, UINT32 data, UINT32 type)
++{
++	const char* str_data = freerdp_get_logon_error_info_data(data);
++	const char* str_type = freerdp_get_logon_error_info_type(type);
++
++	if (!instance || !instance->context)
++		return -1;
++
++	WLog_INFO(TAG, "Logon Error Info %s [%s]", str_data, str_type);
++	return 1;
++}
++
++static BOOL haiku_begin_paint(rdpContext* context)
++{
++	rdpGdi* gdi = context->gdi;
++	gdi->primary->hdc->hwnd->invalid->null = TRUE;
++	return TRUE;
++}
++
++static BOOL haiku_end_paint(rdpContext* context)
++{
++	HaikuContext* h_context = (HaikuContext*)context;
++	rdpGdi* gdi = context->gdi;
++
++	if(h_context->window == NULL)
++		return TRUE;
++
++	if (gdi->primary->hdc->hwnd->invalid->null)
++		return TRUE;
++
++	char* data = (char*)h_context->window->view->GetBuffer();
++
++	int x = gdi->primary->hdc->hwnd->invalid->x;
++	int y = gdi->primary->hdc->hwnd->invalid->y;
++	int w = gdi->primary->hdc->hwnd->invalid->w;
++	int h = gdi->primary->hdc->hwnd->invalid->h;
++
++	for (int i = 0; i < h; i++)
++	{
++		memcpy(data + ((i + y) * (gdi->width * GetBytesPerPixel(
++			gdi->dstFormat))) + x * GetBytesPerPixel(gdi->dstFormat),
++			gdi->primary_buffer + ((i + y) * (gdi->width *
++			GetBytesPerPixel(gdi->dstFormat))) + x * GetBytesPerPixel(gdi->dstFormat),
++			w * GetBytesPerPixel(gdi->dstFormat));
++	}
++
++	h_context->window->view->Paint();
++
++	return TRUE;
++}
++
++static BOOL haiku_pre_connect(freerdp* instance)
++{
++	int rc;
++	rdpSettings* settings;
++
++	if (!instance)
++		return FALSE;
++
++	settings = instance->settings;
++
++	if (!settings)
++		return FALSE;
++
++	settings->OrderSupport[NEG_DSTBLT_INDEX] = TRUE;
++	settings->OrderSupport[NEG_PATBLT_INDEX] = TRUE;
++	settings->OrderSupport[NEG_SCRBLT_INDEX] = TRUE;
++	settings->OrderSupport[NEG_OPAQUE_RECT_INDEX] = TRUE;
++	settings->OrderSupport[NEG_DRAWNINEGRID_INDEX] = FALSE;
++	settings->OrderSupport[NEG_MULTIDSTBLT_INDEX] = FALSE;
++	settings->OrderSupport[NEG_MULTIPATBLT_INDEX] = FALSE;
++	settings->OrderSupport[NEG_MULTISCRBLT_INDEX] = FALSE;
++	settings->OrderSupport[NEG_MULTIOPAQUERECT_INDEX] = TRUE;
++	settings->OrderSupport[NEG_MULTI_DRAWNINEGRID_INDEX] = FALSE;
++	settings->OrderSupport[NEG_LINETO_INDEX] = TRUE;
++	settings->OrderSupport[NEG_POLYLINE_INDEX] = TRUE;
++	settings->OrderSupport[NEG_MEMBLT_INDEX] = TRUE;
++	settings->OrderSupport[NEG_MEM3BLT_INDEX] = FALSE;
++	settings->OrderSupport[NEG_SAVEBITMAP_INDEX] = FALSE;
++	settings->OrderSupport[NEG_GLYPH_INDEX_INDEX] = FALSE;
++	settings->OrderSupport[NEG_FAST_INDEX_INDEX] = FALSE;
++	settings->OrderSupport[NEG_FAST_GLYPH_INDEX] = FALSE;
++	settings->OrderSupport[NEG_POLYGON_SC_INDEX] = FALSE;
++	settings->OrderSupport[NEG_POLYGON_CB_INDEX] = FALSE;
++	settings->OrderSupport[NEG_ELLIPSE_SC_INDEX] = FALSE;
++	settings->OrderSupport[NEG_ELLIPSE_CB_INDEX] = FALSE;
++
++	PubSub_SubscribeChannelConnected(instance->context->pubSub, haiku_OnChannelConnectedEventHandler);
++	PubSub_SubscribeChannelDisconnected(instance->context->pubSub, haiku_OnChannelDisconnectedEventHandler);
++
++	if (settings->Fullscreen)
++	{
++		BScreen screen;
++		settings->DesktopWidth = (UINT32) screen.Frame().right + 1;
++		settings->DesktopHeight = (UINT32) screen.Frame().bottom + 1;
++	}
++
++	if (!freerdp_client_load_addins(instance->context->channels, instance->settings))
++		return FALSE;
++
++	return TRUE;
++}
++
++static BOOL haiku_post_connect(freerdp* instance)
++{
++	rdpGdi* gdi;
++	rdpContext* context;
++	rdpSettings* settings;
++
++	context = ((rdpContext*) instance->context);
++
++	HaikuContext* h_context = (HaikuContext*)context;
++
++	if (!gdi_init(instance, PIXEL_FORMAT_BGRA32))
++		return FALSE;
++
++	gdi = instance->context->gdi;
++	settings = instance->settings;
++
++	instance->update->BeginPaint = haiku_begin_paint;
++	instance->update->EndPaint = haiku_end_paint;
++
++	if (h_context->window == NULL)
++	{
++		char wndTitle[256]={"FreeRDP"};
++
++		BRect rect = BRect(50, 50, 50 + gdi->width, 50 + gdi->height);
++
++		if (settings->Fullscreen)
++			rect = BRect(0, 0, gdi->width, gdi->height);
++		
++		if (settings->WindowTitle != NULL)
++			snprintf(wndTitle, 255, "%s", settings->WindowTitle);
++		else if (settings->ServerPort == 3389)
++			snprintf(wndTitle, 255, "FreeRDP: %s", settings->ServerHostname);
++		else
++			snprintf(wndTitle, 255, "FreeRDP: %S:%u", settings->ServerHostname, settings->ServerPort);
++
++		h_context->window = new RDPWindow(rect, wndTitle, instance);
++		h_context->window->Show();
++	}
++	return TRUE;
++}
++
++static void haiku_post_disconnect(freerdp* instance)
++{
++	rdpContext* context;
++
++	if (!instance)
++		return;
++
++	if (!instance->context)
++		return;
++
++	context = (rdpContext*) instance->context;
++	HaikuContext* h_context = (HaikuContext*)context;
++
++	if (h_context->window != NULL)
++	{
++		h_context->window->Lock();
++		h_context->window->Quit();
++	}
++
++	gdi_free(instance);
++}
++
++static DWORD WINAPI haiku_haiku_app_thread_proc(LPVOID arg)
++{
++	BApplication app("application/x-vnd.freerdp");
++	*(BOOL*)arg = TRUE;
++	app.Run();
++
++	ExitThread(0);
++	return 0;
++}
++
++
++static DWORD WINAPI haiku_client_thread_proc(LPVOID arg)
++{
++	rdpContext* context = (rdpContext*)arg;
++	freerdp* instance = context->instance;
++	DWORD nCount;
++	DWORD status;
++	HANDLE handles[64];
++
++	if (!freerdp_connect(instance))
++	{
++		WLog_ERR(TAG, "connection failure");
++		return 0;
++	}
++
++	while (!freerdp_shall_disconnect(instance))
++	{
++		nCount = freerdp_get_event_handles(instance->context, &handles[0], 64);
++
++		if (nCount == 0)
++		{
++			WLog_ERR(TAG, "%s: freerdp_get_event_handles failed", __FUNCTION__);
++			break;
++		}
++
++		status = WaitForMultipleObjects(nCount, handles, FALSE, INFINITE);
++
++		if (status == WAIT_FAILED)
++		{
++			WLog_ERR(TAG, "%s: WaitForMultipleObjects failed with %" PRIu32"", __FUNCTION__,
++			         status);
++			break;
++		}
++
++		if (!freerdp_check_event_handles(instance->context))
++		{
++			if (client_auto_reconnect(instance))
++				continue;
++			else
++			{
++				if (freerdp_error_info(instance) == 0)
++					status = 42;
++			}
++
++			if (freerdp_get_last_error(instance->context) == FREERDP_ERROR_SUCCESS)
++				WLog_ERR(TAG, "Failed to check FreeRDP file descriptor");
++
++			break;
++		}
++	}
++
++	freerdp_disconnect(instance);
++	ExitThread(0);
++	return 0;
++}
++
++
++static BOOL haiku_client_new(freerdp* instance, rdpContext* context)
++{
++	HaikuContext* h_context = (HaikuContext*)context;
++
++	if (!instance || !context)
++		return FALSE;
++
++	instance->PreConnect = haiku_pre_connect;
++	instance->PostConnect = haiku_post_connect;
++	instance->PostDisconnect = haiku_post_disconnect;
++	instance->Authenticate = client_cli_authenticate;
++	instance->GatewayAuthenticate = client_cli_gw_authenticate;
++	instance->VerifyCertificateEx = client_cli_verify_certificate_ex;
++	instance->VerifyChangedCertificateEx = client_cli_verify_changed_certificate_ex;
++	instance->PresentGatewayMessage = client_cli_present_gateway_message;
++	instance->LogonErrorInfo = haiku_logon_error_info;
++
++	h_context->window = NULL;
++
++	return TRUE;
++}
++
++
++static int RdpClientEntry(RDP_CLIENT_ENTRY_POINTS* pEntryPoints)
++{
++	ZeroMemory(pEntryPoints, sizeof(RDP_CLIENT_ENTRY_POINTS));
++	pEntryPoints->Version = RDP_CLIENT_INTERFACE_VERSION;
++	pEntryPoints->Size = sizeof(RDP_CLIENT_ENTRY_POINTS_V1);
++	pEntryPoints->ContextSize = sizeof(HaikuContext);
++	pEntryPoints->ClientNew = haiku_client_new;
++	return 0;
++}
++
++
++int main(int argc, char* argv[])
++{
++	int rc = -1;
++	int status;
++	HANDLE appThread, clientThread;
++	RDP_CLIENT_ENTRY_POINTS clientEntryPoints;
++	rdpContext* context;
++	rdpSettings* settings;
++	BOOL appThreadReady = FALSE;
++
++	RdpClientEntry(&clientEntryPoints);
++	context = freerdp_client_context_new(&clientEntryPoints);
++
++	if (!context)
++		goto fail;
++
++	settings = context->settings;
++
++	status = freerdp_client_settings_parse_command_line(settings, argc, argv, FALSE);
++	if (status)
++	{
++		rc = freerdp_client_settings_command_line_status_print(settings, status, argc, argv);
++		goto fail;
++	}
++
++	if (!(appThread = CreateThread(NULL, 0, haiku_haiku_app_thread_proc, &appThreadReady, 0, NULL)))
++		WLog_ERR(TAG, "Failed to create app thread");
++
++	while (!appThreadReady)
++		sched_yield();
++
++	if (freerdp_client_start(context) != 0)
++		goto fail;
++
++	if (!(clientThread = CreateThread(NULL, 0, haiku_client_thread_proc, context, 0, NULL)))
++		WLog_ERR(TAG, "Failed to create client thread");
++	else
++		WaitForSingleObject(clientThread, INFINITE);
++
++	if (freerdp_client_stop(context) != 0)
++		rc = -1;
++	else
++		rc = 0;
++
++fail:
++	freerdp_client_context_free(context);
++	return rc;
++}
+diff --git a/client/Haiku/haiku_freerdp.h b/client/Haiku/haiku_freerdp.h
+new file mode 100644
+index 0000000..d157d99
+--- /dev/null
++++ b/client/Haiku/haiku_freerdp.h
+@@ -0,0 +1,60 @@
++/**
++ * FreeRDP: A Remote Desktop Protocol Implementation
++ *
++ * Copyright 2018-2022 Gerasim Troeglazov <3deyes@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef FREERDP_CLIENT_HAIKU_FREERDP_H
++#define FREERDP_CLIENT_HAIKU_FREERDP_H
++
++extern "C" {
++#include <freerdp/freerdp.h>
++#include <freerdp/constants.h>
++#include <freerdp/gdi/gdi.h>
++#include <freerdp/client/file.h>
++#include <freerdp/client/cmdline.h>
++#include <freerdp/client/cliprdr.h>
++#include <freerdp/client/channels.h>
++#include <freerdp/channels/channels.h>
++#include <freerdp/locale/keyboard.h>
++#include <freerdp/api.h>
++#include <freerdp/log.h>
++
++#include <winpr/crt.h>
++#include <winpr/clipboard.h>
++#include <winpr/crt.h>
++#include <winpr/synch.h>
++}
++
++class RDPWindow;
++
++struct haiku_context
++{
++	rdpContext _p;
++
++	RDPWindow *window;
++
++	wClipboard* clipboard;
++	BOOL clipboardSync;
++	UINT32 numServerFormats;
++	UINT32 requestedFormatId;
++	HANDLE clipboardRequestEvent;
++	CLIPRDR_FORMAT* serverFormats;
++	CliprdrClientContext* cliprdr;
++	UINT32 clipboardCapabilities;
++};
++typedef struct haiku_context HaikuContext;
++
++#endif // FREERDP_CLIENT_HAIKU_FREERDP_H
+diff --git a/client/Haiku/haiku_resources.rdef b/client/Haiku/haiku_resources.rdef
+new file mode 100644
+index 0000000..b7d7760
+--- /dev/null
++++ b/client/Haiku/haiku_resources.rdef
+@@ -0,0 +1,48 @@
++resource app_signature "application/x-vnd.freerdp";
++
++resource app_flags B_MULTIPLE_LAUNCH;
++
++resource app_version {
++	major  = 2,
++	middle = 9,
++	minor  = 0,
++	variety = 0,
++	internal = 0,
++	short_info = "FreeRDP",
++	long_info = "FreeRDP"
++};
++
++resource vector_icon {
++	$"6E6369662803010000020016023CC7ED389BBFBA16553E39AF4977C842ADC700"
++	$"FFFFD3020016023C529D3753A2B8966F3D9D074B6044496AAF0047FFA0020016"
++	$"02BC4E75BC411A3C90D9BCA00C47587D4ABA850090FFD40200160238313C3B5C"
++	$"F0BFCD953C7AAB4C13943FCAF901ECFFC3054B04016B020006033E2F99387F17"
++	$"BA42DC3FF5B84A0E32482C90001D1E2C3D454658FF010101020006023879063B"
++	$"8224BE2CC73B10D94A1F6F49B89400242222FF9A9A9A020006033C69A6000000"
++	$"0000003E186148800049800000D4CECE58F3F3F3FFD9D9D90389FF0005000500"
++	$"0500030100000500033A3A4303F46E0C03010000020016023CC7ED389BBFBA16"
++	$"553E39AF4977C842ADC700FFFFD3020006023C529D3753A2B8966F3D9D074B60"
++	$"44496AAF00474747FFA5A0A002001602BC4E75BC411A3C90D9BCA00C47587D4A"
++	$"BA850090FFD40200160238313C3B5CF0BFCD953C7AAB4C13943FCAF901ECFFC3"
++	$"054B04017E020006033E2F99387F17BA42DC3FF5B84A0E32482C90001D1E2C3D"
++	$"454658FF010101020006023879063B8224BE2CC73B10D94A1F6F49B894002422"
++	$"22FF9A9A9A020006033C69A60000000000003E186148800049800000D4CECE58"
++	$"F3F3F3FFD9D9D9038AFF01050005000500030100000500033A3A43033A3A4303"
++	$"0100000300AAFF0300FF0003FFAA002200000A062228224A485E525252302C22"
++	$"0A042228483852302C220A044838485E525252300A042228224A485E48380A04"
++	$"453A45572446242C0A04B560442446242CB569B8200A0445544557244626440A"
++	$"0438263D234E28492C080438263D234E284E2E0A03492C4E284E2E0802425843"
++	$"C9830A06486054606052CA1BC5B95C4D524800000A0430303050505050300000"
++	$"000000000A04B570B86DB57DC12FC17CC729C17CBD8F0A062228224A485E5252"
++	$"52302C220A062228224A485E525252302C220A042228483852302C220A044838"
++	$"485E525252300A042228224A485E48380A042228224A485E48380A04453A4557"
++	$"2446242C0A04B560442446242CB569B8200A04B560442446242CB569B8200A04"
++	$"45544557244626440A0438263D234E28492C080438263D234E284E2E0A03492C"
++	$"4E284E2E0802425843C9830A04B570B86DB57DC12FC17CC729C17CBD8F0F0A06"
++	$"010C000A0001091001178400040A040108000A05010A000A0001011001178400"
++	$"040A010102000A03020405000A080106000A090107000A0A010B1815FF011782"
++	$"20040A020103000A110112023E00150000000000003E260D42CEDE44B6B40A26"
++	$"0112023E21EE0000000000003E260D483363471B5A0A250112023E0015000000"
++	$"0000003E260D42CEDE482DAD0A270112023E21EE0000000000003E41BA483363"
++	$"4901E6"
++};
+diff --git a/client/Haiku/haiku_view.cpp b/client/Haiku/haiku_view.cpp
+new file mode 100644
+index 0000000..a886711
+--- /dev/null
++++ b/client/Haiku/haiku_view.cpp
+@@ -0,0 +1,228 @@
++/**
++ * FreeRDP: A Remote Desktop Protocol Implementation
++ *
++ * Copyright 2018-2022 Gerasim Troeglazov <3deyes@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "haiku_window.h"
++#include "haiku_view.h"
++
++
++RDPView::RDPView(BRect rect) :
++	BView(rect, "RDPView", B_FOLLOW_ALL, B_WILL_DRAW | B_PULSE_NEEDED | B_FRAME_EVENTS),
++	showBar(false)
++{
++	RDPView(rect, rect.IntegerWidth(), rect.IntegerHeight());
++}
++
++RDPView::RDPView(BRect rect, int width, int height) :
++	BView(rect, "RDPView", B_FOLLOW_ALL, B_WILL_DRAW | B_PULSE_NEEDED | B_FRAME_EVENTS),
++	showBar(false)
++{
++	buffer_width = width;
++	buffer_height = height;
++	lastButtons = 0;
++
++	BRect	fbRect = BRect(0, 0, buffer_width - 1, buffer_height - 1);
++	bufferView = new BView(fbRect, "bufferView", B_FOLLOW_ALL_SIDES, 0);
++	bufferBitmap = new BBitmap(fbRect, B_RGB32, true);
++	bufferBitmap->AddChild(bufferView);
++
++	font = be_bold_font;
++	font.SetSize(14);
++	SetFont(&font, B_FONT_ALL);
++
++	title = BString("FreeRDP");
++}
++
++void
++RDPView::AttachedToWindow(void)
++{
++	tickCount = 0;
++}
++
++void
++RDPView::Pulse(void)
++{
++	uint32 dx = Bounds().Width() / 3;
++	uint32 h = showBar ? 20:2;
++
++	if (lastPos.y >= 0 && lastPos.y < h && lastPos.x > dx && lastPos.x < dx * 2 )
++	{
++		tickCount++;
++		if (tickCount > 5)
++		{
++			showBar = true;
++			Invalidate();
++		}
++		return;
++	}
++
++	if (showBar)
++	{
++		showBar = false;
++		Invalidate();
++	}
++	tickCount = 0;
++}
++
++void
++RDPView::SetInstance(freerdp *inst)
++{
++	instance = inst;
++	title.SetTo(Window()->Title());
++}
++
++void RDPView::MouseMoved(BPoint p, uint32 transit,const BMessage *message)
++{
++	rdpInput* input = instance->input;
++	switch (transit)
++	{
++		case B_INSIDE_VIEW:
++		case B_ENTERED_VIEW:
++			{
++				input->MouseEvent(input, PTR_FLAGS_MOVE, p.x, p.y);
++				tickCount = 0;
++				break;
++			}
++		case B_EXITED_VIEW:
++			break;
++		case B_OUTSIDE_VIEW:
++			break;
++	}
++	lastPos = p;
++}
++
++void RDPView::MouseDown(BPoint p)
++{
++	rdpInput* input = instance->input;
++
++	uint32 dx = Bounds().Width() / 3;
++	uint32 h = showBar ? 20 : 2;
++
++	uint32 buttons = Window()->CurrentMessage()->FindInt32("buttons");
++	int32 clicks = Window()->CurrentMessage()->FindInt32("clicks");
++
++	int flags = PTR_FLAGS_DOWN;
++
++	if (buttons & B_PRIMARY_MOUSE_BUTTON)
++			flags |= PTR_FLAGS_BUTTON1;
++	if (buttons & B_SECONDARY_MOUSE_BUTTON)
++			flags |= PTR_FLAGS_BUTTON2;
++	if (buttons & B_TERTIARY_MOUSE_BUTTON)
++			flags |= PTR_FLAGS_BUTTON2;
++
++	if (showBar && buttons & B_PRIMARY_MOUSE_BUTTON) {
++		BRect closeButtonRect(dx + 3, 3, dx + h - 3, h - 3);
++		if (closeButtonRect.Contains(p))
++		{
++			freerdp_abort_connect(instance);
++		}
++		else if (clicks == 2)
++		{
++			Window()->Minimize(true);
++			flags = 0;
++		}
++	}
++
++	if (flags != 0)
++		input->MouseEvent(input, flags, p.x, p.y);
++
++	lastPos = p;
++	lastButtons = buttons;
++}
++
++void RDPView::MouseUp(BPoint p)
++{
++	rdpInput* input = instance->input;
++
++	uint32 buttons = Window()->CurrentMessage()->FindInt32("buttons");
++	int flags = 0;
++
++	if ((buttons ^ lastButtons) & B_PRIMARY_MOUSE_BUTTON)
++			flags |= PTR_FLAGS_BUTTON1;
++	if ((buttons ^ lastButtons) & B_SECONDARY_MOUSE_BUTTON)
++			flags |= PTR_FLAGS_BUTTON2;
++	if ((buttons ^lastButtons) & B_TERTIARY_MOUSE_BUTTON)
++			flags |= PTR_FLAGS_BUTTON2;
++
++	if (flags != 0)
++		input->MouseEvent(input, flags, p.x, p.y);
++
++	lastPos = p;
++	lastButtons = buttons;
++}
++
++void
++RDPView::Draw(BRect r)
++{
++	uint32 dx = Bounds().Width() / 3;
++	uint32 h = showBar ? 20 : 2;
++
++	DrawBitmap(bufferBitmap, r, r);
++
++	if (showBar)
++	{
++		BRect r(dx, -1, dx * 2, h);
++		SetDrawingMode(B_OP_COPY);
++
++		SetHighColor(255, 203, 0);
++		SetLowColor(255, 203, 0);
++		FillRect(r);
++		SetHighColor(179, 143, 0);
++		SetLowColor(179, 143, 0);
++		StrokeRect(r);
++
++		SetDrawingMode(B_OP_ALPHA);
++		BRect closeButtonRect(dx + 3, 3, dx + h - 3, h - 3);
++		StrokeRect(closeButtonRect);
++
++		SetHighColor(0, 0, 0);
++		SetLowColor(0, 0, 0);
++		float width = font.StringWidth(title);
++		DrawString(title, BPoint(Bounds().Width()/2 - width/2, 16));
++	}
++}
++
++void
++RDPView::Paint()
++{
++  if (LockLooper())
++  {
++ 	 bufferView->LockLooper();
++ 	 SetDrawingMode(B_OP_COPY);
++	 DrawBitmap(bufferBitmap);
++	 bufferView->UnlockLooper();
++	 UnlockLooper();
++	}
++}
++
++uint32 *
++RDPView::GetBuffer()
++{
++	if (bufferBitmap)
++		return (uint32*)bufferBitmap->Bits();
++
++	return NULL;
++}
++
++uint32
++RDPView::GetBufferSize()
++{
++	if (bufferBitmap)
++		return bufferBitmap->BitsLength()/4;
++
++	return 0;
++}
+diff --git a/client/Haiku/haiku_view.h b/client/Haiku/haiku_view.h
+new file mode 100644
+index 0000000..056372c
+--- /dev/null
++++ b/client/Haiku/haiku_view.h
+@@ -0,0 +1,75 @@
++/**
++ * FreeRDP: A Remote Desktop Protocol Implementation
++ *
++ * Copyright 2018-2022 Gerasim Troeglazov <3deyes@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef FREERDP_CLIENT_HAIKU_VIEW_H
++#define FREERDP_CLIENT_HAIKU_VIEW_H
++
++#include <errno.h>
++#include <stdio.h>
++#include <string.h>
++
++#include <SupportDefs.h>
++#include <Bitmap.h>
++#include <String.h>
++#include <Font.h>
++#include <View.h>
++#include <Rect.h>
++#include <TranslationUtils.h>
++#include <TranslatorFormats.h>
++
++#include "haiku_freerdp.h"
++
++class RDPView : public BView 
++{
++ public:
++		RDPView(BRect rect);
++		RDPView(BRect rect, int width, int height);
++		~RDPView() { };
++
++		void 	Paint();
++		void 	SetInstance(freerdp *instance);
++		uint32	*GetBuffer();
++		uint32	GetBufferSize();
++		BPoint	GetLastMousePos() { return lastPos; };
++
++		int		Width() { return buffer_width; };
++		int		Height() { return buffer_height; };
++protected:
++		virtual void	Draw(BRect r);
++		virtual void 	MouseDown(BPoint p);
++ 		virtual void 	MouseUp(BPoint p);
++ 		virtual void 	MouseMoved(BPoint point, uint32 transit, const BMessage *message);
++ 		virtual void 	Pulse(void);
++ 		virtual void 	AttachedToWindow(void);
++
++private:
++		freerdp *instance;
++
++ 		int		buffer_width;
++ 		int		buffer_height;
++		BView	*bufferView;
++		BBitmap *bufferBitmap;
++		uint32  lastButtons;
++		BPoint	lastPos;
++		uint32	tickCount;
++		bool	showBar;
++		BFont 	font;
++		BString title;
++};
++
++#endif // FREERDP_CLIENT_HAIKU_VIEW_H
+diff --git a/client/Haiku/haiku_window.cpp b/client/Haiku/haiku_window.cpp
+new file mode 100644
+index 0000000..1c9f7a6
+--- /dev/null
++++ b/client/Haiku/haiku_window.cpp
+@@ -0,0 +1,181 @@
++/**
++ * FreeRDP: A Remote Desktop Protocol Implementation
++ *
++ * Copyright 2018-2022 Gerasim Troeglazov <3deyes@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "haiku_window.h"
++#include "haiku_clipboard.h"
++
++#include <Application.h>
++#include <Window.h>
++#include <Clipboard.h>
++
++static const uint32 haiku_scan_codes[] = {
++VK_ESCAPE, VK_F1, VK_F2, VK_F3, VK_F4, VK_F5,
++VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12, VK_PRINT, VK_SCROLL, 0,
++//////////
++VK_OEM_3,VK_KEY_1,VK_KEY_2,VK_KEY_3,VK_KEY_4,VK_KEY_5,VK_KEY_6,VK_KEY_7,VK_KEY_8,
++VK_KEY_9,VK_KEY_0,VK_OEM_MINUS,VK_OEM_PLUS,VK_BACK,VK_INSERT|KBDEXT,
++VK_HOME|KBDEXT,VK_PRIOR|KBDEXT,VK_NUMLOCK,VK_DIVIDE|KBDEXT,VK_MULTIPLY,VK_SUBTRACT,
++//////////
++VK_TAB,VK_KEY_Q,VK_KEY_W,VK_KEY_E,VK_KEY_R,VK_KEY_T,VK_KEY_Y,VK_KEY_U,VK_KEY_I,
++VK_KEY_O,VK_KEY_P,VK_OEM_4,VK_OEM_6,VK_OEM_5,VK_DELETE|KBDEXT,VK_END|KBDEXT,VK_NEXT|KBDEXT,
++VK_NUMPAD7,VK_NUMPAD8,VK_NUMPAD9,VK_ADD,
++//////////
++VK_CAPITAL,VK_KEY_A,VK_KEY_S,VK_KEY_D,VK_KEY_F,VK_KEY_G,VK_KEY_H,VK_KEY_J,VK_KEY_K,VK_KEY_L,VK_OEM_1,VK_OEM_7,VK_RETURN,
++VK_NUMPAD4,VK_NUMPAD5,VK_NUMPAD6,
++//////////
++VK_LSHIFT,VK_KEY_Z,VK_KEY_X,VK_KEY_C,VK_KEY_V,VK_KEY_B,VK_KEY_N,VK_KEY_M,VK_OEM_COMMA,VK_OEM_PERIOD,VK_OEM_2,
++VK_RSHIFT,VK_UP|KBDEXT,VK_NUMPAD1,VK_NUMPAD2,VK_NUMPAD3,VK_RETURN|KBDEXT,
++//////////
++VK_LCONTROL,VK_LMENU,VK_SPACE,VK_RMENU,VK_RCONTROL,VK_LEFT|KBDEXT,VK_DOWN|KBDEXT,VK_RIGHT|KBDEXT,VK_NUMPAD0,VK_DECIMAL,
++VK_LWIN|KBDEXT,VK_RWIN|KBDEXT,127,0
++};
++
++
++RDPWindow::RDPWindow(BRect frame, const char* title, freerdp *inst)
++	: BWindow(BRect(frame.left, frame.top, frame.right - 1, frame.bottom - 1), title,
++		B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL, B_NOT_RESIZABLE | B_NOT_ZOOMABLE)
++{
++	view = new RDPView(Bounds(), frame.Width(), frame.Height());
++	AddChild(view);
++	
++	SetInstance(inst);
++
++	be_clipboard->StartWatching(this);
++
++	SetPulseRate(100000);
++}
++
++RDPWindow::~RDPWindow()
++{
++	be_clipboard->StopWatching(this);
++}
++
++void
++RDPWindow::MessageReceived(BMessage *message)
++{
++	switch (message->what)
++	{
++		case B_UNMAPPED_KEY_DOWN:
++		case B_KEY_DOWN:
++		{
++			rdpInput* input = instance->input;
++
++			const char *bytes;
++			int32 key;
++			uint32 keycode;
++			message->FindInt32("key", &key);
++
++			keycode = haiku_scan_codes[(uint8)key-1];
++			DWORD scancode = GetVirtualScanCodeFromVirtualKeyCode(keycode, input->context->settings->KeyboardType);
++
++			if (scancode)
++				freerdp_input_send_keyboard_event_ex(input, TRUE, scancode);
++
++			break;
++		}
++		case B_UNMAPPED_KEY_UP:
++		case B_KEY_UP:
++		{
++			rdpInput* input = instance->input;
++
++			const char *bytes;
++			int32 key;
++			uint32 keycode;
++			message->FindInt32("key",&key);
++
++			keycode = haiku_scan_codes[(uint8)key-1];
++			DWORD scancode = GetVirtualScanCodeFromVirtualKeyCode(keycode, input->context->settings->KeyboardType);
++
++			if (scancode)
++				freerdp_input_send_keyboard_event_ex(input, FALSE, scancode);
++
++			break;
++		}
++		case B_MOUSE_WHEEL_CHANGED:
++			{
++				rdpInput* input = instance->input;
++		 		BPoint pos = view->GetLastMousePos();
++
++			 	float shift=0;
++				UINT16 flags;
++
++			 	flags = PTR_FLAGS_WHEEL;
++
++			 	if(message->FindFloat("be:wheel_delta_y",&shift)==B_OK) {
++		        	if(shift<0) {
++						flags |= 0x0078;
++		        	}
++					if(shift>0) {
++						flags |= PTR_FLAGS_WHEEL_NEGATIVE | 0x0088;
++			        }
++				}
++				input->MouseEvent(input, flags, pos.x, pos.y);
++				break;
++			}
++		case B_CLIPBOARD_CHANGED:
++			{
++				HaikuContext *hfc = (HaikuContext*)instance->context;
++
++				BMessage *clip = NULL;
++				const char *data = NULL;
++				ssize_t size = 0;
++
++				if(be_clipboard->Lock())
++				{
++					if((clip = be_clipboard->Data()))
++					{
++						if (clip->FindData("text/plain", B_MIME_TYPE, (const void**)&data, &size) == B_OK)
++						{
++							if (data != NULL && size > 0)
++							{
++								BString textString(data, size);
++								UINT32 formatId = ClipboardRegisterFormat(hfc->clipboard, "UTF8_STRING");
++								ClipboardSetData(hfc->clipboard, formatId, textString.String(), textString.Length() + 1);
++							}
++							else
++							{
++								ClipboardEmpty(hfc->clipboard);
++							}
++
++							haiku_cliprdr_send_client_format_list(hfc->cliprdr);
++						}
++					}
++					be_clipboard->Unlock();
++				}
++				break;
++			}
++		default:
++			BWindow::MessageReceived(message);
++			break;
++	}
++}
++
++
++void
++RDPWindow::SetInstance(freerdp *inst)
++{
++	instance = inst;
++	view->SetInstance(inst);
++}
++
++bool
++RDPWindow::QuitRequested()
++{
++	freerdp_abort_connect(instance);
++	return false;
++}
+diff --git a/client/Haiku/haiku_window.h b/client/Haiku/haiku_window.h
+new file mode 100644
+index 0000000..00e0c83
+--- /dev/null
++++ b/client/Haiku/haiku_window.h
+@@ -0,0 +1,51 @@
++/**
++ * FreeRDP: A Remote Desktop Protocol Implementation
++ *
++ * Copyright 2018-2022 Gerasim Troeglazov <3deyes@gmail.com>
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef FREERDP_CLIENT_HAIKU_WINDOW_H
++#define FREERDP_CLIENT_HAIKU_WINDOW_H
++
++#include <errno.h>
++#include <stdio.h>
++#include <string.h>
++
++#include <Application.h>
++#include <Window.h>
++#include <View.h>
++#include <OS.h>
++
++#include "haiku_freerdp.h"
++#include "haiku_view.h"
++
++class RDPWindow : public BWindow {
++	public:
++						RDPWindow(BRect rect, const char* name, freerdp *instance);
++		virtual			~RDPWindow();
++
++		virtual void 	MessageReceived(BMessage *message);
++		bool			QuitRequested();
++		
++		void 			SetInstance(freerdp *instance);
++		
++		RDPView			*view;
++	private:
++		freerdp 		*instance;
++};
++
++#endif // FREERDP_CLIENT_HAIKU_WINDOW_H
++
++
+diff --git a/config.h.in b/config.h.in
+index 650d5ad..ddb0f0b 100644
+--- a/config.h.in
++++ b/config.h.in
+@@ -67,6 +67,7 @@
+ #cmakedefine WITH_OPENCL
+ #cmakedefine WITH_MEDIA_FOUNDATION
+ #cmakedefine WITH_MEDIACODEC
++#cmakedefine WITH_MEDIA_KIT
+ 
+ #cmakedefine WITH_VAAPI
+ 
+diff --git a/libfreerdp/locale/keyboard.c b/libfreerdp/locale/keyboard.c
+index 4c5ae03..bed3980 100644
+--- a/libfreerdp/locale/keyboard.c
++++ b/libfreerdp/locale/keyboard.c
+@@ -128,7 +128,7 @@ static int freerdp_keyboard_init_x11_evdev(DWORD* keyboardLayoutId,
+ DWORD freerdp_keyboard_init(DWORD keyboardLayoutId)
+ {
+ 	DWORD keycode;
+-#if defined(__APPLE__) || defined(WITH_X11) || defined(WITH_WAYLAND)
++#if defined(__APPLE__) || defined(__HAIKU__) || defined(WITH_X11) || defined(WITH_WAYLAND)
+ 	int status = -1;
+ #endif
+ 
+@@ -137,7 +137,7 @@ DWORD freerdp_keyboard_init(DWORD keyboardLayoutId)
+ 		status = freerdp_keyboard_init_apple(&keyboardLayoutId, X11_KEYCODE_TO_VIRTUAL_SCANCODE);
+ #endif
+ 
+-#if defined(WITH_X11) || defined(WITH_WAYLAND)
++#if defined(WITH_X11) || defined(WITH_WAYLAND) || defined(__HAIKU__)
+ 
+ #ifdef WITH_XKBFILE
+ 	if (status < 0)
 diff --git a/winpr/include/winpr/winsock.h b/winpr/include/winpr/winsock.h
 index 1677609..7912ee5 100644
 --- a/winpr/include/winpr/winsock.h
@@ -21,18 +2202,57 @@ index 1677609..7912ee5 100644
  #include <winpr/error.h>
  #include <winpr/platform.h>
 diff --git a/winpr/libwinpr/CMakeLists.txt b/winpr/libwinpr/CMakeLists.txt
-index 2df8d89..ec47997 100644
+index 2df8d89..2e3886a 100644
 --- a/winpr/libwinpr/CMakeLists.txt
 +++ b/winpr/libwinpr/CMakeLists.txt
-@@ -78,7 +78,7 @@ macro (winpr_definition_add)
+@@ -77,7 +77,7 @@ macro (winpr_definition_add)
+      set (WINPR_DEFINITIONS ${WINPR_DEFINITIONS} PARENT_SCOPE)
  endmacro()
  
- set(CMAKE_REQUIRED_LIBRARIES rt)
--if (NOT IOS)
-+if (NOT IOS AND NOT HAIKU)
+-set(CMAKE_REQUIRED_LIBRARIES rt)
++#set(CMAKE_REQUIRED_LIBRARIES rt)
+ if (NOT IOS)
  	check_function_exists(timer_create TIMER_CREATE)
  	check_function_exists(timer_delete TIMER_DELETE)
- 	check_function_exists(timer_settime TIMER_SETTIME)
+@@ -85,7 +85,7 @@ if (NOT IOS)
+ 	check_function_exists(timer_gettime TIMER_GETTIME)
+ 	if (TIMER_CREATE AND TIMER_DELETE AND TIMER_SETTIME AND TIMER_GETTIME)
+ 			add_definitions(-DWITH_POSIX_TIMER)
+-		winpr_library_add_private(rt)
++#		winpr_library_add_private(rt)
+ 	endif()
+ endif()
+ 
+diff --git a/winpr/libwinpr/path/shell.c b/winpr/libwinpr/path/shell.c
+index 4bba4ec..b1db9d4 100644
+--- a/winpr/libwinpr/path/shell.c
++++ b/winpr/libwinpr/path/shell.c
+@@ -507,10 +507,24 @@ BOOL PathMakePathA(LPCSTR path, LPSECURITY_ATTRIBUTES lpAttributes)
+ 	for (p = dup; p;)
+ #endif
+ 	{
++		struct stat stat_info;
++		BOOL skip = FALSE;
++
+ 		if ((p = strchr(p + 1, delim)))
+ 			*p = '\0';
+ 
+-		if (mkdir(dup, 0777) != 0)
++		if (stat(dup, &stat_info) == 0)
++		{
++			if ((stat_info.st_mode & S_IFDIR) == 0)
++			{
++				result = FALSE;
++				break;
++			}
++
++			skip = TRUE;
++		}
++
++		if (!skip && mkdir(dup, 0777) != 0)
+ 			if (errno != EEXIST)
+ 			{
+ 				result = FALSE;
 diff --git a/winpr/libwinpr/synch/timer.c b/winpr/libwinpr/synch/timer.c
 index 4204f59..da78812 100644
 --- a/winpr/libwinpr/synch/timer.c
@@ -222,1710 +2442,6 @@ index 6b0c950..f94f8f9 100644
 -Libs.private: -ldl -lrt -lm -lpthread
 +Libs.private: -ldl -lnetwork -lm -lpthread
  Cflags: -I${includedir}
--- 
-2.37.3
-
-
-From cefdb60ef421fa85e9bfabc71913a57a55357153 Mon Sep 17 00:00:00 2001
-From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Wed, 21 Dec 2022 19:45:21 +1000
-Subject: shell: Do not try to make directories that already exist.
-
-
-diff --git a/winpr/libwinpr/path/shell.c b/winpr/libwinpr/path/shell.c
-index 4bba4ec..b1db9d4 100644
---- a/winpr/libwinpr/path/shell.c
-+++ b/winpr/libwinpr/path/shell.c
-@@ -507,10 +507,24 @@ BOOL PathMakePathA(LPCSTR path, LPSECURITY_ATTRIBUTES lpAttributes)
- 	for (p = dup; p;)
- #endif
- 	{
-+		struct stat stat_info;
-+		BOOL skip = FALSE;
-+
- 		if ((p = strchr(p + 1, delim)))
- 			*p = '\0';
- 
--		if (mkdir(dup, 0777) != 0)
-+		if (stat(dup, &stat_info) == 0)
-+		{
-+			if ((stat_info.st_mode & S_IFDIR) == 0)
-+			{
-+				result = FALSE;
-+				break;
-+			}
-+
-+			skip = TRUE;
-+		}
-+
-+		if (!skip && mkdir(dup, 0777) != 0)
- 			if (errno != EEXIST)
- 			{
- 				result = FALSE;
--- 
-2.37.3
-
-
-From 74da9d433ed054e66995fda2eb32d9d002d984a5 Mon Sep 17 00:00:00 2001
-From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Wed, 21 Dec 2022 19:46:16 +1000
-Subject: Add Haiku client.
-
-
-diff --git a/client/CMakeLists.txt b/client/CMakeLists.txt
-index af7606b..ec26961 100644
---- a/client/CMakeLists.txt
-+++ b/client/CMakeLists.txt
-@@ -54,6 +54,11 @@ if(FREERDP_VENDOR AND WITH_CLIENT)
- 		message(STATUS "Adding Android client")
- 		add_subdirectory(Android)
- 	endif()
-+
-+	if(HAIKU)
-+		message(STATUS "Adding Haiku client")
-+		add_subdirectory(Haiku)
-+	endif()
- endif()
- 
- # Pick up other clients
-diff --git a/client/Haiku/CMakeLists.txt b/client/Haiku/CMakeLists.txt
-new file mode 100644
-index 0000000..4df9959
---- /dev/null
-+++ b/client/Haiku/CMakeLists.txt
-@@ -0,0 +1,36 @@
-+# FreeRDP: A Remote Desktop Protocol Implementation
-+# FreeRDP Haiku UI cmake build script
-+#
-+# Copyright 2018 Gerasim Troeglazov <3dEyes@gmail.com>
-+#
-+# Licensed under the Apache License, Version 2.0 (the "License");
-+# you may not use this file except in compliance with the License.
-+# You may obtain a copy of the License at
-+#
-+#     http://www.apache.org/licenses/LICENSE-2.0
-+#
-+# Unless required by applicable law or agreed to in writing, software
-+# distributed under the License is distributed on an "AS IS" BASIS,
-+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+# See the License for the specific language governing permissions and
-+# limitations under the License.
-+
-+set(MODULE_NAME "FreeRDP")
-+set(MODULE_PREFIX "FREERDP_CLIENT_HAIKU")
-+set(CMAKE_POSITION_INDEPENDENT_CODE OFF)
-+
-+set(${MODULE_PREFIX}_SRCS
-+	FreeRDP.cpp MainWindow.cpp MainView.cpp)
-+
-+add_executable(${MODULE_NAME} ${${MODULE_PREFIX}_SRCS})
-+
-+set(${MODULE_PREFIX}_LIBS ${${MODULE_PREFIX}_LIBS} ${CMAKE_DL_LIBS})
-+set(${MODULE_PREFIX}_LIBS ${${MODULE_PREFIX}_LIBS} freerdp-client freerdp)
-+set(${MODULE_PREFIX}_LIBS ${${MODULE_PREFIX}_LIBS} be network media translation)
-+target_link_libraries(${MODULE_NAME} ${${MODULE_PREFIX}_LIBS})
-+
-+ADD_CUSTOM_COMMAND(TARGET ${MODULE_NAME} COMMAND rc -o Resources.rsrc ${CMAKE_CURRENT_SOURCE_DIR}/Resources.rdef COMMENT "Compiling resources")
-+ADD_CUSTOM_COMMAND(TARGET ${MODULE_NAME} COMMAND xres -o ${MODULE_NAME} Resources.rsrc COMMENT "Adding resources to executable")
-+ADD_CUSTOM_COMMAND(TARGET ${MODULE_NAME} COMMAND mimeset --all ${MODULE_NAME} COMMENT "Adjusting MIME types")
-+
-+set_property(TARGET ${MODULE_NAME} PROPERTY FOLDER "Client/Haiku")
-diff --git a/client/Haiku/FreeRDP.cpp b/client/Haiku/FreeRDP.cpp
-new file mode 100644
-index 0000000..6cc92d4
---- /dev/null
-+++ b/client/Haiku/FreeRDP.cpp
-@@ -0,0 +1,360 @@
-+/**
-+ * FreeRDP: A Remote Desktop Protocol Implementation
-+ * FreeRDP Haiku UI
-+ *
-+ * Copyright 2018 Gerasim Troeglazov
-+ * Copyright 2021 Haiku, Inc.
-+ *
-+ * Licensed under the Apache License, Version 2.0 (the "License");
-+ * you may not use this file except in compliance with the License.
-+ * You may obtain a copy of the License at
-+ *
-+ *     http://www.apache.org/licenses/LICENSE-2.0
-+ *
-+ * Unless required by applicable law or agreed to in writing, software
-+ * distributed under the License is distributed on an "AS IS" BASIS,
-+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+ * See the License for the specific language governing permissions and
-+ * limitations under the License.
-+ */
-+
-+#ifdef HAVE_CONFIG_H
-+#include "config.h"
-+#endif
-+
-+#include <Application.h>
-+#include <Window.h>
-+#include <SupportDefs.h>
-+#include <Bitmap.h>
-+#include <Screen.h>
-+#include <View.h>
-+#include <Rect.h>
-+
-+#include "MainWindow.h"
-+#include "MainView.h"
-+
-+#include <errno.h>
-+#include <stdio.h>
-+#include <string.h>
-+#include <sched.h>
-+
-+extern "C" {
-+
-+#include <freerdp/freerdp.h>
-+#include <freerdp/constants.h>
-+#include <freerdp/gdi/gdi.h>
-+#include <freerdp/client/file.h>
-+#include <freerdp/client/cmdline.h>
-+#include <freerdp/client/cliprdr.h>
-+#include <freerdp/client/channels.h>
-+#include <freerdp/channels/channels.h>
-+#include <freerdp/locale/keyboard.h>
-+
-+#include <winpr/crt.h>
-+#include <winpr/synch.h>
-+#include <freerdp/log.h>
-+
-+}
-+
-+#define TAG CLIENT_TAG("haiku")
-+
-+MainWindow *wnd = NULL;
-+
-+struct tf_context
-+{
-+	rdpContext _p;
-+};
-+typedef struct tf_context tfContext;
-+
-+static int tf_logon_error_info(freerdp* instance, UINT32 data, UINT32 type)
-+{
-+	const char* str_data = freerdp_get_logon_error_info_data(data);
-+	const char* str_type = freerdp_get_logon_error_info_type(type);
-+
-+	if (!instance || !instance->context)
-+		return -1;
-+
-+	WLog_INFO(TAG, "Logon Error Info %s [%s]", str_data, str_type);
-+	return 1;
-+}
-+
-+static BOOL tf_begin_paint(rdpContext* context)
-+{
-+	rdpGdi* gdi = context->gdi;
-+	gdi->primary->hdc->hwnd->invalid->null = TRUE;
-+	return TRUE;
-+}
-+
-+static BOOL tf_end_paint(rdpContext* context)
-+{
-+	rdpGdi* gdi = context->gdi;
-+
-+	if(wnd==NULL)
-+		return TRUE;
-+
-+	if (gdi->primary->hdc->hwnd->invalid->null)
-+		return TRUE;
-+
-+	char* data = (char*)wnd->fb->GetBuffer();
-+
-+	int x = gdi->primary->hdc->hwnd->invalid->x;
-+	int y = gdi->primary->hdc->hwnd->invalid->y;
-+	int w = gdi->primary->hdc->hwnd->invalid->w;
-+	int h = gdi->primary->hdc->hwnd->invalid->h;
-+
-+	for (int i = 0; i < h; i++)
-+	{
-+		memcpy(data + ((i + y) * (gdi->width * GetBytesPerPixel(
-+		                              gdi->dstFormat))) + x * GetBytesPerPixel(gdi->dstFormat),
-+		       gdi->primary_buffer + ((i + y) * (gdi->width * GetBytesPerPixel(
-+		                                  gdi->dstFormat))) + x * GetBytesPerPixel(gdi->dstFormat),
-+		       w * GetBytesPerPixel(gdi->dstFormat));
-+	}
-+
-+	wnd->fb->Paint();
-+
-+	return TRUE;
-+}
-+
-+static BOOL tf_pre_connect(freerdp* instance)
-+{
-+	rdpSettings* settings;
-+	settings = instance->settings;
-+	settings->OrderSupport[NEG_DSTBLT_INDEX] = TRUE;
-+	settings->OrderSupport[NEG_PATBLT_INDEX] = TRUE;
-+	settings->OrderSupport[NEG_SCRBLT_INDEX] = TRUE;
-+	settings->OrderSupport[NEG_OPAQUE_RECT_INDEX] = TRUE;
-+	settings->OrderSupport[NEG_DRAWNINEGRID_INDEX] = FALSE;
-+	settings->OrderSupport[NEG_MULTIDSTBLT_INDEX] = FALSE;
-+	settings->OrderSupport[NEG_MULTIPATBLT_INDEX] = FALSE;
-+	settings->OrderSupport[NEG_MULTISCRBLT_INDEX] = FALSE;
-+	settings->OrderSupport[NEG_MULTIOPAQUERECT_INDEX] = TRUE;
-+	settings->OrderSupport[NEG_MULTI_DRAWNINEGRID_INDEX] = FALSE;
-+	settings->OrderSupport[NEG_LINETO_INDEX] = TRUE;
-+	settings->OrderSupport[NEG_POLYLINE_INDEX] = TRUE;
-+	settings->OrderSupport[NEG_MEMBLT_INDEX] = TRUE;
-+	settings->OrderSupport[NEG_MEM3BLT_INDEX] = FALSE;
-+	settings->OrderSupport[NEG_SAVEBITMAP_INDEX] = FALSE;
-+	settings->OrderSupport[NEG_GLYPH_INDEX_INDEX] = FALSE;
-+	settings->OrderSupport[NEG_FAST_INDEX_INDEX] = FALSE;
-+	settings->OrderSupport[NEG_FAST_GLYPH_INDEX] = FALSE;
-+	settings->OrderSupport[NEG_POLYGON_SC_INDEX] = FALSE;
-+	settings->OrderSupport[NEG_POLYGON_CB_INDEX] = FALSE;
-+	settings->OrderSupport[NEG_ELLIPSE_SC_INDEX] = FALSE;
-+	settings->OrderSupport[NEG_ELLIPSE_CB_INDEX] = FALSE;
-+
-+	if (settings->Fullscreen) {
-+		BScreen screen;
-+		settings->DesktopWidth = (UINT32) screen.Frame().right + 1;
-+		settings->DesktopHeight = (UINT32) screen.Frame().bottom + 1;
-+	}
-+
-+	return TRUE;
-+}
-+
-+static BOOL tf_post_connect(freerdp* instance)
-+{
-+	rdpGdi* gdi;
-+	rdpContext* context;
-+	rdpSettings* settings;
-+
-+	context = ((rdpContext*) instance->context);
-+
-+	if (!gdi_init(instance, PIXEL_FORMAT_BGRA32))
-+		return FALSE;
-+
-+	gdi = instance->context->gdi;
-+	settings = instance->settings;
-+
-+	instance->update->BeginPaint = tf_begin_paint;
-+	instance->update->EndPaint = tf_end_paint;
-+
-+	if(wnd==NULL) {
-+		char wndTitle[256]={"FreeRDP"};
-+
-+		BRect rect = BRect(50, 50, 50 + gdi->width, 50 + gdi->height);
-+		if (settings->Fullscreen) {
-+			rect = BRect(0, 0, gdi->width, gdi->height);
-+		}
-+		if (settings->WindowTitle != NULL)
-+			snprintf(wndTitle, 255, "%s", settings->WindowTitle);
-+		else if (settings->ServerPort == 3389)
-+			snprintf(wndTitle, 255, "FreeRDP: %s", settings->ServerHostname);
-+		else
-+			snprintf(wndTitle, 255, "FreeRDP: %S:%u", settings->ServerHostname, settings->ServerPort);
-+
-+		wnd = new MainWindow(rect, wndTitle, instance);
-+		wnd->Show();
-+	}
-+	return TRUE;
-+}
-+
-+static void tf_post_disconnect(freerdp* instance)
-+{
-+	rdpContext* context;
-+
-+	if (!instance)
-+		return;
-+
-+	if (!instance->context)
-+		return;
-+
-+	context = (rdpContext*) instance->context;
-+	gdi_free(instance);
-+
-+	if (wnd!=NULL) {
-+		wnd->Lock();
-+		wnd->Quit();
-+	}
-+}
-+
-+static DWORD WINAPI tf_haiku_app_thread_proc(LPVOID arg)
-+{
-+	BApplication app("application/x-vnd.freerdp");
-+	*(BOOL*)arg = TRUE;
-+	app.Run();
-+
-+	ExitThread(0);
-+	return 0;
-+}
-+
-+
-+static DWORD WINAPI tf_client_thread_proc(LPVOID arg)
-+{
-+	rdpContext* context = (rdpContext*)arg;
-+	freerdp* instance = context->instance;
-+	DWORD nCount;
-+	DWORD status;
-+	HANDLE handles[64];
-+
-+	if (!freerdp_connect(instance))
-+	{
-+		WLog_ERR(TAG, "connection failure");
-+		return 0;
-+	}
-+
-+	while (!freerdp_shall_disconnect(instance))
-+	{
-+		nCount = freerdp_get_event_handles(instance->context, &handles[0], 64);
-+
-+		if (nCount == 0)
-+		{
-+			WLog_ERR(TAG, "%s: freerdp_get_event_handles failed", __FUNCTION__);
-+			break;
-+		}
-+
-+		status = WaitForMultipleObjects(nCount, handles, FALSE, INFINITE);
-+
-+		if (status == WAIT_FAILED)
-+		{
-+			WLog_ERR(TAG, "%s: WaitForMultipleObjects failed with %" PRIu32"", __FUNCTION__,
-+			         status);
-+			break;
-+		}
-+
-+		if (!freerdp_check_event_handles(instance->context))
-+		{
-+			if (client_auto_reconnect(instance))
-+				continue;
-+			else
-+			{
-+				if (freerdp_error_info(instance) == 0)
-+					status = 42;
-+			}
-+
-+			if (freerdp_get_last_error(instance->context) == FREERDP_ERROR_SUCCESS)
-+				WLog_ERR(TAG, "Failed to check FreeRDP file descriptor");
-+
-+			break;
-+		}
-+	}
-+
-+	freerdp_disconnect(instance);
-+	ExitThread(0);
-+	return 0;
-+}
-+
-+
-+static BOOL tf_client_new(freerdp* instance, rdpContext* context)
-+{
-+	tfContext* tf = (tfContext*)context;
-+
-+	if (!instance || !context)
-+		return FALSE;
-+
-+	instance->PreConnect = tf_pre_connect;
-+	instance->PostConnect = tf_post_connect;
-+	instance->PostDisconnect = tf_post_disconnect;
-+	instance->Authenticate = client_cli_authenticate;
-+	instance->GatewayAuthenticate = client_cli_gw_authenticate;
-+	instance->VerifyCertificateEx = client_cli_verify_certificate_ex;
-+	instance->VerifyChangedCertificateEx = client_cli_verify_changed_certificate_ex;
-+	instance->PresentGatewayMessage = client_cli_present_gateway_message;
-+	instance->LogonErrorInfo = tf_logon_error_info;
-+
-+	return TRUE;
-+}
-+
-+
-+static int RdpClientEntry(RDP_CLIENT_ENTRY_POINTS* pEntryPoints)
-+{
-+	ZeroMemory(pEntryPoints, sizeof(RDP_CLIENT_ENTRY_POINTS));
-+	pEntryPoints->Version = RDP_CLIENT_INTERFACE_VERSION;
-+	pEntryPoints->Size = sizeof(RDP_CLIENT_ENTRY_POINTS_V1);
-+	pEntryPoints->ContextSize = sizeof(tfContext);
-+	pEntryPoints->ClientNew = tf_client_new;
-+	return 0;
-+}
-+
-+
-+int main(int argc, char* argv[])
-+{
-+	int rc = -1;
-+	int status;
-+	HANDLE appThread, clientThread;
-+	RDP_CLIENT_ENTRY_POINTS clientEntryPoints;
-+	rdpContext* context;
-+	rdpSettings* settings;
-+	BOOL appThreadReady = FALSE;
-+
-+	RdpClientEntry(&clientEntryPoints);
-+	context = freerdp_client_context_new(&clientEntryPoints);
-+	if (!context)
-+		goto fail;
-+	settings = context->settings;
-+
-+	status = freerdp_client_settings_parse_command_line(settings, argc, argv, FALSE);
-+	if (status)
-+	{
-+		rc = freerdp_client_settings_command_line_status_print(settings, status, argc, argv);
-+		goto fail;
-+	}
-+
-+	if (!(appThread = CreateThread(NULL, 0, tf_haiku_app_thread_proc, &appThreadReady, 0, NULL)))
-+	{
-+		WLog_ERR(TAG, "Failed to create app thread");
-+	}
-+	while (!appThreadReady)
-+		sched_yield();
-+
-+	if (freerdp_client_start(context) != 0)
-+		goto fail;
-+
-+	if (!(clientThread = CreateThread(NULL, 0, tf_client_thread_proc, context, 0, NULL)))
-+	{
-+		WLog_ERR(TAG, "Failed to create client thread");
-+	}
-+	else
-+	{
-+		WaitForSingleObject(clientThread, INFINITE);
-+	}
-+
-+	if (freerdp_client_stop(context) != 0)
-+		rc = -1;
-+	else
-+		rc = 0;
-+
-+fail:
-+	freerdp_client_context_free(context);
-+	return rc;
-+}
-diff --git a/client/Haiku/MainView.cpp b/client/Haiku/MainView.cpp
-new file mode 100644
-index 0000000..9dd50b2
---- /dev/null
-+++ b/client/Haiku/MainView.cpp
-@@ -0,0 +1,235 @@
-+/*
-+ * Copyright 2021 Gerasim Troeglazov. All rights reserved.
-+ * Distributed under the terms of the MIT license.
-+ */
-+
-+#include "MainWindow.h"
-+#include "MainView.h"
-+
-+
-+FBView::FBView(BRect rect) :
-+	BView(rect, "FBView", B_FOLLOW_ALL, B_WILL_DRAW|B_PULSE_NEEDED|B_FRAME_EVENTS),
-+	showBar(false)
-+{
-+	FBView(rect, rect.IntegerWidth(), rect.IntegerHeight());
-+}
-+
-+FBView::FBView(BRect rect, int width, int height) :
-+	BView(rect, "FBView", B_FOLLOW_ALL, B_WILL_DRAW|B_PULSE_NEEDED|B_FRAME_EVENTS),
-+	showBar(false)
-+{
-+	buffer_width = width;
-+	buffer_height = height;
-+	lastButtons = 0;
-+
-+	BRect	fbRect = BRect(0,0,buffer_width-1,buffer_height-1);
-+	bufferView = new BView(fbRect, "bufferView", B_FOLLOW_ALL_SIDES, 0);
-+	bufferBitmap = new BBitmap(fbRect, B_RGB32, true);
-+	bufferBitmap->AddChild(bufferView);
-+
-+	font = be_bold_font;
-+	font.SetSize(14);
-+	SetFont(&font, B_FONT_ALL);
-+
-+	title = BString("FreeRDP");
-+
-+	//printf("BTranslationUtils::GetBitmap\n");
-+	//closeBitmap = BTranslationUtils::GetBitmapFile("/NoIndex64/Public/FreeRDP/client/Haiku/images/close.png");
-+	//printf("W:%f H:%f\n", closeBitmap->Bounds().Width(), closeBitmap->Bounds().Height());
-+	//zoomBitmap = new BBitmap(BRect(0,0,16,16),B_RGB32);//BTranslationUtils::GetBitmap(B_PNG_FORMAT, "zoom.png");
-+}
-+
-+FBView::~FBView()
-+{
-+	//delete closeBitmap;
-+	//delete zoomBitmap;
-+}
-+
-+void
-+FBView::AttachedToWindow(void)
-+{
-+	tickCount = 0;
-+}
-+
-+void
-+FBView::Pulse(void)
-+{
-+	uint32 dx = Bounds().Width() / 3;
-+	uint32 h = showBar?20:2;
-+	if (lastPos.y >= 0 && lastPos.y < h && lastPos.x > dx && lastPos.x < dx * 2 ) {
-+		tickCount++;
-+		if(tickCount > 5) {
-+			showBar = true;
-+			Invalidate();
-+		}
-+		return;
-+	}
-+	if(showBar) {
-+		showBar = false;
-+		Invalidate();
-+	}
-+	tickCount = 0;
-+}
-+
-+void
-+FBView::SetInstance(freerdp *inst)
-+{
-+	instance = inst;
-+	title.SetTo(Window()->Title());
-+}
-+
-+BPoint
-+FBView::GetLastMousePos()
-+{
-+	return lastPos;
-+}
-+
-+void FBView::MouseMoved(BPoint p, uint32 transit,const BMessage *message)
-+{
-+	rdpInput* input = instance->input;
-+	switch(transit)
-+	 {
-+	 	case B_INSIDE_VIEW:
-+	 	case B_ENTERED_VIEW:
-+	 		{
-+	 			input->MouseEvent(input, PTR_FLAGS_MOVE, p.x, p.y);
-+	 			tickCount = 0;
-+	 			break;
-+	 		}
-+	 	case B_EXITED_VIEW:
-+	 		break;
-+	 	case B_OUTSIDE_VIEW:
-+	 		break;
-+	 }
-+	lastPos = p;
-+}
-+
-+void FBView::MouseDown(BPoint p)
-+{
-+	rdpInput* input = instance->input;
-+
-+	uint32 dx = Bounds().Width() / 3;
-+	uint32 h = showBar?20:2;
-+
-+	uint32 buttons = Window()->CurrentMessage()->FindInt32("buttons");
-+	int32 clicks = Window()->CurrentMessage()->FindInt32("clicks");
-+	int flags = PTR_FLAGS_DOWN;
-+
-+	if (buttons & B_PRIMARY_MOUSE_BUTTON)
-+			flags |= PTR_FLAGS_BUTTON1;
-+	if (buttons & B_SECONDARY_MOUSE_BUTTON)
-+			flags |= PTR_FLAGS_BUTTON2;
-+	if (buttons & B_TERTIARY_MOUSE_BUTTON)
-+			flags |= PTR_FLAGS_BUTTON2;
-+
-+	if (showBar && buttons & B_PRIMARY_MOUSE_BUTTON) {
-+		BRect closeButtonRect(dx + 3, 3, dx + h - 3, h - 3);
-+		if (closeButtonRect.Contains(p)) {
-+			freerdp_abort_connect(instance);
-+		} else if(clicks == 2) {
-+			Window()->Minimize(true);
-+			flags = 0;
-+		}
-+	}
-+
-+	if (flags != 0)
-+		input->MouseEvent(input, flags, p.x, p.y);
-+
-+	lastPos = p;
-+	lastButtons = buttons;
-+}
-+
-+void FBView::MouseUp(BPoint p)
-+{
-+	rdpInput* input = instance->input;
-+
-+	uint32 buttons = Window()->CurrentMessage()->FindInt32("buttons");
-+	int flags = 0;
-+
-+	if ((buttons ^ lastButtons) & B_PRIMARY_MOUSE_BUTTON)
-+			flags |= PTR_FLAGS_BUTTON1;
-+	if ((buttons ^ lastButtons) & B_SECONDARY_MOUSE_BUTTON)
-+			flags |= PTR_FLAGS_BUTTON2;
-+	if ((buttons ^lastButtons) & B_TERTIARY_MOUSE_BUTTON)
-+			flags |= PTR_FLAGS_BUTTON2;
-+
-+	if (flags != 0)
-+		input->MouseEvent(input, flags, p.x, p.y);
-+
-+	lastPos = p;
-+	lastButtons = buttons;
-+}
-+
-+void
-+FBView::Draw(BRect r)
-+{
-+	uint32 dx = Bounds().Width() / 3;
-+	uint32 h = showBar?20:2;
-+
-+	DrawBitmap(bufferBitmap, r, r);
-+	if (showBar) {
-+		BRect r(dx, -1, dx * 2, h);
-+		SetDrawingMode(B_OP_COPY);
-+
-+		SetHighColor(255, 203, 0);
-+		SetLowColor(255, 203, 0);
-+		FillRect(r);
-+		SetHighColor(179, 143, 0);
-+		SetLowColor(179, 143, 0);
-+		StrokeRect(r);
-+
-+		SetDrawingMode(B_OP_ALPHA);
-+		BRect closeButtonRect(dx + 3, 3, dx + h - 3, h - 3);
-+		StrokeRect(closeButtonRect);
-+		//DrawBitmap(closeBitmap, BPoint(dx + 3, 3));
-+
-+		SetHighColor(0, 0, 0);
-+		SetLowColor(0, 0, 0);
-+		float width = font.StringWidth(title);
-+		DrawString(title, BPoint(Bounds().Width()/2 - width/2, 16));
-+	}
-+}
-+
-+void
-+FBView::Paint()
-+{
-+  if(LockLooper())	{
-+ 	 bufferView->LockLooper();
-+ 	 SetDrawingMode(B_OP_COPY);
-+	 DrawBitmap(bufferBitmap);//, bufferView->Bounds(), Bounds());
-+	 bufferView->UnlockLooper();
-+	 UnlockLooper();
-+	}
-+}
-+
-+uint32 *
-+FBView::GetBuffer()
-+{
-+	if(bufferBitmap) {
-+		return (uint32*)bufferBitmap->Bits();
-+	}
-+	return NULL;
-+}
-+
-+uint32
-+FBView::GetBufferSize()
-+{
-+	if(bufferBitmap) {
-+		return bufferBitmap->BitsLength()/4;
-+	}
-+	return 0;
-+}
-+
-+int
-+FBView::Width()
-+{
-+	return buffer_width;
-+}
-+
-+int
-+FBView::Height()
-+{
-+	return buffer_height;
-+}
-+
-+
-diff --git a/client/Haiku/MainView.h b/client/Haiku/MainView.h
-new file mode 100644
-index 0000000..8597c85
---- /dev/null
-+++ b/client/Haiku/MainView.h
-@@ -0,0 +1,74 @@
-+#ifndef _H_FBVIEW_
-+#define _H_FBVIEW_
-+
-+#include <errno.h>
-+#include <stdio.h>
-+#include <string.h>
-+
-+extern "C" {
-+
-+#include <freerdp/freerdp.h>
-+#include <freerdp/constants.h>
-+#include <freerdp/gdi/gdi.h>
-+#include <freerdp/client/file.h>
-+#include <freerdp/client/cmdline.h>
-+#include <freerdp/client/cliprdr.h>
-+#include <freerdp/client/channels.h>
-+#include <freerdp/channels/channels.h>
-+#include <freerdp/locale/keyboard.h>
-+
-+#include <winpr/crt.h>
-+#include <winpr/synch.h>
-+#include <freerdp/log.h>
-+
-+}
-+
-+#include <SupportDefs.h>
-+#include <Bitmap.h>
-+#include <String.h>
-+#include <Font.h>
-+#include <View.h>
-+#include <Rect.h>
-+#include <TranslationUtils.h>
-+#include <TranslatorFormats.h>
-+
-+class FBView : public BView 
-+{
-+ public:
-+		FBView(BRect rect);
-+		FBView(BRect rect, int width, int height);
-+		~FBView();
-+		
-+		void 	Paint();
-+		void 	SetInstance(freerdp *instance);
-+		uint32	*GetBuffer();
-+		uint32	GetBufferSize();
-+		BPoint	GetLastMousePos();
-+		
-+		int		Width();
-+		int		Height();
-+protected:
-+		virtual void	Draw(BRect r);
-+		virtual void 	MouseDown(BPoint p);
-+ 		virtual void 	MouseUp(BPoint p);
-+ 		virtual void 	MouseMoved(BPoint point, uint32 transit, const BMessage *message);
-+ 		virtual void 	Pulse(void);
-+ 		virtual void 	AttachedToWindow(void);
-+
-+private:
-+ 		int		buffer_width;
-+ 		int		buffer_height;
-+		BView	*bufferView;
-+		BBitmap *bufferBitmap;
-+		BBitmap *closeBitmap;
-+		BBitmap *zoomBitmap;
-+		uint32  lastButtons;
-+		BPoint	lastPos;
-+		freerdp *instance;
-+		uint32	tickCount;
-+		bool	showBar;
-+		BFont 	font;
-+		BString title;
-+};
-+
-+#endif
-diff --git a/client/Haiku/MainWindow.cpp b/client/Haiku/MainWindow.cpp
-new file mode 100644
-index 0000000..7718e3b
---- /dev/null
-+++ b/client/Haiku/MainWindow.cpp
-@@ -0,0 +1,129 @@
-+#include <Application.h>
-+#include <Window.h>
-+#include "MainWindow.h"
-+
-+static const uint32 be_to_scan_codes[] = {
-+VK_ESCAPE, VK_F1, VK_F2, VK_F3, VK_F4, VK_F5,
-+VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12, VK_PRINT, VK_SCROLL, 0,
-+//////////
-+VK_OEM_3,VK_KEY_1,VK_KEY_2,VK_KEY_3,VK_KEY_4,VK_KEY_5,VK_KEY_6,VK_KEY_7,VK_KEY_8,
-+VK_KEY_9,VK_KEY_0,VK_OEM_MINUS,VK_OEM_PLUS,VK_BACK,VK_INSERT|KBDEXT,
-+VK_HOME|KBDEXT,VK_PRIOR|KBDEXT,VK_NUMLOCK,VK_DIVIDE|KBDEXT,VK_MULTIPLY,VK_SUBTRACT,
-+//////////
-+VK_TAB,VK_KEY_Q,VK_KEY_W,VK_KEY_E,VK_KEY_R,VK_KEY_T,VK_KEY_Y,VK_KEY_U,VK_KEY_I,
-+VK_KEY_O,VK_KEY_P,VK_OEM_4,VK_OEM_6,VK_OEM_5,VK_DELETE|KBDEXT,VK_END|KBDEXT,VK_NEXT|KBDEXT,
-+VK_NUMPAD7,VK_NUMPAD8,VK_NUMPAD9,VK_ADD,
-+//////////
-+VK_CAPITAL,VK_KEY_A,VK_KEY_S,VK_KEY_D,VK_KEY_F,VK_KEY_G,VK_KEY_H,VK_KEY_J,VK_KEY_K,VK_KEY_L,VK_OEM_1,VK_OEM_7,VK_RETURN,
-+VK_NUMPAD4,VK_NUMPAD5,VK_NUMPAD6,
-+//////////
-+VK_LSHIFT,VK_KEY_Z,VK_KEY_X,VK_KEY_C,VK_KEY_V,VK_KEY_B,VK_KEY_N,VK_KEY_M,VK_OEM_COMMA,VK_OEM_PERIOD,VK_OEM_2,
-+VK_RSHIFT,VK_UP|KBDEXT,VK_NUMPAD1,VK_NUMPAD2,VK_NUMPAD3,VK_RETURN|KBDEXT,
-+//////////
-+VK_LCONTROL,VK_LMENU,VK_SPACE,VK_RMENU,VK_RCONTROL,VK_LEFT|KBDEXT,VK_DOWN|KBDEXT,VK_RIGHT|KBDEXT,VK_NUMPAD0,VK_DECIMAL,
-+VK_LWIN|KBDEXT,VK_RWIN|KBDEXT,127,0
-+};
-+
-+
-+MainWindow::MainWindow(BRect frame, const char* title, freerdp *inst)
-+	: BWindow(frame, title, B_TITLED_WINDOW_LOOK,B_NORMAL_WINDOW_FEEL,B_NOT_RESIZABLE|B_NOT_ZOOMABLE)
-+{
-+	fb = new FBView(Bounds(), frame.Width(),frame.Height());
-+	AddChild(fb);
-+	SetInstance(inst);
-+	SetPulseRate(100000);
-+}
-+
-+
-+MainWindow::~MainWindow()
-+{
-+}
-+
-+void
-+MainWindow::MessageReceived(BMessage *message)
-+{
-+	switch(message->what) {
-+		case B_UNMAPPED_KEY_DOWN:
-+		case B_KEY_DOWN:
-+		{
-+			rdpInput* input = instance->input;
-+
-+			const char *bytes;
-+			int32 key;
-+			uint32 keycode;
-+			message->FindInt32("key",&key);
-+			keycode = be_to_scan_codes[(uint8)key-1];
-+			DWORD scancode = GetVirtualScanCodeFromVirtualKeyCode(keycode, input->context->settings->KeyboardType);
-+
-+			if (scancode)
-+				freerdp_input_send_keyboard_event_ex(input, TRUE, scancode);
-+
-+			break;
-+		}
-+		case B_UNMAPPED_KEY_UP:
-+		case B_KEY_UP:
-+		{
-+			rdpInput* input = instance->input;
-+
-+			const char *bytes;
-+			int32 key;
-+			uint32 keycode;
-+			message->FindInt32("key",&key);
-+			keycode = be_to_scan_codes[(uint8)key-1];
-+			DWORD scancode = GetVirtualScanCodeFromVirtualKeyCode(keycode, input->context->settings->KeyboardType);
-+
-+			if (scancode)
-+				freerdp_input_send_keyboard_event_ex(input, FALSE, scancode);
-+
-+			break;
-+		}
-+		case B_MOUSE_WHEEL_CHANGED:
-+			{
-+				rdpInput* input = instance->input;
-+		 		BPoint pos = fb->GetLastMousePos();
-+
-+			 	float shift=0;
-+				UINT16 flags;
-+
-+			 	flags = PTR_FLAGS_WHEEL;
-+
-+			 	if(message->FindFloat("be:wheel_delta_y",&shift)==B_OK) {
-+		        	if(shift<0) {
-+						flags |= 0x0078;
-+		        	}
-+					if(shift>0) {
-+						flags |= PTR_FLAGS_WHEEL_NEGATIVE | 0x0088;
-+			        }
-+				}
-+				input->MouseEvent(input, flags, pos.x, pos.y);
-+				break;
-+			}
-+//		case B_CLIPBOARD_CHANGED:
-+//			{
-+//			 break;
-+//			}
-+		case B_WINDOW_ACTIVATED:
-+		case B_WORKSPACE_ACTIVATED:
-+			{
-+			 break;
-+			}
-+		default:
-+			BWindow::MessageReceived(message);
-+			break;
-+	}
-+}
-+
-+
-+void
-+MainWindow::SetInstance(freerdp *inst)
-+{
-+	instance = inst;
-+	fb->SetInstance(inst);
-+}
-+
-+bool
-+MainWindow::QuitRequested()
-+{
-+	freerdp_abort_connect(instance);
-+	return false;
-+}
-diff --git a/client/Haiku/MainWindow.h b/client/Haiku/MainWindow.h
-new file mode 100644
-index 0000000..709a2c0
---- /dev/null
-+++ b/client/Haiku/MainWindow.h
-@@ -0,0 +1,50 @@
-+#ifndef _TEST_WINDOW_H
-+#define _TEST_WINDOW_H
-+
-+#include <errno.h>
-+#include <stdio.h>
-+#include <string.h>
-+
-+extern "C" {
-+
-+#include <freerdp/freerdp.h>
-+#include <freerdp/constants.h>
-+#include <freerdp/gdi/gdi.h>
-+#include <freerdp/client/file.h>
-+#include <freerdp/client/cmdline.h>
-+#include <freerdp/client/cliprdr.h>
-+#include <freerdp/client/channels.h>
-+#include <freerdp/channels/channels.h>
-+#include <freerdp/locale/keyboard.h>
-+
-+#include <winpr/crt.h>
-+#include <winpr/synch.h>
-+#include <freerdp/log.h>
-+
-+}
-+
-+#include <Application.h>
-+#include <Window.h>
-+#include <View.h>
-+#include <OS.h>
-+
-+#include "MainView.h"
-+
-+class MainWindow : public BWindow {
-+	public:
-+						MainWindow(BRect rect, const char* name, freerdp *instance);
-+		virtual			~MainWindow();
-+
-+		virtual void 	MessageReceived(BMessage *message);
-+		bool			QuitRequested();
-+		
-+		void 			SetInstance(freerdp *instance);
-+		
-+		FBView			*fb;
-+	private:
-+		freerdp 		*instance;
-+};
-+
-+#endif
-+
-+
-diff --git a/client/Haiku/ModuleOptions.cmake b/client/Haiku/ModuleOptions.cmake
-new file mode 100644
-index 0000000..130bfa1
---- /dev/null
-+++ b/client/Haiku/ModuleOptions.cmake
-@@ -0,0 +1,4 @@
-+
-+set(FREERDP_CLIENT_NAME "hfreerdp")
-+set(FREERDP_CLIENT_PLATFORM "Haiku")
-+set(FREERDP_CLIENT_VENDOR "FreeRDP")
-diff --git a/client/Haiku/Resources.rdef b/client/Haiku/Resources.rdef
-new file mode 100644
-index 0000000..86dd149
---- /dev/null
-+++ b/client/Haiku/Resources.rdef
-@@ -0,0 +1,55 @@
-+/*
-+ * Resources.rdef
-+ */
-+
-+resource app_signature "application/x-vnd.freerdp";
-+
-+resource app_flags B_MULTIPLE_LAUNCH;
-+
-+resource app_version {
-+	major  = 2,
-+	middle = 0,
-+	minor  = 0,
-+	variety = 0,
-+	internal = 0,
-+	short_info = "FreeRDP",
-+	long_info = "FreeRDP"
-+};
-+
-+resource(1, "close.png") #'PNG ' import "images/close.png";
-+resource(2, "zoom.png") #'PNG ' import "images/zoom.png";
-+
-+resource vector_icon {
-+	$"6E6369662803010000020016023CC7ED389BBFBA16553E39AF4977C842ADC700"
-+	$"FFFFD3020016023C529D3753A2B8966F3D9D074B6044496AAF0047FFA0020016"
-+	$"02BC4E75BC411A3C90D9BCA00C47587D4ABA850090FFD40200160238313C3B5C"
-+	$"F0BFCD953C7AAB4C13943FCAF901ECFFC3054B04016B020006033E2F99387F17"
-+	$"BA42DC3FF5B84A0E32482C90001D1E2C3D454658FF010101020006023879063B"
-+	$"8224BE2CC73B10D94A1F6F49B89400242222FF9A9A9A020006033C69A6000000"
-+	$"0000003E186148800049800000D4CECE58F3F3F3FFD9D9D90389FF0005000500"
-+	$"0500030100000500033A3A4303F46E0C03010000020016023CC7ED389BBFBA16"
-+	$"553E39AF4977C842ADC700FFFFD3020006023C529D3753A2B8966F3D9D074B60"
-+	$"44496AAF00474747FFA5A0A002001602BC4E75BC411A3C90D9BCA00C47587D4A"
-+	$"BA850090FFD40200160238313C3B5CF0BFCD953C7AAB4C13943FCAF901ECFFC3"
-+	$"054B04017E020006033E2F99387F17BA42DC3FF5B84A0E32482C90001D1E2C3D"
-+	$"454658FF010101020006023879063B8224BE2CC73B10D94A1F6F49B894002422"
-+	$"22FF9A9A9A020006033C69A60000000000003E186148800049800000D4CECE58"
-+	$"F3F3F3FFD9D9D9038AFF01050005000500030100000500033A3A43033A3A4303"
-+	$"0100000300AAFF0300FF0003FFAA002200000A062228224A485E525252302C22"
-+	$"0A042228483852302C220A044838485E525252300A042228224A485E48380A04"
-+	$"453A45572446242C0A04B560442446242CB569B8200A0445544557244626440A"
-+	$"0438263D234E28492C080438263D234E284E2E0A03492C4E284E2E0802425843"
-+	$"C9830A06486054606052CA1BC5B95C4D524800000A0430303050505050300000"
-+	$"000000000A04B570B86DB57DC12FC17CC729C17CBD8F0A062228224A485E5252"
-+	$"52302C220A062228224A485E525252302C220A042228483852302C220A044838"
-+	$"485E525252300A042228224A485E48380A042228224A485E48380A04453A4557"
-+	$"2446242C0A04B560442446242CB569B8200A04B560442446242CB569B8200A04"
-+	$"45544557244626440A0438263D234E28492C080438263D234E284E2E0A03492C"
-+	$"4E284E2E0802425843C9830A04B570B86DB57DC12FC17CC729C17CBD8F0F0A06"
-+	$"010C000A0001091001178400040A040108000A05010A000A0001011001178400"
-+	$"040A010102000A03020405000A080106000A090107000A0A010B1815FF011782"
-+	$"20040A020103000A110112023E00150000000000003E260D42CEDE44B6B40A26"
-+	$"0112023E21EE0000000000003E260D483363471B5A0A250112023E0015000000"
-+	$"0000003E260D42CEDE482DAD0A270112023E21EE0000000000003E41BA483363"
-+	$"4901E6"
-+};
-diff --git a/client/Haiku/images/close.png b/client/Haiku/images/close.png
-new file mode 100644
-index 0000000000000000000000000000000000000000..584d790923a6dc766842e4baa2227f64aadf8d69
-GIT binary patch
-literal 163
-zcmeAS@N?(olHy`uVBq!ia0vp^0wB!61SBU+%rFB|S)MMAAsQ2>UNYosP~dTU*#5C1
-z?&xHT3L*8qvmS)Rs^%_~Q2YFsS$|1!`it3(se32J%wO~`Wl79&Ge*bW6bJsAT;5qx
-zyj8p8Sia;7Tn;+p{rlF+C$9^_wg>sMZ`w6A=~t~(WG?TLi_iZua`!Yw+VW_I0BvRP
-MboFyt=akR{0P0ga`Tzg`
-
-literal 0
-HcmV?d00001
-
-diff --git a/client/Haiku/images/zoom.png b/client/Haiku/images/zoom.png
-new file mode 100644
-index 0000000000000000000000000000000000000000..4b796324247432ac5b5a9c595daf97cf4c2e33ab
-GIT binary patch
-literal 248
-zcmV<U00;kxP)<h;3K|Lk000e1NJLTq000mG000mO0ssI2kdbIM0002LNkl<ZD3O(s
-zy$!-J5Jq267GWP(v{cm0zzoo(VFHSzz!DWpumClLCZPxtwnGu;NB)V#$%Spbr~7o5
-zocF{^tdIU@3W)6kRq}nJ%Hbl5jP?^2d>T~(m?k3lv=wGL_)S2bcK<~Zn+v+O$JD4w
-z=7(6M7ckPgvJNZ)kve)5dRo^uk}R^|9$dN;gjfxLl)0OGO6v+p-R=0fr%y=TVb9RL
-y(0D?Gwt^cePMdcmQk({o_O=|SbiIe?JE<RZxEtBM=8k#*0000<MNUMnLSTYJn`goR
-
-literal 0
-HcmV?d00001
-
--- 
-2.37.3
-
-
-From 80e12229b839108934b716aba5c83fee9d556729 Mon Sep 17 00:00:00 2001
-From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Wed, 21 Dec 2022 20:13:01 +1000
-Subject: Use posix timer
-
-
-diff --git a/winpr/libwinpr/CMakeLists.txt b/winpr/libwinpr/CMakeLists.txt
-index ec47997..2e3886a 100644
---- a/winpr/libwinpr/CMakeLists.txt
-+++ b/winpr/libwinpr/CMakeLists.txt
-@@ -77,15 +77,15 @@ macro (winpr_definition_add)
-      set (WINPR_DEFINITIONS ${WINPR_DEFINITIONS} PARENT_SCOPE)
- endmacro()
- 
--set(CMAKE_REQUIRED_LIBRARIES rt)
--if (NOT IOS AND NOT HAIKU)
-+#set(CMAKE_REQUIRED_LIBRARIES rt)
-+if (NOT IOS)
- 	check_function_exists(timer_create TIMER_CREATE)
- 	check_function_exists(timer_delete TIMER_DELETE)
- 	check_function_exists(timer_settime TIMER_SETTIME)
- 	check_function_exists(timer_gettime TIMER_GETTIME)
- 	if (TIMER_CREATE AND TIMER_DELETE AND TIMER_SETTIME AND TIMER_GETTIME)
- 			add_definitions(-DWITH_POSIX_TIMER)
--		winpr_library_add_private(rt)
-+#		winpr_library_add_private(rt)
- 	endif()
- endif()
- 
--- 
-2.37.3
-
-
-From 6a909afa1a5d596b6c9c1133195bdf3a9e763230 Mon Sep 17 00:00:00 2001
-From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Thu, 22 Dec 2022 23:21:18 +1000
-Subject: Add MediaKit audio backend
-
-
-diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 811cd39..4766a94 100644
---- a/CMakeLists.txt
-+++ b/CMakeLists.txt
-@@ -599,6 +599,16 @@ if(OPENBSD)
- 	set(WITH_WAYLAND "OFF")
- endif()
- 
-+# Haiku
-+if(HAIKU)
-+	set(WITH_MANPAGES "ON")
-+	set(WITH_ALSA "OFF")
-+	set(WITH_PULSE "OFF")
-+	set(WITH_OSS "OFF")
-+	set(WITH_MEDIA_KIT "ON")
-+	set(WITH_WAYLAND "OFF")
-+endif()
-+
- # Android
- if(ANDROID)
- 	set(WITH_LIBRARY_VERSIONING "OFF")
-diff --git a/channels/rdpsnd/client/CMakeLists.txt b/channels/rdpsnd/client/CMakeLists.txt
-index 70f4aa2..d3fb3cd 100644
---- a/channels/rdpsnd/client/CMakeLists.txt
-+++ b/channels/rdpsnd/client/CMakeLists.txt
-@@ -37,6 +37,10 @@ if(WITH_ALSA)
- 	add_channel_client_subsystem(${MODULE_PREFIX} ${CHANNEL_NAME} "alsa" "")
- endif()
- 
-+if(WITH_MEDIA_KIT)
-+	add_channel_client_subsystem(${MODULE_PREFIX} ${CHANNEL_NAME} "haiku" "")
-+endif()
-+
- if(WITH_IOSAUDIO)
- 	add_channel_client_subsystem(${MODULE_PREFIX} ${CHANNEL_NAME} "ios" "")
- endif()
-diff --git a/channels/rdpsnd/client/haiku/CMakeLists.txt b/channels/rdpsnd/client/haiku/CMakeLists.txt
-new file mode 100644
-index 0000000..988bf4a
---- /dev/null
-+++ b/channels/rdpsnd/client/haiku/CMakeLists.txt
-@@ -0,0 +1,43 @@
-+# FreeRDP: A Remote Desktop Protocol Implementation
-+# FreeRDP cmake build script
-+#
-+# Copyright 2012 Laxmikant Rashinkar <LK.Rashinkar@gmail.com>
-+# Copyright 2012 Marc-Andre Moreau <marcandre.moreau@gmail.com>
-+# Copyright 2013 Corey Clayton <can.of.tuna@gmail.com>
-+#
-+# Licensed under the Apache License, Version 2.0 (the "License");
-+# you may not use this file except in compliance with the License.
-+# You may obtain a copy of the License at
-+#
-+#     http://www.apache.org/licenses/LICENSE-2.0
-+#
-+# Unless required by applicable law or agreed to in writing, software
-+# distributed under the License is distributed on an "AS IS" BASIS,
-+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+# See the License for the specific language governing permissions and
-+# limitations under the License.
-+
-+define_channel_client_subsystem("rdpsnd" "haiku" "")
-+
-+FIND_LIBRARY(LIB_MEDIA media)
-+FIND_LIBRARY(LIB_BE be)
-+
-+set(${MODULE_PREFIX}_SRCS
-+	rdpsnd_haiku.cpp
-+	RingBuffer.cpp )
-+
-+include_directories(..)
-+
-+add_channel_client_subsystem_library(${MODULE_PREFIX} ${MODULE_NAME} ${CHANNEL_NAME} "" TRUE "")
-+
-+
-+
-+set(${MODULE_PREFIX}_LIBS ${${MODULE_PREFIX}_LIBS} 
-+    ${LIB_MEDIA}
-+    ${LIB_BE} )
-+
-+set(${MODULE_PREFIX}_LIBS ${${MODULE_PREFIX}_LIBS} freerdp)
-+
-+target_link_libraries(${MODULE_NAME} ${${MODULE_PREFIX}_LIBS})
-+
-+set_property(TARGET ${MODULE_NAME} PROPERTY FOLDER "Channels/${CHANNEL_NAME}/Client/haiku")
-diff --git a/channels/rdpsnd/client/haiku/RingBuffer.cpp b/channels/rdpsnd/client/haiku/RingBuffer.cpp
-new file mode 100644
-index 0000000..5a3dc5f
---- /dev/null
-+++ b/channels/rdpsnd/client/haiku/RingBuffer.cpp
-@@ -0,0 +1,127 @@
-+#include <stdio.h>
-+#include <stdlib.h>
-+#include <string.h>
-+
-+#include "RingBuffer.h"
-+
-+RingBuffer::RingBuffer( int size )
-+{
-+    initialized = false;
-+    Buffer = new unsigned char[size];
-+    if(Buffer) {
-+        memset( Buffer, 0, size );
-+        BufferSize = size;
-+    } else {
-+        BufferSize = 0;
-+    }
-+    reader = 0;
-+    writer = 0;
-+    writeBytesAvailable = size;
-+    if((locker=create_sem(1,"locker")) >= B_OK) {
-+        initialized = true;
-+    } else {
-+        delete[] Buffer;
-+    }
-+}
-+
-+RingBuffer::~RingBuffer( )
-+{
-+    if(initialized) {
-+        delete[] Buffer;
-+        delete_sem(locker);
-+    }
-+}
-+
-+bool
-+RingBuffer::Empty( void )
-+{
-+    memset( Buffer, 0, BufferSize );
-+    reader = 0;
-+    writer = 0;
-+    writeBytesAvailable = BufferSize;
-+    return true;
-+}
-+
-+int
-+RingBuffer::Read( unsigned char *data, int size )
-+{
-+    acquire_sem(locker);
-+
-+    if( data == 0 || size <= 0 || writeBytesAvailable == BufferSize ) {
-+        release_sem(locker);
-+        return 0;
-+    }
-+
-+    int readBytesAvailable = BufferSize - writeBytesAvailable;
-+
-+    if( size > readBytesAvailable ) {
-+        size = readBytesAvailable;
-+    }
-+
-+    if(size > BufferSize - reader) {
-+        int len = BufferSize - reader;
-+        memcpy(data, Buffer + reader, len);
-+        memcpy(data + len, Buffer, size-len);
-+    } else {
-+        memcpy(data, Buffer + reader, size);
-+    }
-+
-+    reader = (reader + size) % BufferSize;
-+    writeBytesAvailable += size;
-+
-+    release_sem(locker);
-+    return size;
-+}
-+
-+int
-+RingBuffer::Write( unsigned char *data, int size )
-+{
-+    acquire_sem(locker);
-+
-+    if( data == 0 || size <= 0 || writeBytesAvailable == 0 ) {
-+        release_sem(locker);
-+        return 0;
-+    }
-+
-+    if( size > writeBytesAvailable ) {
-+        size = writeBytesAvailable;
-+    }
-+
-+    if(size > BufferSize - writer) {
-+        int len = BufferSize - writer;
-+        memcpy(Buffer + writer, data, len);
-+        memcpy(Buffer, data+len, size-len);
-+    } else {
-+        memcpy(Buffer + writer, data, size);
-+    }
-+
-+    writer = (writer + size) % BufferSize;
-+    writeBytesAvailable -= size;
-+
-+    release_sem(locker);
-+    return size;
-+}
-+
-+int
-+RingBuffer::GetSize( void )
-+{
-+    return BufferSize;
-+}
-+
-+int
-+RingBuffer::GetWriteAvailable( void )
-+{
-+    return writeBytesAvailable;
-+}
-+
-+int
-+RingBuffer::GetReadAvailable( void )
-+{
-+    return BufferSize - writeBytesAvailable;
-+}
-+
-+status_t
-+RingBuffer::InitCheck( void )
-+{
-+    return initialized?B_OK:B_ERROR;
-+}
-diff --git a/channels/rdpsnd/client/haiku/RingBuffer.h b/channels/rdpsnd/client/haiku/RingBuffer.h
-new file mode 100644
-index 0000000..7ec8e01
---- /dev/null
-+++ b/channels/rdpsnd/client/haiku/RingBuffer.h
-@@ -0,0 +1,28 @@
-+#pragma once
-+
-+#include <OS.h>
-+
-+class RingBuffer {
-+
-+public:
-+    RingBuffer(int size);
-+    ~RingBuffer();
-+    int Read( unsigned char* dataPtr, int numBytes );
-+    int Write( unsigned char *dataPtr, int numBytes );
-+
-+    bool Empty( void );
-+    int GetSize( );
-+    int GetWriteAvailable( );
-+    int GetReadAvailable( );
-+    status_t InitCheck( );
-+private:
-+    unsigned char *Buffer;
-+    int BufferSize;
-+    int reader;
-+    int writer;
-+    int writeBytesAvailable;
-+
-+    sem_id locker;
-+
-+    bool initialized;
-+};
-diff --git a/channels/rdpsnd/client/haiku/rdpsnd_haiku.cpp b/channels/rdpsnd/client/haiku/rdpsnd_haiku.cpp
-new file mode 100644
-index 0000000..61528bb
---- /dev/null
-+++ b/channels/rdpsnd/client/haiku/rdpsnd_haiku.cpp
-@@ -0,0 +1,237 @@
-+#ifdef HAVE_CONFIG_H
-+#include "config.h"
-+#endif
-+
-+#include <winpr/wtypes.h>
-+
-+#include <freerdp/types.h>
-+#include <freerdp/codec/dsp.h>
-+
-+#include <SoundPlayer.h>
-+#include "RingBuffer.h"
-+
-+#include "rdpsnd_main.h"
-+
-+#define INPUT_BUFFER_SIZE 32768
-+#define CIRCULAR_BUFFER_SIZE (INPUT_BUFFER_SIZE * 4)
-+
-+typedef struct rdpsnd_haiku_plugin
-+{
-+	rdpsndDevicePlugin device;
-+	BSoundPlayer *player;
-+	RingBuffer *buffer;
-+	BOOL is_opened;
-+	BOOL is_playing;
-+} rdpsndHaikuPlugin;
-+
-+#define THIS(__ptr) ((rdpsndHaikuPlugin*)__ptr)
-+
-+static void proc(void *cookie, void *buffer, size_t len, const media_raw_audio_format &format)
-+{
-+    RingBuffer *ring = (RingBuffer*)cookie;
-+    unsigned char* ptr = (unsigned char*)buffer;
-+
-+    int readed = ring->Read(ptr, len);
-+
-+    if(readed <len)
-+        memset(ptr+readed, 0, len - readed);
-+}
-+
-+/*
-+static OSStatus rdpsnd_haiku_render_cb(void* inRefCon,
-+                                     AudioUnitRenderActionFlags __unused* ioActionFlags,
-+                                     const AudioTimeStamp __unused* inTimeStamp, UInt32 inBusNumber,
-+                                     UInt32 __unused inNumberFrames, AudioBufferList* ioData)
-+{
-+	unsigned int i;
-+
-+	if (inBusNumber != 0)
-+	{
-+		return noErr;
-+	}
-+
-+	rdpsndHaikuPlugin* p = THIS(inRefCon);
-+
-+	for (i = 0; i < ioData->mNumberBuffers; i++)
-+	{
-+		AudioBuffer* target_buffer = &ioData->mBuffers[i];
-+		int32_t available_bytes = 0;
-+		const void* buffer = TPCircularBufferTail(&p->buffer, &available_bytes);
-+
-+		if (buffer != NULL && available_bytes > 0)
-+		{
-+			const int bytes_to_copy = MIN((int32_t)target_buffer->mDataByteSize, available_bytes);
-+			memcpy(target_buffer->mData, buffer, bytes_to_copy);
-+			target_buffer->mDataByteSize = bytes_to_copy;
-+			TPCircularBufferConsume(&p->buffer, bytes_to_copy);
-+		}
-+		else
-+		{
-+			target_buffer->mDataByteSize = 0;
-+			AudioOutputUnitStop(p->audio_unit);
-+			p->is_playing = 0;
-+		}
-+	}
-+
-+	return noErr;
-+}
-+*/
-+static BOOL rdpsnd_haiku_format_supported(rdpsndDevicePlugin* __unused device, const AUDIO_FORMAT* format)
-+{
-+	if (format->wFormatTag == WAVE_FORMAT_PCM)
-+	{
-+		return 1;
-+	}
-+
-+	return 0;
-+}
-+
-+static BOOL rdpsnd_haiku_set_volume(rdpsndDevicePlugin* __unused device, UINT32 __unused value)
-+{
-+	return TRUE;
-+}
-+
-+static void rdpsnd_haiku_start(rdpsndDevicePlugin* device)
-+{
-+	rdpsndHaikuPlugin* p = THIS(device);
-+
-+	if (!p->is_playing)
-+	{
-+		int32_t available_bytes = p->buffer->GetReadAvailable();
-+
-+		if (available_bytes > 0)
-+		{
-+			p->is_playing = 1;
-+			p->player->Start();
-+			p->player->SetHasData(true);
-+		}
-+	}
-+}
-+
-+static void rdpsnd_haiku_stop(rdpsndDevicePlugin* __unused device)
-+{
-+	rdpsndHaikuPlugin* p = THIS(device);
-+
-+	if (p->is_playing)
-+	{
-+		p->player->SetHasData(false);
-+		p->player->Stop();
-+		p->is_playing = 0;
-+		p->buffer->Empty();
-+	}
-+}
-+
-+static UINT rdpsnd_haiku_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
-+{
-+	rdpsndHaikuPlugin* p = THIS(device);
-+    
-+    int s = size;
-+    while ( s > 0 && s % 4 )
-+        s--;
-+    if ( s <= 0 )
-+        return 0;
-+
-+    int len = s;
-+
-+    unsigned char *src_ptr = (unsigned char *)data;
-+
-+    for(;;) {
-+        int len2 = p->buffer->Write(src_ptr, len);
-+        if (len2 == len)break;
-+        len -= len2;
-+        src_ptr += len2;
-+        snooze(100);
-+    }
-+    
-+	rdpsnd_haiku_start(device);
-+	return 10; /* TODO: Get real latencry in [ms] */
-+}
-+
-+static int rdpsnd_haiku_open(rdpsndDevicePlugin* device, const AUDIO_FORMAT* format, unsigned int __unused latency)
-+{
-+	rdpsndHaikuPlugin* p = THIS(device);
-+
-+	if (p->is_opened)
-+		return TRUE;
-+
-+    media_raw_audio_format form = {
-+        format->nSamplesPerSec,
-+        format->nChannels,
-+        media_raw_audio_format::B_AUDIO_SHORT,
-+        B_MEDIA_LITTLE_ENDIAN,
-+        INPUT_BUFFER_SIZE
-+    };
-+
-+    p->buffer = new RingBuffer(CIRCULAR_BUFFER_SIZE);
-+    if(p->buffer->InitCheck() != B_OK) {
-+        delete p->buffer;
-+        p->buffer = NULL;
-+        return FALSE;
-+    }
-+
-+    p->player = new BSoundPlayer(&form, "FreeRDP", proc, nullptr, (void*)p->buffer);
-+
-+    if(p->player->InitCheck() != B_OK) {
-+        delete p->player;
-+        p->player = NULL;
-+        delete p->buffer;
-+        p->buffer = NULL;
-+        return FALSE;
-+    }
-+
-+	p->is_opened = 1;
-+	return TRUE;
-+}
-+
-+static void rdpsnd_haiku_close(rdpsndDevicePlugin* device)
-+{
-+	rdpsndHaikuPlugin* p = THIS(device);
-+	rdpsnd_haiku_stop(device);
-+
-+	if (p->is_opened)
-+	{
-+		delete p->player;
-+		p->player = NULL;
-+		p->is_opened = 0;
-+		delete p->buffer;
-+	}
-+}
-+
-+static void rdpsnd_haiku_free(rdpsndDevicePlugin* device)
-+{
-+	rdpsndHaikuPlugin* p = THIS(device);
-+	rdpsnd_haiku_close(device);
-+	free(p);
-+}
-+
-+extern "C" {
-+
-+#ifdef BUILTIN_CHANNELS
-+#define freerdp_rdpsnd_client_subsystem_entry haiku_freerdp_rdpsnd_client_subsystem_entry
-+#else
-+#define freerdp_rdpsnd_client_subsystem_entry FREERDP_API freerdp_rdpsnd_client_subsystem_entry
-+#endif
-+
-+/**
-+ * Function description
-+ *
-+ * @return 0 on success, otherwise a Win32 error code
-+ */
-+UINT freerdp_rdpsnd_client_subsystem_entry(PFREERDP_RDPSND_DEVICE_ENTRY_POINTS pEntryPoints)
-+{
-+	rdpsndHaikuPlugin* p = (rdpsndHaikuPlugin*)calloc(1, sizeof(rdpsndHaikuPlugin));
-+
-+	if (!p)
-+		return CHANNEL_RC_NO_MEMORY;
-+
-+	p->device.Open = rdpsnd_haiku_open;
-+	p->device.FormatSupported = rdpsnd_haiku_format_supported;
-+	p->device.SetVolume = rdpsnd_haiku_set_volume;
-+	p->device.Play = rdpsnd_haiku_play;
-+	p->device.Start = rdpsnd_haiku_start;
-+	p->device.Close = rdpsnd_haiku_close;
-+	p->device.Free = rdpsnd_haiku_free;
-+	pEntryPoints->pRegisterRdpsndDevice(pEntryPoints->rdpsnd, (rdpsndDevicePlugin*)p);
-+	return CHANNEL_RC_OK;
-+}
-+}
-diff --git a/channels/rdpsnd/client/rdpsnd_main.c b/channels/rdpsnd/client/rdpsnd_main.c
-index f624058..0bc3a6c 100644
---- a/channels/rdpsnd/client/rdpsnd_main.c
-+++ b/channels/rdpsnd/client/rdpsnd_main.c
-@@ -995,6 +995,9 @@ static UINT rdpsnd_process_connect(rdpsndPlugin* rdpsnd)
- #if defined(WITH_ALSA)
- 		{ "alsa", "default" },
- #endif
-+#if defined(WITH_MEDIA_KIT)
-+		{ "haiku", "default" },
-+#endif
- #if defined(WITH_OSS)
- 		{ "oss", "" },
- #endif
-diff --git a/config.h.in b/config.h.in
-index 650d5ad..ddb0f0b 100644
---- a/config.h.in
-+++ b/config.h.in
-@@ -67,6 +67,7 @@
- #cmakedefine WITH_OPENCL
- #cmakedefine WITH_MEDIA_FOUNDATION
- #cmakedefine WITH_MEDIACODEC
-+#cmakedefine WITH_MEDIA_KIT
- 
- #cmakedefine WITH_VAAPI
- 
--- 
-2.37.3
-
-
-From 39abad4db2d9a1f674b2cac2d454fa1ca652f7cc Mon Sep 17 00:00:00 2001
-From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Thu, 22 Dec 2022 23:22:10 +1000
-Subject: Missing load addins for Haiku client
-
-
-diff --git a/client/Haiku/FreeRDP.cpp b/client/Haiku/FreeRDP.cpp
-index 6cc92d4..eeac902 100644
---- a/client/Haiku/FreeRDP.cpp
-+++ b/client/Haiku/FreeRDP.cpp
-@@ -149,6 +149,9 @@ static BOOL tf_pre_connect(freerdp* instance)
- 		settings->DesktopHeight = (UINT32) screen.Frame().bottom + 1;
- 	}
- 
-+	if (!freerdp_client_load_addins(instance->context->channels, instance->settings))
-+		return FALSE;
-+
- 	return TRUE;
- }
- 
--- 
-2.37.3
-
-
-From 9ebe493b6ba1cbf4c2f837164729c57bf0c5644d Mon Sep 17 00:00:00 2001
-From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Thu, 22 Dec 2022 23:22:44 +1000
-Subject: Use evdev keymapping for Haiku
-
-
-diff --git a/libfreerdp/locale/keyboard.c b/libfreerdp/locale/keyboard.c
-index 4c5ae03..bed3980 100644
---- a/libfreerdp/locale/keyboard.c
-+++ b/libfreerdp/locale/keyboard.c
-@@ -128,7 +128,7 @@ static int freerdp_keyboard_init_x11_evdev(DWORD* keyboardLayoutId,
- DWORD freerdp_keyboard_init(DWORD keyboardLayoutId)
- {
- 	DWORD keycode;
--#if defined(__APPLE__) || defined(WITH_X11) || defined(WITH_WAYLAND)
-+#if defined(__APPLE__) || defined(__HAIKU__) || defined(WITH_X11) || defined(WITH_WAYLAND)
- 	int status = -1;
- #endif
- 
-@@ -137,7 +137,7 @@ DWORD freerdp_keyboard_init(DWORD keyboardLayoutId)
- 		status = freerdp_keyboard_init_apple(&keyboardLayoutId, X11_KEYCODE_TO_VIRTUAL_SCANCODE);
- #endif
- 
--#if defined(WITH_X11) || defined(WITH_WAYLAND)
-+#if defined(WITH_X11) || defined(WITH_WAYLAND) || defined(__HAIKU__)
- 
- #ifdef WITH_XKBFILE
- 	if (status < 0)
 -- 
 2.37.3
 
