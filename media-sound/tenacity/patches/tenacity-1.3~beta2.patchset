@@ -1,0 +1,260 @@
+From 5bda751f0680b3c83c474f36d338c0c1e71e7aa2 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Tue, 24 Jan 2023 19:45:07 +0100
+Subject: Adjust LIBDIR for Haiku
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 71bf60c..0a63fbe 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -362,7 +362,11 @@ endif()
+ 
+ set( _DEST "${_DESTDIR}" )
+ set( INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}" )
+-set( _LIBDIR "${CMAKE_INSTALL_LIBDIR}" )
++if( CMAKE_SYSTEM_NAME MATCHES "Haiku" )
++   set( _LIBDIR "lib" )
++else()
++   set( _LIBDIR "${CMAKE_INSTALL_LIBDIR}" )
++endif()
+ set( _DATADIR "${CMAKE_INSTALL_DATADIR}" )
+ set( _PKGLIB "${_LIBDIR}/tenacity" )
+ set( _PKGDATA "${_DATADIR}/tenacity/" )
+-- 
+2.37.3
+
+
+From 699211b52f98ba0d2a03de7770752ea459607029 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Tue, 24 Jan 2023 19:45:07 +0100
+Subject: Fix GTK include paths and libs
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 71bf60c..1a25628 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -746,6 +746,11 @@ if(NOT TARGET wxWidgets::wxWidgets)
+   add_library(wxWidgets::wxWidgets INTERFACE IMPORTED)
+   target_link_libraries(wxWidgets::wxWidgets INTERFACE ${wxWidgets_LIBRARIES})
+   target_compile_definitions(wxWidgets::wxWidgets INTERFACE ${wxWidgets_DEFINITIONS} ${wxWidgets_DEFINITIONS_DEBUG})
++
++  target_include_directories( wxWidgets::wxWidgets INTERFACE ${GTK_INCLUDE_DIRS} )
++  target_link_directories( wxWidgets::wxWidgets INTERFACE ${GTK_LIB_DIR} )
++  target_link_libraries( wxWidgets::wxWidgets INTERFACE ${GTK_LIBRARIES} )
++
+ endif()
+ 
+ add_subdirectory(lib-src/libnyquist)
+-- 
+2.37.3
+
+
+From 7477e43c2a4b1147aaa557c0a0907f4bb1738d50 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Tue, 24 Jan 2023 19:45:07 +0100
+Subject: Haiku: initialize XDG vars
+
+
+diff --git a/src/TenacityApp.cpp b/src/TenacityApp.cpp
+index 57bff6e..cd02057 100644
+--- a/src/TenacityApp.cpp
++++ b/src/TenacityApp.cpp
+@@ -50,6 +50,12 @@ It handles initialization and termination by subclassing wxApp.
+ #endif
+ #endif
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#include <fs_info.h>
++#include <glib.h>
++#endif
++
+ // chmod, lstat, geteuid
+ #ifdef __UNIX__
+ 
+@@ -498,6 +504,30 @@ int main(int argc, char *argv[])
+ IMPLEMENT_APP_NO_MAIN(TenacityApp)
+ IMPLEMENT_WX_THEME_SUPPORT
+ 
++#ifdef __HAIKU__
++void initialize_xdg_paths(void)
++{
++   char dir[B_PATH_NAME_LENGTH + B_FILE_NAME_LENGTH];
++   char dirs[B_PATH_NAME_LENGTH + B_FILE_NAME_LENGTH];
++   dev_t volume = dev_for_path("/boot");
++
++   if (find_directory(B_SYSTEM_SETTINGS_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++      g_setenv ("XDG_CONFIG_DIRS", dir, FALSE);
++   if (find_directory(B_USER_NONPACKAGED_DATA_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++      g_setenv ("XDG_DATA_HOME", dir, FALSE);
++   if (find_directory(B_USER_SETTINGS_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++      g_setenv ("XDG_CONFIG_HOME", dir, FALSE);
++   if (find_directory(B_USER_CACHE_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++      g_setenv ("XDG_CACHE_HOME", dir, FALSE);
++   if (find_directory(B_SYSTEM_DATA_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK &&
++         find_directory(B_SYSTEM_NONPACKAGED_DATA_DIRECTORY, volume, false, dirs, sizeof(dirs)) == B_OK) {
++      strcat(dirs, ":");
++      strcat(dirs, dir);
++      g_setenv ("XDG_DATA_DIRS", dirs, FALSE);
++   }
++}
++#endif
++
+ int main(int argc, char *argv[])
+ {
+    wxDISABLE_DEBUG_SUPPORT();
+@@ -510,6 +540,10 @@ int main(int argc, char *argv[])
+    stdout = freopen("/dev/null", "w", stdout);
+    stderr = freopen("/dev/null", "w", stderr);
+ 
++#ifdef __HAIKU__
++   initialize_xdg_paths();
++#endif
++
+    return wxEntry(argc, argv);
+ }
+ 
+-- 
+2.37.3
+
+
+From 925faa80052f5abfbf3a611995bf60d525e87115 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Tue, 24 Jan 2023 19:45:07 +0100
+Subject: Release sLocale smart pointer before exit. Fixes crash on exit.
+
+
+diff --git a/libraries/lib-strings/Languages.cpp b/libraries/lib-strings/Languages.cpp
+index 15ac86e..b536cfd 100644
+--- a/libraries/lib-strings/Languages.cpp
++++ b/libraries/lib-strings/Languages.cpp
+@@ -325,6 +325,11 @@ void GetLanguages( FilePaths pathList,
+ static std::unique_ptr<wxLocale> sLocale;
+ static wxString sLocaleName;
+ 
++void UnsetLocale(void)
++{
++   sLocale.reset();
++}
++
+ wxString SetLang( const FilePaths &pathList, const wxString & lang )
+ {
+    wxString result = lang;
+diff --git a/libraries/lib-strings/Languages.h b/libraries/lib-strings/Languages.h
+index 81092d0..d9068f8 100644
+--- a/libraries/lib-strings/Languages.h
++++ b/libraries/lib-strings/Languages.h
+@@ -36,6 +36,9 @@ void GetLanguages( FilePaths pathList,
+ STRINGS_API
+ wxString GetSystemLanguageCode(const FilePaths &pathList);
+ 
++STRINGS_API
++void UnsetLocale(void);
++
+ /*!
+  @param tenacityPathList paths to search for .mo files, grouped into subdirectories for the different languages
+  @param lang a language code; or if empty or "System", then default to system language.
+diff --git a/src/TenacityApp.cpp b/src/TenacityApp.cpp
+index cd02057..b84ea3f 100644
+--- a/src/TenacityApp.cpp
++++ b/src/TenacityApp.cpp
+@@ -544,7 +544,9 @@ int main(int argc, char *argv[])
+    initialize_xdg_paths();
+ #endif
+ 
+-   return wxEntry(argc, argv);
++   int res = wxEntry(argc, argv);
++   Languages::UnsetLocale();
++   return res;
+ }
+ 
+ #else
+-- 
+2.37.3
+
+
+From 8db32ca3afc9d07e85962839e204d49965fe2ecd Mon Sep 17 00:00:00 2001
+From: David Karoly <karolyd577@gmail.com>
+Date: Tue, 7 Feb 2023 19:56:39 +0100
+Subject: OverlayPanel: call RefreshRect from DrawOverlays
+
+
+diff --git a/src/widgets/OverlayPanel.cpp b/src/widgets/OverlayPanel.cpp
+index cfca34d..0fec289 100644
+--- a/src/widgets/OverlayPanel.cpp
++++ b/src/widgets/OverlayPanel.cpp
+@@ -124,6 +124,12 @@ void OverlayPanel::DrawOverlays(bool repaint_all, wxDC *pDC)
+       }
+       ++it2;
+    }
++
++   for (const auto& pair : pairs) {
++      if (repaint_all || pair.second) {
++         RefreshRect(pair.first);
++      }
++   }
+ }
+ 
+ void OverlayPanel::Compress()
+-- 
+2.37.3
+
+
+From 9ad759c3e9941b0c94d3819870608c0bbb8fcf52 Mon Sep 17 00:00:00 2001
+From: David Karoly <karolyd577@gmail.com>
+Date: Tue, 7 Feb 2023 18:40:17 +0100
+Subject: HelpText: Remove broken link from welcome text
+
+Signed-off-by: David Karoly <david.karoly@outlook.com>
+
+diff --git a/src/HelpText.cpp b/src/HelpText.cpp
+index 2d1b86d..dc6af38 100644
+--- a/src/HelpText.cpp
++++ b/src/HelpText.cpp
+@@ -232,9 +232,6 @@ static wxString HelpTextBuiltIn( const wxString & Key )
+          << XO(
+ /* i18n-hint: Preserve '[[help:Main_Page|' as it's the name of a link.*/
+ " [[help:Main_Page|Audacity Manual]] - if not installed locally, [[https://manual.audacityteam.org/|view online]]")
+-         << wxT("</li><li>")
+-         << XO(
+-" [[https://github.com/tenacitytenacity/tenacity/discussions|Discussions (on GitHub)]] - ask your question directly, online.")
+          << wxT("</li></ul></p><p>")
+          << wxT("<b>")
+          << XO("More:</b> Visit our [[https://codeberg.org/tenacityteam/tenacity/wiki|Wiki]] for tips, tricks, extra tutorials and effects plug-ins.")
+-- 
+2.37.3
+
+
+From 02d752bd465179509029bf301fee0711e44068ba Mon Sep 17 00:00:00 2001
+From: Avery King <avery98@pm.me>
+Date: Thu, 9 Feb 2023 19:24:25 -0800
+Subject: About dialog: remove PortMixer build support
+
+* PortMixer has been abscent in Tenacity for some time now.
+
+Signed-off-by: Avery King <avery98@pm.me>
+
+diff --git a/src/AboutDialog.cpp b/src/AboutDialog.cpp
+index 675fb09..3560e9d 100644
+--- a/src/AboutDialog.cpp
++++ b/src/AboutDialog.cpp
+@@ -788,14 +788,6 @@ void AboutDialog::PopulateInformationPage( ShuttleGui & S )
+          disabled);
+    # endif
+ 
+-   # if USE_PORTMIXER
+-   AddBuildinfoRow(&informationStr, wxT("PortMixer"), XO("Sound card mixer support"),
+-         enabled);
+-   # else
+-   AddBuildinfoRow(&informationStr, wxT("PortMixer"), XO("Sound card mixer support"),
+-         disabled);
+-   # endif
+-
+    # if USE_SOUNDTOUCH
+    AddBuildinfoRow(&informationStr, wxT("SoundTouch"), XO("Pitch and Tempo Change support"),
+          enabled);
+-- 
+2.37.3
+

@@ -1,0 +1,550 @@
+From 2db52d40b000c4e89947cf3ec92ea9aaa24d633f Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Tue, 6 Dec 2022 19:51:55 +1000
+Subject: Fix build for Haiku
+
+
+diff --git a/meson.build b/meson.build
+index 8dd7a93..3d95be6 100644
+--- a/meson.build
++++ b/meson.build
+@@ -159,8 +159,8 @@ subdir('embed')
+ subdir('src')
+ subdir('tests')
+ 
+-gnome.post_install(
+-  gtk_update_icon_cache: true,
+-  glib_compile_schemas: true,
+-  update_desktop_database: true
+-)
++#gnome.post_install(
++#  gtk_update_icon_cache: true,
++#  glib_compile_schemas: true,
++#  update_desktop_database: true
++#)
+-- 
+2.37.3
+
+
+From 6f6b5fefaac8fa5f0a6f5e88bbe5fc54925496d0 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Tue, 6 Dec 2022 19:52:45 +1000
+Subject: Use /dev/random for ephy_sync_utils_generate_random_bytes
+
+
+diff --git a/lib/ephy-sync-utils.c b/lib/ephy-sync-utils.c
+index 75c08fc..156a730 100644
+--- a/lib/ephy-sync-utils.c
++++ b/lib/ephy-sync-utils.c
+@@ -35,6 +35,10 @@
+ #elif defined(__FreeBSD__) || defined(__OpenBSD__)
+ #include <unistd.h>
+ #endif
++#if defined(__HAIKU__)
++#include <unistd.h>
++#include <fcntl.h>
++#endif
+ 
+ static const char hex_digits[] = "0123456789abcdef";
+ 
+@@ -187,6 +191,12 @@ ephy_sync_utils_generate_random_bytes (void   *random_ctx,
+   if (getentropy (out, num_bytes) == -1) {
+     g_error ("Failed to get entropy: %s", g_strerror (errno));
+   }
++#elif defined(__HAIKU__)
++  {
++    int fd = open("/dev/random", O_RDONLY);
++    read(fd, out, num_bytes);
++    close(fd);
++  }
+ #else
+   do {
+     ret = getrandom (out, num_bytes, 0);
+-- 
+2.37.3
+
+
+From 7e8e0511b23effbf3dd56da9a9bce5d5d602d8fd Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Tue, 6 Dec 2022 19:53:26 +1000
+Subject: Disable settings for set default browser
+
+
+diff --git a/src/ephy-window.c b/src/ephy-window.c
+index f557397..758aa7e 100644
+--- a/src/ephy-window.c
++++ b/src/ephy-window.c
+@@ -3678,12 +3678,12 @@ ephy_window_constructed (GObject *object)
+   window->action_bar = setup_action_bar (window);
+   box = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 0));
+   window->titlebar_box = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 0));
+-
++#ifndef __HAIKU__
+   if (g_settings_get_boolean (EPHY_SETTINGS_MAIN, EPHY_PREFS_ASK_FOR_DEFAULT) &&
+       !is_browser_default () &&
+       !ephy_profile_dir_is_web_application ())
+     add_default_browser_question (box);
+-
++#endif
+   gtk_container_add (GTK_CONTAINER (window->tab_bar_revealer), GTK_WIDGET (window->tab_bar));
+   gtk_box_pack_start (window->titlebar_box, GTK_WIDGET (window->window_handle), FALSE, TRUE, 0);
+   gtk_box_pack_start (window->titlebar_box, GTK_WIDGET (window->tab_bar_revealer), FALSE, TRUE, 0);
+-- 
+2.37.3
+
+
+From a26f992f3c665e20e9d3687035ef048fb575ec1e Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Tue, 6 Dec 2022 19:53:41 +1000
+Subject: Add open handler for Haiku
+
+
+diff --git a/lib/ephy-file-helpers.c b/lib/ephy-file-helpers.c
+index 18017f7..6f4d58d 100644
+--- a/lib/ephy-file-helpers.c
++++ b/lib/ephy-file-helpers.c
+@@ -490,7 +490,7 @@ ephy_file_helpers_init (const char            *profile_dir,
+     }
+   }
+ 
+-  global_portal = xdp_portal_new ();
++  //global_portal = xdp_portal_new ();
+ 
+   return ret;
+ }
+@@ -658,6 +658,27 @@ ephy_file_launch_handler (GFile *file)
+   return ret;
+ }
+ 
++#ifdef __HAIKU__
++static gboolean
++open_in_default_handler (const char *uri,
++                         const char *mime_type,
++                         GdkScreen  *screen)
++{
++  char *command;
++  GError *error = NULL;
++
++  command = g_strdup_printf ("open %s ", uri);
++
++  g_spawn_command_line_async (command, &error);
++
++  if (error) {
++    g_warning ("Couldn't open uri: %s", error->message);
++    g_error_free (error);
++  }
++
++  g_free (command);
++}
++#else
+ static gboolean
+ open_in_default_handler (const char *uri,
+                          const char *mime_type,
+@@ -687,6 +708,7 @@ open_in_default_handler (const char *uri,
+ 
+   return TRUE;
+ }
++#endif
+ 
+ gboolean
+ ephy_file_open_uri_in_default_browser (const char *uri,
+-- 
+2.37.3
+
+
+From 91e0d90dc44683a1682363316ce046c30bca3f79 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Tue, 6 Dec 2022 19:54:11 +1000
+Subject: Set XDG variables
+
+
+diff --git a/src/ephy-main.c b/src/ephy-main.c
+index be9b6db..68d9922 100644
+--- a/src/ephy-main.c
++++ b/src/ephy-main.c
+@@ -43,6 +43,11 @@
+ #include <string.h>
+ #include <stdlib.h>
+ 
++#if defined(__HAIKU__)
++#include <FindDirectory.h>
++#include <fs_info.h>
++#endif
++
+ static gboolean open_in_new_window = FALSE;
+ 
+ static char *session_filename = NULL;
+@@ -178,6 +183,26 @@ main (int   argc,
+   EphyFileHelpersFlags flags;
+   GDesktopAppInfo *desktop_info = NULL;
+ 
++#ifdef __HAIKU__
++  char dir[B_PATH_NAME_LENGTH + B_FILE_NAME_LENGTH];
++  char dirs[B_PATH_NAME_LENGTH + B_FILE_NAME_LENGTH];
++  dev_t volume = dev_for_path("/boot");
++  if (find_directory(B_SYSTEM_SETTINGS_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++    g_setenv ("XDG_CONFIG_DIRS", dir, FALSE);
++  if (find_directory(B_USER_NONPACKAGED_DATA_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++    g_setenv ("XDG_DATA_HOME", dir, FALSE);
++  if (find_directory(B_USER_SETTINGS_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++    g_setenv ("XDG_CONFIG_HOME", dir, FALSE);
++  if (find_directory(B_USER_CACHE_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++    g_setenv ("XDG_CACHE_HOME", dir, FALSE);
++  if (find_directory(B_SYSTEM_DATA_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK &&
++      find_directory(B_SYSTEM_NONPACKAGED_DATA_DIRECTORY, volume, false, dirs, sizeof(dirs)) == B_OK) {
++    strcat(dirs, ":");
++    strcat(dirs, dir);
++    g_setenv ("XDG_DATA_DIRS", dirs, FALSE);
++  }
++#endif
++
+ #if DEVELOPER_MODE
+   g_setenv ("GSETTINGS_SCHEMA_DIR", BUILD_ROOT "/data", FALSE);
+ #endif
+-- 
+2.37.3
+
+
+From 0a4e2219e85d41e8d5e2959faac9e7b47fced552 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 11 Dec 2022 12:06:20 +1000
+Subject: Disable translate languages, fix #7524
+
+
+diff --git a/lib/contrib/gnome-languages.c b/lib/contrib/gnome-languages.c
+index 75ba956..4570215 100644
+--- a/lib/contrib/gnome-languages.c
++++ b/lib/contrib/gnome-languages.c
+@@ -44,8 +44,13 @@
+ #define __LC_LAST       13
+ #endif
+ 
++#ifdef __HAIKU__
++#define ISO_CODES_DATADIR ISO_CODES_PREFIX "/xml/iso-codes"
++#define ISO_CODES_LOCALESDIR ISO_CODES_PREFIX "/locale"
++#else
+ #define ISO_CODES_DATADIR ISO_CODES_PREFIX "/share/xml/iso-codes"
+ #define ISO_CODES_LOCALESDIR ISO_CODES_PREFIX "/share/locale"
++#endif
+ 
+ #if 0
+ #include "default-input-sources.h"
+@@ -288,6 +293,9 @@ gnome_normalize_locale (const char *locale)
+ static gboolean
+ language_name_is_valid (const char *language_name)
+ {
++#ifdef __HAIKU__
++        return language_name != NULL;
++#else
+         locale_t locale;
+ 
+         locale = newlocale (LC_MESSAGES_MASK, language_name, (locale_t) 0);
+@@ -297,6 +305,7 @@ language_name_is_valid (const char *language_name)
+         }
+ 
+         return FALSE;
++#endif
+ }
+ 
+ static void
+@@ -307,7 +316,14 @@ language_name_get_codeset_details (const char  *language_name,
+         locale_t locale;
+         locale_t old_locale;
+         const char *codeset = NULL;
+-
++#ifdef __HAIKU__
++        if (pcodeset != NULL) {
++            *pcodeset = g_strdup ("UTF-8");
++        }
++        if (is_utf8 != NULL) {
++            *is_utf8 = TRUE;
++        }
++#else
+         locale = newlocale (LC_CTYPE_MASK, language_name, (locale_t) 0);
+         if (locale == (locale_t) 0)
+                 return;
+@@ -328,6 +344,7 @@ language_name_get_codeset_details (const char  *language_name,
+ 
+         uselocale (old_locale);
+         freelocale (locale);
++#endif
+ }
+ 
+ /**
+@@ -582,7 +599,9 @@ collect_locales (void)
+ 
+         found_localebin_locales = collect_locales_from_localebin ();
+ 
++#ifndef __HAIKU__
+         found_dir_locales = collect_locales_from_directory ();
++#endif
+ 
+         if (!(found_localebin_locales || found_dir_locales)) {
+                 g_warning ("Could not read list of available locales from libc, "
+@@ -701,7 +720,9 @@ get_translated_language (const char *code,
+         char *name;
+ 
+         language = get_language (code);
+-
++#ifdef __HAIKU__
++        return g_strdup(language);
++#else
+         name = NULL;
+         if (language != NULL) {
+                 const char *translated_name;
+@@ -731,6 +752,7 @@ get_translated_language (const char *code,
+         }
+ 
+         return name;
++#endif
+ }
+ 
+ static const char *
+@@ -759,7 +781,9 @@ get_translated_territory (const char *code,
+         char       *name;
+ 
+         territory = get_territory (code);
+-
++#ifdef __HAIKU__
++        return g_strdup(territory);
++#else
+         name = NULL;
+         if (territory != NULL) {
+                 const char *translated_territory;
+@@ -785,6 +809,7 @@ get_translated_territory (const char *code,
+         }
+ 
+         return name;
++#endif
+ }
+ 
+ static void
+-- 
+2.37.3
+
+
+From 18b48b05c7d65efa2c2f9d60f46866d01244a277 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 11 Dec 2022 12:06:53 +1000
+Subject: Use system locale folder for liblocaledir
+
+
+diff --git a/meson.build b/meson.build
+index 3d95be6..01f696d 100644
+--- a/meson.build
++++ b/meson.build
+@@ -21,7 +21,7 @@ datadir = join_paths(prefix, get_option('datadir'))
+ desktopdir = join_paths(datadir, 'applications')
+ libdir = join_paths(prefix, get_option('libdir'))
+ libexecdir = join_paths(prefix, get_option('libexecdir'))
+-liblocaledir = join_paths(prefix, libdir, 'locale')
++liblocaledir = join_paths(prefix, get_option('localedir'))
+ localedir = join_paths(prefix, get_option('localedir'))
+ pkgdatadir = join_paths(datadir, 'epiphany')
+ pkglibdir = join_paths(libdir, 'epiphany')
+@@ -30,7 +30,7 @@ servicedir = join_paths(datadir, 'dbus-1', 'services')
+ webprocessextensionsdir = join_paths(pkglibdir, 'web-process-extensions')
+ 
+ iso_codes = dependency('iso-codes')
+-iso_codes_prefix = iso_codes.get_variable(pkgconfig: 'prefix')
++iso_codes_prefix = join_paths(prefix, get_option('datadir'))
+ 
+ profile = get_option('profile')
+ application_id = 'org.gnome.Epiphany'
+-- 
+2.37.3
+
+
+From 2ded1fafa678657f2aeaec0d8cf08fb7b1556751 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 11 Dec 2022 12:07:29 +1000
+Subject: Remove icon transparency for about page
+
+
+diff --git a/src/resources/about.css b/src/resources/about.css
+index e3138b9..85507b5 100644
+--- a/src/resources/about.css
++++ b/src/resources/about.css
+@@ -7,7 +7,6 @@ html {
+     --base-color: #fff;
+     --text-color: #000;
+     --borders: #d3d7cf;
+-    --icon-invert: 0.2; /* average(0x2e, 0x34, 0x36) / 0xff */
+ 
+     /* Misc colors */
+     --header-color: #999;
+@@ -25,7 +24,6 @@ html {
+         --base-color: #2d2d2d;
+         --text-color: #fff;
+         --borders: #1b1b1b;
+-        --icon-invert: 0.93; /* average(0xee, 0xee, 0xec) / 0xff */
+ 
+         /* Misc colors */
+         --header-color: #666;
+@@ -92,14 +90,6 @@ h1 {
+     text-shadow: 0 1px 0 var(--base-color);
+ }
+ 
+-#about-icon {
+-    filter: drop-shadow(0 1px 12px rgba(0, 0, 0, 0.05))
+-            drop-shadow(0 -1px rgba(0, 0, 0, 0.05))
+-            drop-shadow(1px 0 rgba(0, 0, 0, 0.1))
+-            drop-shadow(0 1px rgba(0, 0, 0, 0.3))
+-            drop-shadow(-1px 0 rgba(0, 0, 0, 0.1));
+-}
+-
+ /* about:epiphany */
+ 
+ html.epiphany-html {
+@@ -259,7 +249,7 @@ html.epiphany-html {
+     margin:auto;
+     display:block;
+     filter: brightness(0) invert(var(--icon-invert));
+-    opacity: 0.5;
++    opacity: 1.0;
+ }
+ 
+ /* about:overview */
+@@ -423,7 +413,7 @@ html[dir="rtl"] .overview-item {
+ .overview-empty img {
+     -webkit-user-select: none;
+     -webkit-user-drag: none;
+-    opacity: 0.5;
++    opacity: 1.0;
+     width: 128px;
+     filter: brightness(0) invert(var(--icon-invert));
+ }
+-- 
+2.37.3
+
+
+From 9b6ff4db9765cc9dea4c4d27ce91402a7c4754f6 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 11 Dec 2022 13:44:46 +1000
+Subject: With 128px for about icons
+
+
+diff --git a/src/resources/about.css b/src/resources/about.css
+index 85507b5..c7eb69e 100644
+--- a/src/resources/about.css
++++ b/src/resources/about.css
+@@ -250,6 +250,7 @@ html.epiphany-html {
+     display:block;
+     filter: brightness(0) invert(var(--icon-invert));
+     opacity: 1.0;
++    width: 128px;
+ }
+ 
+ /* about:overview */
+-- 
+2.37.3
+
+
+From 76653f4d72a9f922c4cfc8f8ee00c3c4835aed0f Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 15 Feb 2023 00:05:34 +1000
+Subject: Fix folder opening
+
+
+diff --git a/lib/ephy-file-helpers.c b/lib/ephy-file-helpers.c
+index 6f4d58d..2953217 100644
+--- a/lib/ephy-file-helpers.c
++++ b/lib/ephy-file-helpers.c
+@@ -43,6 +43,7 @@
+ #include <libportal/portal-helpers.h>
+ #include <libxml/xmlreader.h>
+ #include <stdlib.h>
++#include <libgen.h>
+ #include <string.h>
+ #include <sys/stat.h>
+ #include <unistd.h>
+@@ -636,6 +637,17 @@ ephy_file_launch_handler (GFile *file)
+   g_autoptr (GList) list = NULL;
+   g_autoptr (GError) error = NULL;
+ 
++#ifdef __HAIKU__
++  g_autofree char *path = NULL;
++  g_autofree char *command = NULL;
++
++  g_assert (file != NULL);
++
++  path =  g_file_get_path (file);
++  command = g_strdup_printf ("open '%s'", path);
++  g_spawn_command_line_async (command, &error);
++  ret = error ? FALSE : TRUE;
++#else
+   g_assert (file != NULL);
+ 
+   /* Launch via URI handler only under sandbox, because this way loses
+@@ -654,41 +666,38 @@ ephy_file_launch_handler (GFile *file)
+ 
+   list = g_list_append (list, file);
+   ret = launch_application (app, list);
+-
++#endif
+   return ret;
+ }
+ 
+-#ifdef __HAIKU__
+ static gboolean
+ open_in_default_handler (const char *uri,
+                          const char *mime_type,
+                          GdkScreen  *screen)
+ {
+-  char *command;
+-  GError *error = NULL;
++  g_autoptr (GdkAppLaunchContext) context = NULL;
++  g_autoptr (GAppInfo) appinfo = NULL;
++  g_autoptr (GError) error = NULL;
++  GList uris;
++#ifdef __HAIKU__
++  g_autofree char *command = NULL;
+ 
+-  command = g_strdup_printf ("open %s ", uri);
++  if (strcmp(mime_type, "inode/directory")==0) {
++	g_autofree char *filename = NULL;
++	filename = g_filename_from_uri (uri, NULL, NULL);
++    command = g_strdup_printf ("open '%s'", dirname(filename));
++  } else {
++    command = g_strdup_printf ("open '%s'", uri);
++  }
+ 
+   g_spawn_command_line_async (command, &error);
+ 
+   if (error) {
+     g_warning ("Couldn't open uri: %s", error->message);
+     g_error_free (error);
++    return FALSE;
+   }
+-
+-  g_free (command);
+-}
+ #else
+-static gboolean
+-open_in_default_handler (const char *uri,
+-                         const char *mime_type,
+-                         GdkScreen  *screen)
+-{
+-  g_autoptr (GdkAppLaunchContext) context = NULL;
+-  g_autoptr (GAppInfo) appinfo = NULL;
+-  g_autoptr (GError) error = NULL;
+-  GList uris;
+-
+   context = gdk_display_get_app_launch_context (screen ? gdk_screen_get_display (screen) : gdk_display_get_default ());
+   gdk_app_launch_context_set_screen (context, screen);
+ 
+@@ -705,10 +714,9 @@ open_in_default_handler (const char *uri,
+     g_warning ("Failed to launch %s: %s", uri, error->message);
+     return FALSE;
+   }
+-
++#endif
+   return TRUE;
+ }
+-#endif
+ 
+ gboolean
+ ephy_file_open_uri_in_default_browser (const char *uri,
+-- 
+2.37.3
+
