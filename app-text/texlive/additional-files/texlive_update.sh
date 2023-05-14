@@ -1,13 +1,15 @@
 #!/bin/bash
 
-notify --group "TexLive" --title "Installation in progress" --messageID texliveInstallID --timeout 10000 "Updating TeXLive filename database…"
+notify --group "TeXLive" --title "Installation in progress" --messageID texliveInstallID --timeout 10000 "Updating TeXLive filename database…"
 mktexlsr
 
-notify --group "TexLive" --title "Installation in progress" --messageID texliveInstallID --timeout 10000 "Updating TeXLive format files…"
+notify --group "TeXLive" --title "Installation in progress" --messageID texliveInstallID --timeout 10000 "Updating TeXLive format files…"
 fmtutil-sys --all
 
+#notify --group "TeXLive" --title "Installation in progress" --messageID texliveInstallID --timeout 10000 "Updating TeXLive ConTeXt formats…"
 #mtxrun --generate
-notify --group "TexLive" --title "Installation in progress" --messageID texliveInstallID --timeout 10000 "Updating TeXLive font maps…"
+
+notify --group "TeXLive" --title "Installation in progress" --messageID texliveInstallID --timeout 10000 "Updating TeXLive font maps…"
 updmap-sys
 
-notify --group "TexLive" --title "Installation finished" --messageID texliveInstallID  "Took long enough...!"
+notify --group "TeXLive" --title "Installation finished" --messageID texliveInstallID  "Took long enough…!"
