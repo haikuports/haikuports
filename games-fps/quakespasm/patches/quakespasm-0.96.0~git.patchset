@@ -1,0 +1,451 @@
+From d98c34befb252064d344194e3acb47e04ed9f809 Mon Sep 17 00:00:00 2001
+From: Jaycie Ewald <jaycie.ewald@outlook.com>
+Date: Thu, 25 May 2023 06:35:44 -0500
+Subject: [PATCH 1/8] Make userdirs more comfortable on Haiku.
+
+---
+ Quake/build_cross_haiku32-sdl2.sh |  2 +-
+ Quake/build_cross_haiku64-sdl2.sh |  2 +-
+ Quake/sys_sdl_unix.c              | 20 ++++++++++++++++++++
+ 3 files changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/Quake/build_cross_haiku32-sdl2.sh b/Quake/build_cross_haiku32-sdl2.sh
+index b180335d..1ef441bf 100755
+--- a/Quake/build_cross_haiku32-sdl2.sh
++++ b/Quake/build_cross_haiku32-sdl2.sh
+@@ -14,4 +14,4 @@ STRIP="$TARGET-strip"
+ LDFLAGS=-L/usr/lib32 # hack
+ export CC AS AR RANLIB STRIP LDFLAGS
+ 
+-exec $MAKE_CMD HAIKU_OS=1 LINK_M=0 USE_SDL2=1 LDFLAGS=$LDFLAGS CC=$CC AS=$AS RANLIB=$RANLIB AR=$AR STRIP=$STRIP -f Makefile $*
++exec $MAKE_CMD HAIKU_OS=1 DO_USERDIRS=1 LINK_M=0 USE_SDL2=1 LDFLAGS=$LDFLAGS CC=$CC AS=$AS RANLIB=$RANLIB AR=$AR STRIP=$STRIP -f Makefile $*
+diff --git a/Quake/build_cross_haiku64-sdl2.sh b/Quake/build_cross_haiku64-sdl2.sh
+index 0b43404c..4d159948 100755
+--- a/Quake/build_cross_haiku64-sdl2.sh
++++ b/Quake/build_cross_haiku64-sdl2.sh
+@@ -13,4 +13,4 @@ AR="$TARGET-ar"
+ STRIP="$TARGET-strip"
+ export CC AS AR RANLIB STRIP
+ 
+-exec $MAKE_CMD HAIKU_OS=1 LINK_M=0 USE_SDL2=1 CC=$CC AS=$AS RANLIB=$RANLIB AR=$AR STRIP=$STRIP -f Makefile $*
++exec $MAKE_CMD HAIKU_OS=1 DO_USERDIRS=1 LINK_M=0 USE_SDL2=1 CC=$CC AS=$AS RANLIB=$RANLIB AR=$AR STRIP=$STRIP -f Makefile $*
+diff --git a/Quake/sys_sdl_unix.c b/Quake/sys_sdl_unix.c
+index 71c8595b..67feaa17 100644
+--- a/Quake/sys_sdl_unix.c
++++ b/Quake/sys_sdl_unix.c
+@@ -244,10 +244,29 @@ static char	cwd[MAX_OSPATH];
+ static char	userdir[MAX_OSPATH];
+ #ifdef PLATFORM_OSX
+ #define SYS_USERDIR	"Library/Application Support/QuakeSpasm"
++#elif defined(PLATFORM_HAIKU)
++#define SYS_USERDIR	"QuakeSpasm"
+ #else
+ #define SYS_USERDIR	".quakespasm"
+ #endif
+ 
++#ifdef PLATFORM_HAIKU
++static void Sys_GetUserdir (char *dst, size_t dstsize)
++{
++	char home_dir[MAX_OSPATH];
++	FILE *finddir;
++
++	finddir = popen ("finddir B_USER_NONPACKAGED_DATA_DIRECTORY", "r");
++	if (finddir == NULL)
++		Sys_Error ("Couldn't determine userspace directory");
++	fgets (home_dir, MAX_OSPATH, finddir);
++	pclose (finddir);
++
++	home_dir[strcspn(home_dir,"\n")] = 0;
++
++	q_snprintf (dst, dstsize, "%s/%s", home_dir, SYS_USERDIR);
++}
++#else
+ static void Sys_GetUserdir (char *dst, size_t dstsize)
+ {
+ 	size_t		n;
+@@ -274,6 +293,7 @@ static void Sys_GetUserdir (char *dst, size_t dstsize)
+ 
+ 	q_snprintf (dst, dstsize, "%s/%s", home_dir, SYS_USERDIR);
+ }
++#endif	/* PLATFORM_HAIKU */
+ #endif	/* DO_USERDIRS */
+ 
+ #ifdef PLATFORM_OSX
+
+From 5da3580bb815a394ba71455608ae5ff025c3ed00 Mon Sep 17 00:00:00 2001
+From: Jaycie Ewald <jaycie.ewald@outlook.com>
+Date: Thu, 25 May 2023 09:16:23 -0500
+Subject: [PATCH 2/8] Make Haiku detection in makefile less hacky.
+
+---
+ Quake/Makefile                    | 13 +++++--------
+ Quake/build_cross_haiku32-sdl2.sh |  2 +-
+ Quake/build_cross_haiku64-sdl2.sh |  2 +-
+ 3 files changed, 7 insertions(+), 10 deletions(-)
+
+diff --git a/Quake/Makefile b/Quake/Makefile
+index beea5e15..bf26cba0 100644
+--- a/Quake/Makefile
++++ b/Quake/Makefile
+@@ -10,9 +10,6 @@ DO_USERDIRS=0
+ ### Enable/Disable SDL2
+ USE_SDL2=0
+ 
+-### Do we need to link the math library?
+-LINK_M=1
+-
+ ### Enable/Disable codecs for streaming music support
+ USE_CODEC_WAVE=1
+ USE_CODEC_FLAC=0
+@@ -38,7 +35,7 @@ check_gcc = $(shell if echo | $(CC) $(1) -Werror -S -o /dev/null -xc - > /dev/nu
+ 
+ # ---------------------------
+ 
+-HOST_OS := $(shell uname|sed -e s/_.*//|tr '[:upper:]' '[:lower:]')
++HOST_OS ?= $(shell uname|sed -e s/_.*//|tr '[:upper:]' '[:lower:]')
+ 
+ DEBUG   ?= 0
+ 
+@@ -112,7 +109,7 @@ SDL_LIBS   := $(shell $(SDL_CONFIG) --libs)
+ 
+ ifeq ($(HOST_OS),sunos)
+ NET_LIBS   :=-lsocket -lnsl -lresolv
+-else ifdef HAIKU_OS
++else ifeq ($(HOST_OS),haiku)
+ NET_LIBS   :=-lnetwork
+ else
+ NET_LIBS   :=
+@@ -185,10 +182,10 @@ ifeq ($(USE_CODEC_UMX),1)
+ CFLAGS+= -DUSE_CODEC_UMX
+ endif
+ 
++ifeq ($(HOST_OS),haiku)
+ COMMON_LIBS:= -lGL
+-
+-ifeq ($(LINK_M),1)
+-COMMON_LIBS += -lm
++else
++COMMON_LIBS:= -lGL -lm
+ endif
+ 
+ LIBS := $(COMMON_LIBS) $(NET_LIBS) $(CODECLIBS)
+diff --git a/Quake/build_cross_haiku32-sdl2.sh b/Quake/build_cross_haiku32-sdl2.sh
+index 1ef441bf..d6c5e559 100755
+--- a/Quake/build_cross_haiku32-sdl2.sh
++++ b/Quake/build_cross_haiku32-sdl2.sh
+@@ -14,4 +14,4 @@ STRIP="$TARGET-strip"
+ LDFLAGS=-L/usr/lib32 # hack
+ export CC AS AR RANLIB STRIP LDFLAGS
+ 
+-exec $MAKE_CMD HAIKU_OS=1 DO_USERDIRS=1 LINK_M=0 USE_SDL2=1 LDFLAGS=$LDFLAGS CC=$CC AS=$AS RANLIB=$RANLIB AR=$AR STRIP=$STRIP -f Makefile $*
++exec $MAKE_CMD HOST_OS=haiku USE_SDL2=1 LDFLAGS=$LDFLAGS CC=$CC AS=$AS RANLIB=$RANLIB AR=$AR STRIP=$STRIP -f Makefile $*
+diff --git a/Quake/build_cross_haiku64-sdl2.sh b/Quake/build_cross_haiku64-sdl2.sh
+index 4d159948..80905283 100755
+--- a/Quake/build_cross_haiku64-sdl2.sh
++++ b/Quake/build_cross_haiku64-sdl2.sh
+@@ -13,4 +13,4 @@ AR="$TARGET-ar"
+ STRIP="$TARGET-strip"
+ export CC AS AR RANLIB STRIP
+ 
+-exec $MAKE_CMD HAIKU_OS=1 DO_USERDIRS=1 LINK_M=0 USE_SDL2=1 CC=$CC AS=$AS RANLIB=$RANLIB AR=$AR STRIP=$STRIP -f Makefile $*
++exec $MAKE_CMD HOST_OS=haiku USE_SDL2=1 CC=$CC AS=$AS RANLIB=$RANLIB AR=$AR STRIP=$STRIP -f Makefile $*
+
+From a7dafdd222ad2fb49f52ebaace296b507658da85 Mon Sep 17 00:00:00 2001
+From: Jaycie Ewald <jaycie.ewald@outlook.com>
+Date: Fri, 26 May 2023 18:34:17 -0500
+Subject: [PATCH 3/8] Add Haiku Install target to makefile.
+
+---
+ Quake/Makefile | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/Quake/Makefile b/Quake/Makefile
+index bf26cba0..91141a01 100644
+--- a/Quake/Makefile
++++ b/Quake/Makefile
+@@ -302,7 +302,17 @@ debug:
+ clean:
+ 	$(RM) *.o *.d $(DEFAULT_TARGET)
+ 
++ifeq ($(HOST_OS),haiku)
++QS_DATA_DIR=$(shell finddir B_USER_NONPACKAGED_DATA_DIRECTORY)/QuakeSpasm/
++QS_APP_DIR=$(shell finddir B_APPS_DIRECTORY)/QuakeSpasm/
++install:	quakespasm
++	mkdir -p $(QS_APP_DIR)
++	mkdir -p $(QS_DATA_DIR)
++	cp quakespasm $(QS_APP_DIR)
++	cp quakespasm.pak $(QS_DATA_DIR)
++else
+ install:	quakespasm
+ 	cp quakespasm /usr/local/games/quake
++endif
+ 
+ sinclude $(OBJS:.o=.d)
+
+From bf477665f1b621ddc9494e94aa292b7ba55df7f9 Mon Sep 17 00:00:00 2001
+From: Jaycie Ewald <jaycie.ewald@outlook.com>
+Date: Fri, 26 May 2023 18:51:24 -0500
+Subject: [PATCH 4/8] woops, the shell doesn't like that.
+
+---
+ Quake/Makefile | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/Quake/Makefile b/Quake/Makefile
+index 91141a01..f89b328a 100644
+--- a/Quake/Makefile
++++ b/Quake/Makefile
+@@ -304,11 +304,8 @@ clean:
+ 
+ ifeq ($(HOST_OS),haiku)
+ QS_DATA_DIR=$(shell finddir B_USER_NONPACKAGED_DATA_DIRECTORY)/QuakeSpasm/
+-QS_APP_DIR=$(shell finddir B_APPS_DIRECTORY)/QuakeSpasm/
+ install:	quakespasm
+-	mkdir -p $(QS_APP_DIR)
+ 	mkdir -p $(QS_DATA_DIR)
+-	cp quakespasm $(QS_APP_DIR)
+ 	cp quakespasm.pak $(QS_DATA_DIR)
+ else
+ install:	quakespasm
+
+From 2b199880959569d9c96ae8e7e6c342474f84ec9c Mon Sep 17 00:00:00 2001
+From: Jaycie Ewald <jaycie.ewald@outlook.com>
+Date: Mon, 29 May 2023 02:29:09 -0500
+Subject: [PATCH 5/8] Modified COM_AddGameDirectory for Haiku.
+
+It's really messy I think, but i'm gonna see if it works.
+---
+ Quake/Makefile |  7 ++++---
+ Quake/common.c | 22 ++++++++++++++++++++++
+ 2 files changed, 26 insertions(+), 3 deletions(-)
+
+diff --git a/Quake/Makefile b/Quake/Makefile
+index f89b328a..0bde3591 100644
+--- a/Quake/Makefile
++++ b/Quake/Makefile
+@@ -303,10 +303,11 @@ clean:
+ 	$(RM) *.o *.d $(DEFAULT_TARGET)
+ 
+ ifeq ($(HOST_OS),haiku)
+-QS_DATA_DIR=$(shell finddir B_USER_NONPACKAGED_DATA_DIRECTORY)/QuakeSpasm/
++QS_APP_DIR=$(shell finddir B_APPS_DIRECTORY)/QuakeSpasm/
+ install:	quakespasm
+-	mkdir -p $(QS_DATA_DIR)
+-	cp quakespasm.pak $(QS_DATA_DIR)
++	mkdir -p $(QS_APP_DIR)
++	cp quakespasm $(QS_APP_DIR)
++	cp quakespasm.pak $(QS_APP_DIR)
+ else
+ install:	quakespasm
+ 	cp quakespasm /usr/local/games/quake
+diff --git a/Quake/common.c b/Quake/common.c
+index c604a0a7..533e62a8 100644
+--- a/Quake/common.c
++++ b/Quake/common.c
+@@ -2052,11 +2052,33 @@ static void COM_AddGameDirectory (const char *base, const char *dir)
+ 		if (i != 0 || path_id != 1 || fitzmode)
+ 			qspak = NULL;
+ 		else {
++			#ifdef PLATFORM_HAIKU
++			qboolean old = com_modified;
++			const char *tmp = base;
++_add_quakespasm_pak:
++			/* check gamedir */
++			q_snprintf (pakfile, sizeof(pakfile), "%s/quakespasm.pak", tmp);
++			qspak = COM_LoadPackFile (pakfile);
++			/* check host dirs */
++			if (!qspak) {
++				if (tmp == base) {
++					tmp = host_parms->basedir;
++					goto _add_quakespasm_pak;
++				}
++
++				if (tmp == host_parms->basedir) {
++					tmp = host_parms->userdir;
++					goto _add_quakespasm_pak;
++				}
++			}
++			com_modified = old;
++			#else
+ 			qboolean old = com_modified;
+ 			if (been_here) base = host_parms->userdir;
+ 			q_snprintf (pakfile, sizeof(pakfile), "%s/quakespasm.pak", base);
+ 			qspak = COM_LoadPackFile (pakfile);
+ 			com_modified = old;
++			#endif
+ 		}
+ 		if (pak) {
+ 			search = (searchpath_t *) Z_Malloc(sizeof(searchpath_t));
+
+From 759975eefe52a096efd1a8716cd134ed601505c3 Mon Sep 17 00:00:00 2001
+From: Jaycie Ewald <jaycie.ewald@outlook.com>
+Date: Mon, 29 May 2023 02:47:15 -0500
+Subject: [PATCH 6/8] Revert "woops, the shell doesn't like that."
+
+This reverts commit bf477665f1b621ddc9494e94aa292b7ba55df7f9.
+---
+ Quake/Makefile |  4 +++-
+ Quake/common.c | 22 ----------------------
+ 2 files changed, 3 insertions(+), 23 deletions(-)
+
+diff --git a/Quake/Makefile b/Quake/Makefile
+index 0bde3591..91141a01 100644
+--- a/Quake/Makefile
++++ b/Quake/Makefile
+@@ -303,11 +303,13 @@ clean:
+ 	$(RM) *.o *.d $(DEFAULT_TARGET)
+ 
+ ifeq ($(HOST_OS),haiku)
++QS_DATA_DIR=$(shell finddir B_USER_NONPACKAGED_DATA_DIRECTORY)/QuakeSpasm/
+ QS_APP_DIR=$(shell finddir B_APPS_DIRECTORY)/QuakeSpasm/
+ install:	quakespasm
+ 	mkdir -p $(QS_APP_DIR)
++	mkdir -p $(QS_DATA_DIR)
+ 	cp quakespasm $(QS_APP_DIR)
+-	cp quakespasm.pak $(QS_APP_DIR)
++	cp quakespasm.pak $(QS_DATA_DIR)
+ else
+ install:	quakespasm
+ 	cp quakespasm /usr/local/games/quake
+diff --git a/Quake/common.c b/Quake/common.c
+index 533e62a8..c604a0a7 100644
+--- a/Quake/common.c
++++ b/Quake/common.c
+@@ -2052,33 +2052,11 @@ static void COM_AddGameDirectory (const char *base, const char *dir)
+ 		if (i != 0 || path_id != 1 || fitzmode)
+ 			qspak = NULL;
+ 		else {
+-			#ifdef PLATFORM_HAIKU
+-			qboolean old = com_modified;
+-			const char *tmp = base;
+-_add_quakespasm_pak:
+-			/* check gamedir */
+-			q_snprintf (pakfile, sizeof(pakfile), "%s/quakespasm.pak", tmp);
+-			qspak = COM_LoadPackFile (pakfile);
+-			/* check host dirs */
+-			if (!qspak) {
+-				if (tmp == base) {
+-					tmp = host_parms->basedir;
+-					goto _add_quakespasm_pak;
+-				}
+-
+-				if (tmp == host_parms->basedir) {
+-					tmp = host_parms->userdir;
+-					goto _add_quakespasm_pak;
+-				}
+-			}
+-			com_modified = old;
+-			#else
+ 			qboolean old = com_modified;
+ 			if (been_here) base = host_parms->userdir;
+ 			q_snprintf (pakfile, sizeof(pakfile), "%s/quakespasm.pak", base);
+ 			qspak = COM_LoadPackFile (pakfile);
+ 			com_modified = old;
+-			#endif
+ 		}
+ 		if (pak) {
+ 			search = (searchpath_t *) Z_Malloc(sizeof(searchpath_t));
+
+From c6d2d0946345910076324fc24d0bb10a1e328889 Mon Sep 17 00:00:00 2001
+From: erysdren <jaycie.ewald@outlook.com>
+Date: Mon, 29 May 2023 09:12:57 -0500
+Subject: [PATCH 7/8] Update Quake/sys_sdl_unix.c
+
+Brought in from sezero
+
+Co-authored-by: OscarL <oscar.lesta@gmail.com>
+---
+ Quake/sys_sdl_unix.c | 19 ++++++++++---------
+ 1 file changed, 10 insertions(+), 9 deletions(-)
+
+diff --git a/Quake/sys_sdl_unix.c b/Quake/sys_sdl_unix.c
+index 67feaa17..ab683ca0 100644
+--- a/Quake/sys_sdl_unix.c
++++ b/Quake/sys_sdl_unix.c
+@@ -251,20 +251,21 @@ static char	userdir[MAX_OSPATH];
+ #endif
+ 
+ #ifdef PLATFORM_HAIKU
++
++#include <FindDirectory.h>
++#include <fs_info.h>
++
+ static void Sys_GetUserdir (char *dst, size_t dstsize)
+ {
+-	char home_dir[MAX_OSPATH];
+-	FILE *finddir;
++	dev_t volume = dev_for_path("/boot");
++	char buffer[B_PATH_NAME_LENGTH];
++	status_t result;
+ 
+-	finddir = popen ("finddir B_USER_NONPACKAGED_DATA_DIRECTORY", "r");
+-	if (finddir == NULL)
++	result = find_directory(B_USER_NONPACKAGED_DATA_DIRECTORY, volume, false, buffer, sizeof(buffer));
++	if (result != B_OK)
+ 		Sys_Error ("Couldn't determine userspace directory");
+-	fgets (home_dir, MAX_OSPATH, finddir);
+-	pclose (finddir);
+ 
+-	home_dir[strcspn(home_dir,"\n")] = 0;
+-
+-	q_snprintf (dst, dstsize, "%s/%s", home_dir, SYS_USERDIR);
++	q_snprintf (dst, dstsize, "%s/%s", buffer, SYS_USERDIR);
+ }
+ #else
+ static void Sys_GetUserdir (char *dst, size_t dstsize)
+
+From e98ac43ceb758b79d31dd0d42d6c2fee98c20339 Mon Sep 17 00:00:00 2001
+From: Jaycie Ewald <jaycie.ewald@outlook.com>
+Date: Sat, 3 Jun 2023 01:54:33 -0500
+Subject: [PATCH 8/8] hack in common.c to load quakespasm.pak
+
+---
+ Quake/common.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/Quake/common.c b/Quake/common.c
+index c604a0a7..931f9710 100644
+--- a/Quake/common.c
++++ b/Quake/common.c
+@@ -28,6 +28,12 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ 
+ #include "miniz.h"
+ 
++#include "arch_def.h"
++#ifdef PLATFORM_HAIKU 
++#include <FindDirectory.h>
++#include <fs_info.h>
++#endif
++
+ static char	*largv[MAX_NUM_ARGVS + 1];
+ static char	argvdummy[] = " ";
+ 
+@@ -2052,11 +2058,28 @@ static void COM_AddGameDirectory (const char *base, const char *dir)
+ 		if (i != 0 || path_id != 1 || fitzmode)
+ 			qspak = NULL;
+ 		else {
++			#ifdef PLATFORM_HAIKU
++			qboolean old = com_modified;
++			dev_t volume = dev_for_path("/boot");
++			char buffer[B_PATH_NAME_LENGTH];
++			status_t result;
++
++			result = find_directory(B_SYSTEM_DATA_DIRECTORY, volume, false, buffer, sizeof(buffer));
++			if (result != B_OK)
++				Sys_Error ("Couldn't determine userspace directory");
++
++			q_snprintf (pakfile, sizeof(pakfile), "%s/QuakeSpasm/quakespasm.pak", buffer);
++
++			qspak = COM_LoadPackFile (pakfile);
++
++			com_modified = old;
++			#else
+ 			qboolean old = com_modified;
+ 			if (been_here) base = host_parms->userdir;
+ 			q_snprintf (pakfile, sizeof(pakfile), "%s/quakespasm.pak", base);
+ 			qspak = COM_LoadPackFile (pakfile);
+ 			com_modified = old;
++			#endif
+ 		}
+ 		if (pak) {
+ 			search = (searchpath_t *) Z_Malloc(sizeof(searchpath_t));
