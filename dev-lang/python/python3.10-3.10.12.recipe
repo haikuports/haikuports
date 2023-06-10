@@ -9,15 +9,15 @@ OSI-approved open source license."
 HOMEPAGE="https://www.python.org"
 LICENSE="Python"
 COPYRIGHT="1990-2023 Python Software Foundation"
-REVISION="2"
+REVISION="1"
 SOURCE_URI="https://www.python.org/ftp/python/$portVersion/Python-$portVersion.tar.xz"
-CHECKSUM_SHA256="3c3bc3048303721c904a03eb8326b631e921f11cc3be2988456a42f115daf04c"
+CHECKSUM_SHA256="afb74bf19130e7a47d10312c8f5e784f24e0527981eab68e20546cfb865830b8"
 SOURCE_DIR="Python-$portVersion"
 
 pyShortVer="${portVersion%.*}"
 pyVersionCompat="$portVersion compat >= $pyShortVer"
 
-PATCHES="python${pyShortVer}-$portVersion.patchset"
+PATCHES="python$pyShortVer-$portVersion.patchset"
 if [ "$secondaryArchSuffix" = _x86 ] ; then
 	PATCHES+="
 		python${pyShortVer}_x86-$portVersion.patchset
@@ -96,22 +96,37 @@ BUILD_PREREQUIRES="
 
 BUILD()
 {
-	export CFLAGS="-D_BSD_SOURCE"
-	rm -Rf Modules/expat
-
 	autoreconf -fi
-	export OPT=""
+
+	# From ./configure:
+	# "compiler flags are generated in two sets, BASECFLAGS and OPT.  OPT is just
+	# for debug/optimization stuff.  BASECFLAGS is for flags that are required
+	# just to get things to compile and link."
+	export BASECFLAGS="-D_BSD_SOURCE"
+
+	# Not exporting OPT ends up with "-g -fwrapv -O3 -Wall" being used,
+	# and using OPT="" means the build ends up being "-O0".
+	export OPT="-fwrapv -O3 -Wall"
 
 	runConfigure --omit-dirs binDir,includeDir ./configure \
-		--enable-shared --enable-optimizations \
-		--with-ensurepip=no --with-system-ffi --with-readline=editline \
-		--with-system-expat --bindir=$commandBinDir --includedir=$developDir/headers
+	 	--bindir=$commandBinDir \
+	 	--includedir=$developDir/headers \
+		--enable-optimizations \
+		--enable-shared \
+		--with-ensurepip=no \
+		--with-readline=editline \
+		--with-system-expat \
+		--with-system-ffi
+		# configure: WARNING: --with(out)-system-ffi is ignored on this platform
+		# --with-lto # this one is too CPU/RAM intensive.
 
 	# prevent make from rebuilding stuff that requires python
 	touch Parser/asdl* Python/Python-ast.c Include/Python-ast.h
 
 	rm -f python
 
+	# NOTE: When using "--enable-optimizations" above, using "make $jobArgs" might be unreliable.
+	# make clean # Uncomment when doing repeated builds (for testing different flags/options).
 	make $jobArgs
 }
 
@@ -170,14 +185,16 @@ TEST()
 
 	cd Lib/test
 
+	# distutils is deprecated, and will be removed on 3.12.
+	rm -f test_distutils.py
+
 	# The following tests invoke the crash dialog, and unless your configure
 	# debug_server default action to "kill" or "report", they will hang waiting for
 	# user input. See comment above TEST().
-	# Otherwise... uncomment these to skip them.
-#	rm -f test_asyncio/test_futures.py # Crashes: Exception (Segment violation)
-#	rm -f test_faulthandler.py
-#	rm -f test_subprocess.py
-#	rm -f test_threading.py
+	rm -f test_asyncio/test_futures.py # Crashes: Exception (Segment violation)
+	rm -f test_faulthandler.py
+	rm -f test_subprocess.py # tends to hang.
+	rm -f test_threading.py # tends to hang.
 
 	# Many of the tests hang/stall. We have two options:
 	#
@@ -233,7 +250,14 @@ TEST()
 
 	cd ../..
 
-	# We could enable/disable certain tests by "resource" type:
-	# export EXTRATESTOPTS="-u all,-largefile,-audio,-gui,-network,-cpu,-urlfetch,-tzdata"
+	# These allows to change what resources tests can use:
+	# export EXTRATESTOPTS="-uall,-largefile,-audio,-gui,-network,-cpu,-urlfetch,-tzdata"
+
+	# Occasionally, some test fails seemingly due to the racy nature of tempfile.mktemp().
+	# Even the help for that function says to NOT use it, but some tests still do.
+	#
+	# If you find some strange "æ" suffix on temp dirnames, ej:
+	#    "cwd: /sources/Python-3.10.12/build/test_python_10324æ"
+	# That's due to usages of os_helper.FS_NONASCII.
 	make $jobArgs test
 }
