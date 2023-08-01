@@ -1,0 +1,588 @@
+From edb660fcfa83876a0422ccc952fdedb2e7624a59 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Tue, 24 Jan 2023 19:45:07 +0100
+Subject: Fix GTK include paths and libs
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2f8da4f..7d7e1c9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -741,6 +741,11 @@ if(NOT TARGET wxWidgets::wxWidgets)
+   add_library(wxWidgets::wxWidgets INTERFACE IMPORTED)
+   target_link_libraries(wxWidgets::wxWidgets INTERFACE ${wxWidgets_LIBRARIES})
+   target_compile_definitions(wxWidgets::wxWidgets INTERFACE ${wxWidgets_DEFINITIONS} ${wxWidgets_DEFINITIONS_DEBUG})
++
++  target_include_directories( wxWidgets::wxWidgets INTERFACE ${GTK_INCLUDE_DIRS} )
++  target_link_directories( wxWidgets::wxWidgets INTERFACE ${GTK_LIB_DIR} )
++  target_link_libraries( wxWidgets::wxWidgets INTERFACE ${GTK_LIBRARIES} )
++
+ endif()
+ 
+ add_subdirectory(lib-src/libnyquist)
+-- 
+2.37.3
+
+
+From 07bb464bc43cd625bc8c18edc629e2edbf15718a Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Tue, 24 Jan 2023 19:45:07 +0100
+Subject: Haiku: initialize XDG vars
+
+
+diff --git a/src/TenacityApp.cpp b/src/TenacityApp.cpp
+index 1115e69..2091e3c 100644
+--- a/src/TenacityApp.cpp
++++ b/src/TenacityApp.cpp
+@@ -50,6 +50,12 @@ It handles initialization and termination by subclassing wxApp.
+ #endif
+ #endif
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#include <fs_info.h>
++#include <glib.h>
++#endif
++
+ // chmod, lstat, geteuid
+ #ifdef __UNIX__
+ #include <sys/types.h>
+@@ -482,6 +488,30 @@ public:
+    };
+ };
+ 
++#ifdef __HAIKU__
++void initialize_xdg_paths(void)
++{
++   char dir[B_PATH_NAME_LENGTH + B_FILE_NAME_LENGTH];
++   char dirs[B_PATH_NAME_LENGTH + B_FILE_NAME_LENGTH];
++   dev_t volume = dev_for_path("/boot");
++
++   if (find_directory(B_SYSTEM_SETTINGS_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++      g_setenv ("XDG_CONFIG_DIRS", dir, FALSE);
++   if (find_directory(B_USER_NONPACKAGED_DATA_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++      g_setenv ("XDG_DATA_HOME", dir, FALSE);
++   if (find_directory(B_USER_SETTINGS_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++      g_setenv ("XDG_CONFIG_HOME", dir, FALSE);
++   if (find_directory(B_USER_CACHE_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++      g_setenv ("XDG_CACHE_HOME", dir, FALSE);
++   if (find_directory(B_SYSTEM_DATA_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK &&
++         find_directory(B_SYSTEM_NONPACKAGED_DATA_DIRECTORY, volume, false, dirs, sizeof(dirs)) == B_OK) {
++      strcat(dirs, ":");
++      strcat(dirs, dir);
++      g_setenv ("XDG_DATA_DIRS", dirs, FALSE);
++   }
++}
++#endif
++
+ #if defined(__WXMAC__)
+ 
+ IMPLEMENT_APP_NO_MAIN(TenacityApp)
+@@ -511,6 +541,10 @@ int main(int argc, char *argv[])
+    stdout = freopen("/dev/null", "w", stdout);
+    stderr = freopen("/dev/null", "w", stderr);
+ 
++#ifdef __HAIKU__
++   initialize_xdg_paths();
++#endif
++
+    return wxEntry(argc, argv);
+ }
+ 
+-- 
+2.37.3
+
+
+From c8d0dd9b63805afa85d882a2caaf8c3125951055 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Tue, 24 Jan 2023 19:45:07 +0100
+Subject: Release sLocale smart pointer before exit. Fixes crash on exit.
+
+
+diff --git a/libraries/lib-strings/Languages.cpp b/libraries/lib-strings/Languages.cpp
+index 4ec0eac..0c7d648 100644
+--- a/libraries/lib-strings/Languages.cpp
++++ b/libraries/lib-strings/Languages.cpp
+@@ -328,6 +328,11 @@ void GetLanguages( FilePaths pathList,
+ static std::unique_ptr<wxLocale> sLocale;
+ static wxString sLocaleName;
+ 
++void UnsetLocale(void)
++{
++   sLocale.reset();
++}
++
+ wxString SetLang( const FilePaths &pathList, const wxString & lang )
+ {
+    wxString result = lang;
+diff --git a/libraries/lib-strings/Languages.h b/libraries/lib-strings/Languages.h
+index 81092d0..d9068f8 100644
+--- a/libraries/lib-strings/Languages.h
++++ b/libraries/lib-strings/Languages.h
+@@ -36,6 +36,9 @@ void GetLanguages( FilePaths pathList,
+ STRINGS_API
+ wxString GetSystemLanguageCode(const FilePaths &pathList);
+ 
++STRINGS_API
++void UnsetLocale(void);
++
+ /*!
+  @param tenacityPathList paths to search for .mo files, grouped into subdirectories for the different languages
+  @param lang a language code; or if empty or "System", then default to system language.
+diff --git a/src/TenacityApp.cpp b/src/TenacityApp.cpp
+index 2091e3c..79eddc5 100644
+--- a/src/TenacityApp.cpp
++++ b/src/TenacityApp.cpp
+@@ -545,7 +545,9 @@ int main(int argc, char *argv[])
+    initialize_xdg_paths();
+ #endif
+ 
+-   return wxEntry(argc, argv);
++   int res = wxEntry(argc, argv);
++   Languages::UnsetLocale();
++   return res;
+ }
+ 
+ #else
+-- 
+2.37.3
+
+
+From e5f3fe7d5c0357d2116ae53359dda6cd3a66f6bd Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Mon, 31 Jul 2023 18:15:17 +0200
+Subject: Haiku: use CLOCK_MONOTONIC
+
+
+diff --git a/src/AudioIO.cpp b/src/AudioIO.cpp
+index c6bb917..84d3c2c 100644
+--- a/src/AudioIO.cpp
++++ b/src/AudioIO.cpp
+@@ -935,7 +935,11 @@ static double SystemTime(bool usingAlsa)
+    if (usingAlsa) {
+       struct timespec now;
+       // CLOCK_MONOTONIC_RAW is unaffected by NTP or adj-time
++#ifdef __HAIKU__
++      clock_gettime(CLOCK_MONOTONIC, &now);
++#else
+       clock_gettime(CLOCK_MONOTONIC_RAW, &now);
++#endif
+       //return now.tv_sec + now.tv_nsec * 0.000000001;
+       return (now.tv_sec + now.tv_nsec * 0.000000001) - streamStartTime;
+    }
+-- 
+2.37.3
+
+
+From 5a194687be8ff7981b87130b1c7cea64729373d7 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Mon, 31 Jul 2023 18:29:04 +0200
+Subject: Use POSIX shared memory
+
+
+diff --git a/src/TenacityApp.cpp b/src/TenacityApp.cpp
+index 79eddc5..4cdf189 100644
+--- a/src/TenacityApp.cpp
++++ b/src/TenacityApp.cpp
+@@ -60,6 +60,7 @@ It handles initialization and termination by subclassing wxApp.
+ #ifdef __UNIX__
+ #include <sys/types.h>
+ #include <sys/file.h>
++#include <sys/mman.h>
+ #include <sys/stat.h>
+ #include <cstdio>
+ #endif
+@@ -817,6 +818,7 @@ TenacityApp::TenacityApp()
+ 
+ TenacityApp::~TenacityApp()
+ {
++   shm_unlink("/TenacityShm");
+ }
+ 
+ // The `main program' equivalent, creating the windows and returning the
+@@ -1633,7 +1635,6 @@ bool TenacityApp::CreateSingleInstanceChecker(const wxString &dir)
+ 
+ #include <sys/ipc.h>
+ #include <sys/sem.h>
+-#include <sys/shm.h>
+ 
+ // Return true if there are no other instances of Audacity running,
+ // false otherwise.
+@@ -1656,8 +1657,40 @@ bool TenacityApp::CreateSingleInstanceChecker(const wxString &dir)
+ 
+    // Create and map the shared memory segment where the port number
+    // will be stored.
+-   int memid = shmget(memkey, sizeof(int), IPC_CREAT | S_IRUSR | S_IWUSR);
+-   int *portnum = (int *) shmat(memid, nullptr, 0);
++   int memfd = shm_open("/TenacityShm", O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
++   if (memfd == -1)
++   {
++      AudacityMessageBox(
++         XO("Unable to create shared memory segment.\n\n"
++            "error code=%d : \"%s\".").Format(errno, strerror(errno)),
++         XO("Tenacity Startup Failure"),
++         wxOK | wxICON_ERROR);
++
++      return false;
++   }
++
++   if (ftruncate(memfd, sizeof(int)) != 0)
++   {
++      AudacityMessageBox(
++         XO("Unable to initialize shared memory segment.\n\n"
++            "error code=%d : \"%s\".").Format(errno, strerror(errno)),
++         XO("Tenacity Startup Failure"),
++         wxOK | wxICON_ERROR);
++
++      return false;
++   }
++
++   int *portnum = (int *) mmap(nullptr, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0);
++   if (portnum == MAP_FAILED)
++   {
++      AudacityMessageBox(
++         XO("Unable to map shared memory segment.\n\n"
++            "error code=%d : \"%s\".").Format(errno, strerror(errno)),
++         XO("Tenacity Startup Failure"),
++         wxOK | wxICON_ERROR);
++
++      return false;
++   }
+ 
+    // Create (or return) the SERVER semaphore ID
+    int servid = semget(servkey, 1, IPC_CREAT | S_IRUSR | S_IWUSR);
+@@ -1800,6 +1833,8 @@ bool TenacityApp::CreateSingleInstanceChecker(const wxString &dir)
+          return false;
+       }
+ 
++      munmap(portnum, sizeof(int));
++
+       // We've successfully created the socket server and the app
+       // should continue to initialize.
+       return true;
+@@ -1891,6 +1926,8 @@ bool TenacityApp::CreateSingleInstanceChecker(const wxString &dir)
+    // Send an empty string to force existing Audacity to front
+    sock->WriteMsg(wxEmptyString, sizeof(wxChar));
+ 
++   munmap(portnum, sizeof(int));
++
+    // We've forwarded all of the filenames, so let the caller know
+    // to terminate.
+    return false;
+-- 
+2.37.3
+
+
+From e0d7ad72b20745151a9dc3b86c15980bddfcd441 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Mon, 31 Jul 2023 18:55:31 +0200
+Subject: Haiku: replace references to topdir
+
+This commit reflects the content of  #c7f757d23 for Haiku.
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index c8612e2..4b44d55 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -1379,9 +1379,9 @@ else()
+                DESTINATION "${_LIBDIR}"
+                USE_SOURCE_PERMISSIONS
+                FILES_MATCHING PATTERN "*.so*" )
+-      install( FILES "${topdir}/LICENSE.txt" "${topdir}/README.md"
++      install( FILES "${CMAKE_SOURCE_DIR}/LICENSE.txt" "${CMAKE_SOURCE_DIR}/README.md"
+                DESTINATION "${_DATADIR}/doc/${APP_NAME}" )
+-      install( FILES "${topdir}/presets/EQDefaultCurves.xml"
++      install( FILES "${CMAKE_SOURCE_DIR}/presets/EQDefaultCurves.xml"
+                DESTINATION "${_PKGDATA}" )
+    else()
+       install( TARGETS ${TARGET} RUNTIME )
+-- 
+2.37.3
+
+
+From d94e1f80bc1ea0c516dd9c0311a3419d95630824 Mon Sep 17 00:00:00 2001
+From: Avery King <avery98@pm.me>
+Date: Sat, 29 Jul 2023 15:35:05 -0700
+Subject: Fix playback cursor on Wayland
+
+Signed-off-by: Avery King <avery98@pm.me>
+
+diff --git a/src/AdornedRulerPanel.cpp b/src/AdornedRulerPanel.cpp
+index 2d84de3..24a1ab1 100644
+--- a/src/AdornedRulerPanel.cpp
++++ b/src/AdornedRulerPanel.cpp
+@@ -1231,8 +1231,8 @@ void AdornedRulerPanel::OnPaint(wxPaintEvent & WXUNUSED(evt))
+    // Stroke extras direct to the client area,
+    // maybe outside of the damaged area
+    // As with TrackPanel, do not make a NEW wxClientDC or else Mac flashes badly!
+-   dc.DestroyClippingRegion();
+-   DrawOverlays(true, &dc);
++   // dc.DestroyClippingRegion();
++   DrawOverlays(true, dc);
+ }
+ 
+ void AdornedRulerPanel::OnSize(wxSizeEvent &evt)
+@@ -1773,8 +1773,8 @@ void AdornedRulerPanel::DrawBothOverlays()
+       wxASSERT( false );
+    }
+    else
+-      pCellularPanel->DrawOverlays( false );
+-   DrawOverlays( false );
++      pCellularPanel->Refresh();
++   Refresh();
+ }
+ 
+ void AdornedRulerPanel::UpdateButtonStates()
+diff --git a/src/TrackPanel.cpp b/src/TrackPanel.cpp
+index b1fd841..4ab711a 100644
+--- a/src/TrackPanel.cpp
++++ b/src/TrackPanel.cpp
+@@ -426,8 +426,8 @@ void TrackPanel::OnTimer(wxTimerEvent& )
+       p->ProcessEvent(e);
+    }
+ 
+-   DrawOverlays(false);
+-   mRuler->DrawOverlays(false);
++   Refresh();
++   mRuler->Refresh();
+ 
+    if(IsAudioActive() && gAudioIO->GetNumCaptureChannels()) {
+ 
+@@ -505,7 +505,7 @@ void TrackPanel::OnPaint(wxPaintEvent & /* event */)
+       // (Used to make a NEW, separate wxClientDC, but that risks flashing
+       // problems on Mac.)
+       dc.DestroyClippingRegion();
+-      DrawOverlays(true, &dc);
++      DrawOverlays(true, dc);
+    }
+ 
+ #if DEBUG_DRAW_TIMING
+@@ -563,8 +563,8 @@ void TrackPanel::ProcessUIHandleResult
+       panel->UpdateVRuler(pClickedTrack);
+ 
+    if (refreshResult & RefreshCode::DrawOverlays) {
+-      panel->DrawOverlays(false);
+-      mRuler->DrawOverlays(false);
++      panel->Refresh();
++      mRuler->Refresh();
+    }
+ 
+    // Refresh all if told to do so, or if told to refresh a track that
+@@ -779,7 +779,6 @@ void TrackPanel::RefreshTrack(Track *trk, bool refreshbacking)
+    Refresh( false, &rect );
+ }
+ 
+-
+ /// This method overrides Refresh() of wxWindow so that the
+ /// boolean play indicator can be set to false, so that an old play indicator that is
+ /// no longer there won't get  XORed (to erase it), thus redrawing it on the
+diff --git a/src/TrackPanel.h b/src/TrackPanel.h
+index 2c070e6..6294e2d 100644
+--- a/src/TrackPanel.h
++++ b/src/TrackPanel.h
+@@ -210,7 +210,7 @@ protected:
+    int mTimeCount;
+ 
+    bool mRefreshBacking;
+-
++   bool mRedrawOverlaysOnly;
+ 
+ protected:
+ 
+diff --git a/src/menus/EditMenus.cpp b/src/menus/EditMenus.cpp
+index 773c89a..7aef27b 100644
+--- a/src/menus/EditMenus.cpp
++++ b/src/menus/EditMenus.cpp
+@@ -305,7 +305,7 @@ void OnCut(const CommandContext &context)
+ 
+    // Bug 1663
+    //mRuler->ClearPlayRegion();
+-   ruler.DrawOverlays( true );
++   ruler.Refresh();
+ }
+ 
+ void OnDelete(const CommandContext &context)
+diff --git a/src/menus/SelectMenus.cpp b/src/menus/SelectMenus.cpp
+index bc7ba5e..650082e 100644
+--- a/src/menus/SelectMenus.cpp
++++ b/src/menus/SelectMenus.cpp
+@@ -273,8 +273,8 @@ void MoveWhenAudioInactive
+       viewInfo.selectedRegion.collapseToT0();
+ 
+       // Move the visual cursor, avoiding an unnecessary complete redraw
+-      trackPanel.DrawOverlays(false);
+-      ruler.DrawOverlays(false);
++      trackPanel.Refresh();
++      ruler.Refresh();
+    }
+    else
+    {
+diff --git a/src/widgets/OverlayPanel.cpp b/src/widgets/OverlayPanel.cpp
+index cfca34d..71caa53 100644
+--- a/src/widgets/OverlayPanel.cpp
++++ b/src/widgets/OverlayPanel.cpp
+@@ -43,7 +43,7 @@ void OverlayPanel::ClearOverlays()
+    mOverlays.clear();
+ }
+ 
+-void OverlayPanel::DrawOverlays(bool repaint_all, wxDC *pDC)
++void OverlayPanel::DrawOverlays(bool repaint_all, wxPaintDC& dc)
+ {
+    if ( !IsShownOnScreen() )
+       return;
+@@ -102,9 +102,6 @@ void OverlayPanel::DrawOverlays(bool repaint_all, wxDC *pDC)
+       } while (!done);
+    }
+ 
+-   std::optional<wxClientDC> myDC;
+-   auto &dc = pDC ? *pDC : (myDC.emplace(this), *myDC);
+-
+    // Erase
+    auto it2 = pairs.begin();
+    for (auto pOverlay : mOverlays) {
+diff --git a/src/widgets/OverlayPanel.h b/src/widgets/OverlayPanel.h
+index 53966d8..a93d3ec 100644
+--- a/src/widgets/OverlayPanel.h
++++ b/src/widgets/OverlayPanel.h
+@@ -37,8 +37,8 @@ public:
+    // will be erased and re-drawn.
+    // pDC can be null, in which case, DrawOverlays() will create a
+    // wxClientDC internally when necessary.
+-   void DrawOverlays(bool repaint_all, wxDC *pDC = nullptr);
+-   
++   void DrawOverlays(bool repaint_all, wxPaintDC& dc);
++
+ private:
+    using OverlayPtr = std::weak_ptr<Overlay>;
+ 
+-- 
+2.37.3
+
+
+From e16c526c74543ff4ac8b8fa8f38f551058d72c50 Mon Sep 17 00:00:00 2001
+From: Avery King <avery98@pm.me>
+Date: Sun, 30 Jul 2023 10:11:30 -0700
+Subject: Fix custom tooltips under Wayland
+
+- Use wxPopupWindow on all platforms again except for macOS.
+- Use wxRegion overload of SetShape() on all platforms (the other
+  overload doesn't work on Wayland).
+
+Signed-off-by: Avery King <avery98@pm.me>
+
+diff --git a/src/widgets/ASlider.cpp b/src/widgets/ASlider.cpp
+index f277b84..b6db077 100644
+--- a/src/widgets/ASlider.cpp
++++ b/src/widgets/ASlider.cpp
+@@ -23,8 +23,8 @@ have a window permanently associated with it.
+ \brief Pop up dialog used with an LWSlider.
+ 
+ \class TipWindow
+-\brief A wxPopupWindow used to give the numerical value of an LWSlider
+-or ASlider.
++\brief A wxPopupWindow (or wxFrame on mcaOS) used to give the numerical
++value of an LWSlider or ASlider.
+ 
+ *//*******************************************************************/
+ 
+@@ -150,7 +150,12 @@ const int sliderFontSize = 12;
+ // TipWindow
+ //
+ 
+-class TipWindow final : public wxFrame
++class TipWindow final
++#ifdef __WXMAC__
++: public wxFrame
++#else
++: public wxPopupWindow
++#endif
+ {
+  public:
+    TipWindow(wxWindow *parent, const TranslatableStrings & labels);
+@@ -159,6 +164,7 @@ class TipWindow final : public wxFrame
+    wxSize GetSize() const;
+    void SetPos(const wxPoint & pos);
+    void SetLabel(const TranslatableString & label);
++   bool Show(bool show = true) override;
+ 
+ private:
+    void OnPaint(wxPaintEvent & event);
+@@ -168,20 +174,19 @@ private:
+    int mWidth;
+    int mHeight;
+    wxFont mFont;
+-
+-   DECLARE_EVENT_TABLE()
+ };
+ 
+-BEGIN_EVENT_TABLE(TipWindow, wxFrame)
+-   EVT_PAINT(TipWindow::OnPaint)
+-END_EVENT_TABLE()
+-
+ TipWindow::TipWindow(wxWindow *parent, const TranslatableStrings & labels)
+-:  wxFrame(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
+-           wxFRAME_SHAPED | wxNO_BORDER | wxFRAME_NO_TASKBAR | wxFRAME_FLOAT_ON_PARENT )
++#ifdef __WXMAC__
++: wxFrame(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
++          wxFRAME_SHAPED | wxNO_BORDER | wxFRAME_NO_TASKBAR | wxFRAME_FLOAT_ON_PARENT)
++#else
++: wxPopupWindow(parent, wxFRAME_SHAPED | wxBORDER_NONE | wxFRAME_FLOAT_ON_PARENT)
++#endif
+ {
+    SetBackgroundStyle(wxBG_STYLE_PAINT);
+    SetBackgroundColour(wxTransparentColour);
++   Bind(wxEVT_PAINT, &TipWindow::OnPaint, this);
+ 
+    mFont.SetPointSize(sliderFontSize);
+    mFont.SetFamily(wxFONTFAMILY_SWISS);
+@@ -200,7 +205,6 @@ TipWindow::TipWindow(wxWindow *parent, const TranslatableStrings & labels)
+    mWidth += 8;
+    mHeight += 8;
+ 
+-#if defined(__WXMAC__)
+    // Use a bitmap region to set the shape since just adding an unfilled path
+    // will make the window transparent
+    wxBitmap shape(mWidth, mHeight);
+@@ -211,12 +215,7 @@ TipWindow::TipWindow(wxWindow *parent, const TranslatableStrings & labels)
+    dc.DrawRoundedRectangle(0, 0, mWidth, mHeight, 5);
+    dc.SelectObject(wxNullBitmap);
+ 
+-   SetShape(wxRegion(shape, *wxWHITE));
+-#else
+-   wxGraphicsPath path = wxGraphicsRenderer::GetDefaultRenderer()->CreatePath();
+-   path.AddRoundedRectangle(0, 0, mWidth, mHeight, 5);
+-   SetShape(path);
+-#endif
++   SetShape(wxRegion(shape));
+ }
+ 
+ wxSize TipWindow::GetSize() const
+@@ -234,6 +233,16 @@ void TipWindow::SetLabel(const TranslatableString & label)
+    mLabel = label;
+ }
+ 
++bool TipWindow::Show(bool show)
++{
++   #ifdef __WXMAC__
++   ShowWithoutActivating();
++   return true;
++   #else
++   return wxWindow::Show(show);
++   #endif
++}
++
+ void TipWindow::OnPaint(wxPaintEvent & WXUNUSED(event))
+ {
+    wxAutoBufferedPaintDC dc(this);
+@@ -903,7 +912,7 @@ void LWSlider::ShowTip(bool show)
+       CreatePopWin();
+       FormatPopWin();
+       SetPopWinPosition();
+-      mTipPanel->ShowWithoutActivating();
++      mTipPanel->Show();
+    }
+    else
+    {
+-- 
+2.37.3
+
