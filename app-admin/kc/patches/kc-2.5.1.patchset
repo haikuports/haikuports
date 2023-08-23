@@ -1,0 +1,319 @@
+From f2aac718b9e7ecf0cfb396904045868fdfddb616 Mon Sep 17 00:00:00 2001
+From: Oscar Lesta <oscar.lesta@gmail.com>
+Date: Tue, 22 Aug 2023 21:58:58 -0300
+Subject: Initial Haiku patch
+
+
+diff --git a/Makefile.haiku b/Makefile.haiku
+new file mode 100644
+index 0000000..c8d154b
+--- /dev/null
++++ b/Makefile.haiku
+@@ -0,0 +1,96 @@
++PROG =		kc
++
++DESTDIR ?=	
++PREFIX ?=	
++MANDIR ?=	
++
++BCRYPT_DIR =	bcrypt
++
++SRCS =		kc.c malloc_check.c
++SRCS +=		cmd_c.c cmd_cdel.c cmd_clear.c cmd_clipboard.c cmd_clist.c cmd_cnew.c cmd_copy.c \
++		cmd_cedit.c cmd_del.c cmd_edit.c cmd_export.c cmd_getnum.c \
++		cmd_help.c cmd_import.c cmd_info.c cmd_list.c cmd_new.c cmd_near.c \
++		cmd_passwd.c cmd_quit.c cmd_search.c cmd_searchre.c cmd_status.c \
++		cmd_swap.c cmd_version.c cmd_write.c \
++		commands.c commands_init.c ssha.c
++OBJS =		kc.o malloc_check.o
++OBJS +=		cmd_c.o cmd_cdel.o cmd_clear.o cmd_clipboard.o cmd_clist.o cmd_cnew.o cmd_copy.o \
++		cmd_cedit.o cmd_del.o cmd_edit.o cmd_export.o cmd_getnum.o \
++		cmd_help.o cmd_import.o cmd_info.o cmd_list.o cmd_new.o cmd_near.o \
++		cmd_passwd.o cmd_quit.o cmd_search.o cmd_searchre.o cmd_status.o \
++		cmd_swap.o cmd_version.o cmd_write.o \
++		commands.o commands_init.o ssha.o
++ifdef HAVE_YUBIKEY
++SRCS +=		ykchalresp.c
++OBJS +=		ykchalresp.o
++endif
++
++BCRYPT_OBJS =	${BCRYPT_DIR}/bcrypt_pbkdf.o ${BCRYPT_DIR}/blf.o ${BCRYPT_DIR}/explicit_bzero.o ${BCRYPT_DIR}/sha2.o
++
++
++CFLAGS +=	-pedantic -Wall
++CFLAGS +=	`pkg-config --cflags libcrypto`
++CFLAGS +=	`pkg-config --cflags libxml-2.0`
++ifndef EDITLINE
++CFLAGS +=	-D_READLINE
++endif
++ifdef HAVE_PCRE
++CFLAGS +=	`pkg-config --cflags libpcre` -D_HAVE_PCRE
++endif
++ifdef HAVE_LIBSCRYPT
++CFLAGS +=	-D_HAVE_LIBSCRYPT
++endif
++ifdef HAVE_YUBIKEY
++CFLAGS +=	-D_HAVE_YUBIKEY `pkg-config --cflags ykpers-1`
++endif
++CFLAGS +=	-D_BUNDLED_BCRYPT -D_OS_HAIKU
++export CFLAGS
++
++LDADD += -lbsd -lnetwork
++LDADD +=	`pkg-config --libs libcrypto`
++LDADD +=	`pkg-config --libs libxml-2.0`
++ifdef EDITLINE
++LDADD +=	-ledit -lncursesw
++else
++LDADD +=	-lreadline
++endif
++ifdef HAVE_PCRE
++LDADD +=	`pkg-config --libs libpcre`
++endif
++ifdef HAVE_LIBSCRYPT
++LDADD +=	-lscrypt
++endif
++ifdef HAVE_YUBIKEY
++LDADD +=	-lyubikey `pkg-config --libs ykpers-1`
++endif
++
++
++CLEANFILES =	${PROG} *.o regress/test*
++
++
++all: bcrypt ${PROG}
++
++.PHONY: bcrypt
++bcrypt:
++	${MAKE} -C ${BCRYPT_DIR} -f Makefile.linux
++
++CLEANFILES +=	${BCRYPT_DIR}/*.o
++
++clean:
++	rm -f ${CLEANFILES}
++
++install: all
++	install -D -s -m 755 ${PROG} ${PREFIX}/bin/${PROG}
++	install -D -m 644 ${PROG}.1 ${MANDIR}/man1/${PROG}.1
++
++test:
++	$(shell) regress/run_tests.sh
++
++set_version:
++	$(shell) if grep -E -q -e '^\#define\s+VERSION\s+"[0-9]\.[0-9]-dev-' common.h;then sed -i -e "s/\(^\#define\s\+VERSION\s\+\"[0-9]\.[0-9]-dev-\)\(.*\)\"$$/\1`git log -1 --pretty=format:%cd-%h --date=short`\"/" common.h; fi
++
++unset_version:
++	$(shell) if grep -E -q -e '^\#define\s+VERSION\s+"[0-9]\.[0-9]-dev-' common.h;then sed -i -e "s/\(^\#define\s\+VERSION\s\+\"[0-9]\.[0-9]-dev-\)\(.*\)\"$$/\1GIT_VERSION\"/" common.h; fi
++
++${PROG}: set_version ${OBJS} ${BCRYPT_OBJS} unset_version
++	${CC} ${LDFLAGS} ${OBJS} ${BCRYPT_OBJS} -o ${PROG} ${LDADD}
+diff --git a/bcrypt/bcrypt_pbkdf.c b/bcrypt/bcrypt_pbkdf.c
+index 1b7ac95..c544542 100644
+--- a/bcrypt/bcrypt_pbkdf.c
++++ b/bcrypt/bcrypt_pbkdf.c
+@@ -25,6 +25,8 @@
+ #ifdef __linux__
+ #include <bsd/string.h>
+ #include <bsd/stdlib.h>
++#elif defined(__HAIKU__)
++#include <posix/fcntl.h>
+ #endif
+ 
+ #define	MINIMUM(a,b) (((a) < (b)) ? (a) : (b))
+@@ -175,6 +177,11 @@ bcrypt_pbkdf(const unsigned char *pass, size_t passlen, const uint8_t *salt, siz
+ 
+ bad:
+ 	/* overwrite with random in case caller doesn't check return code */
++#if !defined(__HAIKU__)
+ 	arc4random_buf(key, keylen);
++	/* arc4random() not available on Haiku's userland. As this code is just
++	a precaution, and kc *does* checkes the return of this function, leaving
++	this out should not hurt. */
++#endif
+ 	return -1;
+ }
+diff --git a/bcrypt/blf.h b/bcrypt/blf.h
+index 7ea350c..3c12034 100644
+--- a/bcrypt/blf.h
++++ b/bcrypt/blf.h
+@@ -32,6 +32,10 @@
+ #ifndef _BLF_H_
+ #define _BLF_H_
+ 
++#ifdef __HAIKU__
++	#include <stdint.h>
++#endif
++
+ /* Schneier states the maximum key length to be 56 bytes.
+  * The way how the subkeys are initialized by the key up
+  * to (N+2)*4 i.e. 72 bytes are utilized.
+diff --git a/bcrypt/sha2.c b/bcrypt/sha2.c
+index 1c27168..adf7069 100644
+--- a/bcrypt/sha2.c
++++ b/bcrypt/sha2.c
+@@ -36,6 +36,9 @@
+ 
+ #ifdef _OS_LINUX
+ #include <bsd/sys/endian.h>
++#elif __HAIKU__
++#include <posix/sys/cdefs.h>
++#include <endian.h>
+ #else
+ #include <sys/endian.h>
+ #endif
+diff --git a/cmd_export.c b/cmd_export.c
+index 72de92a..4a0d8f2 100644
+--- a/cmd_export.c
++++ b/cmd_export.c
+@@ -28,6 +28,8 @@
+ 
+ #ifdef BSD
+ #include <fcntl.h>
++#elif defined(__HAIKU__)
++#include <posix/fcntl.h>
+ #endif
+ 
+ #if defined(__linux__)  ||  defined(__CYGWIN__)
+diff --git a/cmd_import.c b/cmd_import.c
+index a808fc0..1fa79ef 100644
+--- a/cmd_import.c
++++ b/cmd_import.c
+@@ -28,6 +28,8 @@
+ 
+ #ifdef BSD
+ #include <fcntl.h>
++#elif defined(__HAIKU__)
++#include <posix/fcntl.h>
+ #endif
+ 
+ #if defined(__linux__)  ||  defined(__CYGWIN__)
+diff --git a/cmd_write.c b/cmd_write.c
+index 71de92e..e5a415e 100644
+--- a/cmd_write.c
++++ b/cmd_write.c
+@@ -28,9 +28,11 @@
+ 
+ #ifdef BSD
+ #include <fcntl.h>
++#elif defined(__HAIKU__)
++#include <posix/fcntl.h>
+ #endif
+ 
+-#if defined(__linux__)  ||  defined(__CYGWIN__)
++#if defined(__linux__)  ||  defined(__CYGWIN__) || defined(__HAIKU__)
+ #include <sys/file.h>
+ #endif
+ 
+diff --git a/commands.c b/commands.c
+index 7837b20..17c5b97 100644
+--- a/commands.c
++++ b/commands.c
+@@ -32,6 +32,9 @@
+ #ifdef BSD
+ #include <fcntl.h>
+ #include <readpassphrase.h>
++#elif defined(__HAIKU__)
++#include <posix/fcntl.h>
++#include <readpassphrase.h>
+ #endif
+ 
+ #ifdef __OpenBSD__
+diff --git a/kc.c b/kc.c
+index 9b1cc8c..5307a9f 100644
+--- a/kc.c
++++ b/kc.c
+@@ -31,9 +31,11 @@
+ 
+ #ifdef BSD
+ #include <fcntl.h>
++#elif defined(__HAIKU__)
++#include <posix/fcntl.h>
+ #endif
+ 
+-#if defined(__linux__)  ||  defined(__CYGWIN__)
++#if defined(__linux__)  ||  defined(__CYGWIN__) || defined(__HAIKU__)
+ #include <sys/file.h>
+ #endif
+ 
+@@ -593,7 +595,7 @@ main(int argc, char *argv[])
+ 	if (el_set(e, EL_BIND, "^L", "ed-clear-screen", NULL) != 0)
+ 		perror("ERROR: el_set(EL_BIND)");
+ 
+-#if !defined(__linux__)  &&  !defined(__CYGWIN__)
++#if !defined(__linux__)  &&  !defined(__CYGWIN__)  &&  !defined(__HAIKU__)
+ 	if (el_source(e, NULL) != 0) {
+ 		if (errno != 0) {
+ 			if (errno != ENOENT)
+diff --git a/regress/run_tests.sh b/regress/run_tests.sh
+index 8dd04bd..44f0280 100755
+--- a/regress/run_tests.sh
++++ b/regress/run_tests.sh
+@@ -52,7 +52,7 @@ export SHA1_COMMON_1='f13bad981225a227a854257d56c0983879ed9733'
+ 
+ SYSTEM=$(uname -s)
+ case "${SYSTEM}" in
+-	Linux|CYGWIN*)
++	Linux|CYGWIN*|Haiku*)
+ 		SHA1_BIN=$(which sha1sum)
+ 		RANDOM_DEV="/dev/urandom"
+ 	;;
+-- 
+2.37.3
+
+
+From 885bbe6b246a98fd4a23fb987d8e3a81f5d4f0b4 Mon Sep 17 00:00:00 2001
+From: Oscar Lesta <oscar.lesta@gmail.com>
+Date: Thu, 24 Aug 2023 04:00:57 -0300
+Subject: Use the proper location for the DEFAULT_DB_DIR in Haiku.
+
+Avoids polluting $HOME.
+
+diff --git a/common.h b/common.h
+index e8f8a8b..11fa7ca 100644
+--- a/common.h
++++ b/common.h
+@@ -57,7 +57,11 @@
+ 
+ #define	ITEMS_MAX	ULONG_MAX
+ 
++#ifndef __HAIKU__
+ #define	DEFAULT_DB_DIR	".kc"
++#else
++#define	DEFAULT_DB_DIR	"kc"
++#endif
+ #define	DEFAULT_DB_FILENAME	"default.kcd"
+ #define	DEFAULT_KDF	"sha512"
+ #define	DEFAULT_CIPHER	"aes256"
+diff --git a/kc.c b/kc.c
+index 5307a9f..e07d59f 100644
+--- a/kc.c
++++ b/kc.c
+@@ -32,6 +32,8 @@
+ #ifdef BSD
+ #include <fcntl.h>
+ #elif defined(__HAIKU__)
++#include <FindDirectory.h>
++#include <fs_info.h>
+ #include <posix/fcntl.h>
+ #endif
+ 
+@@ -245,7 +247,17 @@ main(int argc, char *argv[])
+ 	if (!db_params.db_filename) {
+ 		/* using default database */
+ 
++#ifdef __HAIKU__
++		dev_t volume = dev_for_path("/boot");
++		char buffer[B_PATH_NAME_LENGTH];
++		status_t result = find_directory(B_USER_SETTINGS_DIRECTORY, volume, false, buffer, sizeof(buffer));
++		if (result == B_OK)
++			env_home = buffer;
++		else
++			env_home = getenv("HOME");
++#else
+ 		env_home = getenv("HOME");
++#endif
+ 
+ 		len = strlen(env_home) + 1 + strlen(DEFAULT_DB_DIR) + 1;
+ 		db_params.db_filename = malloc(len); malloc_check(db_params.db_filename);
+-- 
+2.37.3
+
