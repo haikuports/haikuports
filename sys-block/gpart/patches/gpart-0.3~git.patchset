@@ -1,0 +1,153 @@
+From f5332a10286ac279adb849698fa5d21bc7ea342c Mon Sep 17 00:00:00 2001
+From: Begasus <begasus@gmail.com>
+Date: Mon, 4 Sep 2023 08:08:57 +0200
+Subject: Apply patchset from PR's
+
+
+diff --git a/src/disku.c b/src/disku.c
+index 24da917..cb3f344 100644
+--- a/src/disku.c
++++ b/src/disku.c
+@@ -33,6 +33,11 @@
+ #include <sys/disk.h>
+ #endif
+ 
++#if defined(__HAIKU__)
++#include <drivers/Drivers.h>
++#include <fcntl.h>
++#endif
++
+ #include <unistd.h>
+ 
+ static void geometry_from_num_sectors(struct disk_geom *g, uint64_t nsects)
+@@ -96,8 +101,22 @@ static void os_disk_geometry(disk_desc *d, struct disk_geom *g)
+ 	g.d_nsecs = o / u;
+ 	g.d_c = g.d_nsecs / g.d_h / g.d_s;
+ }
++#elif defined(__HAIKU__)
++static void os_disk_geometry(disk_desc *d, struct disk_geom *g)
++{
++	device_geometry geom;
++
++	if (ioctl(d->d_fd, B_GET_GEOMETRY, &geom, sizeof(geom)) == -1) {
++		pr(FATAL, EM_IOCTLFAILED, "B_GET_GEOMETRY", strerror(errno));
++	}
++
++	g->d_c = geom.cylinder_count;
++	g->d_h = geom.head_count;
++	g->d_s = geom.sectors_per_track;
++	g->d_nsecs = ((uint64_t)g->d_c) * g->d_h * g->d_s;
++}
+ #else
+-#error Only Linux and FreeBSD supported
++#error Only Linux, FreeBSD and Haiku are supported
+ #endif
+ 
+ /*
+diff --git a/src/gpart.c b/src/gpart.c
+index 3b44a75..279ee05 100644
+--- a/src/gpart.c
++++ b/src/gpart.c
+@@ -175,6 +175,10 @@ ssize_t bread(int fd, byte_t *buf, size_t ssize, size_t nsecs)
+ 			// ret < 0, an error case
+ 			if (errno == EINTR)
+ 				continue; // Rogue signal interruption, retry
++#ifdef __HAIKU__
++			if (errno == EINVAL)
++				return read_bytes;	// on Haiku, EOF causes EINVAL
++#endif
+ 			berrno = errno;
+ 			break;
+ 		}
+@@ -504,20 +508,28 @@ static void u_to_chs(disk_desc *d, unsigned long u, long *c, long *h, long *s)
+ 
+ static int on_cyl_boundary(disk_desc *d, s64_t sec)
+ {
++#ifndef __HAIKU__
+ 	struct disk_geom *g = &d->d_dg;
+ 
+ 	if (g->d_h && g->d_s)
+ 		return ((sec % (g->d_h * g->d_s)) == 0);
+ 	return (1);
++#else
++	return (1);
++#endif
+ }
+ 
+ static int on_head_boundary(disk_desc *d, s64_t sec)
+ {
++#ifndef __HAIKU__
+ 	struct disk_geom *g = &d->d_dg;
+ 
+ 	if (g->d_s)
+ 		return ((sec % g->d_s) == 0);
+ 	return (1);
++#else
++	return (1);
++#endif
+ }
+ 
+ static void print_partition(disk_desc *d, dos_part_entry *p, int inset, s64_t offset)
+@@ -936,7 +948,11 @@ static void do_guess_loop(disk_desc *d)
+ 	d->d_nsb = 0;
+ 	bincr = incr * d->d_ssize;
+ 
++#ifdef __HAIKU__
++	start = skipsec ? skipsec : incr;
++#else
+ 	start = skipsec ? skipsec : d->d_dg.d_s;
++#endif
+ 	d->d_nsb = start - incr;
+ 	start *= d->d_ssize;
+ 	if (l64seek(d->d_fd, start, SEEK_SET) == -1)
+diff --git a/src/gpart.h b/src/gpart.h
+index e6e213c..5cf8a1c 100644
+--- a/src/gpart.h
++++ b/src/gpart.h
+@@ -22,6 +22,7 @@
+ #include "errmsgs.h"
+ #include "l64seek.h"
+ 
++#include <endian.h>
+ #include <stdint.h>
+ 
+ typedef uint8_t byte_t;
+-- 
+2.37.3
+
+
+From 362233ce95674a0ddfddb8412e30d428c3b98478 Mon Sep 17 00:00:00 2001
+From: Begasus <begasus@gmail.com>
+Date: Mon, 4 Sep 2023 08:40:24 +0200
+Subject: Revert upstream changes that brakes the build
+
+
+diff --git a/src/gm_s86dl.h b/src/gm_s86dl.h
+index d4ae4ae..e23b803 100644
+--- a/src/gm_s86dl.h
++++ b/src/gm_s86dl.h
+@@ -17,7 +17,9 @@
+ #ifndef _GM_S86DL_H
+ #define _GM_S86DL_H
+ 
++#ifndef __HAIKU__
+ #include <linux/types.h>
++#endif
+ 
+ #define SOLARIS_X86_NUMSLICE		8
+ #define SOLARIS_X86_VTOC_SANE		(0x600DDEEEUL)
+@@ -41,7 +43,11 @@
+ struct solaris_x86_slice {
+ 	ushort	s_tag;				/* ID tag of partition */
+ 	ushort	s_flag;				/* permision flags */
++#ifdef __HAIKU__
++	daddr_t s_start;		/* start sector no of partition */
++#else
+ 	__kernel_daddr_t s_start;	/* start sector no of partition */
++#endif
+ 	long	s_size;				/* # of blocks in partition */
+ };
+ 
+-- 
+2.37.3
+
