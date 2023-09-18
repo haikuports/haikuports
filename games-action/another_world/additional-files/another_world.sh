@@ -1,9 +1,14 @@
 #!/bin/bash
 
-DATA_PATH=`/bin/finddir B_USER_NONPACKAGED_DATA_DIRECTORY`/another_world
+DATA_PATH=`findpaths -e B_FIND_PATH_DATA_DIRECTORY another_world | head -n 1`
 SAVE_PATH=`/bin/finddir B_USER_NONPACKAGED_DATA_DIRECTORY`/another_world/save
 
-mkdir -p $DATA_PATH # create data directory if it does not exist
+if [ -z $DATA_PATH ];
+then
+	DATA_PATH=`/bin/finddir B_USER_NONPACKAGED_DATA_DIRECTORY`/another_world
+	mkdir -p $DATA_PATH # create data directory if it does not exist
+fi
+
 mkdir -p $SAVE_PATH # create save directory if it does not exist
 
 # Check if all files are present
@@ -22,9 +27,10 @@ if [ ! -f $DATA_PATH/BANK01 ] \
 || [ ! -f $DATA_PATH/BANK0D ] \
 || [ ! -f $DATA_PATH/MEMLIST.BIN ];
 then
-    if [ "$(alert --warning "Please copy original Another World files (DOS version) to $DATA_PATH (BANK* and MEMLIST.BIN)." "Open $DATA_PATH" "Cancel")" == "Open $DATA_PATH" ]; then
+    if [ "$(alert --warning "Please copy original 'Another World' files (DOS version) to $DATA_PATH (BANK* and MEMLIST.BIN)." "Open data folder" "Cancel")" == "Open data folder" ];
+    then
         open $DATA_PATH
     fi
 else # all files are present, launch the game
-   `/bin/finddir B_SYSTEM_APPS_DIRECTORY`/AnotherWorld/raw --datapath=$DATA_PATH --savepath=$SAVE_PATH $@
+   neo-raw --datapath=$DATA_PATH --savepath=$SAVE_PATH $@
 fi
