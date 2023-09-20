@@ -32,4 +32,4 @@ do
 done
 
 # all files are present, launch the game
-neo-raw --datapath=$DATA_PATH --savepath=$SAVE_PATH $@
+exec neo-raw --datapath=$DATA_PATH --savepath=$SAVE_PATH $@
