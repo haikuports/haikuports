@@ -1,0 +1,154 @@
+From e79490d2547d34aaa3f677640bf1230cf814ad79 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 28 Feb 2021 17:54:22 +1000
+Subject: Add haiku support
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 539169b..48002da 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -274,7 +274,7 @@ install(FILES "doc/texture_packs.txt" DESTINATION "${DOCDIR}" COMPONENT "Docs")
+ install(FILES "doc/world_format.txt" DESTINATION "${DOCDIR}" COMPONENT "Docs")
+ install(FILES "minetest.conf.example" DESTINATION "${EXAMPLE_CONF_DIR}")
+ 
+-if(UNIX AND NOT APPLE)
++if(UNIX AND NOT APPLE AND NOT HAIKU)
+ 	install(FILES "doc/minetest.6" "doc/minetestserver.6" DESTINATION "${MANDIR}/man6")
+ 	install(FILES "misc/net.minetest.minetest.desktop" DESTINATION "${XDG_APPS_DIR}")
+ 	install(FILES "misc/net.minetest.minetest.appdata.xml" DESTINATION "${APPDATADIR}")
+diff --git a/cmake/Modules/MinetestFindIrrlichtHeaders.cmake b/cmake/Modules/MinetestFindIrrlichtHeaders.cmake
+index e434b58..e697f51 100644
+--- a/cmake/Modules/MinetestFindIrrlichtHeaders.cmake
++++ b/cmake/Modules/MinetestFindIrrlichtHeaders.cmake
+@@ -5,6 +5,7 @@ find_path(IRRLICHT_INCLUDE_DIR NAMES irrlicht.h
+ 	PATHS
+ 	/usr/local/include/irrlichtmt
+ 	/usr/include/irrlichtmt
++	/system/develop/headers/x86/irrlichtmt #Haiku hybrid
+ 	/system/develop/headers/irrlichtmt #Haiku
+ 	PATH_SUFFIXES "include/irrlichtmt"
+ )
+diff --git a/src/defaultsettings.cpp b/src/defaultsettings.cpp
+index 29449d9..c639bf6 100644
+--- a/src/defaultsettings.cpp
++++ b/src/defaultsettings.cpp
+@@ -207,11 +207,15 @@ void set_default_settings()
+ 	settings->setDefault("lighting_boost_spread", "0.2");
+ 	settings->setDefault("texture_path", "");
+ 	settings->setDefault("shader_path", "");
++#ifdef __HAIKU__
++	settings->setDefault("video_driver", "ogles2");
++#else
+ #if ENABLE_GLES
+ 	settings->setDefault("video_driver", "ogles2");
+ #else
+ 	settings->setDefault("video_driver", "opengl");
+ #endif
++#endif // __HAIKU__
+ 	settings->setDefault("cinematic", "false");
+ 	settings->setDefault("camera_smoothing", "0");
+ 	settings->setDefault("cinematic_camera_smoothing", "0.7");
+@@ -246,7 +250,11 @@ void set_default_settings()
+ 	settings->setDefault("texture_clean_transparent", "false");
+ 	settings->setDefault("texture_min_size", "64");
+ 	settings->setDefault("ambient_occlusion_gamma", "1.8");
++#ifdef __HAIKU__
++	settings->setDefault("enable_shaders", "false");
++#else
+ 	settings->setDefault("enable_shaders", "true");
++#endif
+ 	settings->setDefault("enable_particles", "true");
+ 	settings->setDefault("arm_inertia", "true");
+ 	settings->setDefault("show_nametag_backgrounds", "true");
+-- 
+2.37.3
+
+
+From cdf3859e16ba20feabfcce2612d0a8031a5a39b3 Mon Sep 17 00:00:00 2001
+From: Maite Gamper <victor@wenzeslaus.de>
+Date: Tue, 10 Oct 2023 07:17:36 +0200
+Subject: fix 3dEye's patch
+
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index afe0083..8f5d50e 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -252,9 +252,13 @@ endif()
+ # Use cmake_config.h
+ add_definitions(-DUSE_CMAKE_CONFIG_H)
+ 
+-set(THREADS_PREFER_PTHREAD_FLAG ON)
+-find_package(Threads REQUIRED)
+-set(PLATFORM_LIBS Threads::Threads)
++if(HAIKU)
++	set(PLATFORM_LIBS ${PLATFORM_LIBS} intl be)
++else()
++	set(THREADS_PREFER_PTHREAD_FLAG ON)
++	find_package(Threads REQUIRED)
++	set(PLATFORM_LIBS Threads::Threads)
++endif(HAIKU)
+ 
+ if(WIN32)
+ 	# Windows
+diff --git a/src/porting.cpp b/src/porting.cpp
+index 629f00c..c3076b4 100644
+--- a/src/porting.cpp
++++ b/src/porting.cpp
+@@ -61,6 +61,14 @@ with this program; if not, write to the Free Software Foundation, Inc.,
+         #include <FindDirectory.h>
+ #endif
+ 
++#if defined(__HAIKU__)
++#include <Application.h>
++#include <FindDirectory.h>
++#include <Path.h>
++#include <Roster.h>
++#include <OS.h>
++#endif
++
+ #include "config.h"
+ #include "debug.h"
+ #include "filesys.h"
+@@ -258,7 +266,16 @@ bool getCurrentWorkingDir(char *buf, size_t len)
+ 
+ bool getExecPathFromProcfs(char *buf, size_t buflen)
+ {
+-#ifndef _WIN32
++#if defined(__HAIKU__)
++	app_info appInfo;
++	if (be_app->GetAppInfo(&appInfo) == B_OK) {
++		BPath path(&appInfo.ref);
++		sprintf(buf, path.Path());
++	} else {
++		sprintf(buf, "/system/apps/Minetest/Minetest");
++	}
++	return true;
++#elif defined(_WIN32)
+ 	buflen--;
+ 
+ 	ssize_t len;
+@@ -533,6 +550,19 @@ bool setSystemPaths()
+ 	return true;
+ }
+ 
++//// Haiku
++#elif defined(__HAIKU__)
++
++bool setSystemPaths()
++{
++	path_share = STATIC_SHAREDIR;
++	static char dir[PATH_MAX] = "";
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, false, dir, sizeof(dir)) != B_OK)
++		sprintf(dir, "/boot/home/config/settings");
++	dir[sizeof(dir) - 1] = 0;
++	path_user  = std::string(dir) + "/" + lowercase(PROJECT_NAME);
++	return true;
++}
+ 
+ #else
+ 
+-- 
+2.37.3
+
