@@ -2,42 +2,46 @@ SUMMARY="Modern and safe systems programming language"
 DESCRIPTION="Rust is a systems programming language that runs blazingly fast, \
 prevents almost all crashes*, and eliminates data races."
 HOMEPAGE="https://www.rust-lang.org/"
-COPYRIGHT="2018 The Rust Project Developers"
+COPYRIGHT="2023 The Rust Project Developers"
 LICENSE="MIT"
-REVISION="2"
-cargoVersion="0.29.0"
-rlsVersion="0.128.0"
-rustfmtVersion="0.8.2"
+REVISION="1"
+cargoVersion="0.74.0"
+rustfmtVersion="1.6.0"
+clippyVersion="0.1.73"
+rlsVersion="2.0.0"
 SOURCE_URI="https://static.rust-lang.org/dist/rustc-$portVersion-src.tar.xz"
-CHECKSUM_SHA256="8a899afd4b502b4ebff5cfc82cba77a8cb37113b5e6018f15c09545936081848"
+CHECKSUM_SHA256="6eaf672dbea2e6596af8c999f5e6924b9af4bb8b02166bfe0b928e68aa75ae62"
 SOURCE_DIR="rustc-$portVersion-src"
 PATCHES="rust-$portVersion.patchset"
 
-ARCHITECTURES="?all !x86_gcc2"
+
+ARCHITECTURES="!x86_gcc2 ?x86 ?x86_64"
 SECONDARY_ARCHITECTURES="?x86"
 
 PROVIDES="
-	rust$secondaryArchSuffix = $portVersion
+	rust_bin$secondaryArchSuffix = $portVersion
+	cmd:rustc$secondaryArchSuffix = $portVersion
+	cmd:rustdoc$secondaryArchSuffix = $portVersion
+	cmd:rustfmt$secondaryArchSuffix = $portVersion
+	cmd:rust_analyzer$secondaryArchSuffix = $portVersion
+	cmd:rust_demangler$secondaryArchSuffix = $portVersion
+	cmd:rust_gdb$secondaryArchSuffix = $portVersion
+	cmd:rust_gdbgui$secondaryArchSuffix = $portVersion
+	cmd:rust_lldb$secondaryArchSuffix = $portVersion
 	cmd:cargo$secondaryArchSuffix = $cargoVersion
-	cmd:cargo_fmt = $cargoVersion
-	cmd:rls = $rlsVersion
-	cmd:rust_gdb = $portVersion
-	cmd:rust_lldb = $portVersion
-	cmd:rustc = $portVersion
-	cmd:rustdoc = $portVersion
-	cmd:rustfmt = $rustfmtVersion
+	cmd:cargo_clippy$secondaryArchSuffix = $clippyVersion
+	cmd:cargo_fmt$secondaryArchSuffix = $cargoVersion
+	cmd:clippy_driver$secondaryArchSuffix = $clippyVersion
 	"
 REQUIRES="
 	haiku$secondaryArchSuffix
 	lib:libcrypto$secondaryArchSuffix
-	lib:libcurl$secondaryArchSuffix
 	lib:libssl$secondaryArchSuffix
 	lib:libz$secondaryArchSuffix
 	"
 
 BUILD_REQUIRES="
 	haiku${secondaryArchSuffix}_devel
-	devel:libcurl$secondaryArchSuffix
 	devel:libssl$secondaryArchSuffix
 	devel:libz$secondaryArchSuffix
 	"
@@ -52,40 +56,47 @@ BUILD_PREREQUIRES="
 	cmd:grep
 	cmd:ld$secondaryArchSuffix
 	cmd:make
+	cmd:ninja
 	cmd:pkg_config$secondaryArchSuffix
-	cmd:python
-	cmd:rustc == $portVersion
+	cmd:python3
+	cmd:rustc$secondaryArchSuffix == $portVersion
 	cmd:sed
 	cmd:tar
 	cmd:which
 	cmd:xargs
 	"
 
+relativeInstallDir="develop/tools$secondaryArchSubDir/rust"
+installDir="$prefix/$relativeInstallDir"
+
 BUILD()
 {
 	# write the build configuration
 	tr -d '\t' >config.toml <<- EOL
 		[llvm]
-		targets = "X86"
+		targets = "WebAssembly;X86"
 		experimental-targets = ""
+		static-libstdcpp = false
 
 		[build]
+		host = ["$effectiveTargetArchitecture-unknown-haiku"]
+		target = ["$effectiveTargetArchitecture-unknown-haiku", "wasm32-unknown-unknown"]
 		cargo = "/$relativeBinDir/cargo"
-		rustc = "/boot/system/bin/rustc"
+		rustc = "/$relativeBinDir/rustc"
 		submodules = false
 		extended = true
-		tools = ["cargo", "rls", "rustfmt", "analysis"]
+		verbose = 1
 
 		[install]
-		prefix = "$prefix"
-		libdir = "$relativeLibDir"
-		mandir = "$relativeManDir"
-		docdir = "$relativeDevelopDocDir"
-		sysconfdir = "$relativeDataDir"
+		prefix = "$installDir"
+		libdir = "$installDir/bin/lib"
+		mandir = "$manDir"
+		docdir = "$developDocDir"
+		sysconfdir = "$dataDir"
 
 		[rust]
 		channel = "stable"
-		use-jemalloc = false
+		lld = true
 		rpath = false
 		deny-warnings = false
 		dist-src = false
@@ -99,8 +110,13 @@ EOL
 	# compile Rust
 	export DISABLE_ASLR=1
 
+	# Version-specific fixes: these fixes need to be applied 
+	pushd src/tools/cargo
+	cargo update -p socket2 --precise 0.4.1
+	cargo update -p tempfile --precise 3.7.1
+	popd
 	# now build rust and cargo
-	./x.py dist
+	./x.py dist $jobArgs
 }
 
 INSTALL()
@@ -120,44 +136,38 @@ INSTALL()
 	              "rustc-$srcGitRev-$architecture"         \
 	              "rust-analysis-$srcGitRev-$architecture" \
 	              "cargo-$cargoVersion-$architecture"      \
-	              "rls-$rlsVersion-$architecture"          \
+	              "clippy-$clippyVersion-$architecture"    \
 	              "rustfmt-$rustfmtVersion-$architecture"
 	do
 		./$module/install.sh                               \
-				--prefix=$prefix                           \
+				--prefix=$installDir                       \
 				--docdir=$developDocDir                    \
-				--libdir=$libDir                           \
 				--mandir=$manDir                           \
 				--sysconfdir=$dataDir                      \
 				--disable-ldconfig
 	done
 
-	# move the cargo and binaries (in case of a secondary arch)
-	if [ -n "$secondaryArchSuffix" ]; then
-		mkdir -p $binDir
-		mv $prefix/bin/cargo $binDir/cargo
-	fi
-
-	# remove zsh data, it is not used on Haiku anyway
-	rm -rf $prefix/share
-
-	# move the `rustlib` folder to the developLibDirs (as it is a framework of sorts)
-	# do create a link in $prefix/lib as that is where rustc expects things to live
-	# Note; this actually seems to be a bug in the Rust build system. The path
-	# to rustlib is hardcoded in the rustc binary, but it does allow it to be
-	# set to libdir_relative (see config.rs in the bootstrap tool). This variable
-	# is only set when the configure script is used to generate the config, not
-	# with config.toml
-	mkdir -p $developLibDir
-	mv $libDir/rustlib $developLibDir
-	ln -r -s $developLibDir/rustlib $prefix/lib/rustlib
+	# move zsh data to the datadir
+	mv $installDir/share/zsh $dataDir
+	rm -rf $installDir/share
 
 	# clean out unneccesary files created by the rust installer
-	rm $developLibDir/rustlib/components
-	rm $developLibDir/rustlib/install.log
-	rm $developLibDir/rustlib/manifest-*
-	rm $developLibDir/rustlib/rust-installer-version
-	rm $developLibDir/rustlib/uninstall.sh
+	rm $installDir/lib/rustlib/components
+	rm $installDir/lib/rustlib/install.log
+	rm $installDir/lib/rustlib/manifest-*
+	rm $installDir/lib/rustlib/rust-installer-version
+	rm $installDir/lib/rustlib/uninstall.sh
+
+	# link the binaries in $binDir
+	mkdir -p $binDir
+	for f in cargo cargo-clippy cargo-fmt clippy-driver rls rust-gdb \
+	         rust-lldb rustc rustdoc rustfmt; do
+		symlinkRelative -sfn $installDir/bin/$f $binDir
+	done
+
+	# make sure runtime_loader can find the libraries in the lib dir relative
+	# to the binaries
+	symlinkRelative -sfn $installDir/lib $installDir/bin/lib
 }
 
 TEST()
