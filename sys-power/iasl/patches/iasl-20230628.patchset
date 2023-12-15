@@ -1,0 +1,171 @@
+From 63cabff3a4260add701eab69813071cacb644209 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Fri, 15 Dec 2023 12:20:02 +0100
+Subject: Haiku user/kernel patch
+
+
+diff --git a/source/components/utilities/utdelete.c b/source/components/utilities/utdelete.c
+index 1227b21..1c7ec31 100644
+--- a/source/components/utilities/utdelete.c
++++ b/source/components/utilities/utdelete.c
+@@ -293,7 +293,11 @@ AcpiUtDeleteInternalObj (
+             /* Global Lock has extra semaphore */
+ 
+             (void) AcpiOsDeleteSemaphore (AcpiGbl_GlobalLockSemaphore);
++#ifdef _KERNEL_MODE
++            AcpiGbl_GlobalLockSemaphore = -1;
++#else
+             AcpiGbl_GlobalLockSemaphore = NULL;
++#endif
+ 
+             AcpiOsDeleteMutex (Object->Mutex.OsMutex);
+             AcpiGbl_GlobalLockMutex = NULL;
+diff --git a/source/components/utilities/utinit.c b/source/components/utilities/utinit.c
+index 37ec63b..d1c2795 100644
+--- a/source/components/utilities/utinit.c
++++ b/source/components/utilities/utinit.c
+@@ -316,7 +316,11 @@ AcpiUtInitGlobals (
+ 
+     /* Global Lock support */
+ 
++#ifdef _KERNEL_MODE
++    AcpiGbl_GlobalLockSemaphore         = -1;
++#else
+     AcpiGbl_GlobalLockSemaphore         = NULL;
++#endif
+     AcpiGbl_GlobalLockMutex             = NULL;
+     AcpiGbl_GlobalLockAcquired          = FALSE;
+     AcpiGbl_GlobalLockHandle            = 0;
+diff --git a/source/include/platform/achaiku.h b/source/include/platform/achaiku.h
+index 505b413..3c84511 100644
+--- a/source/include/platform/achaiku.h
++++ b/source/include/platform/achaiku.h
+@@ -152,50 +152,49 @@
+ #ifndef __ACHAIKU_H__
+ #define __ACHAIKU_H__
+ 
++#include <SupportDefs.h>
++#include <OS.h>
++
+ #define ACPI_USE_STANDARD_HEADERS
+ #define ACPI_USE_SYSTEM_CLIBRARY
+ 
+-#include <KernelExport.h>
++#ifdef B_HAIKU_64_BIT
++#define ACPI_MACHINE_WIDTH          64
++#else
++#define ACPI_MACHINE_WIDTH          32
++#define ACPI_USE_NATIVE_DIVIDE
++#define ACPI_USE_NATIVE_MATH64
++#endif
++
++#define COMPILER_DEPENDENT_INT64    int64
++#define COMPILER_DEPENDENT_UINT64   uint64
+ 
+-struct mutex;
+ 
++#ifdef _KERNEL_MODE
+ 
+-/* Host-dependent types and defines for user- and kernel-space ACPICA */
++struct mutex;
+ 
+ #define ACPI_MUTEX_TYPE             ACPI_OSL_MUTEX
+ #define ACPI_MUTEX                  struct mutex *
+ 
+-#define ACPI_USE_NATIVE_DIVIDE
+-#define ACPI_USE_NATIVE_MATH64
++#define ACPI_SEMAPHORE              sem_id
+ 
+-/* #define ACPI_THREAD_ID               thread_id */
++#include <KernelExport.h>
+ 
+-#define ACPI_SEMAPHORE              sem_id
+ #define ACPI_SPINLOCK               spinlock *
+ #define ACPI_CPU_FLAGS              cpu_status
+ 
+-#define COMPILER_DEPENDENT_INT64    int64
+-#define COMPILER_DEPENDENT_UINT64   uint64
+-
+-
+-#ifdef B_HAIKU_64_BIT
+-#define ACPI_MACHINE_WIDTH          64
+-#else
+-#define ACPI_MACHINE_WIDTH          32
+-#endif
+-
+-
+-#ifdef _KERNEL_MODE
+-/* Host-dependent types and defines for in-kernel ACPICA */
+-
+ /* ACPICA cache implementation is adequate. */
+ #define ACPI_USE_LOCAL_CACHE
+ 
++/* On other platform the default definition (do nothing) is fine. */
++#if defined(__i386__) || defined(__x86_64__)
+ #define ACPI_FLUSH_CPU_CACHE() __asm __volatile("wbinvd");
++#endif
+ 
+ /* Based on FreeBSD's due to lack of documentation */
+-int AcpiOsAcquireGlobalLock(uint32 *lock);
+-int AcpiOsReleaseGlobalLock(uint32 *lock);
++extern int AcpiOsAcquireGlobalLock(volatile uint32_t *lock);
++extern int AcpiOsReleaseGlobalLock(volatile uint32_t *lock);
+ 
+ #define ACPI_ACQUIRE_GLOBAL_LOCK(GLptr, Acq)    do {                \
+         (Acq) = AcpiOsAcquireGlobalLock(&((GLptr)->GlobalLock));    \
+@@ -206,9 +205,9 @@ int AcpiOsReleaseGlobalLock(uint32 *lock);
+ } while (0)
+ 
+ #else /* _KERNEL_MODE */
+-/* Host-dependent types and defines for user-space ACPICA */
+ 
+-#error "We only support kernel mode ACPI atm."
++#define ACPI_CAST_PTHREAD_T(pthread)    ((ACPI_THREAD_ID) ACPI_TO_INTEGER (pthread))
++#define ACPI_FLUSH_CPU_CACHE()
+ 
+ #endif /* _KERNEL_MODE */
+ #endif /* __ACHAIKU_H__ */
+-- 
+2.42.1
+
+
+From c91105bc3be3f05ab60899a1ac265d75a2ea3129 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Tue, 12 Dec 2023 17:55:25 +0100
+Subject: disable rt on Haiku
+
+
+diff --git a/generate/unix/Makefile.config b/generate/unix/Makefile.config
+index 0deeb14..1101b72 100644
+--- a/generate/unix/Makefile.config
++++ b/generate/unix/Makefile.config
+@@ -71,6 +71,10 @@ ifeq ($(UNAME_S), QNX)
+ ACPI_HOST =       _QNX
+ endif
+ 
++ifeq ($(UNAME_S), Haiku)
++ACPI_HOST =       _HAIKU
++endif
++
+ ifeq ($(ACPI_HOST), _APPLE)
+ INSTALL  =   cp
+ INSTALLFLAGS ?= -f
+diff --git a/generate/unix/acpiexec/Makefile b/generate/unix/acpiexec/Makefile
+index 389455a..9e58526 100644
+--- a/generate/unix/acpiexec/Makefile
++++ b/generate/unix/acpiexec/Makefile
+@@ -262,9 +262,11 @@ endif
+ 
+ ifneq ($(ACPI_HOST),_APPLE)
+ ifneq ($(ACPI_HOST),_QNX)
++ifneq ($(ACPI_HOST),_HAIKU)
+ LDFLAGS += -lrt
+ endif
+ endif
++endif
+ 
+ #
+ # Common Rules
+-- 
+2.42.1
+
