@@ -1,4 +1,4 @@
-From ecf131d19f5f0c1866e64df5fa37fede12889df7 Mon Sep 17 00:00:00 2001
+From f818e7050e1671aff2a61fed683bfe68f478ef5d Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
 Date: Thu, 7 Dec 2023 18:33:47 +1000
 Subject: Patchset based on qtwebengine patches for FreeBSD, as well as patches 
@@ -11324,6 +11324,122 @@ index 9e087c8..decafe8 100644
      }
      qtConfig(separate_debug_info): QMAKE_POST_LINK="cd $(DESTDIR) && $(STRIP) --strip-unneeded $(TARGET)"
  }
+-- 
+2.42.1
+
+
+From c5e673acc778e70e87995cd7912454023e9147b4 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 31 Dec 2023 23:28:53 +1000
+Subject: Implement CloseSuperfluousFds
+
+
+diff --git a/src/3rdparty/chromium/base/process/launch_posix.cc b/src/3rdparty/chromium/base/process/launch_posix.cc
+index bb8718a..340a56f 100644
+--- a/src/3rdparty/chromium/base/process/launch_posix.cc
++++ b/src/3rdparty/chromium/base/process/launch_posix.cc
+@@ -63,6 +63,15 @@
+ #include <sys/ucontext.h>
+ #endif
+ 
++#if defined(OS_HAIKU)
++#include <OS.h>
++#include <fs_info.h>
++#include <private/system/vfs_defs.h>
++extern "C" {
++status_t _kern_get_next_fd_info(team_id team, uint32 *_cookie, struct fd_info *info, size_t infoSize);
++}
++#endif
++
+ #if defined(OS_APPLE)
+ #error "macOS should use launch_mac.cc"
+ #endif
+@@ -223,7 +232,25 @@ static const char kFDDir[] = "/proc/self/fd";
+ void CloseSuperfluousFds(const base::InjectiveMultimap& saved_mapping) {
+   // DANGER: no calls to malloc or locks are allowed from now on:
+   // http://crbug.com/36678
+-#if !defined(OS_HAIKU)
++#if defined(OS_HAIKU)
++  uint32 cookie = 0;
++  fd_info info;
++  while (_kern_get_next_fd_info(B_CURRENT_TEAM, &cookie, &info, sizeof(fd_info)) >= B_OK) {
++    const int fd = info.number;
++    if (fd == STDIN_FILENO || fd == STDOUT_FILENO || fd == STDERR_FILENO)
++      continue;
++    size_t i;
++    for (i = 0; i < saved_mapping.size(); i++) {
++      if (fd == saved_mapping[i].dest)
++        break;
++    }
++    if (i < saved_mapping.size())
++      continue;
++
++    int ret = IGNORE_EINTR(close(fd));
++    DPCHECK(ret == 0);
++  }
++#else
+   // Get the maximum number of FDs possible.
+   size_t max_fds = GetMaxFds();
+ 
+diff --git a/src/3rdparty/chromium/base/process/process_metrics_posix.cc b/src/3rdparty/chromium/base/process/process_metrics_posix.cc
+index d29e675..935d60c 100644
+--- a/src/3rdparty/chromium/base/process/process_metrics_posix.cc
++++ b/src/3rdparty/chromium/base/process/process_metrics_posix.cc
+@@ -54,7 +54,7 @@ static const rlim_t kSystemDefaultMaxFds = 1024;
+ #elif defined(OS_AIX)
+ static const rlim_t kSystemDefaultMaxFds = 8192;
+ #elif defined(OS_HAIKU)
+-static const rlim_t kSystemDefaultMaxFds = 4096;
++static const rlim_t kSystemDefaultMaxFds = 512;
+ #endif
+ 
+ size_t GetMaxFds() {
+-- 
+2.42.1
+
+
+From c59d03dcaf036d06b5bf0c5a247d90e55b7a98a3 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 7 Jan 2024 12:12:49 +1000
+Subject: Fix fstat
+
+
+diff --git a/src/3rdparty/chromium/base/files/file_posix.cc b/src/3rdparty/chromium/base/files/file_posix.cc
+index a521ef0..7ab80df 100644
+--- a/src/3rdparty/chromium/base/files/file_posix.cc
++++ b/src/3rdparty/chromium/base/files/file_posix.cc
+@@ -125,7 +125,7 @@ void File::Info::FromStat(const stat_wrapper_t& stat_info) {
+   // creation time. However, other than on Mac & iOS where the actual file
+   // creation time is included as st_birthtime, the rest of POSIX platforms have
+   // no portable way to get the creation time.
+-#if defined(OS_LINUX) || defined(OS_CHROMEOS) || defined(OS_FUCHSIA)
++#if defined(OS_LINUX) || defined(OS_CHROMEOS) || defined(OS_FUCHSIA) || defined(OS_HAIKU)
+   time_t last_modified_sec = stat_info.st_mtim.tv_sec;
+   int64_t last_modified_nsec = stat_info.st_mtim.tv_nsec;
+   time_t last_accessed_sec = stat_info.st_atim.tv_sec;
+-- 
+2.42.1
+
+
+From 3023e2180a83f46b4398472ee5328e80573e595c Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 7 Jan 2024 12:13:39 +1000
+Subject: Check FD acess mode
+
+
+diff --git a/src/3rdparty/chromium/base/memory/platform_shared_memory_region_posix.cc b/src/3rdparty/chromium/base/memory/platform_shared_memory_region_posix.cc
+index cabf383..63feaad 100644
+--- a/src/3rdparty/chromium/base/memory/platform_shared_memory_region_posix.cc
++++ b/src/3rdparty/chromium/base/memory/platform_shared_memory_region_posix.cc
+@@ -308,7 +308,7 @@ bool PlatformSharedMemoryRegion::CheckPlatformHandlePermissionsCorrespondToMode(
+     PlatformHandle handle,
+     Mode mode,
+     size_t size) {
+-#if !defined(OS_NACL) && !defined(OS_HAIKU)
++#if !defined(OS_NACL)
+   if (!CheckFDAccessMode(handle.fd,
+                          mode == Mode::kReadOnly ? O_RDONLY : O_RDWR)) {
+     return false;
 -- 
 2.42.1
 
