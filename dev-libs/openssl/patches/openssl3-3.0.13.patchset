@@ -1,0 +1,195 @@
+From 2281c40d6ae0d1939f53e5aa1ac5c27f6dca9a81 Mon Sep 17 00:00:00 2001
+From: Augustin Cavalier <waddlesplash@gmail.com>
+Date: Sat, 14 Mar 2020 19:20:45 -0400
+Subject: Small changes for Haiku.
+
+
+diff --git a/include/internal/cryptlib.h b/include/internal/cryptlib.h
+index 934d4b0..7c54894 100644
+--- a/include/internal/cryptlib.h
++++ b/include/internal/cryptlib.h
+@@ -66,7 +66,7 @@ DEFINE_LHASH_OF(MEM);
+ # ifndef OPENSSL_SYS_VMS
+ #  define X509_CERT_AREA          OPENSSLDIR
+ #  define X509_CERT_DIR           OPENSSLDIR "/certs"
+-#  define X509_CERT_FILE          OPENSSLDIR "/cert.pem"
++#  define X509_CERT_FILE          OPENSSLDIR "/CARootCertificates.pem"
+ #  define X509_PRIVATE_DIR        OPENSSLDIR "/private"
+ #  define CTLOG_FILE              OPENSSLDIR "/ct_log_list.cnf"
+ # else
+-- 
+2.42.1
+
+
+From b317e96d93f539d866bda43be06234e57eb17cd1 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Wed, 18 Nov 2020 18:29:38 +0100
+Subject: Use find_directory to locate user certificates
+
+We want this directory (where the user can easily add their own
+certificates) to be non-packaged and under user control. The system
+certificates are centralized in the CARootCertificates.pem file.
+
+This was previously done in BSecureSocket (overriding OpenSSL defaults),
+now it is valid also for apps using OpenSSL directly.
+
+diff --git a/crypto/x509/x509_def.c b/crypto/x509/x509_def.c
+index b8bdcb4..36a628b 100644
+--- a/crypto/x509/x509_def.c
++++ b/crypto/x509/x509_def.c
+@@ -12,6 +12,10 @@
+ #include <openssl/crypto.h>
+ #include <openssl/x509.h>
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#endif
++
+ const char *X509_get_default_private_dir(void)
+ {
+     return X509_PRIVATE_DIR;
+@@ -24,6 +28,20 @@ const char *X509_get_default_cert_area(void)
+ 
+ const char *X509_get_default_cert_dir(void)
+ {
++#ifdef __HAIKU__
++	static char path[PATH_MAX];
++	if (path[0] != 0)
++	{
++		// We already called find_directory
++		return path;
++	}
++
++	if (find_directory(B_SYSTEM_NONPACKAGED_DATA_DIRECTORY, 0, false, path, sizeof(path)) == B_OK)
++	{
++		strlcat(path, "/ssl/certs/", sizeof(path));
++		return path;
++	}
++#endif
+     return X509_CERT_DIR;
+ }
+ 
+-- 
+2.42.1
+
+
+From dd41493335d2cccb679e2483f967b8207f3fc058 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Wed, 13 Dec 2023 13:59:22 +0100
+Subject: Haiku: fix zlib support
+
+
+diff --git a/Configurations/50-haiku.conf b/Configurations/50-haiku.conf
+index 4580e71..4c27d44 100644
+--- a/Configurations/50-haiku.conf
++++ b/Configurations/50-haiku.conf
+@@ -1,5 +1,6 @@
+ my %targets = (
+     "haiku-common" => {
++        inherit_from     => [ "BASE_common" ],
+         template         => 1,
+         CC               => "cc",
+         CFLAGS           => add_before(picker(default => "-Wall",
+@@ -11,7 +12,11 @@ my %targets = (
+         ARFLAGS         => "qc",
+         HASHBANGPERL    => "/bin/env perl",
+         sys_id           => "HAIKU",
+-        ex_libs          => "-lnetwork",
++        ex_libs          => add("-lnetwork",
++            sub { !defined($disabled{zlib})
++                  && defined($disabled{"zlib-dynamic"})
++                  ? "-lz" : () }
++        ),
+         perlasm_scheme   => "elf",
+         thread_scheme    => "pthreads",
+         dso_scheme       => "dlfcn",
+-- 
+2.42.1
+
+
+From 5b327b82a55d1a2caa74d58e0982417cdcf2e939 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Wed, 13 Dec 2023 14:54:54 +0100
+Subject: Haiku: skip test case test_print_error_format
+
+
+diff --git a/test/errtest.c b/test/errtest.c
+index 2d827ff..da02efd 100644
+--- a/test/errtest.c
++++ b/test/errtest.c
+@@ -21,6 +21,12 @@
+ #endif
+ 
+ #ifndef OPENSSL_NO_DEPRECATED_3_0
++#ifdef __HAIKU__
++static int test_print_error_format(void)
++{
++    return TEST_skip("not supported on Haiku");
++}
++#else
+ # define IS_HEX(ch) ((ch >= '0' && ch <='9') || (ch >= 'A' && ch <='F'))
+ 
+ static int test_print_error_format(void)
+@@ -112,6 +118,7 @@ err:
+     return ret;
+ }
+ #endif
++#endif
+ 
+ /* Test that querying the error queue preserves the OS error. */
+ static int preserves_system_error(void)
+-- 
+2.42.1
+
+
+From fa6a470be370433031f06822e39c74bbaa8e1925 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Wed, 13 Dec 2023 14:59:20 +0100
+Subject: Haiku: don't use IPV6_V6ONLY
+
+
+diff --git a/crypto/bio/bio_sock2.c b/crypto/bio/bio_sock2.c
+index 8bdad0c..a02364d 100644
+--- a/crypto/bio/bio_sock2.c
++++ b/crypto/bio/bio_sock2.c
+@@ -263,7 +263,8 @@ int BIO_listen(int sock, const BIO_ADDR *addr, int options)
+     }
+ 
+   /* On OpenBSD it is always ipv6 only with ipv6 sockets thus read-only */
+-# if defined(IPV6_V6ONLY) && !defined(__OpenBSD__)
++  /* IPV6_V6ONLY is broken on Haiku */
++# if defined(IPV6_V6ONLY) && !defined(__OpenBSD__) && !defined(__HAIKU__)
+     if (BIO_ADDR_family(addr) == AF_INET6) {
+         /*
+          * Note: Windows default of IPV6_V6ONLY is ON, and Linux is OFF.
+-- 
+2.42.1
+
+
+From 3cc0b8e03065aa51df291654c389c649587e0fac Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Wed, 13 Dec 2023 17:49:28 +0100
+Subject: Haiku: listening sockets shall default to IPv4
+
+
+diff --git a/crypto/bio/bss_acpt.c b/crypto/bio/bss_acpt.c
+index 8870831..ca52f36 100644
+--- a/crypto/bio/bss_acpt.c
++++ b/crypto/bio/bss_acpt.c
+@@ -96,7 +96,13 @@ static BIO_ACCEPT *BIO_ACCEPT_new(void)
+         ERR_raise(ERR_LIB_BIO, ERR_R_MALLOC_FAILURE);
+         return NULL;
+     }
++
++#ifdef __HAIKU__
++    ret->accept_family = BIO_FAMILY_IPV4;
++#else
+     ret->accept_family = BIO_FAMILY_IPANY;
++#endif
++
+     ret->accept_sock = (int)INVALID_SOCKET;
+     return ret;
+ }
+-- 
+2.42.1
+
