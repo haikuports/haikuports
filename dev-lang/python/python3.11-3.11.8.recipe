@@ -13,18 +13,13 @@ LICENSE="Python"
 COPYRIGHT="1990-2023 Python Software Foundation"
 REVISION="1"
 SOURCE_URI="https://www.python.org/ftp/python/$portVersion/Python-$portVersion.tar.xz"
-CHECKSUM_SHA256="18e1aa7e66ff3a58423d59ed22815a6954e53342122c45df20c96877c062b9b7"
+CHECKSUM_SHA256="9e06008c8901924395bc1da303eac567a729ae012baa182ab39269f650383bb3"
 SOURCE_DIR="Python-$portVersion"
 
 pyShortVer="${portVersion%.*}"
 pyVersionCompat="$portVersion compat >= $pyShortVer"
 
 PATCHES="python$pyShortVer-$portVersion.patchset"
-if [ "$secondaryArchSuffix" = _x86 ] ; then
-	PATCHES+="
-		python${pyShortVer}_x86-$portVersion.patchset
-	"
-fi
 
 ARCHITECTURES="all !x86_gcc2"
 SECONDARY_ARCHITECTURES="x86"
@@ -93,9 +88,22 @@ BUILD_PREREQUIRES="
 	cmd:pkg_config$secondaryArchSuffix
 	"
 
+# For some reason, test_zoneinfo fails to find it when running the tests inside the chroot,
+# but works when calling the test with an installed Python 3.nn
 TEST_REQUIRES="
 	timezone_data
 	"
+
+# If set to "yes", the resulting "_tests" package is around 30 MB in size.
+packageTests="no"
+if [ "$packageTests" = "yes" ]; then
+	PROVIDES_tests="
+		python$pyShortVer${secondaryArchSuffix}_tests = $portVersion
+		"
+	REQUIRES_tests="
+		python$pyShortVer$secondaryArchSuffix == $portVersion base
+		"
+fi
 
 BUILD()
 {
@@ -119,25 +127,17 @@ BUILD()
 		--with-ensurepip=no \
 		--with-readline=editline \
 		--with-system-expat \
-		--with-system-ffi \
 		--with-tzpath=$dataDir/zoneinfo \
 		--without-static-libpython
-		# configure: WARNING: --with(out)-system-ffi is ignored on this platform
 		# --with-lto # this one is too CPU/RAM intensive.
 
-	# prevent make from rebuilding stuff that requires python
-	touch Parser/asdl* Python/Python-ast.c Include/Python-ast.h
-
-	rm -f python
-
 	# Uncomment when doing repeated builds (for testing different flags/options).
-	# make clean
+	# echo "[.recipe] Cleaning before rebuild:" && make clean && rm -f python
 
 	# NOTE: When using "--enable-optimizations" above, using "make $jobArgs" might be unreliable.
 	# Can see several instances of, for example:
 	#
-	# libgcov profiling error:/sources/Python-3.11.4/Objects/object.gcda:Merge mismatch for function 51
-	# libgcov profiling error:/sources/Python-3.11.4/Parser/parser.gcda:Merge mismatch for function 83
+	# libgcov profiling error:/sources/Python-3.xx.x/Objects/<filename_here>.gcda:Merge mismatch for function <some_number>
 	#
 	# Build might end OK (with only some "missing profile" warnings later on), or it can fail
 	# with something like:
@@ -154,20 +154,24 @@ INSTALL()
 	# altinstall avoids clobbering $prefix/bin/{2to3,idle3,pydoc3,python3,python3-config}
 	make altinstall
 
+	# Remove this one for "make altinstall" Python versions on Haiku.
 	rm $libDir/libpython3.so
-	# ToDo: use this instead?
-	# mv $libDir/libpython3.so $libDir/libpython$pyShortVer.so
 
 	if [ "$targetArchitecture" = x86_gcc2 ]; then
 		# On x86_gcc2, move lib-dynload to lib/python3.x/
 		mv $libDir/python$pyShortVer/lib-dynload $prefix/lib/python$pyShortVer/
 	fi
-	prepareInstalledDevelLibs libpython$pyShortVer
+	prepareInstalledDevelLib libpython$pyShortVer
 	fixPkgconfig
 	if [ "$targetArchitecture" = x86_gcc2 ]; then
 		# fix pkgconfig to match configure flags
 		sed -i -e 's,headers/x86,headers,' $developLibDir/pkgconfig/python*.pc
 	fi
+
+	## Provide symlink to libpython3.nn.so
+	# Having `libpython3.nn.so` can help software like CudaText (via python4delphi), for example,
+	# to detect the different Python versions available for runtime loading.
+	ln -sr $libDir/libpython${pyShortVer}.so.1.0 $libDir/libpython${pyShortVer}.so
 
 	mkdir -p $prefix/lib/python$pyShortVer/vendor-packages
 	echo 'This directory contains packaged python modules.' \
@@ -176,10 +180,16 @@ INSTALL()
 	mkdir -p $prefix/non-packaged/lib/python$pyShortVer
 	mv $prefix/lib/python$pyShortVer/site-packages $prefix/non-packaged/lib/python$pyShortVer/
 
-	# drop testsuite altogether; move to a separate package if needed
-	cd $prefix/lib/python$pyShortVer
-	rm -rf ctypes/test distutils/tests idlelib/idle_test lib2to3/tests \
-		test tkinter/test unittest/test
+	if [ "$packageTests" = "yes" ]; then
+		packageEntries tests \
+			$prefix/lib/python$pyShortVer/idlelib/idle_test \
+			$prefix/lib/python$pyShortVer/test
+	else
+		# drop testsuite altogether
+		cd $prefix/lib/python$pyShortVer
+		rm -rf ctypes/test distutils/tests idlelib/idle_test lib2to3/tests test tkinter/test \
+			unittest/test
+	fi
 }
 
 # Some of the test will crash, invoking the crash dialog, and will hang waiting for
@@ -198,28 +208,42 @@ INSTALL()
 # the recipe's building environment at the moment (https://dev.haiku-os.org/ticket/10301)
 
 # To see the available test-runs options:
-# > hp -E python3.11
-# > LIBRARY_PATH=/sources/Python-3.11.6:%A/lib:/boot/home/config/non-packaged/lib:/boot/home/config/lib:/boot/system/non-packaged/lib:/boot/system/lib python -m test --help
+# > hp -E python3.nn
+# > LIBRARY_PATH=/sources/Python-3.nn.n:%A/lib:/boot/home/config/non-packaged/lib:/boot/home/config/lib:/boot/system/non-packaged/lib:/boot/system/lib python -m test --help
+# or just:
+# > LD_PRELOAD=./libpython3.nn.so.1.0 python -m test --help
 #
-# To only execute a particular test:
-# > cd Lib/test
-# > PYTHONPATH="../":$PYTHONPATH python -m test test_xxx
+# To only execute a particular test (from the $sourceDir):
+#
+# > LD_PRELOAD=./libpython3.nn.so.1.0 python -m test test_datetime -W
 
+# For reference, results on hrev57581 (64 bits):
+# Total duration: 4 min 47 sec
+# Total test files: run=429/410 failed=27 skipped=18 resource_denied=9 rerun=28
 TEST()
 {
 	# Remove tests data left-overs, if any:
-	rm -f -r /boot/system/cache/tmp/
-	rm -f -d -r build/test_python*
+	# rm -f -r /boot/system/cache/tmp/
+	# rm -f -d -r build/test_python*
+	make $jobArgs test EXTRATESTOPTS="--cleanup"
 
 	local test_options=(
 		# Use this to get same test order on different runs (actual value not important).
-		# --randseed 0
+		--randseed 7858065
+
+ 		# Print the names of the 10 slowest tests.
+		--slowest
 
 		# Possibly useful?
 		# --tempdir=/another_drive/tmp
 
 		# Enable/disable certain tests by "resource" type:
-		# -uall,-audio,-cpu,-curses,-decimal,-gui,-largefile,-network,-subprocess,-tzdata,-urlfetch
+		# -uall,-audio,-cpu,-curses,-decimal,-gui,-largefile,-network,-subprocess,-urlfetch
+		# make test --help says that "-unone" is the default, but the build is doing this:
+		# "resources: all,-audio,-gui,-largefile" instead.
+		#
+		# Let's be explicit to avoid surprises:
+		-unone,curses,tzdata
 
 		# distutils is deprecated, and will be removed on 3.12.
 		-x test_distutils
@@ -235,21 +259,16 @@ TEST()
 		# Many of the tests hang/stall. We have two options:
 		#
 		# 1- Manually remove the problematic test-cases.
-		# 2- Set a TIMEOUT.
+		# 2- Set a TIMEOUT (eg: --timeout=300).
 		#
 		# Option 1: Works, but requires manual identification/mainteinance.
-		#
 		# Option 2: Doesn't requires maintaining a list of stalling tests, but:
-		# - Causes errors at the end of the run:
-		#	"unmounting failed: Device/File/Resource Busy"
-		# - Leaves dangling threads running when the tests timeout:
-		#	"Warning -- threading_cleanup() failed to cleanup 0 threads (count: 0, dangling: 2)"
-		#   (or otherwise leaves the system in a weird state).
-		# - The time it takes to run the full suite largely increases,
+		# at the end of the test run it causes:
+		# - "unmounting failed: Device/File/Resource Busy" errors, as there are
+		#   dangling threads running when the tests timeout (requiring `killall python`)
+		# - The time it takes to run the full suite largely increases.
 		#
-		# For Option 2, use: "--timeout=300"
-		#
-		# Let's use Option 1, for now at least:
+		# Let's use Option 1, for now at least.
 
 		# These hang reliably.
 		-x test__xxsubinterpreters
@@ -261,19 +280,20 @@ TEST()
 		-x test_multiprocessing_main_handling
 		-x test_multiprocessing_spawn
 		-x test_multiprocessing
-		-x test_threaded_import # test_importlib/test_threaded_import
 		-x test_socketserver
+		-x test_threaded_import # test_importlib/test_threaded_import
 
 		# "test_asyncio" doesn't seems to runs reliably, even after individually skipping
 		# all the problematic test-cases that could be identify by running them one by one.
 		-x test_asyncio
-		# -x test_asyncio/test_base_events
-		# -x test_asyncio/test_buffered_proto.py # Exception on Exception handler.
-		# -x test_asyncio/test_events
-		# -x test_asyncio/test_sendfile
-		# -x test_asyncio/test_server # Exception on Exception handler.
-		# -x test_asyncio/test_sslproto # Exception on Exception handler.
-		# -x test_asyncio/test_streams
+		# The following are all under "test_asyncio/"
+		# -x test_base_events
+		# -x test_buffered_proto # Exception on Exception handler.
+		# -x test_events
+		# -x test_sendfile
+		# -x test_server # Exception on Exception handler.
+		# -x test_sslproto # Exception on Exception handler.
+		# -x test_streams
 
 		# These not always hang/stall, but they do it enough to warrant skipping for now.
 		-x test_imaplib
@@ -289,6 +309,18 @@ TEST()
 		# 3.11.7, these take way too much time (hang?)
 		-x test_builtin
 		-x test_importlib
+
+		# 3.11.8 / 3.12.2 (hang on nightlies, at least)
+		-x test_httplib
+		-x test_httpservers
+		-x test_logging
+		-x test_pydoc
+		-x test_xmlrpc
+
+		# Fails while outputing "ResourceWarning: unclosed <ssl.SSLSocket", but takes anywhere
+		# between 1 to 3+ minutes to end (and gets re-run!). Run it manually if needed, or
+		# re-enable once those SSLSocket warninings, that also pop up on other tests, get resolved.
+		-x test_ftplib
 	)
 
 	local -x LOGNAME=buildbot # this skips tests_tools/test_freeze, copied from Gentoo's ebuild
