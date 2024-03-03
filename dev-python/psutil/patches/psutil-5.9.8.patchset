@@ -1,21 +1,11 @@
-From cad8406514db2b2241d0e522ede4d19267c8e441 Mon Sep 17 00:00:00 2001
+From 13892923cf7b6b8d8f329e764a40c8eb2e0d2602 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
 Date: Wed, 12 Feb 2020 04:16:40 +0100
-Subject: [PATCH] WIP: preliminary Haiku port
+Subject: WIP: preliminary Haiku port
 
----
- psutil/__init__.py       |   5 +
- psutil/_common.py        |   5 +-
- psutil/_pshaiku.py       | 433 ++++++++++++++++++++
- psutil/_psutil_haiku.cpp | 841 +++++++++++++++++++++++++++++++++++++++
- psutil/_psutil_posix.c   |   5 +-
- setup.py                 |  11 +
- 6 files changed, 1297 insertions(+), 3 deletions(-)
- create mode 100644 psutil/_pshaiku.py
- create mode 100644 psutil/_psutil_haiku.cpp
 
 diff --git a/psutil/__init__.py b/psutil/__init__.py
-index b267239..0ba8fc7 100644
+index 8138db4..b326a86 100644
 --- a/psutil/__init__.py
 +++ b/psutil/__init__.py
 @@ -16,6 +16,7 @@ sensors) in Python. Supported platforms:
@@ -24,17 +14,17 @@ index b267239..0ba8fc7 100644
   - AIX
 + - Haiku
  
- Works with Python versions from 2.6 to 3.4+.
+ Works with Python versions 2.7 and 3.6+.
  """
-@@ -79,6 +80,7 @@ from ._common import NIC_DUPLEX_UNKNOWN
- from ._common import AIX
- from ._common import BSD
+@@ -55,6 +56,7 @@ from ._common import CONN_SYN_RECV
+ from ._common import CONN_SYN_SENT
+ from ._common import CONN_TIME_WAIT
  from ._common import FREEBSD  # NOQA
 +from ._common import HAIKU
  from ._common import LINUX
  from ._common import MACOS
  from ._common import NETBSD  # NOQA
-@@ -174,6 +176,9 @@ elif AIX:
+@@ -141,6 +143,9 @@ elif AIX:
      # via sys.modules.
      PROCFS_PATH = "/proc"
  
@@ -45,21 +35,21 @@ index b267239..0ba8fc7 100644
      raise NotImplementedError('platform %s is not supported' % sys.platform)
  
 diff --git a/psutil/_common.py b/psutil/_common.py
-index 126d9d6..88ac58f 100644
+index 6989fea..34daca1 100644
 --- a/psutil/_common.py
 +++ b/psutil/_common.py
-@@ -42,8 +42,8 @@ PY3 = sys.version_info[0] == 3
- 
+@@ -50,8 +50,8 @@ _DEFAULT = object()
+ # fmt: off
  __all__ = [
-     # constants
+     # OS constants
 -    'FREEBSD', 'BSD', 'LINUX', 'NETBSD', 'OPENBSD', 'MACOS', 'OSX', 'POSIX',
 -    'SUNOS', 'WINDOWS',
 +    'FREEBSD', 'BSD', 'HAIKU', 'LINUX', 'NETBSD', 'OPENBSD', 'MACOS', 'OSX',
 +    'POSIX', 'SUNOS', 'WINDOWS',
-     'ENCODING', 'ENCODING_ERRS', 'AF_INET6',
      # connection constants
      'CONN_CLOSE', 'CONN_CLOSE_WAIT', 'CONN_CLOSING', 'CONN_ESTABLISHED',
-@@ -84,6 +84,7 @@ NETBSD = sys.platform.startswith("netbsd")
+     'CONN_FIN_WAIT1', 'CONN_FIN_WAIT2', 'CONN_LAST_ACK', 'CONN_LISTEN',
+@@ -97,6 +97,7 @@ NETBSD = sys.platform.startswith("netbsd")
  BSD = FREEBSD or OPENBSD or NETBSD
  SUNOS = sys.platform.startswith(("sunos", "solaris"))
  AIX = sys.platform.startswith("aix")
@@ -508,10 +498,10 @@ index 0000000..89115f7
 +            -1)
 diff --git a/psutil/_psutil_haiku.cpp b/psutil/_psutil_haiku.cpp
 new file mode 100644
-index 0000000..f9b3a44
+index 0000000..f63ba07
 --- /dev/null
 +++ b/psutil/_psutil_haiku.cpp
-@@ -0,0 +1,841 @@
+@@ -0,0 +1,840 @@
 +/*
 + * Copyright (c) 2009, Giampaolo Rodola'. All rights reserved.
 + * Use of this source code is governed by a BSD-style license that can be
@@ -1259,9 +1249,8 @@ index 0000000..f9b3a44
 +     "Return battery information."},
 +
 +    // --- others
-+    {"set_testing", psutil_set_testing, METH_NOARGS,
-+     "Set psutil in testing mode"},
-+
++    {"check_pid_range", psutil_check_pid_range, METH_VARARGS},
++    {"set_debug", psutil_set_debug, METH_VARARGS},
 +    {NULL, NULL, 0, NULL}
 +};
 +
@@ -1354,33 +1343,36 @@ index 0000000..f9b3a44
 +#endif
 +}
 diff --git a/psutil/_psutil_posix.c b/psutil/_psutil_posix.c
-index aa60084..8165475 100644
+index 24628af..bd40126 100644
 --- a/psutil/_psutil_posix.c
 +++ b/psutil/_psutil_posix.c
-@@ -40,6 +40,9 @@
-     #include <sys/sockio.h>
- #elif defined(PSUTIL_AIX)
+@@ -45,6 +45,11 @@
+ #if defined(PSUTIL_AIX)
      #include <netdb.h>
-+#elif defined(PSUTIL_HAIKU)
+ #endif
++#if defined(PSUTIL_HAIKU)
 +    #include <netdb.h>
 +    #include <sys/sockio.h>
++    #define IFF_RUNNING 0x0001
++#endif
+ #if defined(PSUTIL_LINUX) || defined(PSUTIL_FREEBSD)
+     #include <sys/resource.h>
  #endif
- 
- #include "_psutil_common.h"
-@@ -675,7 +678,7 @@ static PyMethodDef mod_methods[] = {
-     if (mod == NULL)
-         INITERR;
- 
--#if defined(PSUTIL_BSD) || defined(PSUTIL_OSX) || defined(PSUTIL_SUNOS) || defined(PSUTIL_AIX)
-+#if defined(PSUTIL_BSD) || defined(PSUTIL_OSX) || defined(PSUTIL_SUNOS) || defined(PSUTIL_AIX) || defined(PSUTIL_HAIKU)
+@@ -916,7 +921,8 @@ static PyMethodDef mod_methods[] = {
+ #if defined(PSUTIL_BSD) || \
+         defined(PSUTIL_OSX) || \
+         defined(PSUTIL_SUNOS) || \
+-        defined(PSUTIL_AIX)
++        defined(PSUTIL_AIX) || \
++        defined(PSUTIL_HAIKU)
      if (PyModule_AddIntConstant(mod, "AF_LINK", AF_LINK)) INITERR;
  #endif
  
 diff --git a/setup.py b/setup.py
-index 99818ad..8b81d25 100755
+index 7c59f56..32ff198 100755
 --- a/setup.py
 +++ b/setup.py
-@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.join(HERE, "psutil"))
+@@ -48,6 +48,7 @@ sys.path.insert(0, os.path.join(HERE, "psutil"))
  from _common import AIX  # NOQA
  from _common import BSD  # NOQA
  from _common import FREEBSD  # NOQA
@@ -1388,9 +1380,9 @@ index 99818ad..8b81d25 100755
  from _common import LINUX  # NOQA
  from _common import MACOS  # NOQA
  from _common import NETBSD  # NOQA
-@@ -256,6 +257,16 @@ elif AIX:
-         libraries=['perfstat'],
-         define_macros=macros)
+@@ -382,6 +383,16 @@ elif AIX:
+         # fmt: on
+     )
  
 +elif HAIKU:
 +    macros.append(("PSUTIL_HAIKU", 1))
@@ -1406,5 +1398,5 @@ index 99818ad..8b81d25 100755
      sys.exit('platform %s is not supported' % sys.platform)
  
 -- 
-2.24.1
+2.43.2
 
