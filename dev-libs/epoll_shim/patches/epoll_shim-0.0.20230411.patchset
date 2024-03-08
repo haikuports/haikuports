@@ -1,0 +1,293 @@
+From 63c846fe382a77c364bd1f1f1af6c045a5942c73 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=B4me=20Duval?= <jerome.duval@gmail.com>
+Date: Fri, 8 Mar 2024 10:34:37 +0100
+Subject: Haiku patch
+
+
+diff --git a/external/tree-macros/CMakeLists.txt b/external/tree-macros/CMakeLists.txt
+index 2893303..75267fe 100644
+--- a/external/tree-macros/CMakeLists.txt
++++ b/external/tree-macros/CMakeLists.txt
+@@ -4,7 +4,7 @@ project(tree-macros LANGUAGES C)
+ add_library(tree-macros INTERFACE)
+ target_include_directories(tree-macros
+                            INTERFACE "${CMAKE_CURRENT_LIST_DIR}/include")
+-if(APPLE)
++if(APPLE OR HAIKU)
+   target_compile_definitions(tree-macros INTERFACE __uintptr_t=uintptr_t)
+ endif()
+ 
+diff --git a/include/sys/epoll.h b/include/sys/epoll.h
+index f16684c..019aa00 100644
+--- a/include/sys/epoll.h
++++ b/include/sys/epoll.h
+@@ -15,6 +15,19 @@ extern "C" {
+ #define EPOLL_CLOEXEC O_CLOEXEC
+ 
+ enum EPOLL_EVENTS { __EPOLL_DUMMY };
++#ifdef __HAIKU__
++#define EPOLLIN 0x001
++#define EPOLLPRI 0x020
++#define EPOLLOUT 0x002
++#define EPOLLRDNORM POLLIN
++#define EPOLLNVAL 0x1000
++#define EPOLLRDBAND 0x008
++#define EPOLLWRNORM POLLOUT
++#define EPOLLWRBAND 0x010
++#define EPOLLMSG 0x400
++#define EPOLLERR 0x004
++#define EPOLLHUP 0x080
++#else
+ #define EPOLLIN 0x001
+ #define EPOLLPRI 0x002
+ #define EPOLLOUT 0x004
+@@ -26,6 +39,7 @@ enum EPOLL_EVENTS { __EPOLL_DUMMY };
+ #define EPOLLMSG 0x400
+ #define EPOLLERR 0x008
+ #define EPOLLHUP 0x010
++#endif
+ #define EPOLLRDHUP @POLLRDHUP_VALUE@
+ #define EPOLLEXCLUSIVE (1U << 28)
+ #define EPOLLWAKEUP (1U << 29)
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index f0a7177..fd4b3f7 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -79,12 +79,13 @@ if(NOT ALLOWS_ONESHOT_TIMERS_WITH_TIMEOUT_ZERO)
+     evfilt_timer_quirks
+     INTERFACE QUIRK_EVFILT_TIMER_DISALLOWS_ONESHOT_TIMEOUT_ZERO)
+ endif()
+-add_compat_target(pipe2 "APPLE")
+-add_compat_target(socket "APPLE")
+-add_compat_target(socketpair "APPLE")
++add_compat_target(pipe2 "APPLE;OR;HAIKU")
++add_compat_target(socket "APPLE;OR;HAIKU")
++add_compat_target(socketpair "APPLE;OR;HAIKU")
+ add_compat_target(itimerspec "APPLE")
+ add_compat_target(sem "APPLE")
+ add_compat_target(ppoll "APPLE")
++add_compat_target(accept4 "HAIKU")
+ 
+ target_link_libraries(rwlock PUBLIC $<BUILD_INTERFACE:compat_enable_sem>)
+ 
+@@ -115,8 +116,15 @@ target_link_libraries(
+           $<BUILD_INTERFACE:compat_enable_ppoll>
+           $<BUILD_INTERFACE:compat_enable_itimerspec>
+           $<BUILD_INTERFACE:compat_enable_sigops>
++          $<BUILD_INTERFACE:compat_enable_pipe2>
++          $<BUILD_INTERFACE:compat_enable_socket>
++          $<BUILD_INTERFACE:compat_enable_socketpair>
++          $<BUILD_INTERFACE:compat_enable_accept4>
+           $<BUILD_INTERFACE:rwlock>
+           $<BUILD_INTERFACE:wrap>)
++if(HAIKU)
++  target_link_libraries(epoll-shim PUBLIC network bsd)
++endif()
+ if(HAVE_TIMERFD)
+   target_compile_definitions(epoll-shim PRIVATE HAVE_TIMERFD)
+ endif()
+diff --git a/src/compat_accept4.c b/src/compat_accept4.c
+new file mode 100644
+index 0000000..72399f1
+--- /dev/null
++++ b/src/compat_accept4.c
+@@ -0,0 +1,59 @@
++#include "compat_socket.h"
++
++#include <errno.h>
++#include <stdlib.h>
++
++#include <fcntl.h>
++#include <unistd.h>
++
++#include "wrap.h"
++
++static errno_t
++compat_accept4_impl(int socket, struct sockaddr *address, socklen_t *_addressLength, int flags, int *s)
++{
++	errno_t ec;
++
++	int sock = accept(socket, address, _addressLength);
++	if (sock < 0) {
++		return errno;
++	}
++
++	{
++		int r;
++
++		if (flags & COMPAT_SOCK_NONBLOCK) {
++			if ((r = fcntl(sock, F_GETFL, 0)) < 0 ||
++			    fcntl(sock, F_SETFL, r | O_NONBLOCK) < 0) {
++				ec = errno;
++				goto out;
++			}
++		}
++
++		if (flags & COMPAT_SOCK_CLOEXEC) {
++			if ((r = fcntl(sock, F_GETFD, 0)) < 0 ||
++			    fcntl(sock, F_SETFD, r | FD_CLOEXEC) < 0) {
++				ec = errno;
++				goto out;
++			}
++		}
++	}
++
++	*s = sock;
++	return 0;
++
++out:
++	(void)real_close(sock);
++	return ec;
++}
++
++int
++compat_accept4(int socket, struct sockaddr *address, socklen_t *_addressLength, int flags)
++{
++	int s;
++	errno_t ec = compat_accept4_impl(socket, address, _addressLength, flags, &s);
++	if (ec != 0) {
++		errno = ec;
++		return -1;
++	}
++	return s;
++}
+diff --git a/src/compat_accept4.h b/src/compat_accept4.h
+new file mode 100644
+index 0000000..a6becc1
+--- /dev/null
++++ b/src/compat_accept4.h
+@@ -0,0 +1,25 @@
++#ifndef COMPAT_ACCEPT4_H
++#define COMPAT_ACCEPT4_H
++
++#include <sys/types.h>
++
++#include <sys/socket.h>
++
++#ifndef COMPAT_SOCK_NONBLOCK
++#define COMPAT_SOCK_NONBLOCK (O_NONBLOCK)
++#endif
++#ifndef COMPAT_SOCK_CLOEXEC
++#define COMPAT_SOCK_CLOEXEC (O_CLOEXEC)
++#endif
++int compat_accept4(int socket, struct sockaddr *address, socklen_t *_addressLength, int flags);
++#ifdef COMPAT_ENABLE_ACCEPT4
++#define accept4 compat_accept4
++#ifndef SOCK_NONBLOCK
++#define SOCK_NONBLOCK COMPAT_SOCK_NONBLOCK
++#endif
++#ifndef SOCK_CLOEXEC
++#define SOCK_CLOEXEC COMPAT_SOCK_CLOEXEC
++#endif
++#endif
++
++#endif
+diff --git a/src/compat_sigops.c b/src/compat_sigops.c
+index a846628..17e9380 100644
+--- a/src/compat_sigops.c
++++ b/src/compat_sigops.c
+@@ -2,7 +2,7 @@
+ 
+ #include <string.h>
+ 
+-#if defined(__OpenBSD__) || defined(__APPLE__)
++#if defined(__OpenBSD__) || defined(__APPLE__) || defined(__HAIKU__)
+ int
+ compat_sigisemptyset(sigset_t const *set)
+ {
+diff --git a/src/epoll_shim_ctx.c b/src/epoll_shim_ctx.c
+index 04359af..eaa3c97 100644
+--- a/src/epoll_shim_ctx.c
++++ b/src/epoll_shim_ctx.c
+@@ -3,7 +3,9 @@
+ #include <sys/event.h>
+ 
+ /* For FIONBIO. */
++#ifndef __HAIKU__
+ #include <sys/filio.h>
++#endif
+ #include <sys/ioctl.h>
+ 
+ #include <assert.h>
+diff --git a/src/timerfd_ctx.c b/src/timerfd_ctx.c
+index 725dc2d..4af5868 100644
+--- a/src/timerfd_ctx.c
++++ b/src/timerfd_ctx.c
+@@ -4,7 +4,11 @@
+ 
+ #include <sys/event.h>
+ #include <sys/param.h>
++#ifndef __HAIKU__
+ #include <sys/sysctl.h>
++#else
++#include <OS.h>
++#endif
+ #include <sys/time.h>
+ 
+ #include <assert.h>
+@@ -94,6 +98,12 @@ timerfd_ctx_get_monotonic_offset(struct timespec *monotonic_offset)
+ 		&(size_t) { sizeof(*monotonic_offset) }, NULL, 0) < 0) {
+ 		return errno;
+ 	}
++#elif defined(__HAIKU__)
++	bigtime_t now = system_time();
++	*monotonic_offset = (struct timespec) {
++		.tv_sec = now / 1000000,
++		.tv_nsec = (now % 1000000) * 1000,
++	};
+ #else
+ 	struct timeval boottime;
+ 	if (sysctl((int const[2]) { CTL_KERN, KERN_BOOTTIME }, 2, /**/
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index 2d04d2a..51e4f06 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -29,12 +29,18 @@ macro(atf_test_impl _testname _suffix)
+               compat_enable_socketpair compat_enable_socket
+               compat_enable_itimerspec)
+   endif()
++  if(HAIKU)
++    target_link_libraries(
++      "${_testname}${_suffix}"
++      PRIVATE wrap compat_enable_pipe2 compat_enable_accept4
++              compat_enable_socketpair compat_enable_socket)
++  endif()
+   atf_discover_tests("${_testname}${_suffix}" ${ARGN})
+ endmacro()
+ 
+ macro(atf_test _testname)
+   atf_test_impl("${_testname}" "" ${ARGN})
+-  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
++  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT HAIKU)
+     atf_test_impl("${_testname}" "-interpose" ${ARGN})
+   endif()
+ endmacro()
+diff --git a/test/pipe-test.c b/test/pipe-test.c
+index 1b04d71..fa114dc 100644
+--- a/test/pipe-test.c
++++ b/test/pipe-test.c
+@@ -420,7 +420,7 @@ print_statbuf(struct stat *sb)
+ 	printf("st_size: %llu\n", (unsigned long long)sb->st_size);
+ 	printf("st_blocks: %llu\n", (unsigned long long)sb->st_blocks);
+ 	printf("st_blksize: %d\n", sb->st_blksize);
+-#if !defined(__linux__)
++#if !defined(__linux__) && !defined(__HAIKU__)
+ 	printf("st_flags: %x\n", sb->st_flags);
+ 	printf("st_gen: %lu\n", (unsigned long)sb->st_gen);
+ #endif
+diff --git a/test/real_close.c b/test/real_close.c
+index 7a1ae1b..63f0748 100644
+--- a/test/real_close.c
++++ b/test/real_close.c
+@@ -16,7 +16,7 @@ extern int real_close_for_test(int fd);
+ int
+ real_close_for_test(int fd)
+ {
+-#if defined(__APPLE__)
++#if defined(__APPLE__) || defined(__HAIKU__)
+ 	return close(fd);
+ #else
+ 	void *libc_handle;
+-- 
+2.42.1
+
