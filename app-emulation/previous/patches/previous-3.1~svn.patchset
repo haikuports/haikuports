@@ -1,0 +1,177 @@
+From 5a8110e235ce7deb4b93585544a9845ed44b72ba Mon Sep 17 00:00:00 2001
+From: Oscar Lesta <oscar.lesta@gmail.com>
+Date: Mon, 19 Feb 2024 10:02:25 -0300
+Subject: Initial Haiku patch for Previous v3.1.
+
+
+diff --git a/src/cpu/sysdeps.h b/src/cpu/sysdeps.h
+index 7c7daf1..db293c0 100644
+--- a/src/cpu/sysdeps.h
++++ b/src/cpu/sysdeps.h
+@@ -259,8 +259,12 @@ typedef uae_u32 uaecptr;
+ 
+ #endif /* WINUAE_FOR_HATARI */
+ 
++#ifdef __HAIKU__
++#include <SupportDefs.h>
++#else
+ uae_atomic atomic_and(volatile uae_atomic *p, uae_u32 v);
+ uae_atomic atomic_or(volatile uae_atomic *p, uae_u32 v);
++#endif
+ uae_atomic atomic_inc(volatile uae_atomic *p);
+ uae_atomic atomic_dec(volatile uae_atomic *p);
+ uae_u32 atomic_bit_test_and_reset(volatile uae_atomic *p, uae_u32 v);
+diff --git a/src/ditool/DiskImage.cpp b/src/ditool/DiskImage.cpp
+index 2ac751e..1fed570 100644
+--- a/src/ditool/DiskImage.cpp
++++ b/src/ditool/DiskImage.cpp
+@@ -11,6 +11,10 @@
+ #include <iostream>
+ #include <cstring>
+ 
++#ifdef __HAIKU__
++	#include <netinet/in.h>
++#endif
++
+ /* Pull in ntohs()/ntohl()/htons()/htonl() declarations... shotgun approach */
+ #if defined(linux) || defined(__MINGW32__)
+     /* netinet/in.h doesn't have proper extern "C" declarations for these... may also apply to other Unices */
+diff --git a/src/paths.c b/src/paths.c
+index e9e2ce5..ef95a60 100644
+--- a/src/paths.c
++++ b/src/paths.c
+@@ -25,6 +25,8 @@ const char Paths_fileid[] = "Hatari paths.c";
+ 	#define HATARI_HOME_DIR "Library/Application Support/Previous"
+ #elif defined(WIN32)
+ 	#define HATARI_HOME_DIR "AppData\\Local\\Previous"
++#elif defined(__HAIKU__)
++	#define HATARI_HOME_DIR "config/settings/previous"
+ #else
+ 	#define HATARI_HOME_DIR ".config/previous"
+ #endif
+@@ -261,7 +263,7 @@ static void Paths_InitHomeDirs(void)
+ 
+ 	/* Hatari home directory does not exists yet...
+ 	 * ... so let's try to create it: */
+-#if !defined(__APPLE__) && !defined(WIN32)
++#if !defined(__APPLE__) && !defined(WIN32) && !defined(__HAIKU__)
+ 	sprintf(sHatariHomeDir, "%s%c.config", sUserHomeDir, PATHSEP);
+ 	if (!File_DirExists(sHatariHomeDir))
+ 	{
+@@ -289,6 +291,39 @@ static void Paths_InitHomeDirs(void)
+  * have to find out where the executable is. But thanks to this effort, we get
+  * a relocatable package (we don't have any absolute path names in the program)!
+  */
++
++#ifdef __HAIKU__
++/*#include <syslog.h>*/
++void Paths_Init(const char *argv0)
++{
++	/* Init working directory string */
++	sWorkingDir = malloc(FILENAME_MAX);
++	if (!sWorkingDir || getcwd(sWorkingDir, FILENAME_MAX) == NULL)
++	{
++		/* This should never happen... just in case... */
++		sWorkingDir = Str_Dup(".");
++	}
++
++	/* Init the user's home directory string */
++	Paths_InitHomeDirs();
++
++	/* Init screenshot directory string */
++	sScreenShotDir = Str_Dup(sUserHomeDir);
++
++	sDataDir = Str_Alloc(FILENAME_MAX);
++	/* On Haiku' BIN2DATADIR is an absolute path already, use that as is. */
++	strcpy(sDataDir, BIN2DATADIR);
++/*
++	syslog(LOG_INFO,
++		"[Previous] WorkingDir = '%s'\n"
++		"[Previous] DataDir = '%s'\n"
++		"[Previous] UserHomeDir = '%s'\n"
++		"[Previous] HatariHomeDir = '%s'\n"
++		"[Previous] ScreenShotDir = '%s'\n",
++		sWorkingDir, sDataDir, sUserHomeDir, sHatariHomeDir, sScreenShotDir);
++*/
++}
++#else
+ void Paths_Init(const char *argv0)
+ {
+ 	char *psExecDir;  /* Path string where the hatari executable can be found */
+@@ -331,6 +366,7 @@ void Paths_Init(const char *argv0)
+ 	/* fprintf(stderr, " WorkingDir = %s\n DataDir = %s\n UserHomeDir = %s\n HatariHomeDir = %s\n ScrenShotDir = %s\n",
+ 	        sWorkingDir, sDataDir, sUserHomeDir, sHatariHomeDir, sScreenShotDir); */
+ }
++#endif
+ 
+ void Paths_UnInit(void)
+ {
+diff --git a/src/slirp/nfs/CSocket.h b/src/slirp/nfs/CSocket.h
+index 06f0409..0b512a7 100755
+--- a/src/slirp/nfs/CSocket.h
++++ b/src/slirp/nfs/CSocket.h
+@@ -5,7 +5,11 @@
+ #include <Winsock2.h>
+ #else
+ #include <sys/socket.h>
+-#include <sys/errno.h>
++#ifdef __HAIKU__
++	#include <errno.h>
++#else
++	#include <sys/errno.h>
++#endif
+ #include <netinet/in.h>
+ #endif
+ #include <unistd.h>
+diff --git a/src/slirp/nfs/RPCProg.h b/src/slirp/nfs/RPCProg.h
+index 1cbc6f4..cd9832f 100755
+--- a/src/slirp/nfs/RPCProg.h
++++ b/src/slirp/nfs/RPCProg.h
+@@ -5,7 +5,9 @@
+ #include <stddef.h>
+ 
+ /* The maximum number of bytes in a pathname argument. */
++#ifndef MAXPATHLEN
+ #define MAXPATHLEN 1024
++#endif
+ 
+ /* The maximum number of bytes in a file name argument. */
+ #define MAXNAMELEN 255
+diff --git a/src/slirp/slirp.h b/src/slirp/slirp.h
+index 695afaa..cd1b88c 100755
+--- a/src/slirp/slirp.h
++++ b/src/slirp/slirp.h
+@@ -356,7 +356,7 @@ struct tcpcb *tcp_drop(struct tcpcb *tp, int err);
+ #define MAX_MRU 16384
+ #endif
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__HAIKU__)
+ #define min(x,y) ((x) < (y) ? (x) : (y))
+ #define max(x,y) ((x) > (y) ? (x) : (y))
+ #endif
+diff --git a/src/zip.c b/src/zip.c
+index 630b91e..aafe74c 100644
+--- a/src/zip.c
++++ b/src/zip.c
+@@ -304,8 +304,15 @@ struct dirent **ZIP_GetFilesDir(const zip_dir *zip, const char *dir, int *entrie
+ 			ZIP_FreeZipDir(files);
+ 			return NULL;
+ 		}
+-		strncpy(fentries[i]->d_name, files->names[i], sizeof(fentries[i]->d_name)-1);
+-		fentries[i]->d_name[sizeof(fentries[i]->d_name) - 1] = 0;
++
++#ifdef __HAIKU__
++		// Not sure **at all** about this, but... it compiles at least :-D
++		size_t sz = strlen(fentries[i]->d_name);
++#else
++		size_t sz = sizeof(fentries[i]->d_name);
++#endif
++		strncpy(fentries[i]->d_name, files->names[i], sz - 1);
++		fentries[i]->d_name[sz - 1] = 0;
+ 	}
+ 
+ 	ZIP_FreeZipDir(files);
+-- 
+2.42.1
+
