@@ -1,0 +1,529 @@
+From d621d9a139119947e1b0701a2bd999778591e5e0 Mon Sep 17 00:00:00 2001
+From: Calvin Hill <calvin@hakobaito.co.uk>
+Date: Sun, 9 Sep 2018 16:11:42 +0100
+Subject: llvm: import header dir suffix patch from 3dEyes
+
+
+diff --git a/llvm/tools/llvm-config/llvm-config.cpp b/llvm/tools/llvm-config/llvm-config.cpp
+index d5b76b1..df3fb59 100644
+--- a/llvm/tools/llvm-config/llvm-config.cpp
++++ b/llvm/tools/llvm-config/llvm-config.cpp
+@@ -366,7 +366,11 @@ int main(int argc, char **argv) {
+       sys::fs::make_absolute(ActivePrefix, Path);
+       ActiveBinDir = std::string(Path);
+     }
++#ifdef __HAIKU__
++    ActiveLibDir = ActivePrefix + "/develop/lib" + LLVM_LIBDIR_SUFFIX;
++#else
+     ActiveLibDir = ActivePrefix + "/lib" + LLVM_LIBDIR_SUFFIX;
++#endif
+     {
+       SmallString<256> Path(LLVM_INSTALL_PACKAGE_DIR);
+       sys::fs::make_absolute(ActivePrefix, Path);
+-- 
+2.43.2
+
+
+From dce7ec6e649f45e09ec214da3a455e31cd36e736 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 3 Apr 2021 23:23:24 +0200
+Subject: lld: MachO needs libunwind somehow, disable
+
+
+diff --git a/lld/CMakeLists.txt b/lld/CMakeLists.txt
+index 595c286..efb08a8 100644
+--- a/lld/CMakeLists.txt
++++ b/lld/CMakeLists.txt
+@@ -199,7 +199,9 @@ endif()
+ add_subdirectory(docs)
+ add_subdirectory(COFF)
+ add_subdirectory(ELF)
++if (NOT HAIKU)
+ add_subdirectory(MachO)
++endif()
+ add_subdirectory(MinGW)
+ add_subdirectory(wasm)
+ 
+diff --git a/lld/include/lld/Common/Driver.h b/lld/include/lld/Common/Driver.h
+index 8520e6e..9562ab7 100644
+--- a/lld/include/lld/Common/Driver.h
++++ b/lld/include/lld/Common/Driver.h
+@@ -58,6 +58,15 @@ Result lldMain(llvm::ArrayRef<const char *> args, llvm::raw_ostream &stdoutOS,
+ 
+ // An array which declares that all LLD drivers are linked in your executable.
+ // Must be used along with LLD_HAS_DRIVERS. See examples in LLD unittests.
++#ifdef __HAIKU__
++#define LLD_ALL_DRIVERS                                                        \
++  {                                                                            \
++    {lld::WinLink, &lld::coff::link}, {lld::Gnu, &lld::elf::link},             \
++        {lld::MinGW, &lld::mingw::link}, {                                     \
++      lld::Wasm, &lld::wasm::link                                              \
++    }                                                                          \
++  }
++#else
+ #define LLD_ALL_DRIVERS                                                        \
+   {                                                                            \
+     {lld::WinLink, &lld::coff::link}, {lld::Gnu, &lld::elf::link},             \
+@@ -65,5 +74,6 @@ Result lldMain(llvm::ArrayRef<const char *> args, llvm::raw_ostream &stdoutOS,
+       lld::Wasm, &lld::wasm::link                                              \
+     }                                                                          \
+   }
++#endif
+ 
+ #endif
+diff --git a/lld/tools/lld/CMakeLists.txt b/lld/tools/lld/CMakeLists.txt
+index 0f5daa7..5712863 100644
+--- a/lld/tools/lld/CMakeLists.txt
++++ b/lld/tools/lld/CMakeLists.txt
+@@ -24,6 +24,16 @@ function(lld_target_link_libraries target type)
+   target_link_libraries(${target} ${type} ${ARGN})
+ endfunction()
+ 
++if (HAIKU)
++lld_target_link_libraries(lld
++  PRIVATE
++  lldCommon
++  lldCOFF
++  lldELF
++  lldMinGW
++  lldWasm
++  )
++else()
+ lld_target_link_libraries(lld
+   PRIVATE
+   lldCommon
+@@ -33,6 +43,7 @@ lld_target_link_libraries(lld
+   lldMinGW
+   lldWasm
+   )
++endif()
+ 
+ if(NOT LLD_SYMLINKS_TO_CREATE)
+   set(LLD_SYMLINKS_TO_CREATE
+diff --git a/lld/tools/lld/lld.cpp b/lld/tools/lld/lld.cpp
+index d6800fa..d2bac9f 100644
+--- a/lld/tools/lld/lld.cpp
++++ b/lld/tools/lld/lld.cpp
+@@ -69,7 +69,9 @@ static unsigned inTestVerbosity() {
+ LLD_HAS_DRIVER(coff)
+ LLD_HAS_DRIVER(elf)
+ LLD_HAS_DRIVER(mingw)
++#ifndef __HAIKU__
+ LLD_HAS_DRIVER(macho)
++#endif
+ LLD_HAS_DRIVER(wasm)
+ 
+ int lld_main(int argc, char **argv, const llvm::ToolContext &) {
+-- 
+2.43.2
+
+
+From 17973e5475d7ab9f90ea0cfcdfb056b31c0379ff Mon Sep 17 00:00:00 2001
+From: Trung Nguyen <trungnt282910@gmail.com>
+Date: Thu, 7 Jul 2022 22:19:34 +0700
+Subject: libunwind: Haiku: Initial support
+
+
+diff --git a/libunwind/cmake/config-ix.cmake b/libunwind/cmake/config-ix.cmake
+index 126c872..d4b8610 100644
+--- a/libunwind/cmake/config-ix.cmake
++++ b/libunwind/cmake/config-ix.cmake
+@@ -125,5 +125,6 @@ else()
+ endif()
+ 
+ if(HAIKU)
++  set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -D_DEFAULT_SOURCE")
+   check_library_exists(bsd dl_iterate_phdr "" LIBUNWIND_HAS_BSD_LIB)
+ endif()
+diff --git a/libunwind/src/CMakeLists.txt b/libunwind/src/CMakeLists.txt
+index 9c6f5d9..5be6a59 100644
+--- a/libunwind/src/CMakeLists.txt
++++ b/libunwind/src/CMakeLists.txt
+@@ -118,10 +118,27 @@ if (HAIKU)
+   add_library_flags_if(LIBUNWIND_HAS_ROOT_LIB root)
+ 
+   add_library_flags_if(LIBUNWIND_HAS_BSD_LIB bsd)
++  add_compile_flags_if(LIBUNWIND_HAS_BSD_LIB -D_DEFAULT_SOURCE=1)
+   add_compile_flags_if(LIBUNWIND_HAS_BSD_LIB -D_LIBUNWIND_USE_HAIKU_BSD_LIB=1)
+ 
+   add_compile_flags("-D_DEFAULT_SOURCE")
+   add_compile_flags("-DPT_GNU_EH_FRAME=PT_EH_FRAME")
++
++  find_path(LIBUNWIND_HAIKU_PRIVATE_HEADERS
++            "commpage_defs.h"
++            PATHS ${CMAKE_SYSTEM_INCLUDE_PATH}
++            PATH_SUFFIXES "/private/system"
++            NO_DEFAULT_PATH
++            REQUIRED)
++
++  include_directories(SYSTEM "${LIBUNWIND_HAIKU_PRIVATE_HEADERS}")
++  if (LIBUNWIND_TARGET_TRIPLE)
++    if (${LIBUNWIND_TARGET_TRIPLE} MATCHES "^x86_64")
++      include_directories(SYSTEM "${LIBUNWIND_HAIKU_PRIVATE_HEADERS}/arch/x86_64")
++    endif()
++  else()
++    include_directories(SYSTEM "${LIBUNWIND_HAIKU_PRIVATE_HEADERS}/arch/${CMAKE_SYSTEM_PROCESSOR}")
++  endif()
+ endif ()
+ 
+ string(REPLACE ";" " " LIBUNWIND_COMPILE_FLAGS "${LIBUNWIND_COMPILE_FLAGS}")
+-- 
+2.43.2
+
+
+From 1bc7b29c64c5dc8fda98a8855f491398567a446e Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Wed, 16 Mar 2022 07:04:18 +0900
+Subject: libunwind: Haiku: Signal frame unwinding support
+
+
+diff --git a/libunwind/src/UnwindCursor.hpp b/libunwind/src/UnwindCursor.hpp
+index 7753936..d7e4344 100644
+--- a/libunwind/src/UnwindCursor.hpp
++++ b/libunwind/src/UnwindCursor.hpp
+@@ -1011,6 +1011,9 @@ private:
+   template <typename Registers> int stepThroughSigReturn(Registers &) {
+     return UNW_STEP_END;
+   }
++#elif defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
++  bool setInfoForSigReturn();
++  int stepThroughSigReturn();
+ #endif
+ 
+ #if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
+@@ -1314,7 +1317,8 @@ private:
+   unw_proc_info_t  _info;
+   bool             _unwindInfoMissing;
+   bool             _isSignalFrame;
+-#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN)
++#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) \
++    || defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+   bool             _isSigReturn = false;
+ #endif
+ };
+@@ -2558,7 +2562,8 @@ int UnwindCursor<A, R>::stepWithTBTable(pint_t pc, tbtable *TBTable,
+ 
+ template <typename A, typename R>
+ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
+-#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN)
++#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) \
++    || defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+   _isSigReturn = false;
+ #endif
+ 
+@@ -2673,7 +2678,8 @@ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
+   }
+ #endif // #if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
+ 
+-#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN)
++#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) \
++    || defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+   if (setInfoForSigReturn())
+     return;
+ #endif
+@@ -2749,6 +2755,65 @@ int UnwindCursor<A, R>::stepThroughSigReturn(Registers_arm64 &) {
+   _isSignalFrame = true;
+   return UNW_STEP_SUCCESS;
+ }
++#elif defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
++
++#include <commpage_defs.h>
++#include <signal.h>
++
++extern "C" {
++extern void *__gCommPageAddress;
++}
++
++template <typename A, typename R>
++bool UnwindCursor<A, R>::setInfoForSigReturn() {
++#if defined(_LIBUNWIND_TARGET_X86_64)
++  addr_t signal_handler = (((addr_t*)__gCommPageAddress)[COMMPAGE_ENTRY_X86_SIGNAL_HANDLER] + (addr_t)__gCommPageAddress);
++	addr_t signal_handler_ret = signal_handler + 45;
++#endif
++  pint_t pc = static_cast<pint_t>(this->getReg(UNW_REG_IP));
++  if (pc == signal_handler_ret) {
++    //printf("signal frame detected\n");
++    _info = {};
++    _info.start_ip = signal_handler;
++    _info.end_ip = signal_handler_ret;
++    _isSigReturn = true;
++    return true;
++  }
++  return false;
++}
++
++template <typename A, typename R>
++int UnwindCursor<A, R>::stepThroughSigReturn() {
++  //printf("stepThroughSigReturn\n");
++  _isSignalFrame = true;
++  pint_t sp = _registers.getSP();
++  // printf("sp: %p\n", (void*)sp);
++#if defined(_LIBUNWIND_TARGET_X86_64)
++  vregs *regs = (vregs*)(sp + 0x70);
++  //printf("&regs: %p\n", regs);
++ 
++  _registers.setRegister(UNW_REG_IP, regs->rip);
++  _registers.setRegister(UNW_REG_SP, regs->rsp);
++  _registers.setRegister(UNW_X86_64_RAX, regs->rax);
++  _registers.setRegister(UNW_X86_64_RDX, regs->rdx);
++  _registers.setRegister(UNW_X86_64_RCX, regs->rcx);
++  _registers.setRegister(UNW_X86_64_RBX, regs->rbx);
++  _registers.setRegister(UNW_X86_64_RSI, regs->rsi);
++  _registers.setRegister(UNW_X86_64_RDI, regs->rdi);
++  _registers.setRegister(UNW_X86_64_RBP, regs->rbp);
++  _registers.setRegister(UNW_X86_64_R8,  regs->r8);
++  _registers.setRegister(UNW_X86_64_R9,  regs->r9);
++  _registers.setRegister(UNW_X86_64_R10, regs->r10);
++  _registers.setRegister(UNW_X86_64_R11, regs->r11);
++  _registers.setRegister(UNW_X86_64_R12, regs->r12);
++  _registers.setRegister(UNW_X86_64_R13, regs->r13);
++  _registers.setRegister(UNW_X86_64_R14, regs->r14);
++  _registers.setRegister(UNW_X86_64_R15, regs->r15);
++  // TODO: XMM
++#endif
++
++  return UNW_STEP_SUCCESS;
++}
+ #endif // defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) &&
+        // defined(_LIBUNWIND_TARGET_AARCH64)
+ 
+@@ -2917,7 +2982,8 @@ template <typename A, typename R> int UnwindCursor<A, R>::step(bool stage2) {
+ 
+   // Use unwinding info to modify register set as if function returned.
+   int result;
+-#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN)
++#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) \
++    || defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+   if (_isSigReturn) {
+     result = this->stepThroughSigReturn();
+   } else
+-- 
+2.43.2
+
+
+From d140a0377400ee7f543847a759b241aeac4ce425 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=B4me=20Duval?= <jerome.duval@gmail.com>
+Date: Mon, 18 Jul 2016 14:13:19 +0200
+Subject: clang: support for secondary arch.
+
+
+diff --git a/clang/CMakeLists.txt b/clang/CMakeLists.txt
+index 5f2b7f0..be846cb 100644
+--- a/clang/CMakeLists.txt
++++ b/clang/CMakeLists.txt
+@@ -361,6 +361,10 @@ if (APPLE AND NOT CMAKE_LINKER MATCHES ".*lld.*")
+   endif()
+   message(STATUS "Host linker version: ${HOST_LINK_VERSION}")
+ endif()
++if(DEFINED HAIKU_HYBRID_SECONDARY)
++  add_definitions(-DHAIKU_HYBRID_SECONDARY=${HAIKU_HYBRID_SECONDARY})
++endif()
++
+ 
+ include(CMakeParseArguments)
+ include(AddClang)
+diff --git a/clang/lib/Driver/ToolChains/Gnu.cpp b/clang/lib/Driver/ToolChains/Gnu.cpp
+index e5e1b1d..d0bf0c3 100644
+--- a/clang/lib/Driver/ToolChains/Gnu.cpp
++++ b/clang/lib/Driver/ToolChains/Gnu.cpp
+@@ -2370,7 +2370,11 @@ void Generic_GCC::GCCInstallationDetector::AddDefaultGCCPrefixes(
+     StringRef SysRoot) {
+ 
+   if (TargetTriple.isOSHaiku()) {
++#ifdef HAIKU_HYBRID_SECONDARY
++    Prefixes.push_back(concat(SysRoot, "/boot/system/develop/tools/" HAIKU_HYBRID_SECONDARY));
++#else
+     Prefixes.push_back(concat(SysRoot, "/boot/system/develop/tools"));
++#endif
+     return;
+   }
+ 
+diff --git a/clang/lib/Driver/ToolChains/Haiku.cpp b/clang/lib/Driver/ToolChains/Haiku.cpp
+index e0d9403..3b9e9ee 100644
+--- a/clang/lib/Driver/ToolChains/Haiku.cpp
++++ b/clang/lib/Driver/ToolChains/Haiku.cpp
+@@ -164,8 +164,16 @@ Haiku::Haiku(const Driver &D, const llvm::Triple& Triple, const ArgList &Args)
+ 
+   GCCInstallation.init(Triple, Args);
+ 
++#ifdef HAIKU_HYBRID_SECONDARY
++  getProgramPaths().insert(getProgramPaths().begin(), getDriver().SysRoot
++                           + "/boot/system/bin/" HAIKU_HYBRID_SECONDARY);
++  getFilePaths().clear();
++  getFilePaths().push_back(getDriver().SysRoot + "/boot/system/lib/" HAIKU_HYBRID_SECONDARY);
++  getFilePaths().push_back(getDriver().SysRoot + "/boot/system/develop/lib/" HAIKU_HYBRID_SECONDARY);
++#else
+   getFilePaths().push_back(concat(getDriver().SysRoot, "/boot/system/lib"));
+   getFilePaths().push_back(concat(getDriver().SysRoot, "/boot/system/develop/lib"));
++#endif
+ 
+   if (GCCInstallation.isValid())
+     getFilePaths().push_back(GCCInstallation.getInstallPath().str());
+@@ -200,8 +208,14 @@ void Haiku::AddClangSystemIncludeArgs(const llvm::opt::ArgList &DriverArgs,
+     return;
+   }
+ 
++#ifdef HAIKU_HYBRID_SECONDARY
++  addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
++                   "/boot/system/non-packaged/develop/headers/"
++                   HAIKU_HYBRID_SECONDARY));
++#else
+   addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
+                    "/boot/system/non-packaged/develop/headers"));
++#endif
+   addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
+                    "/boot/system/develop/headers/os"));
+   addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
+@@ -264,6 +278,17 @@ void Haiku::AddClangSystemIncludeArgs(const llvm::opt::ArgList &DriverArgs,
+                    "/boot/system/develop/headers/gnu"));
+   addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
+                    "/boot/system/develop/headers/posix"));
++#ifdef HAIKU_HYBRID_SECONDARY
++  addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
++                   "/boot/system/develop/headers/"
++                   HAIKU_HYBRID_SECONDARY));
++  addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
++                   "/boot/system/develop/headers/"
++                   HAIKU_HYBRID_SECONDARY "/os"));
++  addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
++                   "/boot/system/develop/headers/"
++                   HAIKU_HYBRID_SECONDARY "/os/opengl"));
++#endif
+   addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
+                    "/boot/system/develop/headers"));
+ }
+diff --git a/clang/lib/Lex/InitHeaderSearch.cpp b/clang/lib/Lex/InitHeaderSearch.cpp
+index 2218db1..b5a56ca 100644
+--- a/clang/lib/Lex/InitHeaderSearch.cpp
++++ b/clang/lib/Lex/InitHeaderSearch.cpp
+@@ -220,7 +220,20 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
+   if (HSOpts.UseBuiltinIncludes) {
+     // Ignore the sys root, we *always* look for clang headers relative to
+     // supplied path.
++#ifdef HAIKU_HYBRID_SECONDARY
++    // Remove version from foo/lib/clang/version
++    StringRef Ver = llvm::sys::path::filename(HSOpts.ResourceDir);
++    StringRef NoVer = llvm::sys::path::parent_path(HSOpts.ResourceDir);
++    // Remove clang from foo/lib/clang
++    StringRef Clang = llvm::sys::path::filename(NoVer);
++    SmallString<128> P = llvm::sys::path::parent_path(NoVer);
++
++    // Get foo/include/c++/v1
++    llvm::sys::path::append(P, Clang, Ver);
++#else
+     SmallString<128> P = StringRef(HSOpts.ResourceDir);
++#endif
++
+     llvm::sys::path::append(P, "include");
+     AddUnmappedPath(P, ExternCSystem, false);
+   }
+-- 
+2.43.2
+
+
+From b88936de0e66d06528184611bad3467fc4f16404 Mon Sep 17 00:00:00 2001
+From: David Karoly <karolyd577@gmail.com>
+Date: Thu, 21 Sep 2023 17:44:12 +0000
+Subject: fix build on x86 secondary arch
+
+
+diff --git a/clang/lib/Headers/CMakeLists.txt b/clang/lib/Headers/CMakeLists.txt
+index b9a966b..81277dc 100644
+--- a/clang/lib/Headers/CMakeLists.txt
++++ b/clang/lib/Headers/CMakeLists.txt
+@@ -333,7 +333,7 @@ set(llvm_libc_wrapper_files
+ )
+ 
+ include(GetClangResourceDir)
+-get_clang_resource_dir(output_dir PREFIX ${LLVM_LIBRARY_OUTPUT_INTDIR}/.. SUBDIR include)
++get_clang_resource_dir(output_dir PREFIX ${CMAKE_BINARY_DIR}/${CMAKE_CFG_INTDIR} SUBDIR include)
+ set(out_files)
+ set(generated_files)
+ 
+-- 
+2.43.2
+
+
+From 8751a8052dbbc126eb9f379a3ea1dbf78c160ee4 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Mon, 6 Nov 2023 14:24:21 +0100
+Subject: clang: Haiku: patch for analyzer scripts
+
+
+diff --git a/clang/tools/scan-build/bin/scan-build b/clang/tools/scan-build/bin/scan-build
+index 04734d9..1f30b85 100755
+--- a/clang/tools/scan-build/bin/scan-build
++++ b/clang/tools/scan-build/bin/scan-build
+@@ -447,7 +447,7 @@ sub CopyFiles {
+ 
+   my $Dir = shift;
+ 
+-  my $JS = Cwd::realpath("$RealBin/../share/scan-build/sorttable.js");
++  my $JS = Cwd::realpath("$RealBin/../data/scan-build/sorttable.js");
+ 
+   DieDiag("Cannot find 'sorttable.js'.\n")
+     if (! -r $JS);
+@@ -457,7 +457,7 @@ sub CopyFiles {
+   DieDiag("Could not copy 'sorttable.js' to '$Dir'.\n")
+     if (! -r "$Dir/sorttable.js");
+ 
+-  my $CSS = Cwd::realpath("$RealBin/../share/scan-build/scanview.css");
++  my $CSS = Cwd::realpath("$RealBin/../data/scan-build/scanview.css");
+ 
+   DieDiag("Cannot find 'scanview.css'.\n")
+     if (! -r $CSS);
+@@ -1888,8 +1888,8 @@ if ($Clang !~ /\+\+(\.exe)?$/) {
+ 
+ # Determine the location of ccc-analyzer.
+ my $AbsRealBin = Cwd::realpath($RealBin);
+-my $Cmd = "$AbsRealBin/../libexec/ccc-analyzer";
+-my $CmdCXX = "$AbsRealBin/../libexec/c++-analyzer";
++my $Cmd = "$AbsRealBin/../lib/ccc-analyzer";
++my $CmdCXX = "$AbsRealBin/../lib/c++-analyzer";
+ 
+ # Portability: use less strict but portable check -e (file exists) instead of
+ # non-portable -x (file is executable). On some windows ports -x just checks
+diff --git a/clang/tools/scan-view/bin/scan-view b/clang/tools/scan-view/bin/scan-view
+index d01aebb..43ba8c3 100755
+--- a/clang/tools/scan-view/bin/scan-view
++++ b/clang/tools/scan-view/bin/scan-view
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python
++#!/usr/bin/env python3
+ 
+ from __future__ import print_function
+ 
+@@ -64,7 +64,7 @@ def start_browser(port, options):
+ 
+ def run(port, options, root):
+     # Prefer to look relative to the installed binary
+-    share = os.path.dirname(__file__) + "/../share/scan-view"
++    share = os.path.dirname(__file__) + "/../data/scan-view"
+     if not os.path.isdir(share):
+         # Otherwise look relative to the source
+         share = os.path.dirname(__file__) + "/../../scan-view/share"
+-- 
+2.43.2
+
+
+From f63269b0f981efbf4d77c04bad792cb402ef24b1 Mon Sep 17 00:00:00 2001
+From: David Karoly <karolyd577@gmail.com>
+Date: Sun, 3 Mar 2024 21:58:38 +0100
+Subject: Link libnetwork on Haiku in llvm-jitlink
+
+
+diff --git a/llvm/tools/llvm-jitlink/CMakeLists.txt b/llvm/tools/llvm-jitlink/CMakeLists.txt
+index c9d1d23..702090c 100644
+--- a/llvm/tools/llvm-jitlink/CMakeLists.txt
++++ b/llvm/tools/llvm-jitlink/CMakeLists.txt
+@@ -32,4 +32,7 @@ add_llvm_tool(llvm-jitlink
+   target_link_libraries(llvm-jitlink PRIVATE socket)
+  endif()
+ 
++ if(${CMAKE_SYSTEM_NAME} MATCHES "Haiku")
++  target_link_libraries(llvm-jitlink PRIVATE network)
++ endif()
+ export_executable_symbols(llvm-jitlink)
+-- 
+2.43.2
+
