@@ -1,0 +1,654 @@
+From 2978938c7b8227b0699644a6c3eed1e8a7098cf9 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 6 Mar 2024 21:40:44 +1000
+Subject: disable setlocale for haiku
+
+
+diff --git a/player/main.c b/player/main.c
+index 27cf9b4..cdad83e 100644
+--- a/player/main.c
++++ b/player/main.c
+@@ -233,8 +233,12 @@ static int cfg_include(void *ctx, char *filename, int flags)
+ // Other locale stuff might break too, but probably isn't too bad.
+ static bool check_locale(void)
+ {
++#ifdef __HAIKU__
++	return true;
++#else
+     char *name = setlocale(LC_NUMERIC, NULL);
+     return !name || strcmp(name, "C") == 0 || strcmp(name, "C.UTF-8") == 0;
++#endif
+ }
+ 
+ struct MPContext *mp_create(void)
+-- 
+2.43.2
+
+
+From af074823c0c320ba0586679f6f2a34aa4c4b903d Mon Sep 17 00:00:00 2001
+From: Oscar Lesta <oscar.lesta@gmail.com>
+Date: Thu, 11 May 2023 21:00:50 -0300
+Subject: Fix build on Haiku
+
+Just adapting previous patch from Sergei Reznikov.
+
+diff --git a/osdep/threads-posix.h b/osdep/threads-posix.h
+index 482e4a8..5675921 100644
+--- a/osdep/threads-posix.h
++++ b/osdep/threads-posix.h
+@@ -237,7 +237,7 @@ static inline void mp_thread_set_name(const char *name)
+ 
+ static inline int64_t mp_thread_cpu_time_ns(mp_thread_id thread)
+ {
+-#if defined(_POSIX_TIMERS) && _POSIX_TIMERS > 0 && defined(_POSIX_THREAD_CPUTIME)
++#if defined(_POSIX_TIMERS) && _POSIX_TIMERS > 0 && defined(_POSIX_THREAD_CPUTIME) && !defined(__HAIKU__)
+     clockid_t id;
+     struct timespec ts;
+     if (pthread_getcpuclockid(thread, &id) == 0 && clock_gettime(id, &ts) == 0)
+-- 
+2.43.2
+
+
+From 105840f8eec05cd2a680f2ae95aea11a45063b96 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 31 Mar 2024 00:52:47 +1000
+Subject: Add Haiku video output module
+
+
+diff --git a/meson.build b/meson.build
+index fdfc526..2806960 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1,5 +1,5 @@
+ project('mpv',
+-        'c',
++        'c', 'cpp',
+         license: ['GPL2+', 'LGPL2.1+'],
+         version: files('./VERSION'),
+         meson_version: '>=0.62.0',
+@@ -933,6 +933,12 @@ if features['sdl2-video']
+     sources += files('video/out/vo_sdl.c')
+ endif
+ 
++features += {'haiku': get_option('haiku').allowed()}
++if features['haiku']
++	dependencies += meson.get_compiler('cpp').find_library('be', required: true)
++    sources += files('video/out/vo_haiku.cpp')
++endif
++
+ shaderc = dependency('shaderc', required: get_option('shaderc'))
+ features += {'shaderc': shaderc.found()}
+ if features['shaderc']
+diff --git a/meson_options.txt b/meson_options.txt
+index b0edb80..8844a03 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -76,6 +76,7 @@ option('gl-x11', type: 'feature', value: 'disabled', description: 'OpenGL X11/GL
+ option('jpeg', type: 'feature', value: 'auto', description: 'JPEG support')
+ option('rpi', type: 'feature', value: 'disabled', description: 'Raspberry Pi support')
+ option('sdl2-video', type: 'feature', value: 'auto', description: 'SDL2 video output')
++option('haiku', type: 'feature', value: 'enabled', description: 'Haiku video output')
+ option('shaderc', type: 'feature', value: 'auto', description: 'libshaderc SPIR-V compiler')
+ option('sixel', type: 'feature', value:'auto', description: 'Sixel')
+ option('spirv-cross', type: 'feature', value: 'auto', description: 'SPIRV-Cross SPIR-V shader converter')
+diff --git a/options/m_option.h b/options/m_option.h
+index e62fa0f..f66fe9d 100644
+--- a/options/m_option.h
++++ b/options/m_option.h
+@@ -259,7 +259,11 @@ union m_option_value {
+ // Keep fully zeroed instance of m_option_value to use as a default value, before
+ // any specific union member is used. C standard says that `= {0}` activates and
+ // initializes only the first member of the union, leaving padding bits undefined.
++#ifdef __cplusplus
++static const union m_option_value m_option_value_default = {0};
++#else
+ static const union m_option_value m_option_value_default;
++#endif
+ 
+ ////////////////////////////////////////////////////////////////////////////
+ 
+diff --git a/video/csputils.h b/video/csputils.h
+index 3a904cb..cf7c93a 100644
+--- a/video/csputils.h
++++ b/video/csputils.h
+@@ -159,7 +159,7 @@ struct mp_colorspace {
+ #define MP_REF_WHITE_HLG 3.17955
+ 
+ // Replaces unknown values in the first struct by those of the second struct
+-void mp_colorspace_merge(struct mp_colorspace *orig, struct mp_colorspace *new);
++void mp_colorspace_merge(struct mp_colorspace *orig, struct mp_colorspace *newscpace);
+ 
+ struct mp_csp_params {
+     struct mp_colorspace color; // input colorspace
+diff --git a/video/out/vo.c b/video/out/vo.c
+index 50129fb..fda0b78 100644
+--- a/video/out/vo.c
++++ b/video/out/vo.c
+@@ -54,6 +54,7 @@ extern const struct vo_driver video_out_gpu;
+ extern const struct vo_driver video_out_gpu_next;
+ extern const struct vo_driver video_out_libmpv;
+ extern const struct vo_driver video_out_null;
++extern const struct vo_driver video_out_haiku;
+ extern const struct vo_driver video_out_image;
+ extern const struct vo_driver video_out_lavc;
+ extern const struct vo_driver video_out_caca;
+@@ -97,6 +98,9 @@ static const struct vo_driver *const video_out_drivers[] =
+ #if HAVE_VAAPI_X11 && HAVE_GPL
+     &video_out_vaapi,
+ #endif
++#ifdef __HAIKU__
++	&video_out_haiku,
++#endif
+ #if HAVE_X11
+     &video_out_x11,
+ #endif
+diff --git a/video/out/vo_haiku.cpp b/video/out/vo_haiku.cpp
+new file mode 100644
+index 0000000..bc285a5
+--- /dev/null
++++ b/video/out/vo_haiku.cpp
+@@ -0,0 +1,501 @@
++/*
++ * Copyright (C) Gerasim Troeglazov
++ *
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * mpv is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <stdlib.h>
++
++#include <Application.h>
++#include <Bitmap.h>
++#include <Cursor.h>
++#include <Rect.h>
++#include <Region.h>
++#include <OS.h>
++#include <Screen.h>
++#include <SupportDefs.h>
++#include <View.h>
++#include <Window.h>
++
++extern "C" {
++
++#include "input/input.h"
++#include "input/keycodes.h"
++#include "input/input.h"
++#include "common/msg.h"
++#include "osdep/timer.h"
++#include "options/m_config.h"
++#include "options/m_option.h"
++#include "video/mp_image.h"
++#include "sub/osd.h"
++#include "vo.h"
++
++#define DEFAULT_WIN_POS_X 50
++#define DEFAULT_WIN_POS_Y 50
++
++class VideoWindow;
++
++static int get_mods(uint32 state);
++static int get_mouse_button(uint32 buttons);
++
++static const struct mp_keymap keymap[] = {
++		{ 0x01, MP_KEY_ESC },		
++		{ 0x02, MP_KEY_F + 1 },
++		{ 0x03, MP_KEY_F + 2 },
++		{ 0x04, MP_KEY_F + 3 },
++		{ 0x05, MP_KEY_F + 4 },
++		{ 0x06, MP_KEY_F + 5 },
++		{ 0x07, MP_KEY_F + 6 },
++		{ 0x08, MP_KEY_F + 7 },
++		{ 0x09, MP_KEY_F + 8 },
++		{ 0x0A, MP_KEY_F + 9 },
++		{ 0x0B, MP_KEY_F + 10 },
++		{ 0x0C, MP_KEY_F + 11 },
++		{ 0x0D, MP_KEY_F + 12 },
++		{ 0x0E, MP_KEY_PRINT },
++		{ 0x22, MP_KEY_PAUSE },
++		{ 0x1E, MP_KEY_BACKSPACE },
++		{ 0x1F, MP_KEY_INSERT },
++		{ 0x20, MP_KEY_HOME },
++		{ 0x21, MP_KEY_PAGE_UP },
++		{ 0x26, MP_KEY_TAB },
++		{ 0x34, MP_KEY_DELETE },
++		{ 0x35, MP_KEY_END },
++		{ 0x36, MP_KEY_PAGE_DOWN },
++		{ 0x47, MP_KEY_ENTER },
++		{ 0x57,	MP_KEY_UP },
++		{ 0x5B, MP_KEY_KPENTER },
++		{ 0x61, MP_KEY_LEFT },
++		{ 0x62, MP_KEY_DOWN },
++		{ 0x63, MP_KEY_RIGHT },
++    	{ 0, 0}
++};
++
++struct priv {
++	VideoWindow *window;
++
++	struct mp_rect src_rect;
++	struct mp_rect dst_rect;
++	struct mp_osd_res osd_res;
++
++	struct m_config_cache *opts_cache;
++};
++
++class VideoView : public BView
++{
++ public:
++						VideoView(BRect rect, struct vo* vout);
++		virtual			~VideoView() { }
++
++		void 			Draw(BRect rect);
++		virtual void 	MouseDown(BPoint point);
++		virtual void 	MouseUp(BPoint point);
++		virtual void 	MouseMoved(BPoint point, uint32 transit,const BMessage *message);
++
++		void			SetBits(struct vo_frame *frame);
++		void 			DrawFrame(void);
++
++ private:
++		BBitmap*		buffer_bitmap;
++		uint32			last_buttons;
++		struct vo*		v_out;
++};
++
++class VideoWindow : public BWindow {
++ public:
++						VideoWindow(int width, int height, const char* name, struct vo* vout);
++		virtual			~VideoWindow();
++
++		virtual void 	MessageReceived(BMessage *message);
++		virtual void 	FrameResized(float width, float height);
++		virtual void 	Zoom(BPoint origin, float width,float height);
++		bool			QuitRequested();
++
++		void 			MouseWheelChanged(BMessage *message);
++
++		void			SetFullscreen(bool fullscreen);
++		bool			Fullscreen() { return full_screen; }
++
++		void			HideCursor(bool hide);
++
++		VideoView*		View() { return video_view; }
++
++ private:
++		VideoView*		video_view;
++		BCursor* 		empty_cursor;
++		bool			full_screen;
++		BRect			last_frame;
++		struct vo*		v_out;
++};
++
++
++VideoView::VideoView(BRect rect, struct vo*	vout)
++	: BView(rect, "VideoView", B_FOLLOW_ALL, B_WILL_DRAW)
++	, buffer_bitmap(NULL)
++	, v_out(vout)
++{
++}
++
++void
++VideoView::MouseDown(BPoint point)
++{
++	int mods = get_mods(modifiers());
++	uint32 buttons = Window()->CurrentMessage()->FindInt32("buttons");
++
++	int button = get_mouse_button(buttons);
++
++	if (button != 0)
++		mp_input_put_key(v_out->input_ctx, button | mods | MP_KEY_STATE_DOWN);
++
++	last_buttons = buttons;
++}
++
++void
++VideoView::MouseUp(BPoint point)
++{
++	int mods = get_mods(modifiers());
++	int button = get_mouse_button(last_buttons);
++
++	if (button != 0)
++		mp_input_put_key(v_out->input_ctx, button | mods | MP_KEY_STATE_UP);
++}
++
++void
++VideoView::MouseMoved(BPoint point, uint32 transit,const BMessage *message)
++{
++	switch (transit)
++	{
++		case B_INSIDE_VIEW:
++			mp_input_set_mouse_pos(v_out->input_ctx, point.x, point.y);
++			break;
++		case B_ENTERED_VIEW:
++			mp_input_put_key(v_out->input_ctx, MP_KEY_MOUSE_ENTER);
++			break;
++		case B_EXITED_VIEW:
++			mp_input_put_key(v_out->input_ctx, MP_KEY_MOUSE_LEAVE);
++			break;
++		case B_OUTSIDE_VIEW:
++			break;
++	}
++}
++
++void
++VideoView::Draw(BRect rect)
++{
++	struct priv *vc = (struct priv*)v_out->priv;
++
++	SetHighColor(0, 0, 0);
++	SetDrawingMode(B_OP_COPY);
++
++	if (buffer_bitmap != NULL) {
++		BRect src_rect = BRect(vc->src_rect.x0, vc->src_rect.y0, vc->src_rect.x1 - 1, vc->src_rect.y1 - 1);
++		BRect dst_rect = BRect(vc->dst_rect.x0, vc->dst_rect.y0, vc->dst_rect.x1 - 1, vc->dst_rect.y1 - 1);
++
++		BRegion region(Bounds());
++		region.Exclude(dst_rect);
++		ConstrainClippingRegion(&region);
++		FillRect(Bounds());
++
++		region.Set(Bounds());
++		ConstrainClippingRegion(&region);
++		DrawBitmap(buffer_bitmap, src_rect, dst_rect, B_FILTER_BITMAP_BILINEAR);
++	} else {
++		FillRect(Bounds());
++	}
++}
++
++void
++VideoView::DrawFrame(void)
++{
++	if (buffer_bitmap != NULL) {
++		if(LockLooperWithTimeout(25000) == B_OK) {
++			Draw(Bounds());
++			UnlockLooper();
++		}
++	}
++}
++
++void
++VideoView::SetBits(struct vo_frame *frame)
++{
++	if (buffer_bitmap != NULL) {
++		if ((buffer_bitmap->Bounds().IntegerWidth() != frame->current->w - 1) ||
++			(buffer_bitmap->Bounds().IntegerHeight() != frame->current->h - 1)) {
++				delete buffer_bitmap;
++				buffer_bitmap = NULL;
++		}
++	}
++
++	if (buffer_bitmap == NULL) {
++		buffer_bitmap = new BBitmap(BRect(0, 0, frame->current->w - 1, frame->current->h - 1), B_RGB32);
++	}
++
++	memcpy(buffer_bitmap->Bits(), frame->current->planes[0], buffer_bitmap->BitsLength());
++}
++
++VideoWindow::VideoWindow(int width, int height, const char* title, struct vo* vout)
++	: BWindow(BRect(DEFAULT_WIN_POS_X, DEFAULT_WIN_POS_Y, DEFAULT_WIN_POS_X + width, DEFAULT_WIN_POS_Y + height),
++			title, B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL, 0)
++	, full_screen(false)
++	, v_out(vout)
++{
++	video_view = new VideoView(Bounds(), vout);
++	video_view->SetViewColor(0, 0, 0);
++	AddChild(video_view);
++
++	empty_cursor = new BCursor(B_CURSOR_ID_NO_CURSOR);
++
++	last_frame = Frame();
++}
++
++VideoWindow::~VideoWindow()
++{
++	delete empty_cursor;
++}
++
++void
++VideoWindow::HideCursor(bool hide)
++{
++	if (video_view->LockLooperWithTimeout(25000) == B_OK) {
++		video_view->SetViewCursor(hide ? empty_cursor : B_CURSOR_SYSTEM_DEFAULT);
++		video_view->UnlockLooper();
++	}
++}
++
++void
++VideoWindow::SetFullscreen(bool fullscreen)
++{
++	if (fullscreen) {		
++		last_frame = Frame();
++		BScreen screen;
++		MoveTo(0, 0);
++		ResizeTo(screen.Frame().right + 1, screen.Frame().bottom + 1);
++	} else {
++		MoveTo(last_frame.left, last_frame.top);
++		ResizeTo(last_frame.Width(), last_frame.Height());
++	}
++
++	full_screen = fullscreen;
++}
++
++void
++VideoWindow::FrameResized(float width, float height)
++{
++	struct priv *vc = (struct priv*)v_out->priv;
++
++	v_out->dwidth = width + 1;
++    v_out->dheight = height + 1;
++
++    vo_get_src_dst_rects(v_out, &vc->src_rect, &vc->dst_rect, &vc->osd_res);
++    v_out->want_redraw = true;
++
++    vo_event(v_out, VO_EVENT_RESIZE);
++    vo_wakeup(v_out);
++}
++
++void
++VideoWindow::Zoom(BPoint origin, float width,float height)
++{
++	full_screen = true;
++	SetFullscreen(full_screen);
++}
++
++void
++VideoWindow::MouseWheelChanged(BMessage *message)
++{
++	float dx = message->FindFloat("be:wheel_delta_x");
++	float dy = message->FindFloat("be:wheel_delta_y");
++
++	int y_code = dy < 0 ? MP_WHEEL_UP : MP_WHEEL_DOWN;
++	mp_input_put_wheel(v_out->input_ctx, y_code, fabs(dy));
++
++	int x_code = dx < 0 ? MP_WHEEL_RIGHT : MP_WHEEL_LEFT;
++	mp_input_put_wheel(v_out->input_ctx, x_code, fabs(dx));
++}
++
++void
++VideoWindow::MessageReceived(BMessage *message)
++{
++	switch (message->what) {
++		case B_MOUSE_WHEEL_CHANGED:
++			MouseWheelChanged(message);
++			break;
++
++		case B_KEY_DOWN:
++		{
++			uint32 code = message->FindInt32("key");
++			uint32 raw_char = message->FindInt32("raw_char");			
++			
++			int mods = get_mods(modifiers());
++			int mpkey = lookup_keymap_table(keymap, code);
++			if (mpkey != 0) {
++				if (mpkey == MP_KEY_ESC && full_screen) {
++					full_screen = false;
++					SetFullscreen(full_screen);
++				} else {
++					mp_input_put_key(v_out->input_ctx, mpkey | mods);
++				}
++			} else {
++				mp_input_put_key(v_out->input_ctx, raw_char | mods);
++			}
++			break;
++		}
++		default:
++			BWindow::MessageReceived(message);
++			break;
++	}
++}
++
++bool
++VideoWindow::QuitRequested()
++{
++	mp_input_put_key(v_out->input_ctx, MP_KEY_CLOSE_WIN);
++	return false;
++}
++
++static int get_mods(uint32 state)
++{
++    int modifiers = 0;
++    if (state & B_SHIFT_KEY)
++        modifiers |= MP_KEY_MODIFIER_SHIFT;
++    if (state & B_CONTROL_KEY)
++        modifiers |= MP_KEY_MODIFIER_CTRL;
++    if (state & B_COMMAND_KEY)
++        modifiers |= MP_KEY_MODIFIER_ALT;
++    if (state & B_OPTION_KEY)
++        modifiers |= MP_KEY_MODIFIER_META;
++    return modifiers;
++}
++
++static int get_mouse_button(uint32 buttons)
++{
++	uint32 button = 0;
++	if (buttons & B_PRIMARY_MOUSE_BUTTON)
++		button = MP_MBTN_LEFT;
++	if (buttons & B_TERTIARY_MOUSE_BUTTON)
++		button = MP_MBTN_MID;
++	if (buttons & B_SECONDARY_MOUSE_BUTTON)
++		button = MP_MBTN_RIGHT;
++	return button;
++}
++
++static void set_fullscreen(struct vo *vo)
++{
++    struct priv *vc = (priv*)vo->priv;
++    struct mp_vo_opts *opts = (mp_vo_opts*)vc->opts_cache->opts;
++
++    int fs = opts->fullscreen;
++
++    if (fs == vc->window->Fullscreen()) {
++        return;
++    }
++
++	vc->window->SetFullscreen(fs);
++}
++
++static void draw_frame(struct vo *vo, struct vo_frame *frame)
++{
++	struct priv *vc = (priv*)vo->priv;
++	vc->window->View()->SetBits(frame);
++}
++
++static void flip_page(struct vo *vo)
++{
++    struct priv *vc = (priv*)vo->priv;
++    vc->window->View()->DrawFrame();
++}
++
++static int query_format(struct vo *vo, int format)
++{
++    return format == IMGFMT_BGR0;
++}
++
++static int reconfig(struct vo *vo, struct mp_image_params *params)
++{
++	struct priv *vc = (priv*)vo->priv;
++    vc->window->ResizeTo(vo->dwidth, vo->dheight);
++    return 0;
++}
++
++static void uninit(struct vo *vo)
++{
++	struct priv *vc = (priv*)vo->priv;
++
++	vc->window->Lock();
++	vc->window->Quit();
++
++	talloc_free(vc);
++}
++
++static int preinit(struct vo *vo)
++{
++	struct priv *vc = (priv*)vo->priv;
++
++	vc->opts_cache = m_config_cache_alloc(vc, vo->global, &vo_sub_opts);
++
++	if (be_app == NULL)
++		be_app = new BApplication("application/x-vnd.mpv.io-mpv");
++
++	vc->window = new VideoWindow(640, 480, "MPV Video Output", vo);
++	vc->window->Show();
++
++    return 0;
++}
++
++static int control(struct vo *vo, uint32_t request, void *data)
++{
++    struct priv *vc = (priv*)vo->priv;
++
++    switch (request) {
++	    case VOCTRL_VO_OPTS_CHANGED: {
++	        void *opt;
++	        while (m_config_cache_get_next_changed(vc->opts_cache, &opt)) {
++	            struct mp_vo_opts *opts = (mp_vo_opts*)vc->opts_cache->opts;
++	            if (&opts->fullscreen == opt)
++	                set_fullscreen(vo);
++	        }
++	        return 1;
++	    }
++	    case VOCTRL_SET_CURSOR_VISIBILITY:
++	    {
++	    	bool show = *(bool *)data;
++    		vc->window->HideCursor(!show);
++	        return true;
++	    }
++	    case VOCTRL_UPDATE_WINDOW_TITLE:
++	    {
++	        vc->window->SetTitle((char *)data);
++	        return true;
++	    }
++    }
++    return VO_NOTIMPL;
++}
++
++#define OPT_BASE_STRUCT struct priv
++
++extern const struct vo_driver video_out_haiku = {
++	    .name = "haiku",
++	    .description = "Haiku video output",
++	    .preinit = preinit,
++	    .query_format = query_format,
++	    .reconfig = reconfig,
++	    .control = control,
++	    .draw_frame = draw_frame,
++	    .flip_page = flip_page,
++	    .uninit = uninit,
++	    .priv_size = sizeof(struct priv),
++	};
++}
+-- 
+2.43.2
+
