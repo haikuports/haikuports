@@ -50,3 +50,279 @@ index 221bfbb..2192641 100644
 -- 
 2.37.3
 
+
+From 55e83980e631737182b47180d0319b6992a58186 Mon Sep 17 00:00:00 2001
+From: PulkoMandy <pulkomandy@pulkomandy.tk>
+Date: Sun, 24 Mar 2024 16:45:42 +0100
+Subject: Use a BHandler attached to the application instead of a BLooper
+
+When there is already a BApplication, SDL cannot start its own. In a
+previous version, it instead started a separate looper. This results in
+some extra complexity as there is now yet another thread to manage (in
+addition to the main thread, the application thread, and the window
+threads).
+
+Instead, create a BHandler and attach it to the existing BApplication,
+which allows it to receive messages in the already existing application
+thread.
+
+diff --git a/src/main/haiku/SDL_BApp.h b/src/main/haiku/SDL_BApp.h
+index 284445d..f3a06f3 100644
+--- a/src/main/haiku/SDL_BApp.h
++++ b/src/main/haiku/SDL_BApp.h
+@@ -49,7 +49,7 @@ extern "C" {
+ #include <vector>
+ 
+ /* Forward declarations */
+-class SDL_BLooper;
++class SDL_BHandler;
+ class SDL_BWin;
+ 
+ /* Message constants */
+@@ -76,21 +76,21 @@ enum ToSDL
+ };
+ 
+ 
+-extern "C" SDL_BLooper *SDL_Looper;
++extern "C" SDL_BHandler *SDL_Handler;
+ 
+ 
+-/* Create a descendant of BLooper */
+-class SDL_BLooper : public BLooper
++/* Create a descendant of BHandler */
++class SDL_BHandler : public BHandler
+ {
+   public:
+-    SDL_BLooper(const char* name) : BLooper(name)
++    SDL_BHandler(const char* name) : BHandler(name)
+     {
+ #ifdef SDL_VIDEO_OPENGL
+         _current_context = NULL;
+ #endif
+     }
+ 
+-    virtual ~SDL_BLooper()
++    virtual ~SDL_BHandler()
+     {
+     }
+ 
+@@ -164,7 +164,7 @@ class SDL_BLooper : public BLooper
+             break;
+ 
+         default:
+-            BLooper::MessageReceived(message);
++            BHandler::MessageReceived(message);
+             break;
+         }
+     }
+diff --git a/src/main/haiku/SDL_BeApp.cc b/src/main/haiku/SDL_BeApp.cc
+index 92f0aeb..a4aefc4 100644
+--- a/src/main/haiku/SDL_BeApp.cc
++++ b/src/main/haiku/SDL_BeApp.cc
+@@ -31,7 +31,7 @@
+ #include <storage/File.h>
+ #include <unistd.h>
+ 
+-#include "SDL_BApp.h"   /* SDL_BLooper class definition */
++#include "SDL_BApp.h"   /* SDL_BHandler class definition */
+ #include "SDL_BeApp.h"
+ #include "SDL_timer.h"
+ #include "SDL_error.h"
+@@ -47,7 +47,7 @@ extern "C" {
+ /* Flag to tell whether or not the Be application and looper are active or not */
+ static int SDL_BeAppActive = 0;
+ static SDL_Thread *SDL_AppThread = NULL;
+-SDL_BLooper *SDL_Looper = NULL;
++SDL_BHandler *SDL_Handler = NULL;
+ 
+ 
+ /* Default application signature */
+@@ -136,8 +136,11 @@ static int StartBeLooper()
+         }
+     }
+ 
+-    SDL_Looper = new SDL_BLooper("SDLLooper");
+-    SDL_Looper->Run();
++    SDL_Handler = new SDL_BHandler("SDLHandler");
++    bool locked = be_app->Lock();
++    be_app->AddHandler(SDL_Handler);
++    if (locked)
++        be_app->Unlock();
+     return (0);
+ }
+ 
+@@ -168,9 +171,6 @@ void SDL_QuitBeApp(void)
+ 
+     /* If the reference count reached zero, clean up the app */
+     if (SDL_BeAppActive == 0) {
+-        SDL_Looper->Lock();
+-        SDL_Looper->Quit();
+-        SDL_Looper = NULL;
+         if (SDL_AppThread) {
+             if (be_app != NULL) {       /* Not tested */
+                 be_app->PostMessage(B_QUIT_REQUESTED);
+@@ -187,7 +187,7 @@ void SDL_QuitBeApp(void)
+ #endif
+ 
+ /* SDL_BApp functions */
+-void SDL_BLooper::ClearID(SDL_BWin *bwin) {
++void SDL_BHandler::ClearID(SDL_BWin *bwin) {
+     _SetSDLWindow(NULL, bwin->GetID());
+     int32 i = _GetNumWindowSlots() - 1;
+     while (i >= 0 && GetSDLWindow(i) == NULL) {
+diff --git a/src/video/haiku/SDL_BApp.h b/src/video/haiku/SDL_BApp.h
+index 284445d..f3a06f3 100644
+--- a/src/video/haiku/SDL_BApp.h
++++ b/src/video/haiku/SDL_BApp.h
+@@ -49,7 +49,7 @@ extern "C" {
+ #include <vector>
+ 
+ /* Forward declarations */
+-class SDL_BLooper;
++class SDL_BHandler;
+ class SDL_BWin;
+ 
+ /* Message constants */
+@@ -76,21 +76,21 @@ enum ToSDL
+ };
+ 
+ 
+-extern "C" SDL_BLooper *SDL_Looper;
++extern "C" SDL_BHandler *SDL_Handler;
+ 
+ 
+-/* Create a descendant of BLooper */
+-class SDL_BLooper : public BLooper
++/* Create a descendant of BHandler */
++class SDL_BHandler : public BHandler
+ {
+   public:
+-    SDL_BLooper(const char* name) : BLooper(name)
++    SDL_BHandler(const char* name) : BHandler(name)
+     {
+ #ifdef SDL_VIDEO_OPENGL
+         _current_context = NULL;
+ #endif
+     }
+ 
+-    virtual ~SDL_BLooper()
++    virtual ~SDL_BHandler()
+     {
+     }
+ 
+@@ -164,7 +164,7 @@ class SDL_BLooper : public BLooper
+             break;
+ 
+         default:
+-            BLooper::MessageReceived(message);
++            BHandler::MessageReceived(message);
+             break;
+         }
+     }
+diff --git a/src/video/haiku/SDL_BWin.h b/src/video/haiku/SDL_BWin.h
+index f1ad1ea..716e9a9 100644
+--- a/src/video/haiku/SDL_BWin.h
++++ b/src/video/haiku/SDL_BWin.h
+@@ -125,8 +125,8 @@ class SDL_BWin : public BWindow
+ 
+ #ifdef SDL_VIDEO_OPENGL
+         if (_SDL_GLView) {
+-            if (SDL_Looper->GetCurrentContext() == _SDL_GLView)
+-                SDL_Looper->SetCurrentContext(NULL);
++            if (SDL_Handler->GetCurrentContext() == _SDL_GLView)
++                SDL_Handler->SetCurrentContext(NULL);
+             if (_SDL_GLView == _cur_view)
+                 RemoveChild(_SDL_GLView);
+             _SDL_GLView = NULL;
+@@ -209,8 +209,8 @@ class SDL_BWin : public BWindow
+     {
+         Lock();
+         if (_SDL_GLView != NULL) {
+-            if (SDL_Looper->GetCurrentContext() == _SDL_GLView)
+-                SDL_Looper->SetCurrentContext(NULL);
++            if (SDL_Handler->GetCurrentContext() == _SDL_GLView)
++                SDL_Handler->SetCurrentContext(NULL);
+             _SDL_GLView = NULL;
+             UpdateCurrentView();
+             // _SDL_GLView deleted by HAIKU_GL_DeleteContext
+@@ -572,7 +572,7 @@ class SDL_BWin : public BWindow
+         if (keyUtf8 != NULL) {
+             msg.AddData("key-utf8", B_INT8_TYPE, (const void *)keyUtf8, len);
+         }
+-        SDL_Looper->PostMessage(&msg);
++        be_app->PostMessage(&msg, SDL_Handler);
+     }
+ 
+     void _RepaintEvent()
+@@ -584,7 +584,7 @@ class SDL_BWin : public BWindow
+     void _PostWindowEvent(BMessage &msg)
+     {
+         msg.AddInt32("window-id", _id);
+-        SDL_Looper->PostMessage(&msg);
++        be_app->PostMessage(&msg, SDL_Handler);
+     }
+ 
+     /* Command methods (functions called upon by SDL) */
+diff --git a/src/video/haiku/SDL_bframebuffer.cc b/src/video/haiku/SDL_bframebuffer.cc
+index 1961cea..cfee55f 100644
+--- a/src/video/haiku/SDL_bframebuffer.cc
++++ b/src/video/haiku/SDL_bframebuffer.cc
+@@ -39,8 +39,8 @@ static SDL_INLINE SDL_BWin *_ToBeWin(SDL_Window *window) {
+     return (SDL_BWin *)(window->driverdata);
+ }
+ 
+-static SDL_INLINE SDL_BLooper *_GetBeLooper() {
+-    return SDL_Looper;
++static SDL_INLINE SDL_BHandler *_GetBeLooper() {
++    return SDL_Handler;
+ }
+ 
+ int HAIKU_CreateWindowFramebuffer(_THIS, SDL_Window * window,
+diff --git a/src/video/haiku/SDL_bmodes.cc b/src/video/haiku/SDL_bmodes.cc
+index 6a162f6..956d782 100644
+--- a/src/video/haiku/SDL_bmodes.cc
++++ b/src/video/haiku/SDL_bmodes.cc
+@@ -52,8 +52,8 @@ static SDL_INLINE SDL_BWin *_ToBeWin(SDL_Window *window) {
+     return (SDL_BWin *)(window->driverdata);
+ }
+ 
+-static SDL_INLINE SDL_BLooper *_GetBeLooper() {
+-    return SDL_Looper;
++static SDL_INLINE SDL_BHandler *_GetBeLooper() {
++    return SDL_Handler;
+ }
+ 
+ static SDL_INLINE display_mode * _ExtractBMode(SDL_DisplayMode *mode) {
+diff --git a/src/video/haiku/SDL_bopengl.cc b/src/video/haiku/SDL_bopengl.cc
+index d34d592..c55002e 100644
+--- a/src/video/haiku/SDL_bopengl.cc
++++ b/src/video/haiku/SDL_bopengl.cc
+@@ -39,8 +39,8 @@ static SDL_INLINE SDL_BWin *_ToBeWin(SDL_Window *window) {
+     return (SDL_BWin *)(window->driverdata);
+ }
+ 
+-static SDL_INLINE SDL_BLooper *_GetBeLooper() {
+-    return SDL_Looper;
++static SDL_INLINE SDL_BHandler *_GetBeLooper() {
++    return SDL_Handler;
+ }
+ 
+ /* Passing a NULL path means load pointers from the application */
+diff --git a/src/video/haiku/SDL_bwindow.cc b/src/video/haiku/SDL_bwindow.cc
+index 38863ab..36cd2f1 100644
+--- a/src/video/haiku/SDL_bwindow.cc
++++ b/src/video/haiku/SDL_bwindow.cc
+@@ -37,8 +37,8 @@ static SDL_INLINE SDL_BWin *_ToBeWin(SDL_Window *window) {
+     return (SDL_BWin *)(window->driverdata);
+ }
+ 
+-static SDL_INLINE SDL_BLooper *_GetBeLooper() {
+-    return SDL_Looper;
++static SDL_INLINE SDL_BHandler *_GetBeLooper() {
++    return SDL_Handler;
+ }
+ 
+ static int _InitWindow(_THIS, SDL_Window *window) {
+-- 
+2.43.2
+
