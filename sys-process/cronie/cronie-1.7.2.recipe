@@ -14,10 +14,11 @@ LICENSE="
 	ISC
 	MIT
 	"
-REVISION="2"
+REVISION="3"
 SOURCE_URI="https://github.com/cronie-crond/cronie/archive/cronie-$portVersion.tar.gz"
 CHECKSUM_SHA256="241ecc1dcd8d4b2a6744fe93509932254d20b7bb9d979d27429809493806357f"
 SOURCE_DIR="cronie-cronie-$portVersion"
+PATCHES="cronie-$portVersion.patchset"
 ADDITIONAL_FILES="
 	0anacron
 	0hourly
@@ -25,24 +26,27 @@ ADDITIONAL_FILES="
 	cron.deny
 	crontab
 	cronie.launch.in
+	cronie-finish-setup.sh
 	"
+GLOBAL_WRITABLE_FILES="
+	settings/anacrontab keep-old
+	settings/cron.deny keep-old
+	settings/cron.d/0hourly keep-old
+	settings/cron.hourly/0anacron keep-old
+	settings/cron.daily directory keep-old
+	settings/cron.weekly directory keep-old
+	settings/cron.monthly directory keep-old
+	settings/crontab keep-old
+	"
+POST_INSTALL_SCRIPTS="$relativePostInstallDir/cronie-finish-setup.sh"
+
+PACKAGE_USERS="
+	crond real-name \"cron daemon user\" home \"/var/empty\" shell \"/bin/true\" groups \"crond\"
+	"
+PACKAGE_GROUPS="crond"
 
 ARCHITECTURES="all !x86_gcc2"
 SECONDARY_ARCHITECTURES="x86"
-
-GLOBAL_WRITABLE_FILES="
-	settings/etc/anacrontab keep-old
-	settings/etc/cron.deny keep-old
-	settings/etc/cron.d/0hourly keep-old
-	settings/etc/cron.hourly/0anacron keep-old
-	settings/etc/cron.daily directory keep-old
-	settings/etc/cron.weekly directory keep-old
-	settings/etc/cron.monthly directory keep-old
-	settings/etc/crontab keep-old
-	var/run directory keep-old
-	var/spool/cron directory keep-old
-	var/spool/anacron directory keep-old
-	"
 
 commandBinDir=$binDir
 commandSuffix=$secondaryArchSuffix
@@ -81,15 +85,31 @@ BUILD_PREREQUIRES="
 	cmd:libtoolize$secondaryArchSuffix
 	"
 
+PATCH()
+{
+	# adjust documentation to match layout
+	sed -i \
+		-e "s,/etc/cron,$settingsDir/cron," \
+		-e "s,/etc/anacron,$settingsDir/anacron," \
+		man/*.{1,5,8}
+
+	# adjust sendmail path
+	sed -i "s,/usr/sbin/sendmail,/bin/sendmail," src/cron.c anacron/global.h
+}
+
 BUILD()
 {
 	./autogen.sh
-	runConfigure --omit-dirs "binDir sbinDir sysconfDir" ./configure \
+
+	CFLAGS="-D_PATH_STDPATH='\"`findpaths -c: B_FIND_PATH_BIN_DIRECTORY`\"'" \
+	MAILARG="/bin/sendmail" \
+	runConfigure --omit-dirs "binDir sbinDir" ./configure \
 		--bindir=$commandBinDir \
 		--sbindir=$commandBinDir \
-		--sysconfdir=$settingsDir/etc \
 		--with-editor=nano \
-		--enable-anacron
+		--enable-anacron \
+		--with-daemon_username=crond \
+		--with-daemon_groupname=crond
 
 	make $jobArgs
 }
@@ -100,16 +120,18 @@ INSTALL()
 
 	chmod u+s $commandBinDir/crontab
 
-	install -d $localStateDir/spool/{ana,}cron $localStateDir/run
-	install -d $settingsDir/etc/cron.{d,hourly,daily,weekly,monthly}
+	install -d $settingsDir/cron.{d,hourly,daily,weekly,monthly}
 
-	install -Dm0644 $portDir/additional-files/cron.deny $settingsDir/etc/cron.deny
-	install -Dm0644 $portDir/additional-files/crontab $settingsDir/etc/crontab
-	install -Dm0644 $portDir/additional-files/anacrontab $settingsDir/etc/anacrontab
-	install -Dm0644 $portDir/additional-files/0hourly $settingsDir/etc/cron.d/0hourly
-	install -Dm0755 $portDir/additional-files/0anacron $settingsDir/etc/cron.hourly/0anacron
+	install -Dm0644 $portDir/additional-files/cron.deny $settingsDir/cron.deny
+	install -Dm0644 $portDir/additional-files/crontab $settingsDir/crontab
+	install -Dm0644 $portDir/additional-files/anacrontab $settingsDir/anacrontab
+	install -Dm0644 $portDir/additional-files/0hourly $settingsDir/cron.d/0hourly
+	install -Dm0755 $portDir/additional-files/0anacron $settingsDir/cron.hourly/0anacron
 
 	install -d $dataDir/launch
 	sed -e "s|@CROND_BIN@|$commandBinDir/crond|" \
 		$portDir/additional-files/cronie.launch.in > $dataDir/launch/cronie.launch
+
+	install -Dm0755 $portDir/additional-files/cronie-finish-setup.sh \
+		$postInstallDir/cronie-finish-setup.sh
 }
