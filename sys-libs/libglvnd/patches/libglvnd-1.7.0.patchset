@@ -1,0 +1,103 @@
+From 9d7f6af5dd7e6e2976c43968757c7037f813b55f Mon Sep 17 00:00:00 2001
+From: Alexander von Gluck <alex@terarocket.io>
+Date: Tue, 9 Apr 2024 07:52:08 -0500
+Subject: [PATCH] Haiku: guard calls to fRenderer in HGL
+
+* Prevents dereferencing fRenderer when an EGL renderer is not found
+* Add nice error text back to OpenGL view to give the user some feedback
+---
+ src/HGL/GLView.cpp | 32 ++++++++++++++++++++++----------
+ 1 file changed, 22 insertions(+), 10 deletions(-)
+
+diff --git a/src/HGL/GLView.cpp b/src/HGL/GLView.cpp
+index 3719522..e0430cb 100644
+--- a/src/HGL/GLView.cpp
++++ b/src/HGL/GLView.cpp
+@@ -328,7 +328,8 @@ void
+ BGLView::LockGL()
+ {
+     fDisplayLock.Lock();
+-    if (fDisplayLock.CountLocks() == 1) {
++
++    if (fRenderer != NULL && fDisplayLock.CountLocks() == 1) {
+         fRenderer->display->eglMakeCurrent(fRenderer->display->eglDpy, fRenderer->eglSurf,
+             fRenderer->eglSurf, fRenderer->eglCtx);
+     }
+@@ -345,7 +346,7 @@ BGLView::UnlockGL()
+             (int)lockerThread, (int)callerThread);
+     }
+ 
+-    if (fDisplayLock.CountLocks() == 1) {
++    if (fRenderer != NULL && fDisplayLock.CountLocks() == 1) {
+         fRenderer->display->eglMakeCurrent(fRenderer->display->eglDpy, EGL_NO_SURFACE,
+             EGL_NO_SURFACE, EGL_NO_CONTEXT);
+     }
+@@ -362,7 +363,8 @@ void
+ BGLView::SwapBuffers(bool vSync)
+ {
+     _LockDraw();
+-    fRenderer->SwapBuffers();
++    if (fRenderer != NULL)
++        fRenderer->SwapBuffers();
+     _UnlockDraw();
+ }
+ 
+@@ -376,7 +378,9 @@ BGLView::EmbeddedView()
+ void*
+ BGLView::GetGLProcAddress(const char* procName)
+ {
+-    return (void*)fRenderer->display->eglGetProcAddress(procName);
++    if (fRenderer != NULL)
++        return (void*)fRenderer->display->eglGetProcAddress(procName);
++    return NULL;
+ }
+ 
+ status_t
+@@ -415,12 +419,17 @@ void
+ BGLView::Draw(BRect updateRect)
+ {
+     BRegion region(updateRect);
+-    PthreadMutexLocker lock(&fRenderer->fLock);
+-    if (fRenderer->fBitmap.IsSet()) {
++    if (fRenderer != NULL && fRenderer->fBitmap.IsSet()) {
++        PthreadMutexLocker lock(&fRenderer->fLock);
+         DrawBitmap(fRenderer->fBitmap.Get(), B_ORIGIN);
+         region.Exclude(fRenderer->fBitmap->Bounds());
+     }
+     FillRegion(&region, B_SOLID_LOW);
++
++	if (fRenderer == NULL) {
++		MovePenTo(8, 32);
++		DrawString("No EGL renderer available!");
++	}
+ }
+ 
+ void
+@@ -428,7 +437,7 @@ BGLView::AttachedToWindow()
+ {
+     BView::AttachedToWindow();
+ 
+-    {
++    if (fRenderer != NULL) {
+         PthreadMutexLocker lock(&fRenderer->fLock);
+         fRenderer->width = Bounds().IntegerWidth() + 1;
+         fRenderer->height = Bounds().IntegerHeight() + 1;
+@@ -462,9 +471,12 @@ BGLView::EnableDirectMode(bool enabled)
+ void BGLView::FrameResized(float width, float height)
+ {
+     BView::FrameResized(width, height);
+-    PthreadMutexLocker lock(&fRenderer->fLock);
+-    fRenderer->width = (uint32_t)width + 1;
+-    fRenderer->height = (uint32_t)height + 1;
++
++    if (fRenderer != NULL) {
++        PthreadMutexLocker lock(&fRenderer->fLock);
++        fRenderer->width = (uint32_t)width + 1;
++        fRenderer->height = (uint32_t)height + 1;
++    }
+ }
+ 
+ 
+-- 
+2.43.2
+

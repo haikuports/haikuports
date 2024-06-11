@@ -1,0 +1,140 @@
+From 5428cebeb2957cb12dda4fe314f5646eba081457 Mon Sep 17 00:00:00 2001
+From: Oscar Lesta <oscar.lesta@gmail.com>
+Date: Fri, 27 Jan 2023 06:21:29 -0300
+Subject: Use proper paths under Haiku (invoking "find_directory()").
+
+
+diff --git a/src/cfte.cpp b/src/cfte.cpp
+index 8661265..08b341b 100644
+--- a/src/cfte.cpp
++++ b/src/cfte.cpp
+@@ -8,6 +8,11 @@
+  *
+  */
+ 
++#if defined(__HAIKU__)
++    #include <FindDirectory.h>
++    #include <fs_info.h>
++#endif
++
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+@@ -1807,6 +1812,32 @@ static int LoadFile(const char *WhereName, const char *CfgName, int Level, int o
+     } else {
+ 
+ #if PATHTYPE == PT_UNIXISH
++
++    #if defined(__HAIKU__)
++        #define SEARCH_PATH_LEN 6
++        char dirs[SEARCH_PATH_LEN][MAXPATH];
++        char dir[B_PATH_NAME_LENGTH + B_FILE_NAME_LENGTH];
++        dev_t volume = dev_for_path("/boot");
++
++        int i = 0;
++        snprintf(dirs[i], MAXPATH, "%s/%s", ConfigDir, CfgName);
++
++        if (find_directory(B_SYSTEM_DATA_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++            snprintf(dirs[++i],  MAXPATH, "%s/efte/config/%s", dir, CfgName);
++
++        if (find_directory(B_USER_DATA_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++            snprintf(dirs[++i],  MAXPATH, "%s/efte/config/%s", dir, CfgName);
++
++        if (find_directory(B_USER_SETTINGS_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++            snprintf(dirs[++i],  MAXPATH, "%s/efte/%s", dir, CfgName);
++
++        if (find_directory(B_SYSTEM_NONPACKAGED_DATA_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++            snprintf(dirs[++i],  MAXPATH, "%s/efte/%s", dir, CfgName);
++
++        if (find_directory(B_USER_NONPACKAGED_DATA_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++            snprintf(dirs[++i],  MAXPATH, "%s/efte/%s", dir, CfgName);
++
++	#else
+ #       define SEARCH_PATH_LEN 6
+         char dirs[SEARCH_PATH_LEN][MAXPATH];
+ 
+@@ -1816,6 +1847,7 @@ static int LoadFile(const char *WhereName, const char *CfgName, int Level, int o
+         snprintf(dirs[3],  MAXPATH, "/etc/efte/local/%s", CfgName);
+         snprintf(dirs[4],  MAXPATH, "%s/share/efte/config/%s", EFTE_INSTALL_DIR, CfgName);
+         snprintf(dirs[5],  MAXPATH, "/etc/efte/config/%s", CfgName);
++	#endif
+ #else // if PT_UNIXISH
+ #       define SEARCH_PATH_LEN 11
+         char dirs[SEARCH_PATH_LEN][MAXPATH];
+-- 
+2.37.3
+
+
+From cfe127564a9baa2daf6ab8ceb7cc71d5dc0f0ad3 Mon Sep 17 00:00:00 2001
+From: Oscar Lesta <oscar.lesta@gmail.com>
+Date: Fri, 27 Jan 2023 07:28:57 -0300
+Subject: Fix BackSpace key issue.
+
+Taken from:
+https://gist.github.com/its-pointless/15a5274eb6cc5106b691793912a8fc32
+
+diff --git a/src/con_ncurses.cpp b/src/con_ncurses.cpp
+index c7d89ee..f18624d 100644
+--- a/src/con_ncurses.cpp
++++ b/src/con_ncurses.cpp
+@@ -655,6 +655,8 @@ int ConGetEvent(TEventMask /*EventMask */ ,
+         Event->What = evNone;
+     } else if (ch == 27) {
+         ConGetEscEvent(Event);
++    } else if (ch == 0x7f) {
++        KEvent->Code |= kbBackSp;
+     } else if (ch == '\r' || ch == '\n') {
+         KEvent->Code |= kbEnter;
+     } else if (ch == '\t') {
+-- 
+2.37.3
+
+
+From 84bef2cb3c9d6df07553ce01a0ef7ad80072fa0e Mon Sep 17 00:00:00 2001
+From: Oscar Lesta <oscar.lesta@gmail.com>
+Date: Fri, 27 Jan 2023 07:45:49 -0300
+Subject: Fix access to the README file from efte's docs.
+
+
+diff --git a/src/view.cpp b/src/view.cpp
+index 1b16938..42e0a13 100644
+--- a/src/view.cpp
++++ b/src/view.cpp
+@@ -7,6 +7,10 @@
+  *    License or the Artistic License, as specified in the README file.
+  *
+  */
++#if defined(__HAIKU__)
++    #include <FindDirectory.h>
++    #include <fs_info.h>
++#endif
+ 
+ #include "fte.h"
+ 
+@@ -658,6 +662,23 @@ int EView::CompileNextError(ExState &/*State*/) {
+ }
+ 
+ int EView::ShowVersion() {
++#if defined(__HAIKU__)
++    char sysDocs[MAXPATH];
++    char userDocs[MAXPATH];
++    char readmeFile[MAXPATH];
++    dev_t volume = dev_for_path("/boot");
++
++    if (find_directory(B_SYSTEM_DOCUMENTATION_DIRECTORY, volume, false, sysDocs, sizeof(sysDocs)) == B_OK)
++        snprintf(readmeFile,  MAXPATH, "%s/packages/efte/README", sysDocs);
++
++    if (access(readmeFile, 0) == 0)
++        FileLoad(0, readmeFile, 0, this);
++    else if (find_directory(B_USER_DOCUMENTATION_DIRECTORY, volume, false, userDocs, sizeof(userDocs)) == B_OK) {
++        snprintf(readmeFile,  MAXPATH, "%s/packages/efte/README", userDocs);
++        if (access(readmeFile, 0) == 0)
++            FileLoad(0, readmeFile, 0, this);
++    } else
++#endif
+     if (access("/usr/local/share/doc/efte/README", 0) == 0)
+         FileLoad(0, "/usr/local/share/doc/efte/README", 0, this);
+     else if (access("/usr/share/doc/efte/README", 0) == 0)
+-- 
+2.37.3
+

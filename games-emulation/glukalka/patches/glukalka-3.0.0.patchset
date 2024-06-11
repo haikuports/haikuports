@@ -1,0 +1,539 @@
+From 579598cf3f777d0808e1ccd6ec2afc1008744a93 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Mon, 19 Feb 2024 20:56:04 +1000
+Subject: Add Haiku support
+
+
+diff --git a/glukalka3.pro b/glukalka3.pro
+index 9aa2e05..cb5102c 100644
+--- a/glukalka3.pro
++++ b/glukalka3.pro
+@@ -17,6 +17,7 @@ QMAKE_CXXFLAGS += -Wno-unused-variable
+ #contains(QT_CONFIG, opengl):{
+ # message(Building with OpenGL support.)
+ # DEFINES += OPENGL
++# QT += opengl
+ #}
+ #}
+ 
+@@ -28,6 +29,15 @@ linux-*: {
+      LIBS += -lasound
+       }
+ 
++
++haiku-*: {
++ message(Building for Haiku with MediaKit support.)
++	
++     DEFINES += HAIKU	
++     SOURCES += haiku.cpp
++     LIBS += -lmedia
++      }
++
+ solaris-*: {
+  message(Building for Solaris with Sun audio support.)
+ 	
+@@ -53,7 +63,7 @@ contains(QT_CONFIG, multimedia):{
+ 
+ contains(QT_CONFIG, webkit):{
+  message(Building with webkit support.)
+- QT += webkit
++ QT += webkit webkitwidgets
+  DEFINES += WEBKIT
+  QT += network
+  HEADERS += download.h
+diff --git a/haiku.cpp b/haiku.cpp
+new file mode 100644
+index 0000000..99e1500
+--- /dev/null
++++ b/haiku.cpp
+@@ -0,0 +1,236 @@
++# include <stdlib.h>
++# include <string.h>
++# include <sys/types.h>
++
++# include <stdio.h>
++# include <unistd.h>
++# include <string.h>
++ 
++# include <OS.h>
++# include <SoundPlayer.h>
++ 
++# include "emulate.h"
++
++class RingBuffer {
++public:
++    RingBuffer(int size)
++	{
++	    initialized = false;
++	    Buffer = new unsigned char[size];
++	    if (Buffer) {
++	        memset( Buffer, 0, size );
++	        BufferSize = size;
++	    } else {
++	        BufferSize = 0;
++	    }
++	    reader = 0;
++	    writer = 0;
++	    writeBytesAvailable = size;
++	    if ((locker = create_sem(1,"locker")) >= B_OK) {
++	        initialized = true;
++	    } else {
++	        delete[] Buffer;
++	    }
++	}
++    ~RingBuffer()
++	{
++	    if (initialized) {
++	        delete[] Buffer;
++	        delete_sem(locker);
++	    }
++	}
++    int Read(unsigned char* data, int size)
++	{
++	    acquire_sem(locker);
++	    if( data == 0 || size <= 0 || writeBytesAvailable == BufferSize ) {
++	        release_sem(locker);
++	        return 0;
++	    }
++	    int readBytesAvailable = BufferSize - writeBytesAvailable;
++	    if( size > readBytesAvailable ) {
++	        size = readBytesAvailable;
++	    }
++	    if(size > BufferSize - reader) {
++	        int len = BufferSize - reader;
++	        memcpy(data, Buffer + reader, len);
++	        memcpy(data + len, Buffer, size-len);
++	    } else {
++	        memcpy(data, Buffer + reader, size);
++	    }
++	    reader = (reader + size) % BufferSize;
++	    writeBytesAvailable += size;
++	    release_sem(locker);
++	    return size;
++	}
++    int Write(unsigned char *data, int size)
++	{
++	    acquire_sem(locker);
++	    if( data == 0 || size <= 0 || writeBytesAvailable == 0 ) {
++	        release_sem(locker);
++	        return 0;
++	    }
++	    if( size > writeBytesAvailable ) {
++	        size = writeBytesAvailable;
++	    }
++	    if(size > BufferSize - writer) {
++	        int len = BufferSize - writer;
++	        memcpy(Buffer + writer, data, len);
++	        memcpy(Buffer, data+len, size-len);
++	    } else {
++	        memcpy(Buffer + writer, data, size);
++	    }
++	    writer = (writer + size) % BufferSize;
++	    writeBytesAvailable -= size;
++	    release_sem(locker);
++	    return size;
++	};
++    bool Empty( void )
++    {
++    	memset( Buffer, 0, BufferSize );
++    	reader = 0;
++    	writer = 0;
++    	writeBytesAvailable = BufferSize;
++    	return true;
++	};
++    int GetSize( ) { return BufferSize; }
++    int GetWriteAvailable( ) { return writeBytesAvailable; }
++    int GetReadAvailable( ) { return BufferSize - writeBytesAvailable; }
++    status_t InitCheck( ) { return initialized ? B_OK : B_ERROR; }
++private:
++    unsigned char *Buffer;
++    int BufferSize;
++    int reader;
++    int writer;
++    int writeBytesAvailable;
++    bool initialized;
++    sem_id locker;
++};
++
++static void soundProc(void *cookie, void *buffer, size_t len, const media_raw_audio_format &format)
++{
++    RingBuffer *ring = (RingBuffer*)cookie;
++    unsigned char* ptr = (unsigned char*)buffer;
++
++    int readed = ring->Read(ptr,len);
++
++    if(readed <len)
++        memset(ptr+readed, 0, len - readed);
++}
++
++class SndPlayer
++{
++public:
++    SndPlayer()
++	{
++	    channels = 2;
++	    sample_rate = 44100;
++	    player = nullptr;
++	    _isOK = true;
++	}
++    ~SndPlayer() { stop(); }
++
++    bool isOK() { return _isOK; }
++    bool isOpen() { return player; }
++
++    bool start()
++	{
++	    size_t gSoundBufferSize = 882 * sizeof(int) * channels;
++	    media_raw_audio_format form = {
++	        sample_rate,
++	        channels,
++	        media_raw_audio_format::B_AUDIO_SHORT,
++	        B_MEDIA_LITTLE_ENDIAN,
++	        gSoundBufferSize
++	    };
++	    ring = new RingBuffer(gSoundBufferSize * 3);
++	    if(ring->InitCheck() != B_OK) {
++	        delete ring; ring = 0;
++	        return false;
++	    }
++	    player = new BSoundPlayer(&form, "Glukalka3", soundProc, nullptr, (void*)ring);
++	    if(player->InitCheck() != B_OK) {
++	        delete player;
++	        player = nullptr;
++	        return false;
++	    }
++	    player->Start();
++	    player->SetHasData(true);
++	    _isOK = true;
++	    return player;
++	}
++    void stop()
++	{
++	    if(player) {
++            player->Stop();
++            delete player;
++            delete ring;
++	        player = nullptr;
++	        ring = nullptr;
++	    }
++	}
++    bool write( char * buffer, int size )
++	{
++	    int s = size;
++	    while ( s > 0 && s % 4 )
++	        s--;
++	    if ( s <= 0 )
++	        return false;
++
++	    int len=s;
++	    unsigned char *src_ptr = (unsigned char *)buffer;
++	    for (;;) {
++	        int len2 = ring->Write(src_ptr,len);
++	        if(len2 == len)
++	        	break;
++	        len -= len2;
++	        src_ptr += len2;
++	        snooze(100);
++	    }
++	    return true;
++	}
++private:
++    uchar channels;
++    float sample_rate;
++    bool _isOK;
++    BSoundPlayer *player;
++    RingBuffer *ring;
++};
++
++static SndPlayer player;
++
++int init_card(char * arg)
++{
++   player.start();
++   return 0;
++}
++
++void play (char * buffer, int len)
++{
++	player.write(buffer, len);
++}
++
++# define MAXCARDS 20
++char *** cardslist;
++
++char *** cards_list(void)
++{
++	if (cardslist)
++		free(cardslist);
++	
++	cardslist = (char ***) malloc(MAXCARDS * sizeof (char **));
++	    
++	for (int i=0; i<MAXCARDS; i++)
++		cardslist[i]= (char**) malloc (2 * sizeof (char *));	
++
++	for (int i=0; i<MAXCARDS; i++) {
++		for (int j=0; j<2; j++) {
++			cardslist[i][j]= (char*) malloc (101 * sizeof (char));
++			memset(cardslist[i][j], 0, 100);
++		}
++	}
++
++    sprintf (cardslist[0][0], "default");
++    sprintf (cardslist[0][1], "default");
++
++    return ((char ***)cardslist);
++}
+diff --git a/qt.cpp b/qt.cpp
+index 8ca4b02..4b58369 100644
+--- a/qt.cpp
++++ b/qt.cpp
+@@ -21,7 +21,7 @@
+ #endif
+ 
+ # if defined WEBKIT
+-# include <QtWebKit/QWebView>
++# include <QtWebKitWidgets/QWebView>
+ QWebView *view;
+ # include "download.h"
+ #endif
+@@ -209,6 +209,7 @@ const char * ssolaris = "Solaris native";
+ const char * smac = "OpenAL";
+ const char * swin = "Windows native";
+ const char * salsa = "Alsa";
++const char * shaiku = "MediaKit";
+ 
+ int slow=0;
+ 
+@@ -230,6 +231,10 @@ const char * ss = ssolaris;
+ const char * ss = soss;
+ #else
+ 
++#if defined HAIKU
++const char * ss = shaiku;
++#else
++
+ #if defined MACOSX
+ const char * ss = smac;
+ #else
+@@ -245,6 +250,7 @@ const char * ss = snosound;
+ #endif
+ #endif
+ #endif
++#endif
+ 
+ char jjjj = -1;
+ 
+@@ -468,9 +474,9 @@ void MyClass::full_screen()
+ void pshow()
+ {
+ 	if (!e_pause)
+-		ppp->setIcon(QIcon(QPixmap(pause)));
++		ppp->setIcon(QIcon::fromTheme("media-playback-pause"));
+ 	else
+-		ppp->setIcon(QIcon(QPixmap(Play)));
++		ppp->setIcon(QIcon::fromTheme("media-playback-start"));
+ }
+ 
+ void MyClass::save()
+@@ -960,6 +966,10 @@ void MyClass::FillAudioList(void)
+ #if defined LINUX
+ 		cl = cards_list();
+ #endif
++
++#if defined HAIKU
++		cl = cards_list();
++#endif
+ 
+ #if defined SOLARIS
+ 		cl = cards_list();
+@@ -1243,6 +1253,11 @@ void MyClass::settings()
+ 	if (ss==smac)line2->setCurrentIndex (line2->count () -1);	
+ #endif	
+ 
++#if defined HAIKU
++	line2->addItem(shaiku);
++	if (ss==shaiku)line2->setCurrentIndex (line2->count () -1);	
++#endif	
++
+ #if defined WIN32
+ 	line2->addItem(swin);
+ 	if (ss==swin)line2->setCurrentIndex (line2->count () -1);
+@@ -2441,7 +2456,12 @@ void MyClass::update()
+ #endif
+ 	}
+ 
+-
++	if (ss==shaiku)
++	{
++# if defined HAIKU
++		play(sound, 882*4);
++#endif
++	}
+ 
+ 	if (ss==swin)
+ 	{
+@@ -2534,7 +2554,7 @@ void MyClass::Main_Window(void)
+ 	QSize * QS = new QSize(33, 34);
+ 	QSize * QS1 = new QSize(65, 34);
+ 
+-	b1 = new QPushButton(QIcon(QPixmap(open)), "", main_window);
++	b1 = new QPushButton(QIcon::fromTheme("document-open"), "", main_window);
+ 	b1->setShortcut(QKeySequence("F3"));
+ 	b1->setToolTip(tr("Open file (F3)"));
+ 	b1->setFixedSize(*QS);
+@@ -2543,7 +2563,7 @@ void MyClass::Main_Window(void)
+ 	B1=b1;
+ 
+ 
+-	b1 = new QPushButton(QIcon(QPixmap(web)), "", main_window);
++	b1 = new QPushButton(QIcon::fromTheme("globe"), "", main_window);
+ 	b1->setToolTip(tr("Get file from the web"));
+ 	b1->setFixedSize(*QS);
+ 	eh->connect(b1, SIGNAL(clicked()), eh, SLOT(web()));
+@@ -2551,7 +2571,7 @@ void MyClass::Main_Window(void)
+ 	B22=b1;
+ 
+ 
+-	b1 = new QPushButton(QIcon(QPixmap(save)), "", main_window);
++	b1 = new QPushButton(QIcon::fromTheme("document-save"), "", main_window);
+ 	b1->setShortcut(QKeySequence("F2"));
+ 	b1->setToolTip(tr("Save file (F2)"));
+ 	b1->setFixedSize(*QS);
+@@ -2559,7 +2579,7 @@ void MyClass::Main_Window(void)
+ 	hlayout->addWidget(b1);
+ 	B3=b1;
+ 
+-	ppp = new QPushButton(QIcon(QPixmap(pause)), "",  main_window);
++	ppp = new QPushButton(QIcon::fromTheme("media-playback-pause"), "",  main_window);
+ 	ppp->setShortcut(QKeySequence("F11"));
+ 	ppp->setToolTip(tr("Pause (F11)"));
+ 	ppp->setFixedSize(*QS);
+@@ -2568,14 +2588,14 @@ void MyClass::Main_Window(void)
+ 	B4=ppp;
+ 	
+ 
+-	b1 = new QPushButton(QIcon(QPixmap(run)), "", main_window);	
++	b1 = new QPushButton(QIcon::fromTheme("go-next-skip"), "", main_window);	
+ 	eh->connect(b1, SIGNAL(clicked()), eh, SLOT(rrrun()));
+ 	b1->setToolTip(tr("Max speed"));
+ 	b1->setFixedSize(*QS);
+ 	hlayout->addWidget(b1);
+ 	B5=b1;
+ 
+-	b1 = new QPushButton(QIcon(QPixmap(settings)), "", main_window);
++	b1 = new QPushButton(QIcon::fromTheme("preferences-system"), "", main_window);
+ 	b1->setFixedSize(*QS);
+ 	b1->setToolTip(tr("Settings"));
+ 	eh->connect(b1, SIGNAL(clicked()), eh, SLOT(settings()));
+@@ -2584,7 +2604,7 @@ void MyClass::Main_Window(void)
+ 
+ 	
+ 
+-	b1 = new QPushButton(QIcon(QPixmap(reset)), "", main_window);
++	b1 = new QPushButton(QIcon::fromTheme("view-refresh"), "", main_window);
+ 	b1->setShortcut(QKeySequence("F12"));
+ 	b1->setToolTip(tr("Reset (F12)"));
+ 	b1->setFixedSize(*QS);
+@@ -2593,7 +2613,7 @@ void MyClass::Main_Window(void)
+ 	B7=b1;
+ 	
+ 
+-	b1 = new QPushButton(QIcon(QPixmap(dump_s)), "", main_window);
++	b1 = new QPushButton(QIcon::fromTheme("music-note-16th"), "", main_window);
+ 	eh->connect(b1, SIGNAL(clicked()), eh, SLOT(record()));
+ 	b1->setToolTip(tr("Dump AY sound"));
+ 	b1->setFixedSize(*QS);
+@@ -2601,7 +2621,7 @@ void MyClass::Main_Window(void)
+ 	B8=b1;
+ 
+ 
+-	b1 = new QPushButton(QIcon(QPixmap(disc)), "", main_window);
++	b1 = new QPushButton(QIcon::fromTheme("tools-report-bug"), "", main_window);
+ 	eh->connect(b1, SIGNAL(clicked()), eh, SLOT(nmi()));
+ 	b1->setToolTip(tr("Generate NMI"));
+ 	b1->setFixedSize(*QS);
+@@ -2629,7 +2649,7 @@ void MyClass::Main_Window(void)
+ 	b1->setMenu(fileMenu);
+ 
+ 
+-	b1 = new QPushButton(QIcon(QPixmap(fullscreen)), "", main_window);
++	b1 = new QPushButton(QIcon::fromTheme("view-fullscreen"), "", main_window);
+ 	b1->setShortcut(QKeySequence("F10"));
+ 	b1->setToolTip(tr("Full screen (F10)"));
+ 	b1->setFixedSize(*QS);
+@@ -2638,7 +2658,7 @@ void MyClass::Main_Window(void)
+ 	B11=b1;
+ 
+ 
+-	b1 = new QPushButton(QIcon(QPixmap(question)), "", main_window);
++	b1 = new QPushButton(QIcon::fromTheme("help-whatsthis"), "", main_window);
+ 	b1->setToolTip(tr("About"));
+ 	eh->connect(b1, SIGNAL(clicked()), eh, SLOT(about()));
+ 	b1->setFixedSize(*QS);
+@@ -2731,8 +2751,8 @@ void SetLL(int v1, int v2, int v3, int v4, int v5, int v6, int v7, int v8, int v
+ #if defined MULTIMEDIA
+ AudioTest::AudioTest()
+ {
+-	m_format.setFrequency(44100);
+-	m_format.setChannels(2);
++	m_format.setSampleRate(44100);
++	m_format.setChannelCount(2);
+ 	m_format.setSampleSize(16);
+ 	m_format.setCodec("audio/pcm");
+ 	m_format.setByteOrder(QAudioFormat::LittleEndian);
+@@ -2888,6 +2908,13 @@ int SoundCardInit(void)
+ #endif
+ 	}
+ 
++	if (ss == shaiku)
++	{
++#if defined HAIKU
++		int rv = init_card(Get_audio_name());
++		return(rv);
++#endif
++	}
+ 
+ 	if (ss == swin)
+ 	{
+@@ -3324,7 +3351,15 @@ int main( int argc, char **argv )
+ 	videomemory1[5]=4;
+ 
+ 
++#if defined HAIKU
++	QDir settings = QDir::homePath() + "/config/settings";
++	settings.mkdir("glukalka3");
++	QString homedir = settings.canonicalPath();
++	homedir += "/glukalka3";
++	SetHomeDir((char *)homedir.toUtf8().constData());
++#else
+ 	SetHomeDir((char *)QDir::toNativeSeparators(QDir::homePath()).toUtf8().constData());
++#endif
+ 
+ 	int rv  = init(videomemory1);
+ 	reset_h();
+diff --git a/android_io.h b/android_io.h
+index 8844ca4..f2377cb 100644
+--- a/android_io.h
++++ b/android_io.h
+@@ -1,7 +1,7 @@
+-#if ((!defined _WIN32) && (!defined __linux__) && (!defined __APPLE__) && (!defined __FreeBSD__) && (!defined __NetBSD__ ) && (!defined __sun__))
+-# define ANDROID 1
+-# warning ANDROID
+-#endif
++#if ((!defined _WIN32) && (!defined __linux__) && (!defined __APPLE__) && (!defined __FreeBSD__) && (!defined __NetBSD__ ) && (!defined __sun__) && (!defined __HAIKU__))
++# define ANDROID 1
++# warning ANDROID
++#endif
+ 
+ # define O_RDONLY 0
+ # define O_WRONLY 1
+@@ -71,4 +71,4 @@ int rand (void);
+ 
+ void sscanf (char *, char *, int *);
+ 
+-#endif
+\ No newline at end of file
++#endif
+-- 
+2.42.1
+

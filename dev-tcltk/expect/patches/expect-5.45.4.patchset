@@ -1,4 +1,4 @@
-From 980fd9bd95ebbd956a658f37de1ab3c74a91d593 Mon Sep 17 00:00:00 2001
+From 74807de2f914de73a41356c7b61823b4bc6f1a5b Mon Sep 17 00:00:00 2001
 From: Jerome Duval <jerome.duval@gmail.com>
 Date: Mon, 6 Jun 2016 19:05:08 +0000
 Subject: Haiku patch
@@ -980,7 +980,7 @@ index 79657cd..59bb593 100755
  # Local variables:
  # eval: (add-hook 'write-file-hooks 'time-stamp)
 diff --git a/tclconfig/tcl.m4 b/tclconfig/tcl.m4
-index 396d920..58eb70f 100644
+index 0689cab..e64112e 100644
 --- a/tclconfig/tcl.m4
 +++ b/tclconfig/tcl.m4
 @@ -751,7 +751,7 @@ AC_DEFUN([TEA_ENABLE_THREADS], [
@@ -993,5 +993,285 @@ index 396d920..58eb70f 100644
  
  	    # USE_THREAD_ALLOC tells us to try the special thread-based
 -- 
-2.7.0
+2.37.3
+
+
+From 52fc21eda65f962cb52d03a7de2ffcfed90a245d Mon Sep 17 00:00:00 2001
+From: Ian Jackson <iwj@ubuntu.com>
+Date: Thu, 29 Jun 2023 23:12:47 +0200
+Subject: Check before call ttyname
+
+
+diff --git a/pty_termios.c b/pty_termios.c
+index c605b23..3070f7e 100644
+--- a/pty_termios.c
++++ b/pty_termios.c
+@@ -369,6 +369,17 @@ exp_init_pty()
+ #define W_OK 02
+ #endif
+ 
++static int ttyname_checked(int fd) {
++	const char *result;
++	result= ttyname(fd);
++	if (!result) {
++		perror("expect: pty_termios: system configuration problem:"
++		       " ttyname() failed");
++		exit(-1);
++	}
++	return result;
++}
++
+ int
+ exp_getptymaster()
+ {
+@@ -454,7 +465,7 @@ exp_getptymaster()
+ 	master = open("/dev/ptc",O_RDWR);
+ 	if (master >= 0) {
+ 		/* never fails */
+-		slave_name = ttyname(master);
++		slave_name = ttyname_checked(master);
+ 	}
+ 	exp_pty_slave_name = slave_name;
+ 	return(master);
+@@ -475,7 +486,7 @@ exp_getptymaster()
+ 		close(slave);
+ 		return -1;
+ 	}
+-	strcpy(slave_name, ttyname(slave));
++	strcpy(slave_name, ttyname_checked(slave));
+ 	exp_pty_slave_name = slave_name;
+ 	close(slave);
+ 	return master;
+-- 
+2.37.3
+
+
+From d8524a15896b6ad42800dfc97b05cf949f75ba2f Mon Sep 17 00:00:00 2001
+From: LaMont Jones <lamont@debian.org>
+Date: Thu, 29 Jun 2023 23:14:52 +0200
+Subject: Fix implicit definitions throughout
+
+
+diff --git a/exp_chan.c b/exp_chan.c
+index 79f486c..ba1fa80 100644
+--- a/exp_chan.c
++++ b/exp_chan.c
+@@ -34,6 +34,7 @@
+ #include "exp_rename.h"
+ #include "exp_prog.h"
+ #include "exp_command.h"
++#include "exp_event.h"
+ #include "exp_log.h"
+ #include "tcldbg.h" /* Dbg_StdinMode */
+ 
+diff --git a/exp_clib.c b/exp_clib.c
+index 1699775..94c3352 100644
+--- a/exp_clib.c
++++ b/exp_clib.c
+@@ -7,6 +7,9 @@ dollars.  Therefore it is public domain.  However, the author and NIST
+ would appreciate credit if this program or parts of it are used.
+ */
+ 
++#include <unistd.h>
++#include <sys/wait.h>
++
+ #include "expect_cf.h"
+ #include <stdio.h>
+ #include <setjmp.h>
+diff --git a/exp_command.h b/exp_command.h
+index d30d911..7da182e 100644
+--- a/exp_command.h
++++ b/exp_command.h
+@@ -7,6 +7,9 @@ dollars.  Therefore it is public domain.  However, the author and NIST
+ would appreciate credit if this program or parts of it are used.
+ */
+ 
++#ifndef __EXP_COMMAND_H
++#define __EXP_COMMAND_H
++
+ #ifdef HAVE_SYS_WAIT_H
+   /* ISC doesn't def WNOHANG unless _POSIX_SOURCE is def'ed */
+ # ifdef WNOHANG_REQUIRES_POSIX_SOURCE
+@@ -100,11 +103,11 @@ typedef struct ExpState {
+     char name[EXP_CHANNELNAMELEN+1]; /* expect and interact set variables
+ 				   to channel name, so for efficiency
+ 				   cache it here */
+-    int fdin;		/* input fd */
+-    int fdout;		/* output fd - usually the same as fdin, although
++    long fdin;		/* input fd - may be used for storing ClientData, a pointer */
++    long fdout;	/* output fd - usually the same as fdin, although
+ 			   may be different if channel opened by tcl::open */
+     ExpOrigin* chan_orig;   /* If opened by someone else, i.e. tcl::open */
+-    int fd_slave;	/* slave fd if "spawn -pty" used */
++    long fd_slave;	/* slave fd if "spawn -pty" used */
+ 
+     /* this may go away if we find it is not needed */
+     /* it might be needed by inherited channels */
+@@ -242,6 +245,7 @@ EXTERN void		exp_init_trap _ANSI_ARGS_((void));
+ EXTERN void		exp_init_send _ANSI_ARGS_((void));
+ EXTERN void		exp_init_unit_random _ANSI_ARGS_((void));
+ EXTERN void		exp_init_sig _ANSI_ARGS_((void));
++EXTERN void		exp_ecmd_remove_state_direct_and_indirect _ANSI_ARGS_((Tcl_Interp *interp,ExpState *esPtr));
+ EXTERN void		expChannelInit _ANSI_ARGS_((void));
+ EXTERN int		expChannelCountGet _ANSI_ARGS_((void));
+ EXTERN int              expChannelStillAlive _ANSI_ARGS_((ExpState *, char *));
+@@ -338,6 +342,8 @@ EXTERN int		expStdinoutIs _ANSI_ARGS_((ExpState *));
+ EXTERN ExpState *	expStdinoutGet _ANSI_ARGS_((void));
+ EXTERN ExpState *	expDevttyGet _ANSI_ARGS_((void));
+ 
++EXTERN int		Exp_StringCaseMatch _ANSI_ARGS_((Tcl_UniChar *string, int strlen, Tcl_UniChar *pattern, int plen, int nocase, int *offset));
++
+ /* generic functions that really should be provided by Tcl */
+ #if 0 /* Redefined as macros. */
+ EXTERN int		expSizeGet _ANSI_ARGS_((ExpState *));
+@@ -349,6 +355,8 @@ EXTERN int		expSizeZero _ANSI_ARGS_((ExpState *));
+ 
+ #define EXP_CMDINFO_CLOSE  "expect/cmdinfo/close"
+ #define EXP_CMDINFO_RETURN "expect/cmdinfo/return"
++
++#endif /* __EXP_COMMAND_H */
+ 
+ /*
+  * Local Variables:
+diff --git a/exp_main_sub.c b/exp_main_sub.c
+index fcfaa6e..fb30c72 100644
+--- a/exp_main_sub.c
++++ b/exp_main_sub.c
+@@ -2,6 +2,7 @@
+ 
+ #include "expect_cf.h"
+ #include <stdio.h>
++#include <getopt.h>
+ #include <errno.h>
+ #ifdef HAVE_INTTYPES_H
+ #  include <inttypes.h>
+diff --git a/exp_tty.h b/exp_tty.h
+index 3013838..bd1a962 100644
+--- a/exp_tty.h
++++ b/exp_tty.h
+@@ -21,6 +21,7 @@ void exp_tty_break(Tcl_Interp *interp, int fd);
+ int exp_tty_raw_noecho(Tcl_Interp *interp, exp_tty *tty_old, int *was_raw, int *was_echo);
+ int exp_israw(void);
+ int exp_isecho(void);
++EXTERN int exp_tty_cooked_echo _ANSI_ARGS_((Tcl_Interp *interp, exp_tty *tty_old, int *was_raw, int *was_echo));
+ 
+ void exp_tty_set(Tcl_Interp *interp, exp_tty *tty, int raw, int echo);
+ int exp_tty_set_simple(exp_tty *tty);
+diff --git a/exp_tty_in.h b/exp_tty_in.h
+index d5f9a13..489d6f7 100644
+--- a/exp_tty_in.h
++++ b/exp_tty_in.h
+@@ -11,6 +11,8 @@
+ #define __EXP_TTY_IN_H__
+ 
+ #include "expect_cf.h"
++#include "expect.h"
++#include <tcl.h>
+ 
+ #ifdef __MACHTEN__
+ #include "sys/types.h"
+diff --git a/exp_win.c b/exp_win.c
+index 97adbee..07e138b 100644
+--- a/exp_win.c
++++ b/exp_win.c
+@@ -51,6 +51,7 @@ conflicts with sys/ioctl.h
+ #   include <sys/ptem.h>
+ #endif /* HAVE_SYS_PTEM_H */
+ 
++#include "expect.h"
+ #include "exp_tty_in.h"
+ #include "exp_win.h"
+ 
+diff --git a/exp_win.h b/exp_win.h
+index 8e77aea..f1fc345 100644
+--- a/exp_win.h
++++ b/exp_win.h
+@@ -1,3 +1,5 @@
++#ifndef __EXP_WIN_H
++#define __EXP_WIN_H
+ /* exp_win.h - window support
+ 
+ Written by: Don Libes, NIST, 10/25/93
+@@ -8,8 +10,8 @@ would appreciate credit if you use this file or parts of it.
+ 
+ #include <tcl.h> /* For _ANSI_ARGS_ */
+ 
+-int exp_window_size_set();
+-int exp_window_size_get();
++EXTERN int exp_window_size_set _ANSI_ARGS_((int fd));
++EXTERN int exp_window_size_get _ANSI_ARGS_((int fd));
+ 
+ void  exp_win_rows_set    _ANSI_ARGS_ ((char* rows));
+ char* exp_win_rows_get    _ANSI_ARGS_ ((void));
+@@ -20,3 +22,5 @@ void  exp_win2_rows_set    _ANSI_ARGS_ ((int fd, char* rows));
+ char* exp_win2_rows_get    _ANSI_ARGS_ ((int fd));
+ void  exp_win2_columns_set _ANSI_ARGS_ ((int fd, char* columns));
+ char* exp_win2_columns_get _ANSI_ARGS_ ((int fd));
++
++#endif /* __EXP_WIN_H */
+diff --git a/pty_termios.c b/pty_termios.c
+index 3070f7e..3cc6a8c 100644
+--- a/pty_termios.c
++++ b/pty_termios.c
+@@ -9,12 +9,19 @@ would appreciate credit if you use this file or parts of it.
+ 
+ #include <stdio.h>
+ #include <signal.h>
++#include <string.h>
++#include <pty.h>
++#include <utmp.h>
+ 
+ #if defined(SIGCLD) && !defined(SIGCHLD)
+ #define SIGCHLD SIGCLD
+ #endif
+ 
+ #include "expect_cf.h"
++#include <tcl.h>
++#include "expect.h"
++#include "exp_tty_in.h"
++#include "exp_int.h"  /* expErrnoMsg() prototype */
+ 
+ /*
+    The following functions are linked from the Tcl library.  They
+@@ -99,7 +106,6 @@ with openpty which supports 4000 while ptmx supports 60. */
+ 
+ #include "exp_win.h"
+ 
+-#include "exp_tty_in.h"
+ #include "exp_rename.h"
+ #include "exp_pty.h"
+ 
+@@ -369,7 +375,7 @@ exp_init_pty()
+ #define W_OK 02
+ #endif
+ 
+-static int ttyname_checked(int fd) {
++static char * ttyname_checked(int fd) {
+ 	const char *result;
+ 	result= ttyname(fd);
+ 	if (!result) {
+-- 
+2.37.3
+
+
+From 35ebcae46fd6e2da54df91c5ae545f3a535171d4 Mon Sep 17 00:00:00 2001
+From: PulkoMandy <pulkomandy@pulkomandy.tk>
+Date: Thu, 29 Jun 2023 23:18:31 +0200
+Subject: Fix include added by Debian patch that doesn't exist on Haiku
+
+
+diff --git a/pty_termios.c b/pty_termios.c
+index 3cc6a8c..349af1b 100644
+--- a/pty_termios.c
++++ b/pty_termios.c
+@@ -11,7 +11,6 @@ would appreciate credit if you use this file or parts of it.
+ #include <signal.h>
+ #include <string.h>
+ #include <pty.h>
+-#include <utmp.h>
+ 
+ #if defined(SIGCLD) && !defined(SIGCHLD)
+ #define SIGCHLD SIGCLD
+-- 
+2.37.3
 

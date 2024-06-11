@@ -16,9 +16,25 @@ HOMEPAGE="https://readthedocs.io/docs/nose/
 	https://github.com/nose-devs/nose"
 COPYRIGHT="2008-2010 anatoly techtonik"
 LICENSE="GNU LGPL v2.1"
-REVISION="3"
+REVISION="6"
 SOURCE_URI="https://pypi.io/packages/source/n/nose/nose-$portVersion.tar.gz"
 CHECKSUM_SHA256="f1bffef9cbc82628f6e7d7b40d7e255aefaa1adb6a1b1d26c69a8b79e6208a98"
+PATCHES="
+	debian/no-google-analytics.diff
+	debian/no-distribute_setup.diff
+	debian/disable-unstable-tests.diff
+	debian/coverage4.1.diff
+	debian/python3.6-modulenotfounderror.diff
+	debian/docs-sys.path.diff
+	debian/sphinx-html_sidebars.diff
+	debian/sphinx-body-max-width.diff
+	debian/no-versioned-entry-point.diff
+	debian/sphinx-class-directives.diff
+	debian/python3-conf-py.diff
+	debian/2to3-fixups.diff
+	debian/python3.11.diff
+	debian/python3.11-testcase-str.diff
+	"
 
 ARCHITECTURES="any"
 
@@ -32,25 +48,33 @@ BUILD_REQUIRES="
 	haiku_devel
 	"
 
-PYTHON_PACKAGES=(python python3 python38 python39)
-PYTHON_VERSIONS=(2.7 3.7 3.8 3.9)
+PYTHON_PACKAGES=(python39 python310)
+PYTHON_VERSIONS=(3.9 3.10)
+defaultVersion=3.9
 for i in "${!PYTHON_PACKAGES[@]}"; do
 	pythonPackage=${PYTHON_PACKAGES[i]}
 	pythonVersion=${PYTHON_VERSIONS[i]}
+
 	eval "PROVIDES_$pythonPackage=\"
 		nose_$pythonPackage = $portVersion
 		cmd:nosetests_$pythonVersion
 		\""
+	if [ $pythonVersion = $defaultVersion ]; then
+		eval "PROVIDES_${pythonPackage}+=\"
+			cmd:nosetests = $portVersion
+			\""
+	fi
 	eval "REQUIRES_$pythonPackage=\"
 		haiku
 		cmd:python$pythonVersion
 		\""
-BUILD_REQUIRES="$BUILD_REQUIRES
-	setuptools_$pythonPackage
-	six_$pythonPackage
-	"
-BUILD_PREREQUIRES="$BUILD_PREREQUIRES
-	cmd:python$pythonVersion"
+	BUILD_REQUIRES+="
+		setuptools_$pythonPackage
+		six_$pythonPackage
+		"
+	BUILD_PREREQUIRES+="
+		cmd:python$pythonVersion
+		"
 done
 
 PATCH()
@@ -58,58 +82,51 @@ PATCH()
 	sed -i "s|man/|$relativeManDir/|" setup.py
 }
 
-BUILD()
-{
-	for i in "${!PYTHON_PACKAGES[@]}"; do
-		pythonPackage=${PYTHON_PACKAGES[i]}
-		pythonVersion=${PYTHON_VERSIONS[i]}
-
-		rm -rf "$sourceDir"-$pythonPackage
-		cp -a "$sourceDir" "$sourceDir"-$pythonPackage
-		cd "$sourceDir"-$pythonPackage
-
-		python=python$pythonVersion
-		$python setup.py build
-	done
-}
-
 INSTALL()
-{
-	for i in "${!PYTHON_PACKAGES[@]}"; do
-		pythonPackage=${PYTHON_PACKAGES[i]}
-		pythonVersion=${PYTHON_VERSIONS[i]}
-
-		cd "$sourceDir"-$pythonPackage
-
-		python=python$pythonVersion
-		installLocation=$prefix/lib/$python/vendor-packages
-		export PYTHONPATH=$installLocation
-		mkdir -p "$installLocation"
-		$python setup.py install \
-			--root=/ --prefix="$prefix" --skip-build
-
-		rm $binDir/nosetests
-		packageEntries $pythonPackage \
-			"$binDir" \
-			"$prefix"/lib/$python
-	done
-
-	cd "$sourceDir"
-	mkdir -p "$docDir"
-	cp -rt "$docDir" \
-		README.txt CHANGELOG NEWS* doc/*
-	rm -f "$docDir"/Makefile
-}
-
-TEST()
 {
 	for i in "${!PYTHON_PACKAGES[@]}"; do
 		pythonPackage=${PYTHON_PACKAGES[i]}
 		pythonVersion=${PYTHON_VERSIONS[$i]}
 
-		cd "$sourceDir"-$pythonPackage
-
 		python=python$pythonVersion
-		$python setup.py test || echo Tests failed with $python && true
+		installLocation=$prefix/lib/$python/vendor-packages/
+		export PYTHONPATH=$installLocation:$PYTHONPATH
+
+		mkdir -p $installLocation
+		rm -rf build
+
+		$python setup.py build
+
+		# Run 2to3 before install (newer setuptools doesn't doit for us anymore).
+		$python -m lib2to3 --write --nobackups --no-diffs build
+
+		$python setup.py install --skip-build --root=/ --prefix=$prefix
+
+		# Version suffix all the scripts
+		for f in $binDir/*; do
+			mv $f $f-$pythonVersion
+		done
+
+		# And provide suffix-less symlinks for the default version
+		if [ $pythonVersion = $defaultVersion ]; then
+			for f in $binDir/*; do
+				ln -sr $f ${f%-$pythonVersion}
+			done
+		fi
+
+		packageEntries $pythonPackage \
+			$prefix/lib/python* \
+			$binDir/* \
+			$manDir
 	done
+}
+
+TEST()
+{
+	# We only test on the default Python version, for now at least.
+	python=python$defaultVersion
+	echo "Running 2to3 before running tests."
+	$python -m lib2to3 --write --nobackups --no-diffs .
+	echo "Run tests now."
+	$python setup.py test || echo "Tests failed with $python" && true
 }

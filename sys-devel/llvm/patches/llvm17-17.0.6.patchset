@@ -1,0 +1,1268 @@
+From a29b1d9c4d44dc235c9c1fa67d8d79c798c910de Mon Sep 17 00:00:00 2001
+From: Calvin Hill <calvin@hakobaito.co.uk>
+Date: Sun, 9 Sep 2018 16:11:42 +0100
+Subject: llvm: import header dir suffix patch from 3dEyes
+
+
+diff --git a/llvm/tools/llvm-config/llvm-config.cpp b/llvm/tools/llvm-config/llvm-config.cpp
+index e86eb2b..395a857 100644
+--- a/llvm/tools/llvm-config/llvm-config.cpp
++++ b/llvm/tools/llvm-config/llvm-config.cpp
+@@ -366,7 +366,11 @@ int main(int argc, char **argv) {
+       sys::fs::make_absolute(ActivePrefix, Path);
+       ActiveBinDir = std::string(Path.str());
+     }
++#ifdef __HAIKU__
++    ActiveLibDir = ActivePrefix + "/develop/lib" + LLVM_LIBDIR_SUFFIX;
++#else
+     ActiveLibDir = ActivePrefix + "/lib" + LLVM_LIBDIR_SUFFIX;
++#endif
+     {
+       SmallString<256> Path(LLVM_INSTALL_PACKAGE_DIR);
+       sys::fs::make_absolute(ActivePrefix, Path);
+-- 
+2.43.2
+
+
+From 1a7cfee4cafe015be4f0788ff80aba56decb29ab Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=B4me=20Duval?= <jerome.duval@gmail.com>
+Date: Mon, 18 Jul 2016 14:13:19 +0200
+Subject: clang: support for secondary arch.
+
+
+diff --git a/clang/CMakeLists.txt b/clang/CMakeLists.txt
+index f7936d7..57b8ec8 100644
+--- a/clang/CMakeLists.txt
++++ b/clang/CMakeLists.txt
+@@ -336,6 +336,10 @@ if (APPLE AND NOT CMAKE_LINKER MATCHES ".*lld.*")
+   endif()
+   message(STATUS "Host linker version: ${HOST_LINK_VERSION}")
+ endif()
++if(DEFINED HAIKU_HYBRID_SECONDARY)
++  add_definitions(-DHAIKU_HYBRID_SECONDARY=${HAIKU_HYBRID_SECONDARY})
++endif()
++
+ 
+ include(CMakeParseArguments)
+ include(AddClang)
+diff --git a/clang/lib/Driver/ToolChains/Haiku.cpp b/clang/lib/Driver/ToolChains/Haiku.cpp
+index a79f0f7..e878cb1 100644
+--- a/clang/lib/Driver/ToolChains/Haiku.cpp
++++ b/clang/lib/Driver/ToolChains/Haiku.cpp
+@@ -19,6 +19,13 @@ using namespace llvm::opt;
+ Haiku::Haiku(const Driver &D, const llvm::Triple& Triple, const ArgList &Args)
+   : Generic_ELF(D, Triple, Args) {
+ 
++#ifdef HAIKU_HYBRID_SECONDARY
++  getProgramPaths().insert(getProgramPaths().begin(), getDriver().SysRoot
++                           + "/system/bin/" HAIKU_HYBRID_SECONDARY);
++  getFilePaths().clear();
++  getFilePaths().push_back(getDriver().SysRoot + "/system/lib/"
++                           HAIKU_HYBRID_SECONDARY);
++#endif
+ }
+ 
+ void Haiku::addLibCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+@@ -29,6 +36,12 @@ void Haiku::addLibCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+ 
+ void Haiku::addLibStdCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+                                      llvm::opt::ArgStringList &CC1Args) const {
++#ifdef HAIKU_HYBRID_SECONDARY
++  addLibStdCXXIncludePaths(getDriver().SysRoot + "/system/develop/headers/"
++                     HAIKU_HYBRID_SECONDARY "/c++", getTriple().str(), "",
++                     DriverArgs, CC1Args);
++#else
+   addLibStdCXXIncludePaths(getDriver().SysRoot + "/system/develop/headers/c++",
+                            getTriple().str(), "", DriverArgs, CC1Args);
++#endif
+ }
+diff --git a/clang/lib/Lex/InitHeaderSearch.cpp b/clang/lib/Lex/InitHeaderSearch.cpp
+index 41382d7..de70e50 100644
+--- a/clang/lib/Lex/InitHeaderSearch.cpp
++++ b/clang/lib/Lex/InitHeaderSearch.cpp
+@@ -251,7 +251,20 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
+   if (HSOpts.UseBuiltinIncludes) {
+     // Ignore the sys root, we *always* look for clang headers relative to
+     // supplied path.
++#ifdef HAIKU_HYBRID_SECONDARY
++    // Remove version from foo/lib/clang/version
++    StringRef Ver = llvm::sys::path::filename(HSOpts.ResourceDir);
++    StringRef NoVer = llvm::sys::path::parent_path(HSOpts.ResourceDir);
++    // Remove clang from foo/lib/clang
++    StringRef Clang = llvm::sys::path::filename(NoVer);
++    SmallString<128> P = llvm::sys::path::parent_path(NoVer);
++
++    // Get foo/include/c++/v1
++    llvm::sys::path::append(P, Clang, Ver);
++#else
+     SmallString<128> P = StringRef(HSOpts.ResourceDir);
++#endif
++
+     llvm::sys::path::append(P, "include");
+     AddUnmappedPath(P, ExternCSystem, false);
+   }
+@@ -281,7 +294,12 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
+   }
+ 
+   case llvm::Triple::Haiku:
++#ifdef HAIKU_HYBRID_SECONDARY
++    AddPath("/boot/system/non-packaged/develop/headers/" HAIKU_HYBRID_SECONDARY,
++            System, false);
++#else
+     AddPath("/boot/system/non-packaged/develop/headers", System, false);
++#endif
+     AddPath("/boot/system/develop/headers/os", System, false);
+     AddPath("/boot/system/develop/headers/os/app", System, false);
+     AddPath("/boot/system/develop/headers/os/arch", System, false);
+@@ -313,6 +331,13 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
+     AddPath("/boot/system/develop/headers/bsd", System, false);
+     AddPath("/boot/system/develop/headers/glibc", System, false);
+     AddPath("/boot/system/develop/headers/posix", System, false);
++#ifdef HAIKU_HYBRID_SECONDARY
++    AddPath("/boot/system/develop/headers/" HAIKU_HYBRID_SECONDARY, System, false);
++    AddPath("/boot/system/develop/headers/" HAIKU_HYBRID_SECONDARY "/os", System,
++            false);
++    AddPath("/boot/system/develop/headers/" HAIKU_HYBRID_SECONDARY "/os/opengl",
++            System, false);
++#endif
+     AddPath("/boot/system/develop/headers",  System, false);
+     break;
+   case llvm::Triple::RTEMS:
+-- 
+2.43.2
+
+
+From 0d4269231f8b0e81704183ee7553899906ca1283 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Thu, 7 Apr 2016 18:30:52 +0000
+Subject: clang: add a test for haiku driver.
+
+* upstream wants a case for libcxx in ToolChains.cpp, so add it.
+
+diff --git a/clang/test/Driver/haiku.c b/clang/test/Driver/haiku.c
+new file mode 100644
+index 0000000..9591739
+--- /dev/null
++++ b/clang/test/Driver/haiku.c
+@@ -0,0 +1,12 @@
++// RUN: %clang -no-canonical-prefixes -target x86_64-unknown-haiku %s -### 2> %t.log
++// RUN: FileCheck --check-prefix=CHECK-X86_64 -input-file %t.log %s
++
++// CHECK-X86_64: clang{{.*}}" "-cc1" "-triple" "x86_64-unknown-haiku"
++// CHECK-X86_64: gcc{{.*}}" "-o" "a.out" "{{.*}}.o"
++
++// RUN: %clang -no-canonical-prefixes -target i586-pc-haiku %s -### 2> %t.log
++// RUN: FileCheck --check-prefix=CHECK-X86 -input-file %t.log %s
++
++// CHECK-X86: clang{{.*}}" "-cc1" "-triple" "i586-pc-haiku"
++// CHECK-X86: gcc{{.*}}" "-o" "a.out" "{{.*}}.o"
++
+-- 
+2.43.2
+
+
+From 69a76b92d25a0ceaae543456ab2fb7b2bc6ec9ad Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=B4me=20Duval?= <jerome.duval@gmail.com>
+Date: Mon, 18 Jul 2016 14:13:19 +0200
+Subject: clang: Enable thread-local storage and disable PIE by default
+
+
+diff --git a/clang/lib/Basic/Targets/OSTargets.h b/clang/lib/Basic/Targets/OSTargets.h
+index cf8cc8e..f570406 100644
+--- a/clang/lib/Basic/Targets/OSTargets.h
++++ b/clang/lib/Basic/Targets/OSTargets.h
+@@ -302,7 +302,6 @@ public:
+     this->IntPtrType = TargetInfo::SignedLong;
+     this->PtrDiffType = TargetInfo::SignedLong;
+     this->ProcessIDType = TargetInfo::SignedLong;
+-    this->TLSSupported = false;
+     switch (Triple.getArch()) {
+     default:
+       break;
+diff --git a/clang/lib/Driver/ToolChains/Haiku.h b/clang/lib/Driver/ToolChains/Haiku.h
+index 669379a..fd82022 100644
+--- a/clang/lib/Driver/ToolChains/Haiku.h
++++ b/clang/lib/Driver/ToolChains/Haiku.h
+@@ -22,9 +22,7 @@ public:
+   Haiku(const Driver &D, const llvm::Triple &Triple,
+           const llvm::opt::ArgList &Args);
+ 
+-  bool isPIEDefault(const llvm::opt::ArgList &Args) const override {
+-    return getTriple().getArch() == llvm::Triple::x86_64;
+-  }
++  bool isPIEDefault(const llvm::opt::ArgList &Args) const override { return false; }
+ 
+   void addLibCxxIncludePaths(
+       const llvm::opt::ArgList &DriverArgs,
+-- 
+2.43.2
+
+
+From 1d2e2594305fc12d8258e262ed2b822876b03ab1 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Mon, 13 Feb 2023 16:28:39 +0100
+Subject: clang: Haiku: defaults to PIC
+
+
+diff --git a/clang/lib/Driver/ToolChains/Haiku.h b/clang/lib/Driver/ToolChains/Haiku.h
+index fd82022..f649d8d 100644
+--- a/clang/lib/Driver/ToolChains/Haiku.h
++++ b/clang/lib/Driver/ToolChains/Haiku.h
+@@ -23,6 +23,7 @@ public:
+           const llvm::opt::ArgList &Args);
+ 
+   bool isPIEDefault(const llvm::opt::ArgList &Args) const override { return false; }
++  bool isPICDefault() const override { return true; }
+ 
+   void addLibCxxIncludePaths(
+       const llvm::opt::ArgList &DriverArgs,
+-- 
+2.43.2
+
+
+From 4aa960b6b5d54db7b2137b4df737db0be31ea973 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 3 Apr 2021 23:23:24 +0200
+Subject: lld: MachO needs libunwind somehow, disable
+
+
+diff --git a/lld/CMakeLists.txt b/lld/CMakeLists.txt
+index 595c286..efb08a8 100644
+--- a/lld/CMakeLists.txt
++++ b/lld/CMakeLists.txt
+@@ -199,7 +199,9 @@ endif()
+ add_subdirectory(docs)
+ add_subdirectory(COFF)
+ add_subdirectory(ELF)
++if (NOT HAIKU)
+ add_subdirectory(MachO)
++endif()
+ add_subdirectory(MinGW)
+ add_subdirectory(wasm)
+ 
+diff --git a/lld/include/lld/Common/Driver.h b/lld/include/lld/Common/Driver.h
+index 8520e6e..9562ab7 100644
+--- a/lld/include/lld/Common/Driver.h
++++ b/lld/include/lld/Common/Driver.h
+@@ -58,6 +58,15 @@ Result lldMain(llvm::ArrayRef<const char *> args, llvm::raw_ostream &stdoutOS,
+ 
+ // An array which declares that all LLD drivers are linked in your executable.
+ // Must be used along with LLD_HAS_DRIVERS. See examples in LLD unittests.
++#ifdef __HAIKU__
++#define LLD_ALL_DRIVERS                                                        \
++  {                                                                            \
++    {lld::WinLink, &lld::coff::link}, {lld::Gnu, &lld::elf::link},             \
++        {lld::MinGW, &lld::mingw::link}, {                                     \
++      lld::Wasm, &lld::wasm::link                                              \
++    }                                                                          \
++  }
++#else
+ #define LLD_ALL_DRIVERS                                                        \
+   {                                                                            \
+     {lld::WinLink, &lld::coff::link}, {lld::Gnu, &lld::elf::link},             \
+@@ -65,5 +74,6 @@ Result lldMain(llvm::ArrayRef<const char *> args, llvm::raw_ostream &stdoutOS,
+       lld::Wasm, &lld::wasm::link                                              \
+     }                                                                          \
+   }
++#endif
+ 
+ #endif
+diff --git a/lld/tools/lld/CMakeLists.txt b/lld/tools/lld/CMakeLists.txt
+index 1262839..9bf717e 100644
+--- a/lld/tools/lld/CMakeLists.txt
++++ b/lld/tools/lld/CMakeLists.txt
+@@ -18,6 +18,16 @@ function(lld_target_link_libraries target type)
+   endif()
+ endfunction()
+ 
++if (HAIKU)
++lld_target_link_libraries(lld
++  PRIVATE
++  lldCommon
++  lldCOFF
++  lldELF
++  lldMinGW
++  lldWasm
++  )
++else()
+ lld_target_link_libraries(lld
+   PRIVATE
+   lldCommon
+@@ -27,6 +37,7 @@ lld_target_link_libraries(lld
+   lldMinGW
+   lldWasm
+   )
++endif()
+ 
+ install(TARGETS lld
+   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+diff --git a/lld/tools/lld/lld.cpp b/lld/tools/lld/lld.cpp
+index 2c30bc9..5069361 100644
+--- a/lld/tools/lld/lld.cpp
++++ b/lld/tools/lld/lld.cpp
+@@ -71,7 +71,9 @@ static unsigned inTestVerbosity() {
+ LLD_HAS_DRIVER(coff)
+ LLD_HAS_DRIVER(elf)
+ LLD_HAS_DRIVER(mingw)
++#ifndef __HAIKU__
+ LLD_HAS_DRIVER(macho)
++#endif
+ LLD_HAS_DRIVER(wasm)
+ 
+ int lld_main(int argc, char **argv, const llvm::ToolContext &) {
+-- 
+2.43.2
+
+
+From 2d834d2fdcc250220f3a9696b828918174e28936 Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Wed, 16 Mar 2022 07:04:18 +0900
+Subject: libunwind: Haiku: Signal frame unwinding support
+
+
+diff --git a/libunwind/src/UnwindCursor.hpp b/libunwind/src/UnwindCursor.hpp
+index dde9477..e4811a7 100644
+--- a/libunwind/src/UnwindCursor.hpp
++++ b/libunwind/src/UnwindCursor.hpp
+@@ -1008,6 +1008,9 @@ private:
+   template <typename Registers> int stepThroughSigReturn(Registers &) {
+     return UNW_STEP_END;
+   }
++#elif defined(__HAIKU__)
++  bool setInfoForSigReturn();
++  int stepThroughSigReturn();
+ #endif
+ 
+ #if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
+@@ -1311,7 +1314,7 @@ private:
+   unw_proc_info_t  _info;
+   bool             _unwindInfoMissing;
+   bool             _isSignalFrame;
+-#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN)
++#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) || defined(_LIBUNWIND_TARGET_HAIKU)
+   bool             _isSigReturn = false;
+ #endif
+ };
+@@ -2523,7 +2526,7 @@ int UnwindCursor<A, R>::stepWithTBTable(pint_t pc, tbtable *TBTable,
+ 
+ template <typename A, typename R>
+ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
+-#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN)
++#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) || defined(_LIBUNWIND_TARGET_HAIKU)
+   _isSigReturn = false;
+ #endif
+ 
+@@ -2638,7 +2641,7 @@ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
+   }
+ #endif // #if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
+ 
+-#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN)
++#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) || defined(_LIBUNWIND_TARGET_HAIKU)
+   if (setInfoForSigReturn())
+     return;
+ #endif
+@@ -2722,6 +2725,65 @@ int UnwindCursor<A, R>::stepThroughSigReturn(Registers_arm64 &) {
+   _isSignalFrame = true;
+   return UNW_STEP_SUCCESS;
+ }
++#elif defined(__HAIKU__)
++
++#include <commpage_defs.h>
++#include <signal.h>
++
++extern "C" {
++extern void *__gCommPageAddress;
++}
++
++template <typename A, typename R>
++bool UnwindCursor<A, R>::setInfoForSigReturn() {
++#if defined(_LIBUNWIND_TARGET_X86_64)
++  addr_t signal_handler = (((addr_t*)__gCommPageAddress)[COMMPAGE_ENTRY_X86_SIGNAL_HANDLER] + (addr_t)__gCommPageAddress);
++	addr_t signal_handler_ret = signal_handler + 45;
++#endif
++  pint_t pc = static_cast<pint_t>(this->getReg(UNW_REG_IP));
++  if (pc == signal_handler_ret) {
++    //printf("signal frame detected\n");
++    _info = {};
++    _info.start_ip = signal_handler;
++    _info.end_ip = signal_handler_ret;
++    _isSigReturn = true;
++    return true;
++  }
++  return false;
++}
++
++template <typename A, typename R>
++int UnwindCursor<A, R>::stepThroughSigReturn() {
++  //printf("stepThroughSigReturn\n");
++  _isSignalFrame = true;
++  pint_t sp = _registers.getSP();
++  // printf("sp: %p\n", (void*)sp);
++#if defined(_LIBUNWIND_TARGET_X86_64)
++  vregs *regs = (vregs*)(sp + 0x70);
++  //printf("&regs: %p\n", regs);
++ 
++  _registers.setRegister(UNW_REG_IP, regs->rip);
++  _registers.setRegister(UNW_REG_SP, regs->rsp);
++  _registers.setRegister(UNW_X86_64_RAX, regs->rax);
++  _registers.setRegister(UNW_X86_64_RDX, regs->rdx);
++  _registers.setRegister(UNW_X86_64_RCX, regs->rcx);
++  _registers.setRegister(UNW_X86_64_RBX, regs->rbx);
++  _registers.setRegister(UNW_X86_64_RSI, regs->rsi);
++  _registers.setRegister(UNW_X86_64_RDI, regs->rdi);
++  _registers.setRegister(UNW_X86_64_RBP, regs->rbp);
++  _registers.setRegister(UNW_X86_64_R8,  regs->r8);
++  _registers.setRegister(UNW_X86_64_R9,  regs->r9);
++  _registers.setRegister(UNW_X86_64_R10, regs->r10);
++  _registers.setRegister(UNW_X86_64_R11, regs->r11);
++  _registers.setRegister(UNW_X86_64_R12, regs->r12);
++  _registers.setRegister(UNW_X86_64_R13, regs->r13);
++  _registers.setRegister(UNW_X86_64_R14, regs->r14);
++  _registers.setRegister(UNW_X86_64_R15, regs->r15);
++  // TODO: XMM
++#endif
++
++  return UNW_STEP_SUCCESS;
++}
+ #endif // defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) &&
+        // defined(_LIBUNWIND_TARGET_AARCH64)
+ 
+@@ -2893,7 +2955,7 @@ template <typename A, typename R> int UnwindCursor<A, R>::step(bool stage2) {
+ 
+   // Use unwinding info to modify register set as if function returned.
+   int result;
+-#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN)
++#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) || defined(_LIBUNWIND_TARGET_HAIKU)
+   if (_isSigReturn) {
+     result = this->stepThroughSigReturn();
+   } else
+-- 
+2.43.2
+
+
+From ca6ef9e202b30045a30362192b9b3635d8ec6f92 Mon Sep 17 00:00:00 2001
+From: Trung Nguyen <trungnt282910@gmail.com>
+Date: Thu, 7 Jul 2022 22:19:34 +0700
+Subject: libunwind: Haiku: Initial support
+
+
+diff --git a/libunwind/cmake/config-ix.cmake b/libunwind/cmake/config-ix.cmake
+index d311477..82f8ce9 100644
+--- a/libunwind/cmake/config-ix.cmake
++++ b/libunwind/cmake/config-ix.cmake
+@@ -11,7 +11,11 @@ include(CheckCSourceCompiles)
+ # --unwindlib=none is supported, and use that if possible.
+ llvm_check_compiler_linker_flag(C "--unwindlib=none" CXX_SUPPORTS_UNWINDLIB_EQ_NONE_FLAG)
+ 
+-check_library_exists(c fopen "" LIBUNWIND_HAS_C_LIB)
++if (HAIKU)
++  check_library_exists(root fopen "" LIBUNWIND_HAS_ROOT_LIB)
++else()
++  check_library_exists(c fopen "" LIBUNWIND_HAS_C_LIB)
++endif()
+ 
+ if (NOT LIBUNWIND_USE_COMPILER_RT)
+   if (ANDROID)
+@@ -45,6 +49,9 @@ if (CXX_SUPPORTS_NOSTDLIBXX_FLAG OR C_SUPPORTS_NODEFAULTLIBS_FLAG)
+   if (LIBUNWIND_HAS_C_LIB)
+     list(APPEND CMAKE_REQUIRED_LIBRARIES c)
+   endif ()
++  if (LIBUNWIND_HAS_ROOT_LIB)
++    list(APPEND CMAKE_REQUIRED_LIBRARIES root)
++  endif ()
+   if (LIBUNWIND_USE_COMPILER_RT)
+     include(HandleCompilerRT)
+     find_compiler_rt_library(builtins LIBUNWIND_BUILTINS_LIBRARY
+@@ -111,3 +118,8 @@ else()
+   check_library_exists(dl dladdr "" LIBUNWIND_HAS_DL_LIB)
+   check_library_exists(pthread pthread_once "" LIBUNWIND_HAS_PTHREAD_LIB)
+ endif()
++
++if(HAIKU)
++  set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -D_DEFAULT_SOURCE")
++  check_library_exists(bsd dl_iterate_phdr "" LIBUNWIND_HAS_BSD_LIB)
++endif()
+\ No newline at end of file
+diff --git a/libunwind/include/__libunwind_config.h b/libunwind/include/__libunwind_config.h
+index a317a36..2444e72 100644
+--- a/libunwind/include/__libunwind_config.h
++++ b/libunwind/include/__libunwind_config.h
+@@ -36,6 +36,9 @@
+ # if defined(__linux__)
+ #  define _LIBUNWIND_TARGET_LINUX 1
+ # endif
++# if defined(__HAIKU__)
++#  define _LIBUNWIND_TARGET_HAIKU 1
++# endif
+ # if defined(__i386__)
+ #  define _LIBUNWIND_TARGET_I386
+ #  define _LIBUNWIND_CONTEXT_SIZE 8
+diff --git a/libunwind/src/CMakeLists.txt b/libunwind/src/CMakeLists.txt
+index bb2ada9..afd50e0 100644
+--- a/libunwind/src/CMakeLists.txt
++++ b/libunwind/src/CMakeLists.txt
+@@ -102,6 +102,32 @@ if (APPLE)
+   endif ()
+ endif ()
+ 
++if (HAIKU)
++  add_library_flags_if(LIBUNWIND_HAS_ROOT_LIB root)
++
++  add_library_flags_if(LIBUNWIND_HAS_BSD_LIB bsd)
++  add_compile_flags_if(LIBUNWIND_HAS_BSD_LIB -D_DEFAULT_SOURCE=1)
++  add_compile_flags_if(LIBUNWIND_HAS_BSD_LIB -D_LIBUNWIND_USE_HAIKU_BSD_LIB=1)
++
++  add_compile_flags("-DPT_GNU_EH_FRAME=PT_EH_FRAME")
++
++  find_path(LIBUNWIND_HAIKU_PRIVATE_HEADERS
++            "commpage_defs.h"
++            PATHS ${CMAKE_SYSTEM_INCLUDE_PATH}
++            PATH_SUFFIXES "/private/system"
++            NO_DEFAULT_PATH
++            REQUIRED)
++
++  include_directories(SYSTEM "${LIBUNWIND_HAIKU_PRIVATE_HEADERS}")
++  if (LIBUNWIND_TARGET_TRIPLE)
++    if (${LIBUNWIND_TARGET_TRIPLE} MATCHES "^x86_64")
++      include_directories(SYSTEM "${LIBUNWIND_HAIKU_PRIVATE_HEADERS}/arch/x86_64")
++    endif()
++  else()
++    include_directories(SYSTEM "${LIBUNWIND_HAIKU_PRIVATE_HEADERS}/arch/${CMAKE_SYSTEM_PROCESSOR}")
++  endif()
++endif()
++
+ string(REPLACE ";" " " LIBUNWIND_COMPILE_FLAGS "${LIBUNWIND_COMPILE_FLAGS}")
+ string(REPLACE ";" " " LIBUNWIND_CXX_FLAGS "${LIBUNWIND_CXX_FLAGS}")
+ string(REPLACE ";" " " LIBUNWIND_C_FLAGS "${LIBUNWIND_C_FLAGS}")
+diff --git a/libunwind/src/UnwindCursor.hpp b/libunwind/src/UnwindCursor.hpp
+index e4811a7..b7280f4 100644
+--- a/libunwind/src/UnwindCursor.hpp
++++ b/libunwind/src/UnwindCursor.hpp
+@@ -1008,7 +1008,7 @@ private:
+   template <typename Registers> int stepThroughSigReturn(Registers &) {
+     return UNW_STEP_END;
+   }
+-#elif defined(__HAIKU__)
++#elif defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+   bool setInfoForSigReturn();
+   int stepThroughSigReturn();
+ #endif
+@@ -1314,7 +1314,8 @@ private:
+   unw_proc_info_t  _info;
+   bool             _unwindInfoMissing;
+   bool             _isSignalFrame;
+-#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) || defined(_LIBUNWIND_TARGET_HAIKU)
++#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) \
++    || defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+   bool             _isSigReturn = false;
+ #endif
+ };
+@@ -2526,7 +2527,8 @@ int UnwindCursor<A, R>::stepWithTBTable(pint_t pc, tbtable *TBTable,
+ 
+ template <typename A, typename R>
+ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
+-#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) || defined(_LIBUNWIND_TARGET_HAIKU)
++#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) \
++    || defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+   _isSigReturn = false;
+ #endif
+ 
+@@ -2641,7 +2643,8 @@ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
+   }
+ #endif // #if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
+ 
+-#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) || defined(_LIBUNWIND_TARGET_HAIKU)
++#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) \
++    || defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+   if (setInfoForSigReturn())
+     return;
+ #endif
+@@ -2725,7 +2728,7 @@ int UnwindCursor<A, R>::stepThroughSigReturn(Registers_arm64 &) {
+   _isSignalFrame = true;
+   return UNW_STEP_SUCCESS;
+ }
+-#elif defined(__HAIKU__)
++#elif defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+ 
+ #include <commpage_defs.h>
+ #include <signal.h>
+@@ -2955,7 +2958,8 @@ template <typename A, typename R> int UnwindCursor<A, R>::step(bool stage2) {
+ 
+   // Use unwinding info to modify register set as if function returned.
+   int result;
+-#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) || defined(_LIBUNWIND_TARGET_HAIKU)
++#if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) \
++    || defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+   if (_isSigReturn) {
+     result = this->stepThroughSigReturn();
+   } else
+diff --git a/libunwind/src/config.h b/libunwind/src/config.h
+index 6707d59..db1df8c 100644
+--- a/libunwind/src/config.h
++++ b/libunwind/src/config.h
+@@ -46,6 +46,12 @@
+ #elif defined(_AIX)
+ // The traceback table at the end of each function is used for unwinding.
+ #define _LIBUNWIND_SUPPORT_TBTAB_UNWIND 1
++#elif defined(__HAIKU__)
++  #if defined(_LIBUNWIND_USE_HAIKU_BSD_LIB)
++    #define _LIBUNWIND_USE_DL_ITERATE_PHDR 1
++  #endif
++  #define _LIBUNWIND_SUPPORT_DWARF_UNWIND 1
++  #define _LIBUNWIND_SUPPORT_DWARF_INDEX 1
+ #else
+   // Assume an ELF system with a dl_iterate_phdr function.
+   #define _LIBUNWIND_USE_DL_ITERATE_PHDR 1
+-- 
+2.43.2
+
+
+From fd4647097b43e3c90699501641db11049b5dbe9f Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Mon, 10 Oct 2022 12:18:55 +0900
+Subject: Haiku: reimplement toolchain driver, make lld functional
+
+
+diff --git a/clang/lib/Driver/ToolChains/Haiku.cpp b/clang/lib/Driver/ToolChains/Haiku.cpp
+index e878cb1..eea14dd 100644
+--- a/clang/lib/Driver/ToolChains/Haiku.cpp
++++ b/clang/lib/Driver/ToolChains/Haiku.cpp
+@@ -8,12 +8,142 @@
+ 
+ #include "Haiku.h"
+ #include "CommonArgs.h"
++#include "clang/Driver/Compilation.h"
+ 
+ using namespace clang::driver;
++using namespace clang::driver::tools;
+ using namespace clang::driver::toolchains;
+ using namespace clang;
+ using namespace llvm::opt;
+ 
++void haiku::Linker::ConstructJob(Compilation &C, const JobAction &JA,
++                                   const InputInfo &Output,
++                                   const InputInfoList &Inputs,
++                                   const ArgList &Args,
++                                   const char *LinkingOutput) const {
++  const toolchains::Haiku &ToolChain =
++      static_cast<const toolchains::Haiku &>(getToolChain());
++  const Driver &D = ToolChain.getDriver();
++  //bool IsNoPIC = Args.hasArg(options::OPT_fno_pic, options::OPT_fno_PIC);
++  ArgStringList CmdArgs;
++
++  // Silence warning for "clang -g foo.o -o foo"
++  Args.ClaimAllArgs(options::OPT_g_Group);
++  // and "clang -emit-llvm foo.o -o foo"
++  Args.ClaimAllArgs(options::OPT_emit_llvm);
++  // and for "clang -w foo.o -o foo". Other warning options are already
++  // handled somewhere else.
++  Args.ClaimAllArgs(options::OPT_w);
++
++  if (!D.SysRoot.empty())
++    CmdArgs.push_back(Args.MakeArgString("--sysroot=" + D.SysRoot));
++/*
++  if (!IsNoPIC)
++    CmdArgs.push_back("-fpic");
++*/
++  CmdArgs.push_back("--eh-frame-hdr");
++  if (Args.hasArg(options::OPT_static)) {
++    CmdArgs.push_back("-Bstatic");
++  } else {
++    if (Args.hasArg(options::OPT_rdynamic))
++      CmdArgs.push_back("-export-dynamic");
++    if (Args.hasArg(options::OPT_shared)) {
++      CmdArgs.push_back("-Bshareable");
++    }
++    CmdArgs.push_back("--enable-new-dtags");
++  }
++
++  if (Arg *A = Args.getLastArg(options::OPT_G)) {
++    if (ToolChain.getTriple().isMIPS()) {
++      StringRef v = A->getValue();
++      CmdArgs.push_back(Args.MakeArgString("-G" + v));
++      A->claim();
++    }
++  }
++
++  CmdArgs.push_back("-shared");
++  if (Args.hasArg(options::OPT_shared)) {
++    //CmdArgs.push_back("-e 0");
++  } else {
++    CmdArgs.push_back("-no-undefined");
++  }
++
++  if (Output.isFilename()) {
++    CmdArgs.push_back("-o");
++    CmdArgs.push_back(Output.getFilename());
++  } else {
++    assert(Output.isNothing() && "Invalid output.");
++  }
++
++  if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nostartfiles,
++                   options::OPT_r)) {
++    const char *crt1 = nullptr;
++    if (!Args.hasArg(options::OPT_shared)) {
++      crt1 = "start_dyn.o";
++    }
++
++    CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crtbeginS.o")));
++    if (crt1)
++      CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath(crt1)));
++    CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("init_term_dyn.o")));
++  }
++
++  Args.AddAllArgs(CmdArgs, options::OPT_L);
++  ToolChain.AddFilePathLibArgs(Args, CmdArgs);
++  Args.AddAllArgs(CmdArgs, options::OPT_T_Group);
++  Args.AddAllArgs(CmdArgs, options::OPT_e);
++  Args.AddAllArgs(CmdArgs, options::OPT_s);
++  Args.AddAllArgs(CmdArgs, options::OPT_t);
++  Args.AddAllArgs(CmdArgs, options::OPT_Z_Flag);
++  Args.AddAllArgs(CmdArgs, options::OPT_r);
++
++  if (D.isUsingLTO()) {
++    assert(!Inputs.empty() && "Must have at least one input.");
++    addLTOOptions(ToolChain, Args, CmdArgs, Output, Inputs[0],
++                  D.getLTOMode() == LTOK_Thin);
++  }
++
++  addLinkerCompressDebugSectionsOption(ToolChain, Args, CmdArgs);
++  AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
++
++  if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nodefaultlibs,
++                   options::OPT_r)) {
++    // Use the static OpenMP runtime with -static-openmp
++    bool StaticOpenMP = Args.hasArg(options::OPT_static_openmp) &&
++                        !Args.hasArg(options::OPT_static);
++    addOpenMPRuntime(CmdArgs, ToolChain, Args, StaticOpenMP);
++
++    if (D.CCCIsCXX()) {
++      if (ToolChain.ShouldLinkCXXStdlib(Args))
++        ToolChain.AddCXXStdlibLibArgs(Args, CmdArgs);
++    }
++    CmdArgs.push_back("-lgcc");
++    CmdArgs.push_back("--push-state");
++    CmdArgs.push_back("--as-needed");
++    CmdArgs.push_back("-lgcc_s");
++    CmdArgs.push_back("--pop-state");
++    CmdArgs.push_back("-lroot");
++    CmdArgs.push_back("-lgcc");
++    CmdArgs.push_back("--push-state");
++    CmdArgs.push_back("--as-needed");
++    CmdArgs.push_back("-lgcc_s");
++    CmdArgs.push_back("--pop-state");
++  }
++
++  if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nostartfiles,
++                   options::OPT_r)) {
++    CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crtendS.o")));
++    CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crtn.o")));
++  }
++
++  ToolChain.addProfileRTLibs(Args, CmdArgs);
++
++  const char *Exec = Args.MakeArgString(getToolChain().GetLinkerPath());
++  C.addCommand(std::make_unique<Command>(JA, *this,
++                                         ResponseFileSupport::AtFileCurCP(),
++                                         Exec, CmdArgs, Inputs, Output));
++}
++
+ /// Haiku - Haiku tool chain which can call as(1) and ld(1) directly.
+ 
+ Haiku::Haiku(const Driver &D, const llvm::Triple& Triple, const ArgList &Args)
+@@ -23,25 +153,69 @@ Haiku::Haiku(const Driver &D, const llvm::Triple& Triple, const ArgList &Args)
+   getProgramPaths().insert(getProgramPaths().begin(), getDriver().SysRoot
+                            + "/system/bin/" HAIKU_HYBRID_SECONDARY);
+   getFilePaths().clear();
+-  getFilePaths().push_back(getDriver().SysRoot + "/system/lib/"
+-                           HAIKU_HYBRID_SECONDARY);
++  getFilePaths().push_back(getDriver().SysRoot + "/boot/system/lib/" HAIKU_HYBRID_SECONDARY);
++  getFilePaths().push_back(getDriver().SysRoot + "/boot/system/develop/lib/" HAIKU_HYBRID_SECONDARY);
++#else
++  getFilePaths().push_back(getDriver().SysRoot + "/boot/system/lib");
++  getFilePaths().push_back(getDriver().SysRoot + "/boot/system/develop/lib");
+ #endif
+ }
+ 
++ToolChain::CXXStdlibType Haiku::GetDefaultCXXStdlibType() const {
++  return ToolChain::CST_Libstdcxx;
++}
++
++unsigned Haiku::GetDefaultDwarfVersion() const {
++  return 2;
++}
++
+ void Haiku::addLibCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+                                   llvm::opt::ArgStringList &CC1Args) const {
+   addSystemInclude(DriverArgs, CC1Args,
+-                   getDriver().SysRoot + "/system/develop/headers/c++/v1");
++                   getDriver().SysRoot + "/boot/system/develop/headers/c++/v1");
+ }
+ 
+ void Haiku::addLibStdCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+                                      llvm::opt::ArgStringList &CC1Args) const {
+ #ifdef HAIKU_HYBRID_SECONDARY
+-  addLibStdCXXIncludePaths(getDriver().SysRoot + "/system/develop/headers/"
++  addLibStdCXXIncludePaths(getDriver().SysRoot + "/boot/system/develop/headers/"
+                      HAIKU_HYBRID_SECONDARY "/c++", getTriple().str(), "",
+                      DriverArgs, CC1Args);
+ #else
+-  addLibStdCXXIncludePaths(getDriver().SysRoot + "/system/develop/headers/c++",
++  addLibStdCXXIncludePaths(getDriver().SysRoot + "/boot/system/develop/headers/c++",
+                            getTriple().str(), "", DriverArgs, CC1Args);
+ #endif
+ }
++
++void Haiku::AddCXXStdlibLibArgs(const ArgList &Args,
++                                  ArgStringList &CmdArgs) const {
++  CXXStdlibType Type = GetCXXStdlibType(Args);
++
++  switch (Type) {
++  case ToolChain::CST_Libcxx:
++    CmdArgs.push_back("-lc++");
++    break;
++
++  case ToolChain::CST_Libstdcxx:
++    CmdArgs.push_back("-lstdc++");
++    break;
++  }
++}
++
++void Haiku::AddCudaIncludeArgs(const ArgList &DriverArgs,
++                                 ArgStringList &CC1Args) const {
++  CudaInstallation->AddCudaIncludeArgs(DriverArgs, CC1Args);
++}
++
++void Haiku::AddHIPIncludeArgs(const ArgList &DriverArgs,
++                                ArgStringList &CC1Args) const {
++  RocmInstallation->AddHIPIncludeArgs(DriverArgs, CC1Args);
++}
++
++bool Haiku::HasNativeLLVMSupport() const { return true; }
++
++ToolChain::UnwindTableLevel Haiku::getDefaultUnwindTableLevel(const ArgList &Args) const { return UnwindTableLevel::Asynchronous;; }
++
++bool Haiku::GetDefaultStandaloneDebug() const { return true; }
++
++Tool *Haiku::buildLinker() const { return new tools::haiku::Linker(*this); }
+diff --git a/clang/lib/Driver/ToolChains/Haiku.h b/clang/lib/Driver/ToolChains/Haiku.h
+index f649d8d..70fc0dc 100644
+--- a/clang/lib/Driver/ToolChains/Haiku.h
++++ b/clang/lib/Driver/ToolChains/Haiku.h
+@@ -15,6 +15,25 @@
+ 
+ namespace clang {
+ namespace driver {
++namespace tools {
++
++/// haiku -- Directly call GNU Binutils linker
++namespace haiku {
++class LLVM_LIBRARY_VISIBILITY Linker : public Tool {
++public:
++  Linker(const ToolChain &TC) : Tool("haiku::Linker", "linker", TC) {}
++
++  bool hasIntegratedCPP() const override { return false; }
++  bool isLinkJob() const override { return true; }
++
++  void ConstructJob(Compilation &C, const JobAction &JA,
++                    const InputInfo &Output, const InputInfoList &Inputs,
++                    const llvm::opt::ArgList &TCArgs,
++                    const char *LinkingOutput) const override;
++};
++} // end namespace haiku
++} // end namespace tools
++
+ namespace toolchains {
+ 
+ class LLVM_LIBRARY_VISIBILITY Haiku : public Generic_ELF {
+@@ -22,6 +41,25 @@ public:
+   Haiku(const Driver &D, const llvm::Triple &Triple,
+           const llvm::opt::ArgList &Args);
+ 
++  bool HasNativeLLVMSupport() const override;
++
++  bool IsMathErrnoDefault() const override { return false; }
++  bool IsObjCNonFragileABIDefault() const override { return true; }
++
++  CXXStdlibType GetDefaultCXXStdlibType() const override;
++  const char *getDefaultLinker() const override { return "ld.lld"; }
++
++  void AddCXXStdlibLibArgs(const llvm::opt::ArgList &Args,
++                           llvm::opt::ArgStringList &CmdArgs) const override;
++  void AddCudaIncludeArgs(const llvm::opt::ArgList &DriverArgs,
++                          llvm::opt::ArgStringList &CC1Args) const override;
++  void AddHIPIncludeArgs(const llvm::opt::ArgList &DriverArgs,
++                         llvm::opt::ArgStringList &CC1Args) const override;
++
++  ToolChain::UnwindTableLevel getDefaultUnwindTableLevel(const llvm::opt::ArgList &Args) const override;
++  unsigned GetDefaultDwarfVersion() const override;
++  bool GetDefaultStandaloneDebug() const override;
++
+   bool isPIEDefault(const llvm::opt::ArgList &Args) const override { return false; }
+   bool isPICDefault() const override { return true; }
+ 
+@@ -31,6 +69,8 @@ public:
+   void addLibStdCxxIncludePaths(
+       const llvm::opt::ArgList &DriverArgs,
+       llvm::opt::ArgStringList &CC1Args) const override;
++protected:
++  Tool *buildLinker() const override;
+ };
+ 
+ } // end namespace toolchains
+-- 
+2.43.2
+
+
+From 7306a47448a920cfaf34c8314208dc8e90e974dc Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Wed, 9 Aug 2023 23:05:15 +0200
+Subject: Haiku: implement GCC installation detection
+
+
+diff --git a/clang/lib/Driver/ToolChains/Gnu.cpp b/clang/lib/Driver/ToolChains/Gnu.cpp
+index 40038dc..8b49cb2 100644
+--- a/clang/lib/Driver/ToolChains/Gnu.cpp
++++ b/clang/lib/Driver/ToolChains/Gnu.cpp
+@@ -2276,6 +2276,15 @@ void Generic_GCC::GCCInstallationDetector::AddDefaultGCCPrefixes(
+     Prefixes.push_back("/opt/rh/devtoolset-2/root/usr");
+   }
+ 
++  if (TargetTriple.getOS() == llvm::Triple::Haiku) {
++#ifdef HAIKU_HYBRID_SECONDARY
++    Prefixes.push_back("/boot/system/develop/tools/" HAIKU_HYBRID_SECONDARY);
++#else
++    Prefixes.push_back("/boot/system/develop/tools");
++#endif
++    return;
++  }
++
+   // Fall back to /usr which is used by most non-Solaris systems.
+   Prefixes.push_back(concat(SysRoot, "/usr"));
+ }
+@@ -2422,6 +2431,23 @@ void Generic_GCC::GCCInstallationDetector::AddDefaultGCCPrefixes(
+   using std::begin;
+   using std::end;
+ 
++  if (TargetTriple.getOS() == llvm::Triple::Haiku) {
++    static const char *const HaikuLibDirs[] = {"/lib"};
++    static const char *const HaikuX86Triples[] = {"i586-unknown-haiku"};
++    static const char *const HaikuX86_64Triples[] = {"x86_64-unknown-haiku"};
++    LibDirs.append(begin(HaikuLibDirs), end(HaikuLibDirs));
++    switch (TargetTriple.getArch()) {
++    case llvm::Triple::x86:
++      TripleAliases.append(begin(HaikuX86Triples), end(HaikuX86Triples));
++      break;
++    case llvm::Triple::x86_64:
++      TripleAliases.append(begin(HaikuX86_64Triples), end(HaikuX86_64Triples));
++      break;
++    default:
++      break;
++    }
++  }
++
+   if (TargetTriple.getOS() == llvm::Triple::Solaris) {
+     static const char *const SolarisLibDirs[] = {"/lib"};
+     static const char *const SolarisSparcV8Triples[] = {
+diff --git a/clang/lib/Driver/ToolChains/Haiku.cpp b/clang/lib/Driver/ToolChains/Haiku.cpp
+index eea14dd..217315f 100644
+--- a/clang/lib/Driver/ToolChains/Haiku.cpp
++++ b/clang/lib/Driver/ToolChains/Haiku.cpp
+@@ -148,7 +148,7 @@ void haiku::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+ 
+ Haiku::Haiku(const Driver &D, const llvm::Triple& Triple, const ArgList &Args)
+   : Generic_ELF(D, Triple, Args) {
+-
++  GCCInstallation.init(Triple, Args);
+ #ifdef HAIKU_HYBRID_SECONDARY
+   getProgramPaths().insert(getProgramPaths().begin(), getDriver().SysRoot
+                            + "/system/bin/" HAIKU_HYBRID_SECONDARY);
+@@ -159,6 +159,10 @@ Haiku::Haiku(const Driver &D, const llvm::Triple& Triple, const ArgList &Args)
+   getFilePaths().push_back(getDriver().SysRoot + "/boot/system/lib");
+   getFilePaths().push_back(getDriver().SysRoot + "/boot/system/develop/lib");
+ #endif
++
++  if (GCCInstallation.isValid()) {
++    getFilePaths().push_back(GCCInstallation.getInstallPath().str());
++  }
+ }
+ 
+ ToolChain::CXXStdlibType Haiku::GetDefaultCXXStdlibType() const {
+-- 
+2.43.2
+
+
+From 5b016fae657630d1a5b36342840f18699d22f74e Mon Sep 17 00:00:00 2001
+From: Trung Nguyen <57174311+trungnt2910@users.noreply.github.com>
+Date: Mon, 14 Aug 2023 14:58:56 +1000
+Subject: clang: Haiku: Add missing GNU headers include path
+
+
+diff --git a/clang/lib/Lex/InitHeaderSearch.cpp b/clang/lib/Lex/InitHeaderSearch.cpp
+index de70e50..0e8df73 100644
+--- a/clang/lib/Lex/InitHeaderSearch.cpp
++++ b/clang/lib/Lex/InitHeaderSearch.cpp
+@@ -330,6 +330,7 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
+     AddPath("/boot/system/develop/headers/3rdparty", System, false);
+     AddPath("/boot/system/develop/headers/bsd", System, false);
+     AddPath("/boot/system/develop/headers/glibc", System, false);
++    AddPath("/boot/system/develop/headers/gnu", System, false);
+     AddPath("/boot/system/develop/headers/posix", System, false);
+ #ifdef HAIKU_HYBRID_SECONDARY
+     AddPath("/boot/system/develop/headers/" HAIKU_HYBRID_SECONDARY, System, false);
+-- 
+2.43.2
+
+
+From 7dde7c825b682812aaf056b0c23216393738562f Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Sat, 26 Aug 2023 09:36:42 +0200
+Subject: clang: Haiku: silence warning for -pie
+
+
+diff --git a/clang/lib/Driver/ToolChains/Haiku.cpp b/clang/lib/Driver/ToolChains/Haiku.cpp
+index 217315f..e9d1187 100644
+--- a/clang/lib/Driver/ToolChains/Haiku.cpp
++++ b/clang/lib/Driver/ToolChains/Haiku.cpp
+@@ -35,6 +35,9 @@ void haiku::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+   // handled somewhere else.
+   Args.ClaimAllArgs(options::OPT_w);
+ 
++  // Silence warning for "clang -pie foo.o -o foo"
++  Args.ClaimAllArgs(options::OPT_pie);
++
+   if (!D.SysRoot.empty())
+     CmdArgs.push_back(Args.MakeArgString("--sysroot=" + D.SysRoot));
+ /*
+-- 
+2.43.2
+
+
+From 4e903e74f30a02083405a4d86cd04d0af6a9cb29 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Sun, 27 Aug 2023 19:32:12 +0200
+Subject: clang: Haiku: silence warning for -pthread and -pthreads when linking
+ against libroot
+
+
+diff --git a/clang/lib/Driver/ToolChains/Haiku.cpp b/clang/lib/Driver/ToolChains/Haiku.cpp
+index e9d1187..f5f7e99 100644
+--- a/clang/lib/Driver/ToolChains/Haiku.cpp
++++ b/clang/lib/Driver/ToolChains/Haiku.cpp
+@@ -131,6 +131,10 @@ void haiku::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+     CmdArgs.push_back("--as-needed");
+     CmdArgs.push_back("-lgcc_s");
+     CmdArgs.push_back("--pop-state");
++
++    // No need to do anything for pthreads. Claim argument to avoid warning.
++    Args.ClaimAllArgs(options::OPT_pthread);
++    Args.ClaimAllArgs(options::OPT_pthreads);
+   }
+ 
+   if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nostartfiles,
+-- 
+2.43.2
+
+
+From 3328623756634a436e960e2d3c682d76c3b07d4e Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Tue, 12 Sep 2023 18:30:30 +0200
+Subject: clang: Haiku: remove custom addLibStdCxxIncludePaths implementation
+
+* previous implementation referred to a non-existent directory
+* we can reuse the logic inherited from base class Generic_GCC
+
+diff --git a/clang/lib/Driver/ToolChains/Haiku.cpp b/clang/lib/Driver/ToolChains/Haiku.cpp
+index f5f7e99..60434c6 100644
+--- a/clang/lib/Driver/ToolChains/Haiku.cpp
++++ b/clang/lib/Driver/ToolChains/Haiku.cpp
+@@ -186,18 +186,6 @@ void Haiku::addLibCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+                    getDriver().SysRoot + "/boot/system/develop/headers/c++/v1");
+ }
+ 
+-void Haiku::addLibStdCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+-                                     llvm::opt::ArgStringList &CC1Args) const {
+-#ifdef HAIKU_HYBRID_SECONDARY
+-  addLibStdCXXIncludePaths(getDriver().SysRoot + "/boot/system/develop/headers/"
+-                     HAIKU_HYBRID_SECONDARY "/c++", getTriple().str(), "",
+-                     DriverArgs, CC1Args);
+-#else
+-  addLibStdCXXIncludePaths(getDriver().SysRoot + "/boot/system/develop/headers/c++",
+-                           getTriple().str(), "", DriverArgs, CC1Args);
+-#endif
+-}
+-
+ void Haiku::AddCXXStdlibLibArgs(const ArgList &Args,
+                                   ArgStringList &CmdArgs) const {
+   CXXStdlibType Type = GetCXXStdlibType(Args);
+diff --git a/clang/lib/Driver/ToolChains/Haiku.h b/clang/lib/Driver/ToolChains/Haiku.h
+index 70fc0dc..be3425e 100644
+--- a/clang/lib/Driver/ToolChains/Haiku.h
++++ b/clang/lib/Driver/ToolChains/Haiku.h
+@@ -66,9 +66,6 @@ public:
+   void addLibCxxIncludePaths(
+       const llvm::opt::ArgList &DriverArgs,
+       llvm::opt::ArgStringList &CC1Args) const override;
+-  void addLibStdCxxIncludePaths(
+-      const llvm::opt::ArgList &DriverArgs,
+-      llvm::opt::ArgStringList &CC1Args) const override;
+ protected:
+   Tool *buildLinker() const override;
+ };
+-- 
+2.43.2
+
+
+From aac28899eea2b1cf54126640617cec7cfbe84323 Mon Sep 17 00:00:00 2001
+From: David Karoly <karolyd577@gmail.com>
+Date: Thu, 21 Sep 2023 17:44:12 +0000
+Subject: fix build on x86 secondary arch
+
+
+diff --git a/clang/lib/Headers/CMakeLists.txt b/clang/lib/Headers/CMakeLists.txt
+index db47de2..afde831 100644
+--- a/clang/lib/Headers/CMakeLists.txt
++++ b/clang/lib/Headers/CMakeLists.txt
+@@ -313,7 +313,7 @@ set(llvm_libc_wrapper_files
+ )
+ 
+ include(GetClangResourceDir)
+-get_clang_resource_dir(output_dir PREFIX ${LLVM_LIBRARY_OUTPUT_INTDIR}/.. SUBDIR include)
++get_clang_resource_dir(output_dir PREFIX ${CMAKE_BINARY_DIR}/${CMAKE_CFG_INTDIR} SUBDIR include)
+ set(out_files)
+ set(generated_files)
+ 
+-- 
+2.43.2
+
+
+From f9a07dd58630073b9cfbc1a828d0ce377f42bf1c Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Fri, 13 Oct 2023 21:35:29 +0200
+Subject: clang: link against crti.o
+
+
+diff --git a/clang/lib/Driver/ToolChains/Haiku.cpp b/clang/lib/Driver/ToolChains/Haiku.cpp
+index 60434c6..2b507b1 100644
+--- a/clang/lib/Driver/ToolChains/Haiku.cpp
++++ b/clang/lib/Driver/ToolChains/Haiku.cpp
+@@ -85,6 +85,7 @@ void haiku::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+       crt1 = "start_dyn.o";
+     }
+ 
++    CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crti.o")));
+     CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crtbeginS.o")));
+     if (crt1)
+       CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath(crt1)));
+-- 
+2.43.2
+
+
+From ce89b900eee3a997a64386b17ef14499b678fd0b Mon Sep 17 00:00:00 2001
+From: Calvin Hill <calvin@hakobaito.co.uk>
+Date: Thu, 2 Nov 2023 07:44:17 +0000
+Subject: lld: Make --no-undefined-version into a warning
+
+
+diff --git a/lld/ELF/SymbolTable.cpp b/lld/ELF/SymbolTable.cpp
+index 0437095..85a0041 100644
+--- a/lld/ELF/SymbolTable.cpp
++++ b/lld/ELF/SymbolTable.cpp
+@@ -280,7 +280,7 @@ void SymbolTable::scanVersionScript() {
+                                    pat.isExternCpp, /*hasWildCard=*/false},
+                                   id, ver, /*includeNonDefault=*/true);
+       if (!found && !config->undefinedVersion)
+-        errorOrWarn("version script assignment of '" + ver + "' to symbol '" +
++        warn("version script assignment of '" + ver + "' to symbol '" +
+                     pat.name + "' failed: symbol not defined");
+     };
+     for (SymbolVersion &pat : v.nonLocalPatterns)
+diff --git a/lld/test/ELF/version-script-noundef.s b/lld/test/ELF/version-script-noundef.s
+index b99fb17..9cdfa1e 100644
+--- a/lld/test/ELF/version-script-noundef.s
++++ b/lld/test/ELF/version-script-noundef.s
+@@ -5,17 +5,17 @@
+ # RUN: not ld.lld --version-script %t.script -shared %t.o -o /dev/null \
+ # RUN:    --fatal-warnings 2>&1 | FileCheck -check-prefix=ERR1 %s
+ # RUN: ld.lld --version-script %t.script -shared --undefined-version %t.o -o %t.so
+-# RUN: not ld.lld --version-script %t.script -shared --no-undefined-version \
++# RUN: ld.lld --version-script %t.script -shared --no-undefined-version \
+ # RUN:   %t.o -o %t.so 2>&1 | FileCheck -check-prefix=ERR1 %s
+ # ERR1: version script assignment of 'VERSION_1.0' to symbol 'bar' failed: symbol not defined
+ 
+ # RUN: echo "VERSION_1.0 { global: und; };" > %t2.script
+-# RUN: not ld.lld --version-script %t2.script -shared --no-undefined-version \
++# RUN: ld.lld --version-script %t2.script -shared --no-undefined-version \
+ # RUN:   %t.o -o %t.so 2>&1 | FileCheck -check-prefix=ERR2 %s
+ # ERR2: version script assignment of 'VERSION_1.0' to symbol 'und' failed: symbol not defined
+ 
+ # RUN: echo "VERSION_1.0 { local: und; };" > %t3.script
+-# RUN: not ld.lld --version-script %t3.script -shared --no-undefined-version \
++# RUN: ld.lld --version-script %t3.script -shared --no-undefined-version \
+ # RUN:   %t.o -o %t.so 2>&1 | FileCheck -check-prefix=ERR3 %s
+ # ERR3: version script assignment of 'local' to symbol 'und' failed: symbol not defined
+ 
+-- 
+2.43.2
+
+
+From 88c81c50dc3d82881dbf214e5468f0fbd3640ada Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Mon, 6 Nov 2023 14:24:21 +0100
+Subject: clang: Haiku: patch for analyzer scripts
+
+
+diff --git a/clang/tools/scan-build/bin/scan-build b/clang/tools/scan-build/bin/scan-build
+index 04734d9..f41d1b7 100755
+--- a/clang/tools/scan-build/bin/scan-build
++++ b/clang/tools/scan-build/bin/scan-build
+@@ -1888,8 +1888,8 @@ if ($Clang !~ /\+\+(\.exe)?$/) {
+ 
+ # Determine the location of ccc-analyzer.
+ my $AbsRealBin = Cwd::realpath($RealBin);
+-my $Cmd = "$AbsRealBin/../libexec/ccc-analyzer";
+-my $CmdCXX = "$AbsRealBin/../libexec/c++-analyzer";
++my $Cmd = "$AbsRealBin/../lib/ccc-analyzer";
++my $CmdCXX = "$AbsRealBin/../lib/c++-analyzer";
+ 
+ # Portability: use less strict but portable check -e (file exists) instead of
+ # non-portable -x (file is executable). On some windows ports -x just checks
+diff --git a/clang/tools/scan-view/bin/scan-view b/clang/tools/scan-view/bin/scan-view
+index d01aebb..f337580 100755
+--- a/clang/tools/scan-view/bin/scan-view
++++ b/clang/tools/scan-view/bin/scan-view
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python
++#!/usr/bin/env python3
+ 
+ from __future__ import print_function
+ 
+-- 
+2.43.2
+
+
+From c673cac7374e2a5895f0be337775c1074237f7e0 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 19 May 2024 10:31:55 +0200
+Subject: Allow linking gcc compiled code with lld
+
+https://github.com/haikuports/haikuports/issues/10445
+
+diff --git a/lld/ELF/Driver.cpp b/lld/ELF/Driver.cpp
+index c2059c7..31541a4 100644
+--- a/lld/ELF/Driver.cpp
++++ b/lld/ELF/Driver.cpp
+@@ -186,8 +186,8 @@ static std::tuple<ELFKind, uint16_t, uint8_t> parseEmulation(StringRef emul) {
+           .Case("elf64lriscv", {ELF64LEKind, EM_RISCV})
+           .Case("elf64ppc", {ELF64BEKind, EM_PPC64})
+           .Case("elf64lppc", {ELF64LEKind, EM_PPC64})
+-          .Cases("elf_amd64", "elf_x86_64", {ELF64LEKind, EM_X86_64})
+-          .Case("elf_i386", {ELF32LEKind, EM_386})
++          .Cases("elf_amd64", "elf_x86_64", "elf_x86_64_haiku", {ELF64LEKind, EM_X86_64})
++          .Cases("elf_i386", "elf_i386_haiku", {ELF32LEKind, EM_386})
+           .Case("elf_iamcu", {ELF32LEKind, EM_IAMCU})
+           .Case("elf64_sparc", {ELF64BEKind, EM_SPARCV9})
+           .Case("msp430elf", {ELF32LEKind, EM_MSP430})
+-- 
+2.43.2
+

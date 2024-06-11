@@ -1,0 +1,178 @@
+From 309341ff0c5bf878178589f8a3f4a598b97d1bb7 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 10 Mar 2024 21:32:29 +1000
+Subject: Fixes for Haiku
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2a127d6..074fc29 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -296,6 +296,14 @@ if (ANDROID)
+ endif ()
+ 
+ # Add security (hardening flags)
++IF (HAIKU)
++	SET(SEC_COMP_FLAGS "-D_FORTIFY_SOURCE=2 -Wcast-align -Wa,--noexecstack")
++	SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${SEC_COMP_FLAGS}")
++	SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SEC_COMP_FLAGS}")
++	SET(SEC_LINK_FLAGS "-Wl,-z,nodump -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now")
++	SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${SEC_LINK_FLAGS}")
++	SET(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${SEC_LINK_FLAGS}")
++ELSE ()
+ IF (UNIX OR APPLE OR ANDROID)
+     SET(SEC_COMP_FLAGS "-D_FORTIFY_SOURCE=2 -fstack-protector-all -Wcast-align -fPIE")
+     IF (NOT ANDROID AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND NOT APPLE)
+@@ -317,6 +325,7 @@ IF (UNIX OR APPLE OR ANDROID)
+     SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${SEC_LINK_FLAGS}")
+     SET(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${SEC_LINK_FLAGS}")
+ ENDIF ()
++ENDIF ()
+ 
+ # Clang Format support
+ IF (UNIX OR APPLE)
+@@ -438,7 +447,7 @@ include_directories(utils)
+ add_subdirectory(kstars)
+ add_subdirectory(datahandlers)
+ 
+-IF (NOT ANDROID)
++IF (NOT ANDROID AND NOT HAIKU)
+     IF (BUILD_TESTING)
+     enable_testing(true)
+     add_subdirectory(Tests)
+diff --git a/kstars/auxiliary/thememanager.cpp b/kstars/auxiliary/thememanager.cpp
+index e636e05..67deb9c 100644
+--- a/kstars/auxiliary/thememanager.cpp
++++ b/kstars/auxiliary/thememanager.cpp
+@@ -140,9 +140,11 @@ void Manager::slotChangePalette()
+     if (theme == "Macintosh" || theme == "White Balance" || theme == "High Key" || (theme == "Default"
+             && currentDesktopdefaultTheme().contains("Dark") == false))
+         themeIconType = BREEZE_THEME;
+-
++#if defined(Q_OS_HAIKU)
++	if (theme == "Default")
++		themeIconType = SYSTEM_THEME;
+     setIconTheme(themeIconType);
+-
++#endif
+     QString filename        = d->themeMap.value(theme);
+     KSharedConfigPtr config = KSharedConfig::openConfig(filename);
+     // hint for the style to synchronize the color scheme with the window manager/compositor
+@@ -164,6 +166,10 @@ void Manager::slotChangePalette()
+ 
+     if(theme == "Macintosh")
+         qApp->setStyle(QStyleFactory::create("macintosh"));
++#if defined(Q_OS_HAIKU)
++	else if(theme == "Default")
++		qApp->setStyle(QStyleFactory::create("haiku"));
++#endif
+     else
+     {
+         if (qgetenv("XDG_CURRENT_DESKTOP") != "KDE")
+@@ -398,6 +404,12 @@ void Manager::setIconTheme(IconTheme theme)
+     QString resourcePath = QStandardPaths::locate(QStandardPaths::GenericDataLocation, "icons",
+                            QStandardPaths::LocateDirectory) + QDir::separator() + iconTheme + QDir::separator() + rccFile;
+     QResource::registerResource(resourcePath, "/icons/" + iconTheme);
++#elif defined(Q_OS_HAIKU)
++	if (theme == SYSTEM_THEME)
++		iconTheme = "haiku";
++	themeSearchPaths = themeSearchPaths << QStandardPaths::locate(QStandardPaths::GenericDataLocation, "icons", QStandardPaths::LocateDirectory);
++	QString resourcePath = QStandardPaths::locate(QStandardPaths::GenericDataLocation, "icons", QStandardPaths::LocateDirectory) + QDir::separator() + iconTheme + QDir::separator() + rccFile;
++	QResource::registerResource(resourcePath, "/icons/" + iconTheme);
+ #else
+     // On Linux on non-KDE Distros, find out if the themes are installed or not and perhaps warn the user
+     // The important point is that the current theme must be left as is to avoid empty icons
+diff --git a/kstars/auxiliary/thememanager.h b/kstars/auxiliary/thememanager.h
+index ca6eeb1..d29faa6 100644
+--- a/kstars/auxiliary/thememanager.h
++++ b/kstars/auxiliary/thememanager.h
+@@ -28,7 +28,7 @@ class Manager : public QObject
+ 
+ public:
+ 
+-    typedef enum { BREEZE_THEME, BREEZE_DARK_THEME } IconTheme;
++    typedef enum { BREEZE_THEME, BREEZE_DARK_THEME, SYSTEM_THEME } IconTheme;
+ 
+     ~Manager();
+     static Manager* instance();
+diff --git a/kstars/dialogs/finddialog.cpp b/kstars/dialogs/finddialog.cpp
+index 77df85c..f80659e 100644
+--- a/kstars/dialogs/finddialog.cpp
++++ b/kstars/dialogs/finddialog.cpp
+@@ -575,7 +575,7 @@ void FindDialog::slotDetails()
+ {
+     if (selectedObject())
+     {
+-        QPointer<DetailDialog> dd = new DetailDialog(selectedObject(), KStarsData::Instance()->ut(),
++        DetailDialog *dd = new DetailDialog(selectedObject(), KStarsData::Instance()->ut(),
+                 KStarsData::Instance()->geo(), KStars::Instance());
+         dd->exec();
+         delete dd;
+diff --git a/kstars/dialogs/fovdialog.cpp b/kstars/dialogs/fovdialog.cpp
+index d457279..4cfbf96 100644
+--- a/kstars/dialogs/fovdialog.cpp
++++ b/kstars/dialogs/fovdialog.cpp
+@@ -129,7 +129,7 @@ void FOVDialog::slotSelect(int irow)
+ 
+ void FOVDialog::slotNewFOV()
+ {
+-    QPointer<NewFOV> newfdlg = new NewFOV(this);
++    NewFOV *newfdlg = new NewFOV(this);
+     if (newfdlg->exec() == QDialog::Accepted)
+     {
+         FOV *newfov = new FOV(newfdlg->getFOV());
+@@ -149,7 +149,7 @@ void FOVDialog::slotEditFOV()
+     FOV *f = item->data(Qt::UserRole).value<FOV *>();
+ 
+     // Create dialog
+-    QPointer<NewFOV> newfdlg = new NewFOV(this, f);
++    NewFOV *newfdlg = new NewFOV(this, f);
+     if (newfdlg->exec() == QDialog::Accepted)
+     {
+         // Overwrite FOV
+diff --git a/kstars/htmesh/SpatialGeneral.h b/kstars/htmesh/SpatialGeneral.h
+index d87c9b0..09d6ae9 100644
+--- a/kstars/htmesh/SpatialGeneral.h
++++ b/kstars/htmesh/SpatialGeneral.h
+@@ -101,7 +101,7 @@ const float64 gEpsilon = 1.0E-15;
+ // standard explicit template instantiation, define.
+ //
+ 
+-#if defined(__APPLE__)
++#if defined(__APPLE__) || defined(__HAIKU__)
+ #define LINKAGE
+ #endif
+ 
+diff --git a/kstars/kstars.cpp b/kstars/kstars.cpp
+index 941e939..379d628 100644
+--- a/kstars/kstars.cpp
++++ b/kstars/kstars.cpp
+@@ -61,8 +61,9 @@ KStars::KStars(bool doSplash, bool clockrun, const QString &startdate)
+     setWindowTitle(i18nc("@title:window", "KStars"));
+ 
+     // Set thread stack size to 32MB
++#ifndef Q_OS_HAIKU
+     QThreadPool::globalInstance()->setStackSize(33554432);
+-
++#endif
+     // Initialize logging settings
+     if (Options::disableLogging())
+         KSUtils::Logging::Disable();
+diff --git a/kstars/main.cpp b/kstars/main.cpp
+index 547f1c2..8609577 100644
+--- a/kstars/main.cpp
++++ b/kstars/main.cpp
+@@ -56,6 +56,10 @@ Q_DECL_EXPORT
+ #endif
+ int main(int argc, char *argv[])
+ {
++#if defined(Q_OS_HAIKU)
++	setenv("QMLSCENE_DEVICE", "softwarecontext", 0);
++#endif
++
+ #if defined(Q_OS_LINUX) || defined(Q_OS_OSX)
+     // Ignore SIGPIPE
+     signal(SIGPIPE, SIG_IGN);
+-- 
+2.43.2
+

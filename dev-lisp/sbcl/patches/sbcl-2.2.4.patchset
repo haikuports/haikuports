@@ -1,4 +1,4 @@
-From 02f8cc6fdc412e9a643a7eb327e17219066efec7 Mon Sep 17 00:00:00 2001
+From 21453c4c6795acf63cc918ce59d89bda121f028f Mon Sep 17 00:00:00 2001
 From: Al Hoang <3811822-hoanga@users.noreply.gitlab.com>
 Date: Sun, 8 May 2022 23:06:29 -0500
 Subject: updated haiku patch
@@ -218,5 +218,189 @@ index 01a9f81..de74553 100644
  
  #ifdef LISP_FEATURE_OPENBSD
 -- 
-2.30.2
+2.37.3
+
+
+From e20e02f6c33bc74f28680833322ae8a6e75c6400 Mon Sep 17 00:00:00 2001
+From: Estevan Castilho <estevan.cps@gmail.com>
+Date: Sun, 28 May 2023 20:26:45 +0000
+Subject: UIOP: don't remove :HAIKU from *FEATURES*
+
+Haiku is in the same position as macOS, where it should have both
+:OS-UNIX and it's own keyword in *FEATURES*, but UIOP inadvertedly
+removes all other keywords once OS-UNIX-P returns true. A similar fix
+is already on ASDF upstream.
+
+diff --git a/contrib/asdf/uiop.lisp b/contrib/asdf/uiop.lisp
+index 6e23972..baf0e13 100644
+--- a/contrib/asdf/uiop.lisp
++++ b/contrib/asdf/uiop.lisp
+@@ -1859,7 +1859,7 @@ except on ABCL where it might change between FASL compilation and runtime."
+                                          (:os-windows . os-windows-p)
+                                          (:genera . os-genera-p) (:os-oldmac . os-oldmac-p)
+                                          (:haiku . os-haiku-p))
+-           :when (and (or (not o) (eq feature :os-macosx)) (funcall detect))
++           :when (and (or (not o) (eq feature :os-macosx) (eq feature :os-haiku)) (funcall detect))
+            :do (setf o feature) (pushnew feature *features*)
+            :else :do (setf *features* (remove feature *features*))
+            :finally
+-- 
+2.37.3
+
+
+From 4c02550e5095d891969c4ce3e23ca3eec37ec80a Mon Sep 17 00:00:00 2001
+From: Estevan Castilho <estevan.cps@gmail.com>
+Date: Sun, 28 May 2023 20:28:30 +0000
+Subject: Setup an alternate stack for signal handling in Haiku
+
+Otherwise we just segfault forever when a stack overflow occurs.
+
+diff --git a/src/runtime/x86-64-haiku-os.c b/src/runtime/x86-64-haiku-os.c
+index 7d2c183..3e6fb4c 100644
+--- a/src/runtime/x86-64-haiku-os.c
++++ b/src/runtime/x86-64-haiku-os.c
+@@ -2,9 +2,23 @@
+ #include "gencgc-alloc-region.h"
+ #include "thread.h"
+ #include "genesis/thread.h"
++#include "interr.h" /* for lose() */
+ #include <signal.h>
++#include <errno.h>
+ 
+ int arch_os_thread_init(struct thread __attribute__((unused)) *thread) {
++    stack_t sigstack;
++#ifdef LISP_FEATURE_C_STACK_IS_CONTROL_STACK
++    /* Signal handlers are run on the control stack, so if it is exhausted
++     * we had better use an alternate stack for whatever signal tells us
++     * we've exhausted it */
++    sigstack.ss_sp    = calc_altstack_base(thread);
++    sigstack.ss_flags = 0;
++    sigstack.ss_size  = calc_altstack_size(thread);
++    if(sigaltstack(&sigstack,0)<0) {
++        lose("Cannot sigaltstack: %s",strerror(errno));
++    }
++#endif
+     return 1;
+ }
+ 
+-- 
+2.37.3
+
+
+From e5abb82629b84b33807401eb8c8af4018aefa7e9 Mon Sep 17 00:00:00 2001
+From: Estevan Castilho <estevan.cps@gmail.com>
+Date: Sun, 28 May 2023 20:30:03 +0000
+Subject: Mark TRACE :ENCAPSULATE NIL tests as broken on Haiku
+
+They just seem to hang while segfaulting forever. No attempt has been
+made to debug this.
+
+diff --git a/tests/debug.impure.lisp b/tests/debug.impure.lisp
+index fd8e4af..4f305e8 100644
+--- a/tests/debug.impure.lisp
++++ b/tests/debug.impure.lisp
+@@ -108,7 +108,7 @@
+ ;;; bug 379
+ (with-test (:name (trace :encapsulate nil)
+             :fails-on (or (and :ppc (not :linux)) :arm64)
+-            :broken-on (or :freebsd))
++            :broken-on (or :freebsd :haiku))
+   (let ((output (with-traced-function (trace-this :encapsulate nil)
+                   (assert (eq 'ok (trace-this))))))
+     (assert (search "TRACE-THIS" output))
+@@ -116,7 +116,7 @@
+ 
+ (with-test (:name (trace :encapsulate nil :recursive)
+             :fails-on (or (and :ppc (not :linux)) :arm64)
+-            :broken-on (or :freebsd))
++            :broken-on (or :freebsd :haiku))
+   (let ((output (with-traced-function (trace-fact :encapsulate nil)
+                   (assert (= 120 (trace-fact 5))))))
+     (assert (search "TRACE-FACT" output))
+-- 
+2.37.3
+
+
+From f23833f7f94d7389a928de25b9fb480267c91c15 Mon Sep 17 00:00:00 2001
+From: Estevan Castilho <estevan.cps@gmail.com>
+Date: Sun, 28 May 2023 20:32:37 +0000
+Subject: Don't assume env is under /usr/bin
+
+On Haiku, it is under /bin instead, and runtime_loader dynamically
+patches script shebangs during load time; so we try getting the
+location from PATH instead.
+
+diff --git a/tests/run-program.test.sh b/tests/run-program.test.sh
+index 3a08741..54389ac 100755
+--- a/tests/run-program.test.sh
++++ b/tests/run-program.test.sh
+@@ -22,8 +22,14 @@ export SOMETHING_IN_THE_ENVIRONMENT
+ PATH=/some/path/that/does/not/exist:${PATH}
+ export PATH
+ 
++# Haiku notably has the env binary on /bin/env, and dynamically
++# patches shebangs referring to /usr/bin/env on runtime_loader. This,
++# of course, doesn't apply to us, so get the actual location from PATH.
++BIN_ENV="$(command -v env || echo /usr/bin/env)"
++
+ # This should probably be broken up into separate pieces.
+-run_sbcl --eval "(defvar *exit-ok* $EXIT_LISP_WIN)" <<'EOF'
++run_sbcl --eval "(defvar *exit-ok* $EXIT_LISP_WIN)" \
++         --eval "(defvar *bin-env* \"$BIN_ENV\")" <<'EOF'
+   ;; test that $PATH is searched
+   (assert (zerop (sb-ext:process-exit-code
+                   (sb-ext:run-program "true" () :search t :wait t))))
+@@ -38,7 +44,7 @@ run_sbcl --eval "(defvar *exit-ok* $EXIT_LISP_WIN)" <<'EOF'
+   ;; Unix environment strings are ordinarily passed with SBCL convention
+   ;; (instead of CMU CL alist-of-keywords convention).
+   (let ((string (with-output-to-string (stream)
+-                  (sb-ext:run-program "/usr/bin/env" ()
++                  (sb-ext:run-program *bin-env* ()
+                                       :output stream
+                                       :environment '("FEEFIE=foefum")))))
+     (assert (equal string "FEEFIE=foefum
+@@ -67,7 +73,7 @@ run_sbcl --eval "(defvar *exit-ok* $EXIT_LISP_WIN)" <<'EOF'
+   (let* ((sb-impl::*default-external-format* :latin-1)
+          (sb-alien::*default-c-string-external-format* :latin-1)   
+          (string (with-output-to-string (stream)
+-                  (sb-ext:run-program "/usr/bin/env" ()
++                  (sb-ext:run-program *bin-env* ()
+                                       :output stream)))
+          (expected (apply #'concatenate
+                          'string
+-- 
+2.37.3
+
+
+From 377f3ad9d5f154dfb011dded46104ef2df14b731 Mon Sep 17 00:00:00 2001
+From: Estevan Castilho <estevan.cps@gmail.com>
+Date: Sun, 28 May 2023 20:34:28 +0000
+Subject: Include missing header, optionally install the SEGV handler on Haiku
+
+
+diff --git a/src/runtime/haiku-os.c b/src/runtime/haiku-os.c
+index f56d06a..74065bc 100644
+--- a/src/runtime/haiku-os.c
++++ b/src/runtime/haiku-os.c
+@@ -3,6 +3,7 @@
+ #include "interrupt.h"
+ #include "arch.h" // for arch_get_bad_addr
+ #include "interrupt.h" // for sig_stop_for_gc_handler
++#include "gc-internal.h" // for gencgc_handle_wp_violation
+ #include <image.h>
+ #include <stdio.h>
+ 
+@@ -78,7 +79,9 @@ sigsegv_handler(int signal, siginfo_t *info, os_context_t *context)
+ void
+ os_install_interrupt_handlers(void)
+ {
+-    ll_install_handler(SIGSEGV, sigsegv_handler);
++    if (INSTALL_SIG_MEMORY_FAULT_HANDLER) {
++        ll_install_handler(SIGSEGV, sigsegv_handler);
++    }
+ }
+ 
+ int pthread_getattr_np(pthread_t thread, pthread_attr_t *attr)
+-- 
+2.37.3
 
