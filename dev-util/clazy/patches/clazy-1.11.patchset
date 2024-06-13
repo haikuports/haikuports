@@ -1,4 +1,4 @@
-From 25069b81e93503e892ff6157ee99e8d3f75f18a4 Mon Sep 17 00:00:00 2001
+From 782b36b80abbe8ebe947883aa0c4dca1179268da Mon Sep 17 00:00:00 2001
 From: Cristian Adam <cristian.adam@qt.io>
 Date: Tue, 6 Sep 2022 16:30:02 +0200
 Subject: Build fixes for LLVM/Clang 15.0.0
@@ -206,10 +206,10 @@ index ae09f7a..8ffbb10 100644
  
  };
 -- 
-2.43.2
+2.45.1
 
 
-From f657b80d8052f8ac49ee0ca08a1c3f58785ce933 Mon Sep 17 00:00:00 2001
+From 840ccca8ab06fd67760e11bf8dac083877728543 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Ivan=20=C4=8Cuki=C4=87?= <ivan.cukic@kdab.com>
 Date: Tue, 7 Feb 2023 11:06:19 +0100
 Subject: Adapt to API changes in clang/llvm 16
@@ -285,37 +285,179 @@ index b0da926..1ba1126 100644
                  emitWarning(capture.getLocation(), "captured local variable by reference might go out of scope before lambda is called");
          }
 -- 
-2.43.2
+2.45.1
 
 
-From 536a9c871686bb97f4ec8c2d341923e15a069ab3 Mon Sep 17 00:00:00 2001
-From: Schrijvers Luc <begasus@gmail.com>
-Date: Fri, 19 Apr 2024 18:42:40 +0200
-Subject: Fix build with LLVM 17 (Arch fix)
+From 08dd17a6a47b0a375a7d51c37e7a331c190188bf Mon Sep 17 00:00:00 2001
+From: Cristian Adam <cristian.adam@gmail.com>
+Date: Mon, 14 Aug 2023 18:16:01 +0200
+Subject: Fix compilation with LLVM 17.0.0 (rc2)
 
+Change-Id: I9d3fc86185c1e7c86145da043e1982d2979b36e9
 
 diff --git a/src/checks/manuallevel/unexpected-flag-enumerator-value.cpp b/src/checks/manuallevel/unexpected-flag-enumerator-value.cpp
-index ae1e607..813fc71 100644
+index ae1e607..2735404 100644
 --- a/src/checks/manuallevel/unexpected-flag-enumerator-value.cpp
 +++ b/src/checks/manuallevel/unexpected-flag-enumerator-value.cpp
-@@ -61,7 +61,7 @@ static bool isIntentionallyNotPowerOf2(EnumConstantDecl *en) {
+@@ -61,9 +61,13 @@ static bool isIntentionallyNotPowerOf2(EnumConstantDecl *en) {
      if (val.isMask() && val.countTrailingOnes() >= MinOnesToQualifyAsMask)
          return true;
  
--    if (val.isShiftedMask() && val.countPopulation() >= MinOnesToQualifyAsMask)
++#if LLVM_VERSION_MAJOR >= 17
 +    if (val.isShiftedMask() && val.popcount() >= MinOnesToQualifyAsMask)
++        return true;
++#else
+     if (val.isShiftedMask() && val.countPopulation() >= MinOnesToQualifyAsMask)
+         return true;
+-
++#endif
+     if (clazy::contains_lower(en->getName(), "mask"))
          return true;
  
-     if (clazy::contains_lower(en->getName(), "mask"))
-@@ -158,7 +158,7 @@ void UnexpectedFlagEnumeratorValue::VisitDecl(clang::Decl *decl)
+@@ -158,7 +162,11 @@ void UnexpectedFlagEnumeratorValue::VisitDecl(clang::Decl *decl)
  
      for (EnumConstantDecl* enumerator : enumerators) {
          const auto &initVal = enumerator->getInitVal();
--        if (!initVal.isPowerOf2() && !initVal.isNullValue() && !initVal.isNegative()) {
++#if LLVM_VERSION_MAJOR >= 17
 +        if (!initVal.isPowerOf2() && !initVal.isZero() && !initVal.isNegative()) {
++#else
+         if (!initVal.isPowerOf2() && !initVal.isNullValue() && !initVal.isNegative()) {
++#endif
              if (isIntentionallyNotPowerOf2(enumerator))
                  continue;
              const auto value = enumerator->getInitVal().getLimitedValue();
 -- 
-2.43.2
+2.45.1
+
+
+From b27a4294635f87988ca04613aabd15220ef78569 Mon Sep 17 00:00:00 2001
+From: Cristian Adam <cristian.adam@gmail.com>
+Date: Mon, 12 Feb 2024 15:42:57 +0100
+Subject: Fix compiler error with LLVM 18
+
+Change-Id: Iae75ad46a90a8c0cddf4ab986bb922ce18ffc2af
+Reviewed-by: Alessandro Portale <alessandro.portale@qt.io>
+
+diff --git a/src/FunctionUtils.h b/src/FunctionUtils.h
+index 37504b0..a0db912 100644
+--- a/src/FunctionUtils.h
++++ b/src/FunctionUtils.h
+@@ -96,6 +96,15 @@ inline bool parametersMatch(const clang::FunctionDecl *f1, const clang::Function
+     return true;
+ }
+ 
++inline bool isPureVirtual(const clang::CXXMethodDecl *decl)
++{
++#if LLVM_VERSION_MAJOR >= 18
++    return decl->isPureVirtual();
++#else
++    return decl->isPure();
++#endif
++}
++
+ /**
+  * Returns true if a class contains a method with a specific signature.
+  * (method->getParent() doesn't need to equal record)
+@@ -107,7 +116,7 @@ inline bool classImplementsMethod(const clang::CXXRecordDecl *record, const clan
+ 
+     llvm::StringRef methodName = clazy::name(method);
+     for (auto m : record->methods()) {
+-        if (!m->isPure() && clazy::name(m) == methodName && parametersMatch(m, method))
++        if (!clazy::isPureVirtual(m) && clazy::name(m) == methodName && parametersMatch(m, method))
+             return true;
+     }
+ 
+diff --git a/src/checks/level2/virtual-call-ctor.cpp b/src/checks/level2/virtual-call-ctor.cpp
+index e6af81c..6bc2b34 100644
+--- a/src/checks/level2/virtual-call-ctor.cpp
++++ b/src/checks/level2/virtual-call-ctor.cpp
+@@ -23,6 +23,7 @@
+ */
+ 
+ #include "virtual-call-ctor.h"
++#include "FunctionUtils.h"
+ #include "HierarchyUtils.h"
+ #include "SourceCompatibilityHelpers.h"
+ #include "clazy_stl.h"
+@@ -115,7 +116,7 @@ SourceLocation VirtualCallCtor::containsVirtualCall(clang::CXXRecordDecl *classD
+             continue;
+ 
+         if (memberDecl->getParent() == classDecl) {
+-            if (memberDecl->isPure()) {
++            if (clazy::isPureVirtual(memberDecl)) {
+                 return clazy::getLocStart(callExpr);
+             } else {
+                 if (containsVirtualCall(classDecl, memberDecl->getBody(), processedStmts).isValid())
+-- 
+2.45.1
+
+
+From 44f32f88606abc72f7afeca18d51d5a9d43e9dbf Mon Sep 17 00:00:00 2001
+From: Cristian Adam <cristian.adam@gmail.com>
+Date: Mon, 12 Feb 2024 15:43:15 +0100
+Subject: Fix linker error with LLVM 18
+
+Change-Id: I4090a66912568b007619d6dacc2f91a9f5466767
+Reviewed-by: Alessandro Portale <alessandro.portale@qt.io>
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d89325e..b503d13 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -118,6 +118,10 @@ if (${LLVM_VERSION} VERSION_GREATER_EQUAL "15.0.0")
+   set(clang_support_lib clangSupport)
+ endif()
+ 
++if (${LLVM_VERSION} VERSION_GREATER_EQUAL "18.0.0")
++  set(clang_api_notes_lib clangAPINotes)
++endif()
++
+ macro(link_to_llvm name is_standalone)
+   if (CLAZY_LINK_CLANG_DYLIB)
+     target_link_libraries(${name} clang-cpp)
+@@ -139,6 +143,7 @@ macro(link_to_llvm name is_standalone)
+     target_link_libraries(${name} clangTooling)
+     target_link_libraries(${name} clangToolingCore)
+     target_link_libraries(${name} ${clang_tooling_refactoring_lib})
++    target_link_libraries(${name} ${clang_api_notes_lib})
+   endif()
+ 
+   foreach(llvm_lib ${LLVM_LIBS})
+@@ -312,6 +317,7 @@ else()
+     clangStaticAnalyzerCheckers
+     clangStaticAnalyzerCore
+     clangStaticAnalyzerFrontend
++    ${clang_api_notes_lib}
+     )
+   add_executable(clazy-standalone ${CLAZY_STANDALONE_SRCS})
+ 
+-- 
+2.45.1
+
+
+From 6fd688c72eda9a1ccf76ac697cc8735ebb7b70fd Mon Sep 17 00:00:00 2001
+From: Schrijvers Luc <begasus@gmail.com>
+Date: Thu, 13 Jun 2024 13:50:31 +0200
+Subject: Disable PCH for 32bit
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b503d13..23a39ab 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -178,10 +178,12 @@ macro(add_clang_plugin name)
+ 
+   add_library(${name} SHARED ${srcs})
+ 
++if(NOT HAIKU)
+   if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "3.16.0")
+       # 30% speedup
+       target_precompile_headers(${name} PRIVATE src/checkbase.h)
+   endif()
++endif(HAIKU)
+ 
+   if(SYMBOL_FILE)
+     set_target_properties(${name} PROPERTIES LINK_FlAGS "-exported_symbols_list ${SYMBOL_FILE}")
+-- 
+2.45.1
 
