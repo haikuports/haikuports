@@ -1,0 +1,217 @@
+From 3b411c5c672892b0e4bc0d461bb7fce52dc9416f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Zolt=C3=A1n=20Mizsei?= <zmizsei@extrowerk.com>
+Date: Wed, 6 Jan 2021 11:20:09 +0100
+Subject: Haiku patches
+
+
+diff --git a/cmake/compilers/Clang.cmake b/cmake/compilers/Clang.cmake
+index 7894312..ffb994a 100644
+--- a/cmake/compilers/Clang.cmake
++++ b/cmake/compilers/Clang.cmake
+@@ -23,7 +23,9 @@ if (CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64)
+     set(TBB_COMMON_COMPILE_FLAGS -mrtm)
+ endif()
+ 
++if (NOT HAIKU)
+ set(TBB_COMMON_LINK_LIBS dl)
++endif()
+ 
+ set(TBB_WARNING_SUPPRESS -Wno-non-virtual-dtor -Wno-dangling-else)
+ if (ANDROID_PLATFORM)
+diff --git a/cmake/compilers/GNU.cmake b/cmake/compilers/GNU.cmake
+index 9bff049..36e7913 100644
+--- a/cmake/compilers/GNU.cmake
++++ b/cmake/compilers/GNU.cmake
+@@ -22,7 +22,9 @@ if (CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64)
+     set(TBB_COMMON_COMPILE_FLAGS -mrtm)
+ endif()
+ 
++if (NOT HAIKU)
+ set(TBB_COMMON_LINK_LIBS dl)
++endif()
+ 
+ if (NOT ${CMAKE_CXX_COMPILER_ID} STREQUAL Intel)
+     # gcc 6.0 and later have -flifetime-dse option that controls elimination of stores done outside the object lifetime
+diff --git a/include/oneapi/tbb/detail/_config.h b/include/oneapi/tbb/detail/_config.h
+index 767a258..e459c2d 100644
+--- a/include/oneapi/tbb/detail/_config.h
++++ b/include/oneapi/tbb/detail/_config.h
+@@ -247,7 +247,7 @@
+ #define __TBB_CPP17_ALLOCATOR_IS_ALWAYS_EQUAL_PRESENT   (__TBB_LANG >= 201703L)
+ #define __TBB_CPP17_IS_SWAPPABLE_PRESENT                (__TBB_LANG >= 201703L)
+ 
+-#define __TBB_RESUMABLE_TASKS                           (!__TBB_WIN8UI_SUPPORT && !__ANDROID__)
++#define __TBB_RESUMABLE_TASKS                           (!__TBB_WIN8UI_SUPPORT && !__ANDROID__ && !__HAIKU__)
+ 
+ /* This macro marks incomplete code or comments describing ideas which are considered for the future.
+  * See also for plain comment with TODO and FIXME marks for small improvement opportunities.
+@@ -424,6 +424,11 @@
+     #define TBB_ALLOCATOR_TRAITS_BROKEN 1
+ #endif
+ 
++// HAIKU build fix
++#if defined(__HAIKU__)
++    #define TBB_ALLOCATOR_TRAITS_BROKEN 1
++#endif
++
+ // GCC 4.8 C++ standard library implements std::this_thread::yield as no-op.
+ #if __TBB_GLIBCXX_VERSION >= 40800 && __TBB_GLIBCXX_VERSION < 40900
+     #define __TBB_GLIBCXX_THIS_THREAD_YIELD_BROKEN 1
+diff --git a/src/tbb/allocator.cpp b/src/tbb/allocator.cpp
+index 84cf929..edfa88f 100644
+--- a/src/tbb/allocator.cpp
++++ b/src/tbb/allocator.cpp
+@@ -95,7 +95,7 @@ static const dynamic_link_descriptor MallocLinkTable[] = {
+ #define MALLOCLIB_NAME "tbbmalloc" DEBUG_SUFFIX ".dll"
+ #elif __APPLE__
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX ".dylib"
+-#elif __FreeBSD__ || __NetBSD__ || __OpenBSD__ || __sun || _AIX || __ANDROID__
++#elif __FreeBSD__ || __NetBSD__ || __OpenBSD__ || __sun || _AIX || __ANDROID__ || __HAIKU__
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX ".so"
+ #elif __linux__  // Note that order of these #elif's is important!
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX ".so.2"
+diff --git a/src/tbb/dynamic_link.cpp b/src/tbb/dynamic_link.cpp
+index 0b30546..5f97e16 100644
+--- a/src/tbb/dynamic_link.cpp
++++ b/src/tbb/dynamic_link.cpp
+@@ -387,7 +387,11 @@ namespace r1 {
+     #endif /* !__TBB_DYNAMIC_LOAD_ENABLED */
+         // RTLD_GLOBAL - to guarantee that old TBB will find the loaded library
+         // RTLD_NOLOAD - not to load the library without the full path
+-        library_handle = dlopen(library, RTLD_LAZY | RTLD_GLOBAL | RTLD_NOLOAD);
++        #ifndef __HAIKU__
++		    library_handle = dlopen(library, RTLD_LAZY | RTLD_GLOBAL | RTLD_NOLOAD);
++		#else
++		    library_handle = dlopen(library, RTLD_LAZY | RTLD_GLOBAL);
++		#endif
+ #endif /* _WIN32 */
+         if (library_handle) {
+             if (!resolve_symbols(library_handle, descriptors, required)) {
+diff --git a/src/tbb/rml_tbb.cpp b/src/tbb/rml_tbb.cpp
+index bcb9929..f5c282c 100644
+--- a/src/tbb/rml_tbb.cpp
++++ b/src/tbb/rml_tbb.cpp
+@@ -52,7 +52,7 @@ namespace rml {
+ #define RML_SERVER_NAME "libirml" DEBUG_SUFFIX ".dylib"
+ #elif __linux__
+ #define RML_SERVER_NAME "libirml" DEBUG_SUFFIX ".so.1"
+-#elif __FreeBSD__ || __NetBSD__ || __OpenBSD__ || __sun || _AIX
++#elif __FreeBSD__ || __NetBSD__ || __OpenBSD__ || __sun || _AIX || __HAIKU__
+ #define RML_SERVER_NAME "libirml" DEBUG_SUFFIX ".so"
+ #else
+ #error Unknown OS
+diff --git a/src/tbbmalloc/frontend.cpp b/src/tbbmalloc/frontend.cpp
+index 8f97213..4f331ec 100644
+--- a/src/tbbmalloc/frontend.cpp
++++ b/src/tbbmalloc/frontend.cpp
+@@ -757,7 +757,7 @@ static inline unsigned int highestBitPos(unsigned int n)
+     unsigned int pos;
+ #if __ARCH_x86_32||__ARCH_x86_64
+ 
+-# if __linux__||__APPLE__||__FreeBSD__||__NetBSD__||__OpenBSD__||__sun||__MINGW32__
++# if __linux__||__APPLE__||__FreeBSD__||__NetBSD__||__OpenBSD__||__sun||__MINGW32__||__HAIKU__
+     __asm__ ("bsr %1,%0" : "=r"(pos) : "r"(n));
+ # elif (_WIN32 && (!_WIN64 || __INTEL_COMPILER))
+     __asm
+diff --git a/src/tbbmalloc/tbbmalloc.cpp b/src/tbbmalloc/tbbmalloc.cpp
+index d6345ea..df59736 100644
+--- a/src/tbbmalloc/tbbmalloc.cpp
++++ b/src/tbbmalloc/tbbmalloc.cpp
+@@ -42,7 +42,7 @@ namespace internal {
+ #define MALLOCLIB_NAME "tbbmalloc" DEBUG_SUFFIX ".dll"
+ #elif __APPLE__
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX ".dylib"
+-#elif __FreeBSD__ || __NetBSD__ || __OpenBSD__ || __sun || _AIX || __ANDROID__
++#elif __FreeBSD__ || __NetBSD__ || __OpenBSD__ || __sun || _AIX || __ANDROID__ || __HAIKU__
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX ".so"
+ #elif __linux__
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX  __TBB_STRING(.so.2)
+diff --git a/test/common/memory_usage.h b/test/common/memory_usage.h
+index 88b5f2d..463845c 100644
+--- a/test/common/memory_usage.h
++++ b/test/common/memory_usage.h
+@@ -119,7 +119,8 @@ namespace utils {
+         ASSERT(status == KERN_SUCCESS, NULL);
+         return info.virtual_size - shared_size;
+ #else
+-        return 0;
++        utils::suppress_unused_warning(stat);
++		return 0;
+ #endif
+     }
+ 
+diff --git a/test/common/utils_dynamic_libs.h b/test/common/utils_dynamic_libs.h
+index acac809..95e7519 100644
+--- a/test/common/utils_dynamic_libs.h
++++ b/test/common/utils_dynamic_libs.h
+@@ -43,7 +43,7 @@ namespace utils {
+ #if __APPLE__
+ #define EXT ".dylib"
+ // Android SDK build system does not support .so file name versioning
+-#elif __FreeBSD__ || __NetBSD__ || __sun || _AIX || __ANDROID__
++#elif __FreeBSD__ || __NetBSD__ || __sun || _AIX || __ANDROID__ || __HAIKU__
+ #define EXT ".so"
+ #elif __linux__  // Order of these elif's matters!
+ #define EXT __TBB_STRING(.so.2)
+diff --git a/test/conformance/conformance_resumable_tasks.cpp b/test/conformance/conformance_resumable_tasks.cpp
+index 637c413..7fb704c 100644
+--- a/test/conformance/conformance_resumable_tasks.cpp
++++ b/test/conformance/conformance_resumable_tasks.cpp
+@@ -16,7 +16,7 @@
+ 
+ #include "common/test.h"
+ 
+-#if (!__TBB_WIN8UI_SUPPORT && !defined(WINAPI_FAMILY) && !__ANDROID__)
++#if (!__TBB_WIN8UI_SUPPORT && !defined(WINAPI_FAMILY) && !__ANDROID__ && !__HAIKU__)
+ 
+ #include "oneapi/tbb/task.h"
+ #include "oneapi/tbb/task_group.h"
+-- 
+2.45.1
+
+
+From 9a452f3f5a9c55851b2ea1cbc38a0e67150155fa Mon Sep 17 00:00:00 2001
+From: Schrijvers Luc <begasus@gmail.com>
+Date: Mon, 24 Jun 2024 07:27:44 +0200
+Subject: Fix for undeclared abort()
+
+
+diff --git a/test/common/utils_assert.h b/test/common/utils_assert.h
+index 958a267..c5523b1 100644
+--- a/test/common/utils_assert.h
++++ b/test/common/utils_assert.h
+@@ -17,6 +17,8 @@
+ #ifndef __TBB_test_common_utils_assert_H
+ #define __TBB_test_common_utils_assert_H
+ 
++#include <cstdlib>
++
+ #include "utils_report.h"
+ 
+ #define REPORT_FATAL_ERROR REPORT
+-- 
+2.45.1
+
+
+From f7b9ac14046e14ec648a518439c2c221c2f01530 Mon Sep 17 00:00:00 2001
+From: Schrijvers Luc <begasus@gmail.com>
+Date: Mon, 24 Jun 2024 08:11:54 +0200
+Subject: Disable some warnings turning into errors for the test cases
+
+
+diff --git a/cmake/compilers/GNU.cmake b/cmake/compilers/GNU.cmake
+index 36e7913..66dc9eb 100644
+--- a/cmake/compilers/GNU.cmake
++++ b/cmake/compilers/GNU.cmake
+@@ -14,7 +14,7 @@
+ 
+ set(TBB_LINK_DEF_FILE_FLAG -Wl,--version-script=)
+ set(TBB_DEF_FILE_PREFIX lin${TBB_ARCH})
+-set(TBB_WARNING_LEVEL -Wall -Wextra $<$<BOOL:${TBB_STRICT}>:-Werror> -Wfatal-errors)
++set(TBB_WARNING_LEVEL -Wall -Wextra $<$<BOOL:${TBB_STRICT}>:-Werror> -Wfatal-errors -Wno-error=uninitialized -Wno-error=array-bounds -Wno-error=use-after-free -Wno-error=address -Wno-error=sizeof-array-div)
+ set(TBB_TEST_WARNING_FLAGS -Wshadow -Wcast-qual -Woverloaded-virtual -Wnon-virtual-dtor)
+ 
+ set(TBB_MMD_FLAG -MMD)
+-- 
+2.45.1
+
