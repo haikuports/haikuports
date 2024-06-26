@@ -1,0 +1,221 @@
+From b51fa4f5758ace4d2c758bbbbdfa8207d8e25dea Mon Sep 17 00:00:00 2001
+From: Chris Roberts <cpr420@gmail.com>
+Date: Tue, 25 Jan 2022 16:04:18 -0700
+Subject: Fix SDL2 include paths on Haiku
+
+
+diff --git a/build/cmake/FindSDL2.cmake b/build/cmake/FindSDL2.cmake
+index 53ef5ef..fb405d0 100644
+--- a/build/cmake/FindSDL2.cmake
++++ b/build/cmake/FindSDL2.cmake
+@@ -44,7 +44,7 @@
+ find_path(SDL2_INCLUDE_DIRS SDL.h
+   HINTS
+     ENV SDLDIR
+-  PATH_SUFFIXES include/SDL2 include
++  PATH_SUFFIXES include/SDL2 include SDL2
+ )
+ 
+ find_library(SDL2_LIBRARY_TEMP
+diff --git a/build/cmake/FindSDL2_image.cmake b/build/cmake/FindSDL2_image.cmake
+index abf6474..fdcda2e 100644
+--- a/build/cmake/FindSDL2_image.cmake
++++ b/build/cmake/FindSDL2_image.cmake
+@@ -37,7 +37,7 @@ find_path(SDL2_IMAGE_INCLUDE_DIR SDL_image.h
+   HINTS
+     ENV SDLIMAGEDIR
+     ENV SDLDIR
+-  PATH_SUFFIXES include/SDL2 include
++  PATH_SUFFIXES include/SDL2 include SDL2
+ )
+ 
+ if(NOT SDL2_IMAGE_LIBRARY AND SDL2IMAGE_LIBRARY)
+diff --git a/build/cmake/FindSDL2_mixer.cmake b/build/cmake/FindSDL2_mixer.cmake
+index 0cb24f0..0d6b468 100644
+--- a/build/cmake/FindSDL2_mixer.cmake
++++ b/build/cmake/FindSDL2_mixer.cmake
+@@ -37,7 +37,7 @@ find_path(SDL2_MIXER_INCLUDE_DIR SDL_mixer.h
+   HINTS
+     ENV SDLMIXERDIR
+     ENV SDLDIR
+-  PATH_SUFFIXES include/SDL2 include
++  PATH_SUFFIXES include/SDL2 include SDL2
+ )
+ 
+ if(NOT SDL2_MIXER_LIBRARY AND SDL2MIXER_LIBRARY)
+-- 
+2.30.2
+
+
+From 0cd65ba265c5769aab26ed3aeb6103649478a1b6 Mon Sep 17 00:00:00 2001
+From: Chris Roberts <cpr420@gmail.com>
+Date: Tue, 25 Jan 2022 16:05:23 -0700
+Subject: use FindDirectory() to get the config path on Haiku
+
+
+diff --git a/src/cdogs/files.c b/src/cdogs/files.c
+index 71e742d..55aa11a 100644
+--- a/src/cdogs/files.c
++++ b/src/cdogs/files.c
+@@ -57,6 +57,10 @@
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ 
++#if defined(__HAIKU__)
++#include <FindDirectory.h>
++#endif
++
+ #include "door.h"
+ #include "log.h"
+ #include "map_new.h"
+@@ -611,8 +615,13 @@ const char *GetConfigFilePath(const char *name)
+ 
+ 	strcpy(cfpath, homedir);
+ 
+-#ifndef __EMSCRIPTEN__
++#if !defined(__EMSCRIPTEN__) && !defined(__HAIKU__)
+ 	strcat(cfpath, CDOGS_CFG_DIR);
++#elif defined(__HAIKU__)
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, false, cfpath, sizeof(cfpath)) != B_OK)
++		return NULL;
++
++	strcat(cfpath, "/cdogs-sdl/");
+ #endif
+ 	strcat(cfpath, name);
+ 
+@@ -629,7 +638,7 @@ static bool doMkdir(const char *path)
+ 	(void)e;
+ 	// Mac OS X 10.4 returns EISDIR instead of EEXIST
+ 	// if a dir already exists...
+-	return errno == EEXIST || errno == EISDIR || errno == EACCES;
++	return errno == EEXIST || errno == EISDIR || errno == EACCES || errno == EROFS;
+ }
+ bool mkdir_deep(const char *path)
+ {
+-- 
+2.30.2
+
+
+From c4bedcdf06ea4cb1f4bb1fe1d7ed555f6f230b3b Mon Sep 17 00:00:00 2001
+From: Chris Roberts <cpr420@gmail.com>
+Date: Tue, 25 Jan 2022 16:07:08 -0700
+Subject: use libnetwork on Haiku
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c7ed9b4..5036295 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -128,6 +128,8 @@ else()
+ 	if(NOT BEOS AND NOT HAIKU)
+ 		add_definitions(-Winline -Werror)
+ 		set(EXTRA_LIBRARIES "m")
++	elseif(HAIKU)
++		set(EXTRA_LIBRARIES "network")
+ 	endif()
+ endif()
+ 
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 564cbf3..1caf8a6 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -60,6 +60,8 @@ if(WIN32)
+ 	set(CDOGS_SDL_EXTRA ../build/windows/cdogs.rc)
+ elseif(APPLE)
+ 	set(EXTRA_LIBRARIES "${EXTRA_LIBRARIES} -framework Carbon -framework IOKit")
++elseif(HAIKU)
++	set(EXTRA_LIBRARIES "network")
+ endif()
+ add_executable(cdogs-sdl
+ 	${CDOGS_SDL_SOURCES} ${CDOGS_SDL_HEADERS} ${CDOGS_SDL_EXTRA})
+diff --git a/src/cdogs/enet/CMakeLists.txt b/src/cdogs/enet/CMakeLists.txt
+index ff6b420..9721759 100644
+--- a/src/cdogs/enet/CMakeLists.txt
++++ b/src/cdogs/enet/CMakeLists.txt
+@@ -3,6 +3,10 @@ cmake_policy(SET CMP0054 NEW)
+ 
+ project(enet)
+ 
++if(HAIKU)
++	set(CMAKE_REQUIRED_LIBRARIES network)
++endif()
++
+ # The "configure" step.
+ include(CheckFunctionExists)
+ include(CheckStructHasMember)
+diff --git a/src/tests/CMakeLists.txt b/src/tests/CMakeLists.txt
+index 60a3195..4f92ea9 100644
+--- a/src/tests/CMakeLists.txt
++++ b/src/tests/CMakeLists.txt
+@@ -4,6 +4,8 @@ else()
+ 	if(NOT BEOS AND NOT HAIKU)
+ 		add_definitions(-Wno-unused-label)
+ 		set(EXTRA_LIBRARIES "m")
++	elseif(HAIKU)
++		set(EXTRA_LIBRARIES "network")
+ 	endif()
+ endif()
+ 
+-- 
+2.30.2
+
+
+From 64377f7afd930bb10d75bcbe8ca7af1dffe2328c Mon Sep 17 00:00:00 2001
+From: Chris Roberts <cpr420@gmail.com>
+Date: Tue, 25 Jan 2022 17:29:56 -0700
+Subject: use CDOGS_DATA_DIR as DATA_INSTALL_DIR
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5036295..e700afb 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -195,7 +195,7 @@ elseif(APPLE)
+ 	set(INSTALL_PREFIX "cdogs-sdl")
+ else()
+ 	set(LIB_EXTENSION ".so")
+-	set(DATA_INSTALL_DIR ".")
++	set(DATA_INSTALL_DIR ${CDOGS_DATA_DIR})
+ endif()
+ 
+ # Since Debian wants games binaries in /usr/games
+-- 
+2.30.2
+
+
+From 6c98a73e07c1a845ea13422ea0c0185d4bd4f4d6 Mon Sep 17 00:00:00 2001
+From: Chris Roberts <cpr420@gmail.com>
+Date: Tue, 25 Jan 2022 18:18:28 -0700
+Subject: Don't use a wrapper script on Haiku
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e700afb..b1254eb 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -293,12 +293,6 @@ elseif(APPLE)
+ 				DESTINATION ${INSTALL_PREFIX}/Frameworks)
+ 		endforeach()
+ 	endforeach()
+-elseif(BEOS OR HAIKU)
+-	set(CPACK_GENERATOR TGZ)
+-	install(
+-		FILES ${CMAKE_SOURCE_DIR}/build/haiku/cdogs-sdl.sh
+-		DESTINATION ${INSTALL_PREFIX}
+-		PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+ else()
+ 	# probably linux
+ 
+diff --git a/build/haiku/cdogs-sdl.sh b/build/haiku/cdogs-sdl.sh
+deleted file mode 100644
+index d14ea03..0000000
+--- a/build/haiku/cdogs-sdl.sh
++++ /dev/null
+@@ -1,3 +0,0 @@
+-#!/bin/bash
+-DIR="$( cd "$( dirname "$0" )" && pwd )"
+-cd "$DIR"/bin && ./cdogs-sdl
+\ No newline at end of file
+-- 
+2.30.2
+

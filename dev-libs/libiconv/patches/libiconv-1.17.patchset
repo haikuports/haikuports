@@ -1,0 +1,289 @@
+From b7c8cfddfcc7f6400c43ee23eda906d190740eb2 Mon Sep 17 00:00:00 2001
+From: Robert Kausch <robert.kausch@freac.org>
+Date: Thu, 13 Oct 2022 00:05:46 +0000
+Subject: gcc2 fixes
+
+
+diff --git a/srclib/canonicalize-lgpl.c b/srclib/canonicalize-lgpl.c
+index a7fa7fe..ad7ffdf 100644
+--- a/srclib/canonicalize-lgpl.c
++++ b/srclib/canonicalize-lgpl.c
+@@ -225,10 +225,12 @@ realpath_stk (const char *name, char *resolved,
+       return NULL;
+     }
+ 
++  {
+   struct scratch_buffer extra_buffer, link_buffer;
+   scratch_buffer_init (&extra_buffer);
+   scratch_buffer_init (&link_buffer);
+   scratch_buffer_init (rname_buf);
++  {
+   char *rname_on_stack = rname_buf->data;
+   char *rname = rname_on_stack;
+   bool end_in_extra_buffer = false;
+@@ -271,6 +273,7 @@ realpath_stk (const char *name, char *resolved,
+ 
+   for ( ; *start; start = end)
+     {
++      idx_t startlen;
+       /* Skip sequence of multiple file name separators.  */
+       while (ISSLASH (*start))
+         ++start;
+@@ -281,7 +284,7 @@ realpath_stk (const char *name, char *resolved,
+ 
+       /* Length of this file name component; it can be zero if a file
+          name ends in '/'.  */
+-      idx_t startlen = end - start;
++      startlen = end - start;
+ 
+       if (startlen == 0)
+         break;
+@@ -315,13 +318,13 @@ realpath_stk (const char *name, char *resolved,
+ 
+           dest = __mempcpy (dest, start, startlen);
+           *dest = '\0';
+-
++		  {
+           char *buf;
+           ssize_t n;
+           while (true)
+             {
+-              buf = link_buffer.data;
+               idx_t bufsize = link_buffer.length;
++              buf = link_buffer.data;
+               n = __readlink (rname, buf, bufsize - 1);
+               if (n < bufsize - 1)
+                 break;
+@@ -330,6 +333,9 @@ realpath_stk (const char *name, char *resolved,
+             }
+           if (0 <= n)
+             {
++              char *extra_buf = extra_buffer.data;
++              idx_t end_idx IF_LINT (= 0);
++              size_t len;
+               if (++num_links > __eloop_threshold ())
+                 {
+                   __set_errno (ELOOP);
+@@ -338,11 +344,9 @@ realpath_stk (const char *name, char *resolved,
+ 
+               buf[n] = '\0';
+ 
+-              char *extra_buf = extra_buffer.data;
+-              idx_t end_idx IF_LINT (= 0);
+               if (end_in_extra_buffer)
+                 end_idx = end - extra_buf;
+-              size_t len = strlen (end);
++              len = strlen (end);
+               if (INT_ADD_OVERFLOW (len, n))
+                 {
+                   __set_errno (ENOMEM);
+@@ -393,6 +397,7 @@ realpath_stk (const char *name, char *resolved,
+                       ? dir_check (rname, dest)
+                       : errno == EINVAL))
+             goto error;
++          }
+         }
+     }
+   if (dest > rname + prefix_len + 1 && ISSLASH (dest[-1]))
+@@ -418,6 +423,7 @@ error_nomem:
+     }
+ 
+   return scratch_buffer_dupfree (rname_buf, dest - rname);
++  }}
+ }
+ 
+ /* Return the canonical absolute name of file NAME.  A canonical name
+diff --git a/srclib/careadlinkat.c b/srclib/careadlinkat.c
+index 6ddc35f..9811c41 100644
+--- a/srclib/careadlinkat.c
++++ b/srclib/careadlinkat.c
+@@ -76,7 +76,7 @@ readlink_stk (int fd, char const *filename,
+       buffer = stack_buf;
+       buffer_size = STACK_BUF_SIZE;
+     }
+-
++  {
+   char *buf = buffer;
+   idx_t buf_size_max = MIN (IDX_MAX, MIN (SSIZE_MAX, SIZE_MAX));
+   idx_t buf_size = MIN (buffer_size, buf_size_max);
+@@ -85,6 +85,7 @@ readlink_stk (int fd, char const *filename,
+     {
+       /* Attempt to read the link into the current buffer.  */
+       idx_t link_length = preadlinkat (fd, filename, buf, buf_size);
++      idx_t link_size = link_length;
+       if (link_length < 0)
+         {
+           if (buf != buffer)
+@@ -96,8 +97,6 @@ readlink_stk (int fd, char const *filename,
+           return NULL;
+         }
+ 
+-      idx_t link_size = link_length;
+-
+       if (link_size < buf_size)
+         {
+           buf[link_size++] = '\0';
+@@ -137,6 +136,7 @@ readlink_stk (int fd, char const *filename,
+ 
+   if (alloc->die)
+     alloc->die (buf_size);
++  }
+   errno = ENOMEM;
+   return NULL;
+ }
+diff --git a/srclib/malloc.c b/srclib/malloc.c
+index f334dd6..dc13183 100644
+--- a/srclib/malloc.c
++++ b/srclib/malloc.c
+@@ -31,6 +31,7 @@
+ void *
+ rpl_malloc (size_t n)
+ {
++  void *result;
+   if (n == 0)
+     n = 1;
+ 
+@@ -40,7 +41,7 @@ rpl_malloc (size_t n)
+       return NULL;
+     }
+ 
+-  void *result = malloc (n);
++  result = malloc (n);
+ 
+ #if !HAVE_MALLOC_POSIX
+   if (result == NULL)
+diff --git a/srclib/malloc/scratch_buffer_set_array_size.c b/srclib/malloc/scratch_buffer_set_array_size.c
+index 89c37a9..43e01ea 100644
+--- a/srclib/malloc/scratch_buffer_set_array_size.c
++++ b/srclib/malloc/scratch_buffer_set_array_size.c
+@@ -29,6 +29,7 @@ __libc_scratch_buffer_set_array_size (struct scratch_buffer *buffer,
+ 				      size_t nelem, size_t size)
+ {
+   size_t new_length = nelem * size;
++  char *new_ptr;
+ 
+   /* Avoid overflow check if both values are small. */
+   if ((nelem | size) >> (sizeof (size_t) * CHAR_BIT / 2) != 0
+@@ -48,7 +49,7 @@ __libc_scratch_buffer_set_array_size (struct scratch_buffer *buffer,
+   /* Discard old buffer.  */
+   scratch_buffer_free (buffer);
+ 
+-  char *new_ptr = malloc (new_length);
++  new_ptr = malloc (new_length);
+   if (new_ptr == NULL)
+     {
+       /* Buffer must remain valid to free.  */
+diff --git a/srclib/malloca.c b/srclib/malloca.c
+index e7beaaf..1804e3a 100644
+--- a/srclib/malloca.c
++++ b/srclib/malloca.c
+@@ -57,14 +57,17 @@ mmalloca (size_t n)
+       if (mem != NULL)
+         {
+           uintptr_t umem = (uintptr_t)mem, umemplus;
++          idx_t offset;
++          void *vp;
++          small_t *p;
+           /* The INT_ADD_WRAPV avoids signed integer overflow on
+              theoretical platforms where UINTPTR_MAX <= INT_MAX.  */
+           INT_ADD_WRAPV (umem, sizeof (small_t) + sa_alignment_max - 1,
+                          &umemplus);
+-          idx_t offset = ((umemplus & ~alignment2_mask)
++          offset = ((umemplus & ~alignment2_mask)
+                           + sa_alignment_max - umem);
+-          void *vp = mem + offset;
+-          small_t *p = vp;
++          vp = mem + offset;
++          p = vp;
+           /* Here p >= mem + sizeof (small_t),
+              and p <= mem + sizeof (small_t) + 2 * sa_alignment_max - 1
+              hence p + n <= mem + nplus.
+diff --git a/srclib/rawmemchr.c b/srclib/rawmemchr.c
+index ea68c1b..963d5e7 100644
+--- a/srclib/rawmemchr.c
++++ b/srclib/rawmemchr.c
+@@ -34,12 +34,17 @@ rawmemchr (const void *s, int c_in)
+ {
+   /* Change this typedef to experiment with performance.  */
+   typedef uintptr_t longword;
+-  /* If you change the "uintptr_t", you should change UINTPTR_WIDTH to match.
+-     This verifies that the type does not have padding bits.  */
+-  verify (UINTPTR_WIDTH == UCHAR_WIDTH * sizeof (longword));
+ 
+   const unsigned char *char_ptr;
+   unsigned char c = c_in;
++  longword const *longword_ptr;
++  longword repeated_one;
++  longword repeated_c;
++  longword repeated_hibit;
++
++  /* If you change the "uintptr_t", you should change UINTPTR_WIDTH to match.
++     This verifies that the type does not have padding bits.  */
++  verify (UINTPTR_WIDTH == UCHAR_WIDTH * sizeof (longword));
+ 
+   /* Handle the first few bytes by reading one byte at a time.
+      Do this until CHAR_PTR is aligned on a longword boundary.  */
+@@ -49,14 +54,14 @@ rawmemchr (const void *s, int c_in)
+     if (*char_ptr == c)
+       return (void *) char_ptr;
+ 
+-  longword const *longword_ptr = s = char_ptr;
++  longword_ptr = s = char_ptr;
+ 
+   /* Compute auxiliary longword values:
+      repeated_one is a value which has a 1 in every byte.
+      repeated_c has c in every byte.  */
+-  longword repeated_one = (longword) -1 / UCHAR_MAX;
+-  longword repeated_c = repeated_one * c;
+-  longword repeated_hibit = repeated_one * (UCHAR_MAX / 2 + 1);
++  repeated_one = (longword) -1 / UCHAR_MAX;
++  repeated_c = repeated_one * c;
++  repeated_hibit = repeated_one * (UCHAR_MAX / 2 + 1);
+ 
+   /* Instead of the traditional loop which tests each byte, we will
+      test a longword at a time.  The tricky part is testing if any of
+diff --git a/srclib/readlink.c b/srclib/readlink.c
+index ed03cc8..458c574 100644
+--- a/srclib/readlink.c
++++ b/srclib/readlink.c
+@@ -55,6 +55,7 @@ rpl_readlink (char const *file, char *buf, size_t bufsize)
+ {
+ # if READLINK_TRAILING_SLASH_BUG
+   size_t file_len = strlen (file);
++  ssize_t r;
+   if (file_len && file[file_len - 1] == '/')
+     {
+       /* Even if FILE without the slash is a symlink to a directory,
+@@ -69,7 +70,7 @@ rpl_readlink (char const *file, char *buf, size_t bufsize)
+     }
+ # endif /* READLINK_TRAILING_SLASH_BUG */
+ 
+-  ssize_t r = readlink (file, buf, bufsize);
++  r = readlink (file, buf, bufsize);
+ 
+ # if READLINK_TRUNCATE_BUG
+   if (r < 0 && errno == ERANGE)
+diff --git a/srclib/realloc.c b/srclib/realloc.c
+index c878381..87caa86 100644
+--- a/srclib/realloc.c
++++ b/srclib/realloc.c
+@@ -37,6 +37,7 @@
+ void *
+ rpl_realloc (void *p, size_t n)
+ {
++  void *result;
+   if (p == NULL)
+     return malloc (n);
+ 
+@@ -52,7 +53,7 @@ rpl_realloc (void *p, size_t n)
+       return NULL;
+     }
+ 
+-  void *result = realloc (p, n);
++  result = realloc (p, n);
+ 
+ #if !HAVE_MALLOC_POSIX
+   if (result == NULL)
+-- 
+2.37.3
+

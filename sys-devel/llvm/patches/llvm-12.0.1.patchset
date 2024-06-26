@@ -1,0 +1,179 @@
+From e40bf3e0bb6fdb433e40c29b271874672deaec9b Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Wed, 20 Jan 2016 21:13:28 +0000
+Subject: llvm-config: use /develop/headers instead of /include
+
+* don't provide obj-root and src-root.
+
+diff --git a/tools/llvm-config/llvm-config.cpp b/tools/llvm-config/llvm-config.cpp
+index 1a2f045..ee0cd89 100644
+--- a/tools/llvm-config/llvm-config.cpp
++++ b/tools/llvm-config/llvm-config.cpp
+@@ -357,11 +357,16 @@ int main(int argc, char **argv) {
+         ("-I" + ActiveIncludeDir + " " + "-I" + ActiveObjRoot + "/include");
+   } else {
+     ActivePrefix = CurrentExecPrefix;
++#ifdef __HAIKU__
++    ActiveIncludeDir = ActivePrefix + "/develop/headers";
++    ActiveLibDir = ActivePrefix + "/develop/lib" + LLVM_LIBDIR_SUFFIX;
++#else
+     ActiveIncludeDir = ActivePrefix + "/include";
++    ActiveLibDir = ActivePrefix + "/lib" + LLVM_LIBDIR_SUFFIX;
++#endif
+     SmallString<256> path(StringRef(LLVM_TOOLS_INSTALL_DIR));
+     sys::fs::make_absolute(ActivePrefix, path);
+     ActiveBinDir = std::string(path.str());
+-    ActiveLibDir = ActivePrefix + "/lib" + LLVM_LIBDIR_SUFFIX;
+     ActiveCMakeDir = ActiveLibDir + "/cmake/llvm";
+     ActiveIncludeOption = "-I" + ActiveIncludeDir;
+   }
+@@ -581,10 +586,16 @@ int main(int argc, char **argv) {
+         OS << (LLVM_HAS_RTTI ? "YES" : "NO") << '\n';
+       } else if (Arg == "--shared-mode") {
+         PrintSharedMode = true;
+-      } else if (Arg == "--obj-root") {
+-        OS << ActivePrefix << '\n';
+-      } else if (Arg == "--src-root") {
+-        OS << LLVM_SRC_ROOT << '\n';
++      } else if (Arg == "--obj-root" || Arg == "--src-root") {
++        if (IsInDevelopmentTree) {
++          if (Arg == "--obj-root")
++            OS << ActivePrefix << '\n';
++          else
++            OS << LLVM_SRC_ROOT << '\n';
++        } else {
++          llvm::errs() << "llvm-config: sources not installed\n";
++          exit(1);
++        }
+       } else if (Arg == "--ignore-libllvm") {
+         LinkDyLib = false;
+         LinkMode = BuiltSharedLibs ? LinkModeShared : LinkModeAuto;
+-- 
+2.30.0
+
+
+From 5a8e421ca5809e39b4380b8f8818eb93c9355be3 Mon Sep 17 00:00:00 2001
+From: Calvin Hill <calvin@hakobaito.co.uk>
+Date: Sun, 9 Sep 2018 16:11:42 +0100
+Subject: import header dir suffix patch from 3dEyes.
+
+
+diff --git a/tools/llvm-config/llvm-config.cpp b/tools/llvm-config/llvm-config.cpp
+index ee0cd89..87a23c4 100644
+--- a/tools/llvm-config/llvm-config.cpp
++++ b/tools/llvm-config/llvm-config.cpp
+@@ -358,7 +358,7 @@ int main(int argc, char **argv) {
+   } else {
+     ActivePrefix = CurrentExecPrefix;
+ #ifdef __HAIKU__
+-    ActiveIncludeDir = ActivePrefix + "/develop/headers";
++    ActiveIncludeDir = ActivePrefix + "/develop/headers" + LLVM_LIBDIR_SUFFIX;
+     ActiveLibDir = ActivePrefix + "/develop/lib" + LLVM_LIBDIR_SUFFIX;
+ #else
+     ActiveIncludeDir = ActivePrefix + "/include";
+-- 
+2.30.0
+
+
+From f8619ab6eda979fc9c1b64a56ada345da378cd10 Mon Sep 17 00:00:00 2001
+From: Calvin Hill <calvin@hakobaito.co.uk>
+Date: Sun, 9 Sep 2018 16:17:33 +0100
+Subject: llvm: allow llvm gtests to build on Haiku.
+
+
+diff --git a/utils/unittest/googletest/include/gtest/internal/gtest-port.h b/utils/unittest/googletest/include/gtest/internal/gtest-port.h
+index 17410d3..3e039a8 100644
+--- a/utils/unittest/googletest/include/gtest/internal/gtest-port.h
++++ b/utils/unittest/googletest/include/gtest/internal/gtest-port.h
+@@ -793,7 +793,8 @@ using ::std::tuple_size;
+      (GTEST_OS_MAC && !GTEST_OS_IOS) || \
+      (GTEST_OS_WINDOWS_DESKTOP && _MSC_VER >= 1400) || \
+      GTEST_OS_WINDOWS_MINGW || GTEST_OS_AIX || GTEST_OS_HPUX || \
+-     GTEST_OS_OPENBSD || GTEST_OS_QNX || GTEST_OS_FREEBSD || GTEST_OS_NETBSD)
++     GTEST_OS_OPENBSD || GTEST_OS_QNX || GTEST_OS_FREEBSD || GTEST_OS_NETBSD \
++     || GTEST_OS_HAIKU)
+ # define GTEST_HAS_DEATH_TEST 1
+ #endif
+ 
+-- 
+2.30.0
+
+
+From 7a2887c163ff96c6ad74cbc1d3032fad1272b82f Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 3 Apr 2021 23:20:23 +0200
+Subject: Haiku: link against libbsd for wait4()
+
+rusage doesn't have a ru_maxrss field
+
+diff --git a/lib/Support/CMakeLists.txt b/lib/Support/CMakeLists.txt
+index cdee114..832ab28 100644
+--- a/lib/Support/CMakeLists.txt
++++ b/lib/Support/CMakeLists.txt
+@@ -36,6 +36,10 @@ elseif( CMAKE_HOST_UNIX )
+   if( FUCHSIA )
+     set(system_libs ${system_libs} zircon)
+   endif()
++  if( HAIKU )
++    add_definitions(-D_DEFAULT_SOURCE)
++    set(system_libs ${system_libs} bsd)
++  endif()
+ endif( MSVC OR MINGW )
+ 
+ # Delay load shell32.dll if possible to speed up process startup.
+diff --git a/lib/Support/Unix/Program.inc b/lib/Support/Unix/Program.inc
+index fb56fa4..f6f0f52 100644
+--- a/lib/Support/Unix/Program.inc
++++ b/lib/Support/Unix/Program.inc
+@@ -452,7 +452,11 @@ ProcessInfo llvm::sys::Wait(const ProcessInfo &PI, unsigned SecondsToWait,
+   if (ProcStat) {
+     std::chrono::microseconds UserT = toDuration(Info.ru_utime);
+     std::chrono::microseconds KernelT = toDuration(Info.ru_stime);
++#ifndef __HAIKU__
+     uint64_t PeakMemory = static_cast<uint64_t>(Info.ru_maxrss);
++#else
++    uint64_t PeakMemory = 0;
++#endif
+     *ProcStat = ProcessStatistics{UserT + KernelT, UserT, PeakMemory};
+   }
+ 
+-- 
+2.30.0
+
+
+From d75496fd4839cc6ca15086b23782ca1c9f2b232e Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 3 Apr 2021 23:21:42 +0200
+Subject: Haiku: link against libnetwork.so
+
+for socket, setsockopt, ...
+
+diff --git a/tools/llvm-jitlink/CMakeLists.txt b/tools/llvm-jitlink/CMakeLists.txt
+index 8d511b1..6292ec5 100644
+--- a/tools/llvm-jitlink/CMakeLists.txt
++++ b/tools/llvm-jitlink/CMakeLists.txt
+@@ -24,4 +24,8 @@ add_llvm_tool(llvm-jitlink
+   llvm-jitlink-macho.cpp
+   )
+ 
++if( HAIKU )
++  target_link_libraries(llvm-jitlink PRIVATE network)
++endif()
++
+ export_executable_symbols(llvm-jitlink)
+diff --git a/tools/llvm-jitlink/llvm-jitlink-executor/CMakeLists.txt b/tools/llvm-jitlink/llvm-jitlink-executor/CMakeLists.txt
+index f6d882d..e2a3343 100644
+--- a/tools/llvm-jitlink/llvm-jitlink-executor/CMakeLists.txt
++++ b/tools/llvm-jitlink/llvm-jitlink-executor/CMakeLists.txt
+@@ -11,4 +11,8 @@ add_llvm_utility(llvm-jitlink-executor
+   intrinsics_gen
+ )
+ 
++if( HAIKU )
++  target_link_libraries(llvm-jitlink-executor PRIVATE network)
++endif()
++
+ export_executable_symbols(llvm-jitlink-executor)
+-- 
+2.30.0
+

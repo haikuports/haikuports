@@ -1,0 +1,152 @@
+From aaf43fa8ca17fb2a44dab2a8f5f5224e7e2c902f Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 30 Oct 2022 19:25:47 +1000
+Subject: enchant2 support
+
+
+diff --git a/configure b/configure
+index 00b716c..e0bca69 100755
+--- a/configure
++++ b/configure
+@@ -4213,7 +4213,7 @@ xp_pkgs="
+ "
+ 
+ # optional deps
+-enchant_req='enchant >= 1.2.0'
++enchant_req='enchant-2 >= 1.2.0'
+ gio_req='gio-2.0'
+ goffice_req='libgoffice-0.10 >= 0.10.0'
+ 
+diff --git a/src/af/xap/xp/enchant_checker.cpp b/src/af/xap/xp/enchant_checker.cpp
+index ed97c1f..165de98 100644
+--- a/src/af/xap/xp/enchant_checker.cpp
++++ b/src/af/xap/xp/enchant_checker.cpp
+@@ -127,7 +127,7 @@ EnchantChecker::_suggestWord (const UT_UCSChar *ucszWord, size_t len)
+ 				pvSugg->addItem (ucszSugg);
+ 		}
+ 
+-		enchant_dict_free_suggestions (m_dict, suggestions);
++		enchant_dict_free_string_list (m_dict, suggestions);
+ 	}
+ 
+ 	return pvSugg;
+@@ -139,7 +139,7 @@ bool EnchantChecker::addToCustomDict (const UT_UCSChar *word, size_t len)
+ 
+ 	if (word && len) {
+ 		UT_UTF8String utf8 (word, len);
+-		enchant_dict_add_to_personal (m_dict, utf8.utf8_str(), utf8.byteLength());
++		enchant_dict_add (m_dict, utf8.utf8_str(), utf8.byteLength());
+ 		return true;
+ 	}
+ 	return false;
+@@ -150,7 +150,7 @@ bool EnchantChecker::isIgnored (const UT_UCSChar *toCorrect, size_t toCorrectLen
+ 	UT_return_val_if_fail (m_dict, false);
+ 
+ 	UT_UTF8String ignore (toCorrect, toCorrectLen);
+-	return enchant_dict_is_in_session (m_dict, ignore.utf8_str(), ignore.byteLength()) != 0;
++	return enchant_dict_is_added (m_dict, ignore.utf8_str(), ignore.byteLength()) != 0;
+ }
+ 
+ void EnchantChecker::ignoreWord (const UT_UCSChar *toCorrect, size_t toCorrectLen)
+-- 
+2.37.3
+
+
+From 7e03d4c1dad941f1e872aa6d8e7948c4260e4c94 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 30 Oct 2022 19:07:33 +1000
+Subject: Dirty hack for XDG variables
+
+
+diff --git a/src/wp/main/gtk/UnixMain.cpp b/src/wp/main/gtk/UnixMain.cpp
+index f19c841..07d03b9 100644
+--- a/src/wp/main/gtk/UnixMain.cpp
++++ b/src/wp/main/gtk/UnixMain.cpp
+@@ -27,6 +27,14 @@
+ 
+ int main(int argc, char ** argv)
+ {
++#ifdef __HAIKU__
++	g_setenv ("XDG_CONFIG_DIRS", "/boot/system/settings", FALSE);
++	g_setenv ("XDG_DATA_HOME", "/boot/home/config/non-packaged/data", FALSE);
++	g_setenv ("XDG_CONFIG_HOME", "/boot/home/config/settings", FALSE);
++	g_setenv ("XDG_CACHE_HOME", "/boot/home/config/cache", FALSE);
++	g_setenv ("XDG_DATA_DIRS", "/boot/system/non-packaged/data:/boot/system/data", FALSE);
++#endif
++
+ 	return AP_UnixApp::main(PACKAGE_NAME, argc, argv);
+ }
+ 
+-- 
+2.37.3
+
+
+From 486245f74b7684650dca7faaf7a1a8652a002a02 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 30 Oct 2022 19:26:24 +1000
+Subject: glib2 segfault fix
+
+
+diff --git a/src/af/util/xp/ut_go_file.cpp b/src/af/util/xp/ut_go_file.cpp
+index 63c21b1..4c2e615 100644
+--- a/src/af/util/xp/ut_go_file.cpp
++++ b/src/af/util/xp/ut_go_file.cpp
+@@ -1002,6 +1002,12 @@ UT_go_basename_from_uri (const char *uri)
+ 	GFile *f = g_file_new_for_uri (uri);
+ 	char *basename = g_file_get_basename (f);
+ 	g_object_unref (G_OBJECT (f));
++	if (!basename) // Try again since the "uri" might just be a plain path.
++	{
++		f = g_file_new_for_path (uri);
++		basename = g_file_get_basename (f);
++		g_object_unref (G_OBJECT (f));
++	}
+ #elif defined(GOFFICE_WITH_GNOME)
+ 	char *raw_uri = gnome_vfs_unescape_string (uri, G_DIR_SEPARATOR_S);
+ 	char *basename = raw_uri ? g_path_get_basename (raw_uri) : NULL;
+-- 
+2.37.3
+
+
+From 32227f11065c56f334bbf8a5b013ac3a484cfd96 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sat, 19 Nov 2022 12:37:25 +1000
+Subject: Lose precision fix from gentoo
+
+
+diff --git a/src/af/xap/xp/xap_Dialog.cpp b/src/af/xap/xp/xap_Dialog.cpp
+index dd210a8..3e92bf0 100644
+--- a/src/af/xap/xp/xap_Dialog.cpp
++++ b/src/af/xap/xp/xap_Dialog.cpp
+@@ -36,8 +36,8 @@
+ 
+ XAP_Dialog::XAP_Dialog(XAP_DialogFactory * pDlgFactory, XAP_Dialog_Id id,
+ 		       const char * helpUrl )
+-  : m_pApp ( NULL ), m_pDlgFactory ( pDlgFactory ), m_id ( id ), 
+-	m_helpUrl(NULL)
++  : m_pApp ( nullptr ), m_pDlgFactory ( pDlgFactory ), m_id ( id ), 
++	m_helpUrl(nullptr)
+ {
+   m_pApp = pDlgFactory->getApp();
+ 
+@@ -235,7 +235,7 @@ XAP_Frame *   XAP_Dialog_Modeless::getActiveFrame(void) const
+ 	// This function returns the frame currently connected to a modeless dialog
+ 
+ 	XAP_Frame * pFrame = m_pApp->getLastFocussedFrame();
+-	if(pFrame == (XAP_Frame *) NULL)
++	if(pFrame == (XAP_Frame *) nullptr)
+ 	{
+ 		pFrame = m_pApp->getFrame(0);
+ 	}
+@@ -267,7 +267,7 @@ XAP_Dialog_Modeless::BuildWindowName(char * pWindowName, const char * pDialogNam
+ // This function constructs and returns the window name of a modeless dialog by
+ // concatenating the active frame with the dialog name
+ 
+-	*pWindowName = (char) NULL;
++	*pWindowName = (char) 0;
+ 	UT_UTF8String wn = UT_UTF8String(pDialogName);
+ 
+ 	XAP_Frame* pFrame = getActiveFrame();
+-- 
+2.37.3
+

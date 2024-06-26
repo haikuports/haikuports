@@ -1,0 +1,340 @@
+From 94568066cec59959aa9027f8c683cde999c71e7b Mon Sep 17 00:00:00 2001
+From: zeldakatze <mail@zeldakatze.de>
+Date: Thu, 8 Feb 2024 02:02:40 +0100
+Subject: mumble: some quick and horrible hacks to make it compile and somehow
+ work with portaudio
+
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 13b3d30..b0d67da 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -196,20 +196,24 @@ endif()
+ 
+ # Note: We always include and link against Tracy but it is only enabled, if we set the TRACY_ENABLE cmake option
+ # to ON, before including the respective subdirectory
+-set(TRACY_ENABLE ${tracy} CACHE BOOL "" FORCE)
++#set(TRACY_ENABLE ${tracy} CACHE BOOL "" FORCE)
+ set(TRACY_ON_DEMAND ON CACHE BOOL "" FORCE)
+ # We force to build Tracy as a static library in order to not create a dependency on the respective .so file
+ # (can cause issues for packagers as that dependency is retained even though Tracy is disabled)
+ set(PREV_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
+ set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+-add_subdirectory("${3RDPARTY_DIR}/tracy" "tracy" EXCLUDE_FROM_ALL)
+-disable_warnings_for_all_targets_in("${3RDPARTY_DIR}/tracy")
++if(NOT HAIKU)
++	add_subdirectory("${3RDPARTY_DIR}/tracy" "tracy" EXCLUDE_FROM_ALL)
++	disable_warnings_for_all_targets_in("${3RDPARTY_DIR}/tracy")
++endif()
+ message(STATUS "Tracy: ${TRACY_ENABLE}")
+ 
+ # Restore whatever BUILD_SHARED_LIBS was set to before
+ set(BUILD_SHARED_LIBS ${PREV_BUILD_SHARED_LIBS} CACHE BOOL "" FORCE)
+ 
+-target_link_libraries(shared PUBLIC Tracy::TracyClient)
++if(NOT HAIKU)
++	target_link_libraries(shared PUBLIC Tracy::TracyClient)
++endif()
+ 
+ # Add the GSL
+ if(bundled-gsl)
+diff --git a/src/ProcessResolver.cpp b/src/ProcessResolver.cpp
+index 9355980..b7db3ce 100644
+--- a/src/ProcessResolver.cpp
++++ b/src/ProcessResolver.cpp
+@@ -276,6 +276,10 @@ void ProcessResolver::doResolve() {
+ 
+ 	kvm_cleanup(kd);
+ }
++#elif __HAIKU__
++void ProcessResolver::doResolve() {
++	#warning "Stub"
++}
+ #else
+ #	error "No implementation of ProcessResolver::resolve() available for this operating system"
+ #endif
+diff --git a/src/mumble/CMakeLists.txt b/src/mumble/CMakeLists.txt
+index 56d6c04..865ac4a 100644
+--- a/src/mumble/CMakeLists.txt
++++ b/src/mumble/CMakeLists.txt
+@@ -633,11 +633,15 @@ else()
+ 	target_sources(mumble_client_object_lib PRIVATE "SharedMemory_unix.cpp")
+ 
+ 	if(NOT APPLE)
+-		find_pkg(X11 COMPONENTS Xext REQUIRED)
+-
+-		if(xinput2)
+-			find_pkg(X11 COMPONENTS Xi REQUIRED)
+-			target_link_libraries(mumble_client_object_lib PUBLIC X11::Xi)
++		if(NOT HAIKU)
++			find_pkg(X11 COMPONENTS Xext REQUIRED)
++	
++			if(xinput2)
++				find_pkg(X11 COMPONENTS Xi REQUIRED)
++				target_link_libraries(mumble_client_object_lib PUBLIC X11::Xi)
++			else()
++				target_compile_definitions(mumble_client_object_lib PUBLIC "NO_XINPUT2")
++			endif()
+ 		else()
+ 			target_compile_definitions(mumble_client_object_lib PUBLIC "NO_XINPUT2")
+ 		endif()
+@@ -647,20 +651,36 @@ else()
+ 			target_link_libraries(mumble_client_object_lib PUBLIC Qt5::QXcbIntegrationPlugin)
+ 		endif()
+ 
+-		target_sources(mumble_client_object_lib
+-			PRIVATE
+-				"GlobalShortcut_unix.cpp"
+-				"GlobalShortcut_unix.h"
+-				"Log_unix.cpp"
+-				"os_unix.cpp"
+-		)
++
++		if(HAIKU)
++			target_sources(mumble_client_object_lib
++				PRIVATE
++					"GlobalShortcut_haiku.cpp"
++					"GlobalShortcut_haiku.h"
++					"Log_unix.cpp"
++					"os_unix.cpp"
++			)
++
++		else()
++			target_sources(mumble_client_object_lib
++				PRIVATE
++					"GlobalShortcut_unix.cpp"
++					"GlobalShortcut_unix.h"
++					"Log_unix.cpp"
++					"os_unix.cpp"
++			)
++		endif()
+ 
+ 		if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
+ 			find_library(LIB_RT rt)
+ 			target_link_libraries(mumble_client_object_lib PUBLIC ${LIB_RT})
+ 		endif()
+-
+-		target_link_libraries(mumble_client_object_lib PUBLIC X11::Xext)
++		
++		if(HAIKU)
++			target_link_libraries(mumble_client_object_lib PUBLIC X11)
++		else()
++			target_link_libraries(mumble_client_object_lib PUBLIC X11::Xext)
++		endif()
+ 	else()
+ 		find_library(LIB_APPKIT "AppKit")
+ 		find_library(LIB_APPLICATIONSERVICES "ApplicationServices")
+@@ -1101,7 +1121,7 @@ if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "3.16.0")
+ 			PROPERTIES
+ 				SKIP_UNITY_BUILD_INCLUSION TRUE
+ 		)
+-	elseif(UNIX)
++	elseif(UNIX AND NOT HAIKU)
+ 		# Exclude source files that include the X11 headers as these define
+ 		# an awful lot of macros that can conflict with other code
+ 		set_source_files_properties(
+diff --git a/src/mumble/GlobalShortcut_haiku.cpp b/src/mumble/GlobalShortcut_haiku.cpp
+new file mode 100644
+index 0000000..fae01f5
+--- /dev/null
++++ b/src/mumble/GlobalShortcut_haiku.cpp
+@@ -0,0 +1,47 @@
++// Copyright 2007-2023 The Mumble Developers. All rights reserved.
++// Use of this source code is governed by a BSD-style license
++// that can be found in the LICENSE file at the root of the
++// Mumble source tree or at <https://www.mumble.info/LICENSE>.
++
++#include "GlobalShortcut_haiku.h"
++
++#include "Settings.h"
++#include "Global.h"
++
++/**
++ * Returns a platform specific GlobalShortcutEngine object.
++ *
++ * @see GlobalShortcutX
++ * @see GlobalShortcutMac
++ * @see GlobalShortcutWin
++ */
++GlobalShortcutEngine *GlobalShortcutEngine::platformInit() {
++	return new GlobalShortcutHaiku();
++}
++
++GlobalShortcutHaiku::GlobalShortcutHaiku() {
++	
++}
++
++GlobalShortcutHaiku::~GlobalShortcutHaiku() {
++
++}
++void GlobalShortcutHaiku::run() {
++	
++}
++
++bool GlobalShortcutHaiku::canDisable() {
++	return true;
++}
++
++bool GlobalShortcutHaiku::enabled() {
++	return false;
++}
++
++void GlobalShortcutHaiku::setEnabled(bool enabled) {
++	
++}
++
++GlobalShortcutHaiku::ButtonInfo GlobalShortcutHaiku::buttonInfo(const QVariant &v) {
++	return ButtonInfo();
++}
+diff --git a/src/mumble/GlobalShortcut_haiku.h b/src/mumble/GlobalShortcut_haiku.h
+new file mode 100644
+index 0000000..916cf8c
+--- /dev/null
++++ b/src/mumble/GlobalShortcut_haiku.h
+@@ -0,0 +1,27 @@
++// Copyright 2007-2023 The Mumble Developers. All rights reserved.
++// Use of this source code is governed by a BSD-style license
++// that can be found in the LICENSE file at the root of the
++// Mumble source tree or at <https://www.mumble.info/LICENSE>.
++
++#ifndef MUMBLE_MUMBLE_GLOBALSHORTCUT_HAIKU_H_
++#define MUMBLE_MUMBLE_GLOBALSHORTCUT_HAIKU_H_
++
++#include "Global.h"
++#include "GlobalShortcut.h"
++
++class GlobalShortcutHaiku : public GlobalShortcutEngine {
++private:
++	Q_OBJECT
++	Q_DISABLE_COPY(GlobalShortcutHaiku)
++public:
++	GlobalShortcutHaiku();
++	~GlobalShortcutHaiku() Q_DECL_OVERRIDE;
++	void run() Q_DECL_OVERRIDE;
++	ButtonInfo buttonInfo(const QVariant &) Q_DECL_OVERRIDE;
++
++	bool canDisable() override;
++	bool enabled() override;
++	void setEnabled(bool enabled) override;
++};
++
++#endif
+diff --git a/src/mumble/PAAudio.cpp b/src/mumble/PAAudio.cpp
+index 7849157..a89eb25 100644
+--- a/src/mumble/PAAudio.cpp
++++ b/src/mumble/PAAudio.cpp
+@@ -262,6 +262,11 @@ int PortAudioSystem::openStream(PaStream **stream, PaDeviceIndex device, const u
+ 		// TODO: add support for more than 2 channels
+ 		streamPar.channelCount = 2;
+ 	}
++	deviceSampleRate = SAMPLE_RATE;
++	#ifdef __HAIKU__
++	streamPar.channelCount = 2;
++	deviceSampleRate = devInfo->defaultSampleRate;
++	#endif
+ 
+ 	streamPar.device           = device;
+ 	streamPar.sampleFormat     = paFloat32;
+@@ -269,7 +274,7 @@ int PortAudioSystem::openStream(PaStream **stream, PaDeviceIndex device, const u
+ 	streamPar.hostApiSpecificStreamInfo = nullptr;
+ 
+ 	const auto ret =
+-		Pa_OpenStream(stream, isInput ? &streamPar : nullptr, isInput ? nullptr : &streamPar, SAMPLE_RATE, frameSize,
++		Pa_OpenStream(stream, isInput ? &streamPar : nullptr, isInput ? nullptr : &streamPar, deviceSampleRate, frameSize,
+ 					  paClipOff | paDitherOff, &streamCallback, reinterpret_cast< void * >(isInput));
+ 	if (ret != paNoError) {
+ 		qWarning("PortAudioSystem: failed to open stream - Pa_OpenStream() returned: %s", Pa_GetErrorText(ret));
+@@ -360,7 +365,7 @@ PortAudioInput::PortAudioInput() : stream(nullptr) {
+ 		return;
+ 	}
+ 
+-	iMicFreq   = SAMPLE_RATE;
++	iMicFreq   = pas->deviceSampleRate;
+ 	eMicFormat = SampleFloat;
+ 	initializeMixer();
+ 
+diff --git a/src/mumble/PAAudio.h b/src/mumble/PAAudio.h
+index 9a20fb4..55b7698 100644
+--- a/src/mumble/PAAudio.h
++++ b/src/mumble/PAAudio.h
+@@ -14,6 +14,10 @@
+ 
+ #include <portaudio.h>
+ 
++#ifdef __HAIKU__
++#define PA_MAX_RESAMPLE_FRAME_COUNT 1000
++#endif
++
+ class PortAudioInit;
+ 
+ class PortAudioSystem : public QObject {
+@@ -59,6 +63,8 @@ public:
+ 
+ 	bool startStream(PaStream *stream);
+ 	bool stopStream(PaStream *stream);
++	
++	double deviceSampleRate;
+ 
+ 	PortAudioSystem();
+ 	~PortAudioSystem();
+@@ -73,6 +79,9 @@ protected:
+ 	QMutex qmWait;
+ 	QWaitCondition qwcSleep;
+ 	PaStream *stream;
++#ifdef __HAIKU__
++	char *resamplingBuffer;
++#endif
+ 
+ public:
+ 	void process(const uint32_t frames, const void *buffer);
+-- 
+2.42.1
+
+
+From dc384d1a9f588e6107ff2984a2a576f72d5064da Mon Sep 17 00:00:00 2001
+From: zeldakatze <mail@zeldakatze.de>
+Date: Mon, 19 Feb 2024 00:46:23 +0100
+Subject: mumble: somewhat fix the flickering on minimize and maximize
+
+
+diff --git a/src/mumble/MainWindow.cpp b/src/mumble/MainWindow.cpp
+index b8f5cbc..2797a9e 100644
+--- a/src/mumble/MainWindow.cpp
++++ b/src/mumble/MainWindow.cpp
+@@ -626,7 +626,7 @@ void MainWindow::hideEvent(QHideEvent *e) {
+ }
+ 
+ void MainWindow::showEvent(QShowEvent *e) {
+-#ifndef Q_OS_MAC
++#if !(defined(Q_OS_MAC) || defined(__HAIKU__))
+ #	ifdef Q_OS_UNIX
+ 	if (!qApp->activeModalWidget() && !qApp->activePopupWidget())
+ #	endif
+-- 
+2.42.1
+
+
+From 20d0a34a8db56ba298f65c8f6a4d158eeec369e5 Mon Sep 17 00:00:00 2001
+From: zeldakatze <mail@zeldakatze.de>
+Date: Tue, 20 Feb 2024 10:28:29 +0100
+Subject: mumble: make the add server dialog be on top
+
+
+diff --git a/src/mumble/ConnectDialog.cpp b/src/mumble/ConnectDialog.cpp
+index eb93c9e..854b44e 100644
+--- a/src/mumble/ConnectDialog.cpp
++++ b/src/mumble/ConnectDialog.cpp
+@@ -806,6 +806,10 @@ void ConnectDialogEdit::init() {
+ 
+ 	qwInlineNotice->hide();
+ 
++#ifdef __HAIKU__
++	setWindowFlag(Qt::WindowStaysOnTopHint);
++#endif
++
+ 	qlePort->setValidator(new QIntValidator(1, 65535, qlePort));
+ 	qlePort->setText(QString::number(DEFAULT_MUMBLE_PORT));
+ 	qlePassword->setEchoMode(QLineEdit::Password);
+-- 
+2.42.1
+

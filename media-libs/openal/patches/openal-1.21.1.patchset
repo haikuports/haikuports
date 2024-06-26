@@ -1,0 +1,915 @@
+From b600c27b3dbeb7664035766a03f4574adefd7e2a Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 24 Feb 2021 14:13:58 +1000
+Subject: Add Haiku backend
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0cf0613..47280e7 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -790,6 +790,7 @@ set(HAVE_OPENSL     0)
+ set(HAVE_OBOE       0)
+ set(HAVE_WAVE       0)
+ set(HAVE_SDL2       0)
++set(HAVE_HAIKU      0)
+ 
+ if(WIN32 OR HAVE_DLFCN_H)
+     set(IS_LINKED "")
+@@ -865,6 +866,22 @@ if(ALSOFT_REQUIRE_SOLARIS AND NOT HAVE_SOLARIS)
+     message(FATAL_ERROR "Failed to enabled required Solaris backend")
+ endif()
+ 
++# Check Haiku backend
++option(ALSOFT_REQUIRE_HAIKU "Require Haiku backend" OFF)
++if(HAIKU)
++    option(ALSOFT_BACKEND_HAIKU "Enable Haiku backend" ON)
++    if(ALSOFT_BACKEND_HAIKU)
++        SET(HAVE_HAIKU 1)
++        SET(BACKENDS  "${BACKENDS} Haiku,")
++        SET(ALC_OBJS  ${ALC_OBJS} alc/backends/haiku.cpp alc/backends/haiku.h)
++		SET(EXTRA_LIBS be ${EXTRA_LIBS})
++		SET(EXTRA_LIBS media ${EXTRA_LIBS})
++    endif()
++endif()
++if(ALSOFT_REQUIRE_HAIKU AND NOT HAVE_HAIKU)
++    MESSAGE(FATAL_ERROR "Failed to enabled required Haiku backend")
++endif()
++
+ # Check SndIO backend
+ option(ALSOFT_REQUIRE_SNDIO "Require SndIO backend" OFF)
+ find_package(SoundIO)
+diff --git a/alc/alc.cpp b/alc/alc.cpp
+index a755e67..fd23820 100644
+--- a/alc/alc.cpp
++++ b/alc/alc.cpp
+@@ -149,6 +149,9 @@
+ #ifdef HAVE_SDL2
+ #include "backends/sdl2.h"
+ #endif
++#ifdef HAVE_HAIKU
++#include "backends/haiku.h"
++#endif
+ #ifdef HAVE_WAVE
+ #include "backends/wave.h"
+ #endif
+@@ -214,7 +217,9 @@ BackendInfo BackendList[] = {
+ #ifdef HAVE_SDL2
+     { "sdl2", SDL2BackendFactory::getFactory },
+ #endif
+-
++#ifdef HAVE_HAIKU
++    { "haiku", HaikuBackendFactory::getFactory },
++#endif
+     { "null", NullBackendFactory::getFactory },
+ #ifdef HAVE_WAVE
+     { "wave", WaveBackendFactory::getFactory },
+diff --git a/alc/backends/haiku.cpp b/alc/backends/haiku.cpp
+new file mode 100644
+index 0000000..0052a64
+--- /dev/null
++++ b/alc/backends/haiku.cpp
+@@ -0,0 +1,453 @@
++/**
++ * OpenAL cross platform audio library
++ * Copyright (C) 2020-2021 by Gerasim Troeglazov
++ * This library is free software; you can redistribute it and/or
++ *  modify it under the terms of the GNU Library General Public
++ *  License as published by the Free Software Foundation; either
++ *  version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ *  Library General Public License for more details.
++ *
++ * You should have received a copy of the GNU Library General Public
++ *  License along with this library; if not, write to the
++ *  Free Software Foundation, Inc.,
++ *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ * Or go to http://www.gnu.org/copyleft/lgpl.html
++ */
++
++#include "config.h"
++
++#include "backends/haiku.h"
++
++#include <exception>
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <cstring>
++#include <functional>
++#include <thread>
++
++#include "alcmain.h"
++#include "almalloc.h"
++#include "alu.h"
++#include "threads.h"
++#include "ringbuffer.h"
++#include "converter.h"
++
++#include <OS.h>
++#include <Path.h>
++#include <Roster.h>
++#include <Application.h>
++#include <SoundPlayer.h>
++#include <MediaAddOn.h>
++#include <MediaFile.h>
++#include <MediaNode.h>
++#include <MediaRecorder.h>
++#include <MediaRoster.h>
++#include <MediaTrack.h>
++#include <TimeSource.h>
++#include <NodeInfo.h>
++
++namespace {
++
++constexpr char defaultDeviceName[] = "Haiku Default";
++constexpr char defualtProcessName[] = "OpenAL";
++
++struct HaikuPlayback final : public BackendBase {
++	HaikuPlayback(ALCdevice *device) noexcept : BackendBase{device} { }
++	~HaikuPlayback() override;
++
++	void audioCallback(void *stream, size_t len) noexcept;
++	static void audioCallbackC(void *cookie, void *buffer, size_t len, const media_raw_audio_format &) noexcept
++	{
++		static_cast<HaikuPlayback*>(cookie)->audioCallback(buffer, len);
++	}
++
++	void open(const char *name) override;
++	bool reset() override;
++	void start() override;
++	void stop() override;
++
++	BSoundPlayer *haikuSoundPlayer{0u};
++
++	DEF_NEWDEL(HaikuPlayback)
++};
++
++HaikuPlayback::~HaikuPlayback()
++{
++	if(haikuSoundPlayer) {
++		haikuSoundPlayer->SetHasData(false);
++		haikuSoundPlayer->Stop();
++		delete haikuSoundPlayer;
++	}
++	haikuSoundPlayer = 0;
++}
++
++void HaikuPlayback::audioCallback(void *stream, size_t len) noexcept
++{
++	const auto ulen = static_cast<unsigned int>(len);
++	mDevice->renderSamples(stream, ulen / mDevice->frameSizeFromFmt(), mDevice->channelsFromFmt());
++}
++
++void HaikuPlayback::open(const char *name)
++{
++	if(!name)
++		name = defaultDeviceName;
++	else if(strcmp(name, defaultDeviceName) != 0) {
++		throw al::backend_exception{al::backend_error::NoDevice, "Device name \"%s\" not found",
++			name};
++	}
++
++	media_raw_audio_format format = {
++		static_cast<float>(mDevice->Frequency),
++		mDevice->channelsFromFmt(),
++		media_raw_audio_format::B_AUDIO_SHORT,
++		B_MEDIA_LITTLE_ENDIAN,
++		mDevice->UpdateSize * sizeof(short)
++	};
++
++	switch(mDevice->FmtType)
++	{
++		case DevFmtUByte:
++			format.format = media_raw_audio_format::B_AUDIO_UCHAR;
++			break;
++		case DevFmtByte:
++			format.format = media_raw_audio_format::B_AUDIO_CHAR;
++			break;
++		case DevFmtUShort:
++			mDevice->FmtType = DevFmtShort;
++			format.format = media_raw_audio_format::B_AUDIO_SHORT;
++			break;
++		case DevFmtShort:
++			format.format = media_raw_audio_format::B_AUDIO_SHORT;
++			break;
++		case DevFmtUInt:
++			mDevice->FmtType = DevFmtInt;
++			format.format = media_raw_audio_format::B_AUDIO_INT;
++			break;
++		case DevFmtInt:
++			format.format = media_raw_audio_format::B_AUDIO_INT;
++			break;
++		case DevFmtFloat:
++			format.format = media_raw_audio_format::B_AUDIO_FLOAT;
++			break;
++		default:
++			mDevice->FmtType = DevFmtShort;
++			format.format = media_raw_audio_format::B_AUDIO_SHORT;
++			break;
++	}
++
++	format.buffer_size = mDevice->UpdateSize * mDevice->frameSizeFromFmt();
++
++	BString processName(defualtProcessName);
++	app_info appInfo;
++	if (be_app->GetAppInfo(&appInfo) == B_OK) {
++		BPath path(&appInfo.ref);
++		processName.SetTo(path.Leaf());
++	}
++
++	haikuSoundPlayer = new BSoundPlayer(&format, processName.String(), audioCallbackC, NULL, static_cast<void*>(this));
++	if(haikuSoundPlayer->InitCheck() != B_OK)
++		throw al::backend_exception{al::backend_error::NoDevice, "Failed to create BSoundPlayer"};
++
++	mDevice->DeviceName = name;
++}
++
++bool HaikuPlayback::reset()
++{
++	setDefaultWFXChannelOrder();
++	return true;
++}
++
++void HaikuPlayback::start()
++{
++	if(haikuSoundPlayer) {
++		haikuSoundPlayer->Start();
++		haikuSoundPlayer->SetHasData(true);
++	}
++}
++
++void HaikuPlayback::stop()
++{
++	if(haikuSoundPlayer) {
++		haikuSoundPlayer->SetHasData(false);
++		haikuSoundPlayer->Stop();
++	}
++}
++
++struct HaikuCapture final : public BackendBase {
++	HaikuCapture(ALCdevice *device) noexcept : BackendBase{device} { }
++	~HaikuCapture() override;
++
++	void readCallback(void* data, size_t size, const media_format &format) noexcept;
++	static void readCallbackC(void* cookie, bigtime_t, void* data, size_t size, const media_format &format) noexcept
++    {
++    	return static_cast<HaikuCapture*>(cookie)->readCallback(data, size, format);
++    }
++
++	static void notifyCallbackC(void * cookie, BMediaRecorder::notification code, ...)
++	{
++		HaikuCapture *haikuCapture = static_cast<HaikuCapture*>(cookie);
++		if (code == BMediaRecorder::B_WILL_STOP) {
++			if (haikuCapture->isRecording) {
++				haikuCapture->fRecorder->Stop();
++				haikuCapture->isRecording = false;
++			}
++		}
++	}
++
++	void open(const char *name) override;
++	void start() override;
++	void stop() override;
++	void captureSamples(al::byte *buffer, uint samples) override;
++	uint availableSamples() override;
++
++	RingBufferPtr mRing{nullptr};
++	ChannelConverter mChannelConv{};
++	SampleConverterPtr mSampleConv;
++
++	bool isRecording{false};
++
++	BMediaRoster *fRoster{0u};
++	BMediaRecorder *fRecorder{0u};
++	media_format fRecordFormat;
++	media_node fAudioInputNode;
++	media_node fAudioMixerNode;	
++
++	DEF_NEWDEL(HaikuCapture)
++};
++
++HaikuCapture::~HaikuCapture()
++{
++	if (fRecorder) {
++		if (fRecorder->InitCheck() == B_OK) {
++			if (fRecorder->IsConnected())
++				fRecorder->Disconnect();
++		}
++		delete fRecorder;
++		fRecorder = NULL;
++	}
++}
++
++void HaikuCapture::readCallback(void* data, size_t size, const media_format &format) noexcept
++{
++	uint numsamples = static_cast<uint>(size) / format.AudioFrameSize();
++	void *rdata = data;
++
++	al::vector<float> samples;
++	if (mChannelConv.is_active()) {
++		samples.resize(numsamples*2);
++		mChannelConv.convert(rdata, samples.data(), numsamples);
++		rdata = reinterpret_cast<void*>(samples.data());
++	}
++
++	auto dstdata = mRing->getWriteVector();
++	size_t dstframes;
++	if (mSampleConv) {
++		const void *srcdata{rdata};
++		uint srcframes{numsamples};
++		dstframes = mSampleConv->convert(&srcdata, &srcframes, dstdata.first.buf,
++			static_cast<uint>(minz(dstdata.first.len, INT_MAX)));
++	} else {
++		const uint framesize{mDevice->frameSizeFromFmt()};
++		size_t len1{minz(dstdata.first.len, numsamples)};
++		size_t len2{minz(dstdata.second.len, numsamples - len1)};
++		memcpy(dstdata.first.buf, rdata, len1 * framesize);
++		if(len2 > 0)
++			memcpy(dstdata.second.buf, static_cast<unsigned char*>(rdata) + len1 * framesize, len2 * framesize);
++		dstframes = len1 + len2;
++	}
++
++	mRing->writeAdvance(dstframes);
++}
++
++void HaikuCapture::open(const char *name)
++{
++	if(!name)
++		name = defaultDeviceName;
++	else if(strcmp(name, defaultDeviceName) != 0) {
++		throw al::backend_exception{al::backend_error::NoDevice, "Device name \"%s\" not found",
++			name};
++	}
++
++    status_t error;
++
++	fRoster = BMediaRoster::Roster(&error);
++	if (!fRoster)
++		throw al::backend_exception{al::backend_error::NoDevice, "Failed to open BMediaRoster"};
++
++	error = fRoster->GetAudioInput(&fAudioInputNode);
++	if (error < B_OK)
++		throw al::backend_exception{al::backend_error::NoDevice, "Failed to get audio input node"};
++
++	error = fRoster->GetAudioMixer(&fAudioMixerNode);
++	if (error < B_OK)
++		throw al::backend_exception{al::backend_error::NoDevice, "Failed to open audio mixer"};
++
++	fRecorder = new BMediaRecorder(defualtProcessName, B_MEDIA_RAW_AUDIO);
++	if (fRecorder->InitCheck() < B_OK)
++		throw al::backend_exception{al::backend_error::NoDevice, "Failed to create BMediaRecorder"};
++
++	media_format output_format;
++	output_format.type = B_MEDIA_RAW_AUDIO;
++	output_format.u.raw_audio = media_raw_audio_format::wildcard;
++	output_format.u.raw_audio.channel_count = static_cast<int>(mDevice->channelsFromFmt());
++	fRecorder->SetAcceptedFormat(output_format);
++
++	const int maxInputCount = 64;
++	dormant_node_info dni[maxInputCount];
++
++	int32 real_count = maxInputCount;
++
++	error = fRoster->GetDormantNodes(dni, &real_count, 0, &output_format, 0, B_BUFFER_PRODUCER | B_PHYSICAL_INPUT);
++	if (real_count > maxInputCount)
++		real_count = maxInputCount;
++	char selected_name[B_MEDIA_NAME_LENGTH] = "Default input";
++
++	for (int i = 0; i < real_count; i++) {
++		media_node_id ni[12];
++		int32 ni_count = 12;
++		error = fRoster->GetInstancesFor(dni[i].addon, dni[i].flavor_id, ni, &ni_count);
++		if (error == B_OK) {
++			for (int j = 0; j < ni_count; j++) {
++				if (ni[j] == fAudioInputNode.node) {
++					strcpy(selected_name, dni[i].name);
++					break;
++				}
++			}
++		}
++	}
++
++	media_output audioOutput;
++	if (!fRecorder->IsConnected()) {
++		int32 count = 0;
++		error = fRoster->GetFreeOutputsFor(fAudioInputNode, &audioOutput, 1, &count, B_MEDIA_RAW_AUDIO);
++		if (error < B_OK || count < 1)
++			throw al::backend_exception{al::backend_error::NoDevice, "Failed to get free outputs"};
++
++		fRecordFormat.u.raw_audio = audioOutput.format.u.raw_audio;
++	} else {
++		fRecordFormat.u.raw_audio = fRecorder->AcceptedFormat().u.raw_audio;
++	}
++
++	fRecordFormat.type = B_MEDIA_RAW_AUDIO;
++
++	error = fRecorder->SetHooks(readCallbackC, notifyCallbackC, this);
++	if (error < B_OK)
++		throw al::backend_exception{al::backend_error::NoDevice, "Failed to set recorder hooks"};
++	
++	if (!fRecorder->IsConnected()) {
++		error = fRecorder->Connect(fAudioInputNode, &audioOutput, &fRecordFormat);
++		if (error < B_OK) {
++			fRecorder->SetHooks(NULL, NULL, NULL);
++			throw al::backend_exception{al::backend_error::NoDevice, "Failed connection to BMediaRecorder"};
++		}
++	}
++
++	mRing = RingBuffer::Create(mDevice->BufferSize, mDevice->frameSizeFromFmt(), false);
++
++	DevFmtType srcType{};
++	switch(fRecordFormat.u.raw_audio.format) {
++		case media_raw_audio_format::B_AUDIO_UCHAR:
++			srcType = DevFmtUByte;
++			break;
++		case  media_raw_audio_format::B_AUDIO_CHAR:
++			srcType = DevFmtByte;
++			break;
++		case  media_raw_audio_format::B_AUDIO_SHORT:
++			srcType = DevFmtShort;
++			break;
++		case  media_raw_audio_format::B_AUDIO_INT:
++			srcType = DevFmtInt;
++			break;
++		case  media_raw_audio_format::B_AUDIO_FLOAT:
++			srcType = DevFmtFloat;
++			break;		
++	}
++
++	mSampleConv = nullptr;
++	mChannelConv = {};
++
++	if(mDevice->FmtChans == DevFmtMono && fRecordFormat.u.raw_audio.channel_count != 1) {
++		uint chanmask{(1u<<fRecordFormat.u.raw_audio.channel_count) - 1u};
++		mChannelConv = ChannelConverter{srcType, fRecordFormat.u.raw_audio.channel_count, chanmask, mDevice->FmtChans};
++		srcType = DevFmtFloat;
++	} else if(mDevice->FmtChans == DevFmtStereo && fRecordFormat.u.raw_audio.channel_count == 1) {
++		mChannelConv = ChannelConverter{srcType, 1, 0x1, mDevice->FmtChans};
++		srcType = DevFmtFloat;
++	}
++
++	if(static_cast<uint>(fRecordFormat.u.raw_audio.frame_rate) != mDevice->Frequency || mDevice->FmtType != srcType) {
++		mSampleConv = CreateSampleConverter(srcType, mDevice->FmtType,
++			mDevice->channelsFromFmt(), static_cast<int>(fRecordFormat.u.raw_audio.frame_rate),
++			mDevice->Frequency, Resampler::FastBSinc24);
++	}
++
++	mDevice->DeviceName = name;
++}
++
++void HaikuCapture::start()
++{
++	isRecording = true;
++	fRecorder->Start();
++}
++
++void HaikuCapture::stop()
++{
++	isRecording = false;
++	fRecorder->Stop();
++}
++
++uint HaikuCapture::availableSamples()
++{
++	return static_cast<uint>(mRing->readSpace());
++}
++
++void HaikuCapture::captureSamples(al::byte *buffer, uint samples)
++{
++	mRing->read(buffer, samples);
++}
++
++} // namespace
++
++
++bool HaikuBackendFactory::init()
++{
++	return true;
++}
++
++bool HaikuBackendFactory::querySupport(BackendType type)
++{
++	return (type == BackendType::Playback || type == BackendType::Capture);
++}
++
++std::string HaikuBackendFactory::probe(BackendType type)
++{
++	std::string outnames;
++	switch(type)
++	{
++		case BackendType::Playback:
++		case BackendType::Capture:
++        	outnames.append(defaultDeviceName, sizeof(defaultDeviceName));
++			break;
++	}
++	return outnames;
++}
++
++BackendPtr HaikuBackendFactory::createBackend(ALCdevice *device, BackendType type)
++{
++	if(type == BackendType::Playback)
++		return BackendPtr{new HaikuPlayback{device}};
++	if(type == BackendType::Capture)
++		return BackendPtr{new HaikuCapture{device}};
++	return nullptr;
++}
++
++BackendFactory &HaikuBackendFactory::getFactory()
++{
++	static HaikuBackendFactory factory{};
++	return factory;
++}
+diff --git a/alc/backends/haiku.h b/alc/backends/haiku.h
+new file mode 100644
+index 0000000..3e20db8
+--- /dev/null
++++ b/alc/backends/haiku.h
+@@ -0,0 +1,19 @@
++#ifndef BACKENDS_HAIKU_H
++#define BACKENDS_HAIKU_H
++
++#include "backends/base.h"
++
++struct HaikuBackendFactory final : public BackendFactory {
++public:
++    bool init() override;
++
++    bool querySupport(BackendType type) override;
++
++    std::string probe(BackendType type) override;
++
++    BackendPtr createBackend(ALCdevice *device, BackendType type) override;
++
++    static BackendFactory &getFactory();
++};
++
++#endif /* BACKENDS_HAIKU_H */
+diff --git a/config.h.in b/config.h.in
+index a28204e..c37065c 100644
+--- a/config.h.in
++++ b/config.h.in
+@@ -71,6 +71,9 @@
+ /* Define if we have the SDL2 backend */
+ #cmakedefine HAVE_SDL2
+ 
++/* Define if we have the Haiku backend */
++#cmakedefine HAVE_HAIKU
++
+ /* Define if we have dlfcn.h */
+ #cmakedefine HAVE_DLFCN_H
+ 
+-- 
+2.30.2
+
+
+From 4d275ab94a2d3de13f28a496759a8e224b81d596 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 24 Feb 2021 17:06:13 +1000
+Subject: Move config file to settings dir
+
+
+diff --git a/alc/alconfig.cpp b/alc/alconfig.cpp
+index 634679a..e6eba16 100644
+--- a/alc/alconfig.cpp
++++ b/alc/alconfig.cpp
+@@ -32,6 +32,9 @@
+ #ifdef __APPLE__
+ #include <CoreFoundation/CoreFoundation.h>
+ #endif
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#endif
+ 
+ #include <algorithm>
+ #include <cstdio>
+@@ -314,6 +317,27 @@ void ReadALConfig()
+     }
+ }
+ 
++#elif defined(__HAIKU__)
++void ReadALConfig()
++{
++	char confpath[PATH_MAX] = "";
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, false, confpath, sizeof(confpath)) == B_OK) {
++		std::string confname{confpath};
++		confname += "/alsoft.conf";
++
++		TRACE("Loading config %s...\n", confname.c_str());
++		al::ifstream f{confname};
++        if(f.is_open())
++            LoadConfigFromFile(f);
++	}
++    if(auto confname = al::getenv("ALSOFT_CONF"))
++    {
++        TRACE("Loading config %s...\n", confname->c_str());
++        al::ifstream f{*confname};
++        if(f.is_open())
++            LoadConfigFromFile(f);
++    }
++}
+ #else
+ 
+ void ReadALConfig()
+diff --git a/utils/alsoft-config/mainwindow.cpp b/utils/alsoft-config/mainwindow.cpp
+index 8e6c7be..5454a3f 100644
+--- a/utils/alsoft-config/mainwindow.cpp
++++ b/utils/alsoft-config/mainwindow.cpp
+@@ -19,6 +19,10 @@
+ #include <shlobj.h>
+ #endif
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#endif
++
+ namespace {
+ 
+ static const struct {
+@@ -64,6 +68,9 @@ static const struct {
+ #ifdef HAVE_OPENSL
+     { "opensl", "OpenSL" },
+ #endif
++#ifdef HAVE_HAIKU
++    { "haiku", "Haiku" },
++#endif
+ 
+     { "null", "Null Output" },
+ #ifdef HAVE_WAVE
+@@ -152,6 +159,12 @@ static QString getDefaultConfigName()
+         return QString();
+     };
+     QString base = get_appdata_path();
++#elif defined(Q_OS_HAIKU)
++	static const char fname[] = "alsoft.conf";
++	QString base;
++	char confpath[PATH_MAX] = "";
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, false, confpath, sizeof(confpath)) == B_OK)
++		base = QString::fromUtf8(confpath);
+ #else
+     static const char fname[] = "alsoft.conf";
+     QByteArray base = qgetenv("XDG_CONFIG_HOME");
+@@ -178,6 +191,11 @@ static QString getBaseDataPath()
+         return QString();
+     };
+     QString base = get_appdata_path();
++#elif defined(Q_OS_HAIKU)
++	QString base;
++	char datapath[PATH_MAX] = "";
++	if (find_directory(B_SYSTEM_DATA_DIRECTORY, -1, false, datapath, sizeof(datapath)) == B_OK)
++		base = QString::fromUtf8(datapath);
+ #else
+     QByteArray base = qgetenv("XDG_DATA_HOME");
+     if(base.isEmpty())
+-- 
+2.30.2
+
+
+From 7a3ec72da52e2341a90a8c08a2e7f793a84aa1a5 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 24 Feb 2021 18:14:20 +1000
+Subject: Add missing include
+
+
+diff --git a/alc/backends/haiku.cpp b/alc/backends/haiku.cpp
+index 0052a64..0159c0e 100644
+--- a/alc/backends/haiku.cpp
++++ b/alc/backends/haiku.cpp
+@@ -40,6 +40,7 @@
+ #include <OS.h>
+ #include <Path.h>
+ #include <Roster.h>
++#include <String.h>
+ #include <Application.h>
+ #include <SoundPlayer.h>
+ #include <MediaAddOn.h>
+-- 
+2.30.2
+
+
+From 2f213bfd3f3c470ad768fe05453fc900ff49690b Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sat, 27 Feb 2021 23:49:01 +1000
+Subject: Move create/delete BSoundPlayer to play()/stop() funcs
+
+
+diff --git a/alc/backends/haiku.cpp b/alc/backends/haiku.cpp
+index 0159c0e..08ebf48 100644
+--- a/alc/backends/haiku.cpp
++++ b/alc/backends/haiku.cpp
+@@ -73,18 +73,15 @@ struct HaikuPlayback final : public BackendBase {
+ 	void stop() override;
+ 
+ 	BSoundPlayer *haikuSoundPlayer{0u};
++	BString processName;
++	media_raw_audio_format format;
+ 
+ 	DEF_NEWDEL(HaikuPlayback)
+ };
+ 
+ HaikuPlayback::~HaikuPlayback()
+ {
+-	if(haikuSoundPlayer) {
+-		haikuSoundPlayer->SetHasData(false);
+-		haikuSoundPlayer->Stop();
+-		delete haikuSoundPlayer;
+-	}
+-	haikuSoundPlayer = 0;
++	stop();
+ }
+ 
+ void HaikuPlayback::audioCallback(void *stream, size_t len) noexcept
+@@ -102,7 +99,14 @@ void HaikuPlayback::open(const char *name)
+ 			name};
+ 	}
+ 
+-	media_raw_audio_format format = {
++	processName.SetTo(defualtProcessName);
++	app_info appInfo;
++	if (be_app->GetAppInfo(&appInfo) == B_OK) {
++		BPath path(&appInfo.ref);
++		processName.SetTo(path.Leaf());
++	}
++
++	format = {
+ 		static_cast<float>(mDevice->Frequency),
+ 		mDevice->channelsFromFmt(),
+ 		media_raw_audio_format::B_AUDIO_SHORT,
+@@ -143,17 +147,6 @@ void HaikuPlayback::open(const char *name)
+ 
+ 	format.buffer_size = mDevice->UpdateSize * mDevice->frameSizeFromFmt();
+ 
+-	BString processName(defualtProcessName);
+-	app_info appInfo;
+-	if (be_app->GetAppInfo(&appInfo) == B_OK) {
+-		BPath path(&appInfo.ref);
+-		processName.SetTo(path.Leaf());
+-	}
+-
+-	haikuSoundPlayer = new BSoundPlayer(&format, processName.String(), audioCallbackC, NULL, static_cast<void*>(this));
+-	if(haikuSoundPlayer->InitCheck() != B_OK)
+-		throw al::backend_exception{al::backend_error::NoDevice, "Failed to create BSoundPlayer"};
+-
+ 	mDevice->DeviceName = name;
+ }
+ 
+@@ -165,10 +158,15 @@ bool HaikuPlayback::reset()
+ 
+ void HaikuPlayback::start()
+ {
+-	if(haikuSoundPlayer) {
+-		haikuSoundPlayer->Start();
+-		haikuSoundPlayer->SetHasData(true);
+-	}
++	if (haikuSoundPlayer)
++		stop();
++
++	haikuSoundPlayer = new BSoundPlayer(&format, processName.String(), audioCallbackC, NULL, static_cast<void*>(this));
++	if(haikuSoundPlayer->InitCheck() != B_OK)
++		throw al::backend_exception{al::backend_error::NoDevice, "Failed to create BSoundPlayer"};
++
++	haikuSoundPlayer->Start();
++	haikuSoundPlayer->SetHasData(true);
+ }
+ 
+ void HaikuPlayback::stop()
+@@ -176,7 +174,9 @@ void HaikuPlayback::stop()
+ 	if(haikuSoundPlayer) {
+ 		haikuSoundPlayer->SetHasData(false);
+ 		haikuSoundPlayer->Stop();
++		delete haikuSoundPlayer;
+ 	}
++	haikuSoundPlayer = 0;
+ }
+ 
+ struct HaikuCapture final : public BackendBase {
+@@ -212,6 +212,7 @@ struct HaikuCapture final : public BackendBase {
+ 
+ 	bool isRecording{false};
+ 
++	BString processName;
+ 	BMediaRoster *fRoster{0u};
+ 	BMediaRecorder *fRecorder{0u};
+ 	media_format fRecordFormat;
+@@ -274,6 +275,13 @@ void HaikuCapture::open(const char *name)
+ 			name};
+ 	}
+ 
++	processName.SetTo(defualtProcessName);
++	app_info appInfo;
++	if (be_app->GetAppInfo(&appInfo) == B_OK) {
++		BPath path(&appInfo.ref);
++		processName.SetTo(path.Leaf());
++	}
++
+     status_t error;
+ 
+ 	fRoster = BMediaRoster::Roster(&error);
+@@ -288,7 +296,7 @@ void HaikuCapture::open(const char *name)
+ 	if (error < B_OK)
+ 		throw al::backend_exception{al::backend_error::NoDevice, "Failed to open audio mixer"};
+ 
+-	fRecorder = new BMediaRecorder(defualtProcessName, B_MEDIA_RAW_AUDIO);
++	fRecorder = new BMediaRecorder(processName, B_MEDIA_RAW_AUDIO);
+ 	if (fRecorder->InitCheck() < B_OK)
+ 		throw al::backend_exception{al::backend_error::NoDevice, "Failed to create BMediaRecorder"};
+ 
+-- 
+2.30.2
+
+
+From c7c83004d39f8e446f2bbdcd44ea6d65c0e71a96 Mon Sep 17 00:00:00 2001
+From: Anonymous Maarten <madebr@users.noreply.github.com>
+Date: Tue, 6 Jul 2021 09:34:40 +0200
+Subject: Make OpenALConfig.cmake compatible with CMake's FindOpenAL.cmake
+ (#581)
+
+* Make OpenALConfig.cmake compatible with CMake's FindOpenAL.cmake
+
+* Create and install OpenALConfigVersion.cmake
+
+* cmake: drop creating of OpenALConfigVersion.cmake
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 47280e7..f2c7414 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -69,6 +69,7 @@ include(CheckCXXCompilerFlag)
+ include(CheckCSourceCompiles)
+ include(CheckCXXSourceCompiles)
+ include(CheckStructHasMember)
++include(CMakePackageConfigHelpers)
+ include(GNUInstallDirs)
+ 
+ 
+@@ -1255,7 +1256,7 @@ else()
+         target_include_directories(OpenAL
+           PUBLIC
+             $<BUILD_INTERFACE:${OpenAL_SOURCE_DIR}/include>
+-            $<INSTALL_INTERFACE:include>
++            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+           PRIVATE
+             ${OpenAL_SOURCE_DIR}/common
+             ${OpenAL_BINARY_DIR}
+@@ -1320,7 +1321,10 @@ endif()
+ target_include_directories(${IMPL_TARGET}
+   PUBLIC
+     $<BUILD_INTERFACE:${OpenAL_SOURCE_DIR}/include>
+-    $<INSTALL_INTERFACE:include>
++  INTERFACE
++    $<BUILD_INTERFACE:${OpenAL_SOURCE_DIR}/include/AL>
++    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
++    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/AL>
+   PRIVATE
+     ${INC_PATHS}
+     ${OpenAL_BINARY_DIR}
+@@ -1387,6 +1391,8 @@ endif()
+ 
+ # Install main library
+ if(ALSOFT_INSTALL)
++    configure_package_config_file(OpenALConfig.cmake.in OpenALConfig.cmake
++        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/OpenAL)
+     install(TARGETS OpenAL EXPORT OpenAL
+         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+@@ -1395,15 +1401,17 @@ if(ALSOFT_INSTALL)
+         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} ${CMAKE_INSTALL_INCLUDEDIR}/AL)
+     export(TARGETS OpenAL
+         NAMESPACE OpenAL::
+-        FILE OpenALConfig.cmake)
++        FILE OpenALTargets.cmake)
+     install(EXPORT OpenAL
+         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/OpenAL
+         NAMESPACE OpenAL::
+-        FILE OpenALConfig.cmake)
++        FILE OpenALTargets.cmake)
+     install(DIRECTORY include/AL
+         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+     install(FILES "${OpenAL_BINARY_DIR}/openal.pc"
+         DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
++    install(FILES "${OpenAL_BINARY_DIR}/OpenALConfig.cmake"
++        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/OpenAL")
+     if(TARGET soft_oal)
+         install(TARGETS soft_oal
+             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+diff --git a/OpenALConfig.cmake.in b/OpenALConfig.cmake.in
+new file mode 100644
+index 0000000..128c1a4
+--- /dev/null
++++ b/OpenALConfig.cmake.in
+@@ -0,0 +1,9 @@
++cmake_minimum_required(VERSION 3.1)
++
++include("${CMAKE_CURRENT_LIST_DIR}/OpenALTargets.cmake")
++
++set(OPENAL_FOUND ON)
++set(OPENAL_INCLUDE_DIR $<TARGET_PROPERTY:OpenAL::OpenAL,INTERFACE_INCLUDE_DIRECTORIES>)
++set(OPENAL_LIBRARY $<LINK_ONLY:OpenAL::OpenAL>)
++set(OPENAL_DEFINITIONS $<TARGET_PROPERTY:OpenAL::OpenAL,INTERFACE_COMPILE_DEFINITIONS>)
++set(OPENAL_VERSION_STRING @PACKAGE_VERSION@)
+-- 
+2.30.2
+

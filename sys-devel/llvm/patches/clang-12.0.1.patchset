@@ -1,0 +1,221 @@
+From e8b1dbf36923bb01f6a90cd07264ffce032badef Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=B4me=20Duval?= <jerome.duval@gmail.com>
+Date: Mon, 18 Jul 2016 14:13:19 +0200
+Subject: support for secondary arch.
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9e74014..bc4efa2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -403,6 +403,10 @@ if (APPLE)
+   endif()
+   message(STATUS "Host linker version: ${HOST_LINK_VERSION}")
+ endif()
++if(DEFINED HAIKU_HYBRID_SECONDARY)
++  add_definitions(-DHAIKU_HYBRID_SECONDARY=${HAIKU_HYBRID_SECONDARY})
++endif()
++
+ 
+ include(CMakeParseArguments)
+ include(AddClang)
+diff --git a/lib/Driver/ToolChains/Haiku.cpp b/lib/Driver/ToolChains/Haiku.cpp
+index 18f550c..2716f58 100644
+--- a/lib/Driver/ToolChains/Haiku.cpp
++++ b/lib/Driver/ToolChains/Haiku.cpp
+@@ -19,6 +19,13 @@ using namespace llvm::opt;
+ Haiku::Haiku(const Driver &D, const llvm::Triple& Triple, const ArgList &Args)
+   : Generic_ELF(D, Triple, Args) {
+ 
++#ifdef HAIKU_HYBRID_SECONDARY
++  getProgramPaths().insert(getProgramPaths().begin(), getDriver().SysRoot
++                           + "/system/bin/" HAIKU_HYBRID_SECONDARY);
++  getFilePaths().clear();
++  getFilePaths().push_back(getDriver().SysRoot + "/system/lib/"
++                           HAIKU_HYBRID_SECONDARY);
++#endif
+ }
+ 
+ void Haiku::addLibCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+@@ -29,6 +36,12 @@ void Haiku::addLibCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+ 
+ void Haiku::addLibStdCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+                                      llvm::opt::ArgStringList &CC1Args) const {
++#ifdef HAIKU_HYBRID_SECONDARY
++  addLibStdCXXIncludePaths(getDriver().SysRoot, "/system/develop/headers/"
++                     HAIKU_HYBRID_SECONDARY "/c++", getTriple().str(), "", "", "",
++                     DriverArgs, CC1Args);
++#else
+   addLibStdCXXIncludePaths(getDriver().SysRoot, "/system/develop/headers/c++",
+-                           getTriple().str(), "", "", "", DriverArgs, CC1Args);
++                     getTriple().str(), "", "", "", DriverArgs, CC1Args);
++#endif
+ }
+diff --git a/lib/Frontend/InitHeaderSearch.cpp b/lib/Frontend/InitHeaderSearch.cpp
+index bc31445..b8ecee0 100644
+--- a/lib/Frontend/InitHeaderSearch.cpp
++++ b/lib/Frontend/InitHeaderSearch.cpp
+@@ -246,7 +246,20 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
+   if (HSOpts.UseBuiltinIncludes) {
+     // Ignore the sys root, we *always* look for clang headers relative to
+     // supplied path.
++#ifdef HAIKU_HYBRID_SECONDARY
++    // Remove version from foo/lib/clang/version
++    StringRef Ver = llvm::sys::path::filename(HSOpts.ResourceDir);
++    StringRef NoVer = llvm::sys::path::parent_path(HSOpts.ResourceDir);
++    // Remove clang from foo/lib/clang
++    StringRef Clang = llvm::sys::path::filename(NoVer);
++    SmallString<128> P = llvm::sys::path::parent_path(NoVer);
++
++    // Get foo/include/c++/v1
++    llvm::sys::path::append(P, Clang, Ver);
++#else
+     SmallString<128> P = StringRef(HSOpts.ResourceDir);
++#endif
++
+     llvm::sys::path::append(P, "include");
+     AddUnmappedPath(P, ExternCSystem, false);
+   }
+@@ -282,7 +295,12 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
+   }
+ 
+   case llvm::Triple::Haiku:
++#ifdef HAIKU_HYBRID_SECONDARY
++    AddPath("/boot/system/non-packaged/develop/headers/" HAIKU_HYBRID_SECONDARY,
++            System, false);
++#else
+     AddPath("/boot/system/non-packaged/develop/headers", System, false);
++#endif
+     AddPath("/boot/system/develop/headers/os", System, false);
+     AddPath("/boot/system/develop/headers/os/app", System, false);
+     AddPath("/boot/system/develop/headers/os/arch", System, false);
+@@ -314,6 +332,13 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
+     AddPath("/boot/system/develop/headers/bsd", System, false);
+     AddPath("/boot/system/develop/headers/glibc", System, false);
+     AddPath("/boot/system/develop/headers/posix", System, false);
++#ifdef HAIKU_HYBRID_SECONDARY
++    AddPath("/boot/system/develop/headers/" HAIKU_HYBRID_SECONDARY, System, false);
++    AddPath("/boot/system/develop/headers/" HAIKU_HYBRID_SECONDARY "/os", System,
++            false);
++    AddPath("/boot/system/develop/headers/" HAIKU_HYBRID_SECONDARY "/os/opengl",
++            System, false);
++#endif
+     AddPath("/boot/system/develop/headers",  System, false);
+     break;
+   case llvm::Triple::RTEMS:
+-- 
+2.37.3
+
+
+From 56407cf72646c3e323f080df76b90570f5dadb17 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Thu, 7 Apr 2016 18:30:52 +0000
+Subject: add a test for haiku driver.
+
+* upstream wants a case for libcxx in ToolChains.cpp, so add it.
+
+diff --git a/test/Driver/haiku.c b/test/Driver/haiku.c
+new file mode 100644
+index 0000000..9591739
+--- /dev/null
++++ b/test/Driver/haiku.c
+@@ -0,0 +1,12 @@
++// RUN: %clang -no-canonical-prefixes -target x86_64-unknown-haiku %s -### 2> %t.log
++// RUN: FileCheck --check-prefix=CHECK-X86_64 -input-file %t.log %s
++
++// CHECK-X86_64: clang{{.*}}" "-cc1" "-triple" "x86_64-unknown-haiku"
++// CHECK-X86_64: gcc{{.*}}" "-o" "a.out" "{{.*}}.o"
++
++// RUN: %clang -no-canonical-prefixes -target i586-pc-haiku %s -### 2> %t.log
++// RUN: FileCheck --check-prefix=CHECK-X86 -input-file %t.log %s
++
++// CHECK-X86: clang{{.*}}" "-cc1" "-triple" "i586-pc-haiku"
++// CHECK-X86: gcc{{.*}}" "-o" "a.out" "{{.*}}.o"
++
+-- 
+2.37.3
+
+
+From d76c6ac9bf0bb54b206d30bc909dacf671d6e4e8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=B4me=20Duval?= <jerome.duval@gmail.com>
+Date: Mon, 18 Jul 2016 14:13:19 +0200
+Subject: Enable thread-local storage and disable PIE by default
+
+
+diff --git a/lib/Basic/Targets/OSTargets.h b/lib/Basic/Targets/OSTargets.h
+index 67fa1a5..ce5f8ff 100644
+--- a/lib/Basic/Targets/OSTargets.h
++++ b/lib/Basic/Targets/OSTargets.h
+@@ -309,7 +309,6 @@ public:
+     this->IntPtrType = TargetInfo::SignedLong;
+     this->PtrDiffType = TargetInfo::SignedLong;
+     this->ProcessIDType = TargetInfo::SignedLong;
+-    this->TLSSupported = false;
+     switch (Triple.getArch()) {
+     default:
+       break;
+diff --git a/lib/Driver/ToolChains/Haiku.h b/lib/Driver/ToolChains/Haiku.h
+index 2bc9832..50a20c2 100644
+--- a/lib/Driver/ToolChains/Haiku.h
++++ b/lib/Driver/ToolChains/Haiku.h
+@@ -22,9 +22,7 @@ public:
+   Haiku(const Driver &D, const llvm::Triple &Triple,
+           const llvm::opt::ArgList &Args);
+ 
+-  bool isPIEDefault() const override {
+-    return getTriple().getArch() == llvm::Triple::x86_64;
+-  }
++  bool isPIEDefault() const override { return false; }
+ 
+   void addLibCxxIncludePaths(
+       const llvm::opt::ArgList &DriverArgs,
+-- 
+2.37.3
+
+
+From 96eac7cff2953e4f8c3a6f95007033c3f11eca3d Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Mon, 13 Feb 2023 16:28:39 +0100
+Subject: Haiku: defaults to PIC
+
+
+diff --git a/lib/Driver/ToolChains/Haiku.h b/lib/Driver/ToolChains/Haiku.h
+index 50a20c2..ac65381 100644
+--- a/lib/Driver/ToolChains/Haiku.h
++++ b/lib/Driver/ToolChains/Haiku.h
+@@ -23,6 +23,7 @@ public:
+           const llvm::opt::ArgList &Args);
+ 
+   bool isPIEDefault() const override { return false; }
++  bool isPICDefault() const override { return true; }
+ 
+   void addLibCxxIncludePaths(
+       const llvm::opt::ArgList &DriverArgs,
+-- 
+2.37.3
+
+
+From 089a07be1f393fc06a8b67f015e40a718ba550dc Mon Sep 17 00:00:00 2001
+From: Trung Nguyen <57174311+trungnt2910@users.noreply.github.com>
+Date: Mon, 14 Aug 2023 14:58:56 +1000
+Subject: [PATCH] Haiku: Add missing GNU headers include path
+
+---
+ lib/Frontend/InitHeaderSearch.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/lib/Frontend/InitHeaderSearch.cpp b/lib/Frontend/InitHeaderSearch.cpp
+index b8ecee03..2d999898 100644
+--- a/lib/Frontend/InitHeaderSearch.cpp
++++ b/lib/Frontend/InitHeaderSearch.cpp
+@@ -331,6 +331,7 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
+     AddPath("/boot/system/develop/headers/3rdparty", System, false);
+     AddPath("/boot/system/develop/headers/bsd", System, false);
+     AddPath("/boot/system/develop/headers/glibc", System, false);
++    AddPath("/boot/system/develop/headers/gnu", System, false);
+     AddPath("/boot/system/develop/headers/posix", System, false);
+ #ifdef HAIKU_HYBRID_SECONDARY
+     AddPath("/boot/system/develop/headers/" HAIKU_HYBRID_SECONDARY, System, false);
+-- 
+2.39.2
+

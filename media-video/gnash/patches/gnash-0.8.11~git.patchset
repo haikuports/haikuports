@@ -1,0 +1,728 @@
+From 309dfaa8d33d1b289729497dd2e59ff00310cfbd Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Tue, 28 Sep 2021 12:28:29 +1000
+Subject: Fix build for Haiku
+
+
+diff --git a/configure.ac b/configure.ac
+index 97d3c87..790eada 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -2948,7 +2948,7 @@ AC_ARG_WITH([gconf],
+           [Disable the use of gconf])],
+   [],
+   [case "${host}" in
+-    *-cygwin* | *-mingw* | *-pw32*) with_gconf=no ;;
++    *-cygwin* | *-mingw* | *-pw32* | *-haiku*) with_gconf=no ;;
+     *) with_gconf=yes ;;
+    esac])
+ AC_MSG_RESULT([$with_gconf])
+diff --git a/gui/haiku/haiku.cpp b/gui/haiku/haiku.cpp
+index c89e699..2c70f08 100644
+--- a/gui/haiku/haiku.cpp
++++ b/gui/haiku/haiku.cpp
+@@ -23,6 +23,7 @@
+ 
+ #include "RunResources.h"
+ 
++#include <iostream>
+ #include <boost/format.hpp>
+ 
+ #include "adipe.h"
+@@ -204,6 +205,8 @@ public:
+ 
+     virtual ~BeApp()
+     {
++    	//delete _gui->getStage()->runResources().soundHandler();
++
+         status_t st, exit_value;
+         do {
+             st = send_data(_pulse_tid, GNASH_QUITTING, NULL, 0);
+@@ -356,8 +359,6 @@ HaikuGui::HaikuGui(unsigned long xid, float scale, bool loop, RunResources& r)
+ HaikuGui::~HaikuGui()
+ {
+     GNASH_REPORT_FUNCTION;
+-
+-    delete _app;
+ }
+ 
+ bool
+@@ -568,6 +569,12 @@ HaikuGui::getInterval()
+     return _interval;
+ }
+ 
++bool
++HaikuGui::showMouse(bool show)
++{
++    return _glue.ShowCursor(show);
++}
++
+ void
+ HaikuGui::resize_view(int width, int height)
+ {
+diff --git a/gui/haiku/haiku_agg_glue.cpp b/gui/haiku/haiku_agg_glue.cpp
+index ad546fc..f0f5eaa 100644
+--- a/gui/haiku/haiku_agg_glue.cpp
++++ b/gui/haiku/haiku_agg_glue.cpp
+@@ -34,6 +34,7 @@
+ #include <interface/Bitmap.h>
+ #include <View.h>
+ #include <Window.h>
++#include <Cursor.h>
+ 
+ #include <sys/mman.h>
+ 
+@@ -85,6 +86,15 @@ public:
+         delete _bitmap; _bitmap = NULL;
+         _bitmap = new BBitmap(BRect(0,0,_width-1, _height-1), B_RGBA32);
+     }
++    
++    void ShowCursor(bool show)
++    {
++    	if (LockLooperWithTimeout(10000) == B_OK) {
++    		BCursor cursor(show ? B_CURSOR_ID_SYSTEM_DEFAULT : B_CURSOR_ID_NO_CURSOR);
++    		SetViewCursor(&cursor);
++    		UnlockLooper();
++    	}    	
++    }
+ 
+ enum gnash::key::code gnash_keycode(int code)
+ {
+@@ -180,7 +190,7 @@ return c;
+ 
+         MakeFocus();
+         BPoint mouseWhere;
+-        ulong buttons;
++        uint32 buttons;
+         GetMouse(&mouseWhere, &buttons);
+         // XXX many buttons clicked simultaneously
+         BMessage msg(GNASH_MOUSE_CLICKED);
+@@ -197,7 +207,7 @@ return c;
+         (void) where;
+ 
+         BPoint mouseWhere;
+-        ulong buttons;
++        uint32 buttons;
+         GetMouse(&mouseWhere, &buttons);
+ 
+         BMessage msg(GNASH_MOUSE_CLICKED);
+@@ -223,7 +233,8 @@ HaikuAggGlue::HaikuAggGlue(Gui *gui, unsigned long xid)
+     _gui(gui),
+     _xid(xid),
+     _sharefd(-1),
+-    _viewhidden(false)
++    _viewhidden(false),
++    _cursorshow(true)
+ {
+     //GNASH_REPORT_FUNCTION;
+ }
+@@ -497,6 +508,15 @@ HaikuAggGlue::Hidden()
+     _viewhidden = true;
+ }
+ 
++bool
++HaikuAggGlue::ShowCursor(bool show)
++{
++	bool prev = _cursorshow;
++	_view->ShowCursor(show);
++	_cursorshow = show;
++	return prev;
++}
++
+ //void
+ //HaikuAggGlue::BlankScreen()
+ //{
+diff --git a/gui/haiku/haiku_agg_glue.h b/gui/haiku/haiku_agg_glue.h
+index c52c373..2337ca1 100644
+--- a/gui/haiku/haiku_agg_glue.h
++++ b/gui/haiku/haiku_agg_glue.h
+@@ -25,6 +25,8 @@
+ 
+ #include <SupportDefs.h>
+ 
++#include "gui.h"
++
+ class BWindow;
+ 
+ namespace gnash
+@@ -62,6 +64,8 @@ class HaikuAggGlue
+     void render(int minx, int miny, int maxx, int maxy);
+     void Shown();
+     void Hidden();
++    void SetCursor(gnash_cursor_type newcursor);
++    bool ShowCursor(bool show);  
+     //void BlankScreen();
+   private:
+     unsigned char   *_offscreenbuf;
+@@ -80,6 +84,7 @@ class HaikuAggGlue
+     std::string _sharefilename;
+     int _sharefd;
+     bool _viewhidden;
++    bool _cursorshow;
+ };
+ 
+ }
+diff --git a/gui/haiku/haikusup.h b/gui/haiku/haikusup.h
+index 7ea0573..cc7b852 100644
+--- a/gui/haiku/haikusup.h
++++ b/gui/haiku/haikusup.h
+@@ -70,6 +70,7 @@ public:
+     virtual void renderBuffer();
+     virtual void setInterval(unsigned int interval);
+     virtual void setTimeout(unsigned int timeout);
++    virtual bool showMouse(bool show);
+     virtual void error(const std::string &msg);
+     virtual bool yesno(const std::string &question);
+ 
+diff --git a/libbase/GnashImageGif.cpp b/libbase/GnashImageGif.cpp
+index 2ae5ddb..fa7b569 100644
+--- a/libbase/GnashImageGif.cpp
++++ b/libbase/GnashImageGif.cpp
+@@ -120,7 +120,7 @@ GifInput::GifInput(std::shared_ptr<IOChannel> in)
+ GifInput::~GifInput()
+ {
+     // Clean up allocated data.
+-#if GIFLIB_MAJOR==5 && GIFLIB_MINOR==1
++#if GIFLIB_MAJOR==5 && GIFLIB_MINOR>=1
+ 	DGifCloseFile(_gif, 0);
+ #else
+ 	DGifCloseFile(_gif);
+diff --git a/libbase/rc.cpp b/libbase/rc.cpp
+index 38ba3ed..e33c060 100644
+--- a/libbase/rc.cpp
++++ b/libbase/rc.cpp
+@@ -75,7 +75,11 @@ RcInitFile::RcInitFile()
+     _debugger(false),
+     _verbosity(-1),
+     // will be reset to something else if __OS2__x is defined:
++#ifdef __HAIKU__
++    _urlOpenerFormat("open '%u'"),
++#else
+     _urlOpenerFormat("xdg-open '%u'"),
++#endif
+     _flashVersionString(
+         DEFAULT_FLASH_PLATFORM_ID" "\
+         DEFAULT_FLASH_MAJOR_VERSION","\
+diff --git a/libbase/utility.h b/libbase/utility.h
+index 10f35aa..5fca0a4 100644
+--- a/libbase/utility.h
++++ b/libbase/utility.h
+@@ -61,7 +61,7 @@ namespace std
+ };
+ #endif
+ 
+-#if defined(__HAIKU__)
++#if defined(__HAIKU_OLD)
+ namespace std {
+ 	class wstring : public std::basic_string<char>
+ 	{
+diff --git a/libmedia/ffmpeg/MediaHandlerFfmpeg.cpp b/libmedia/ffmpeg/MediaHandlerFfmpeg.cpp
+index 127aaaa..216d96b 100644
+--- a/libmedia/ffmpeg/MediaHandlerFfmpeg.cpp
++++ b/libmedia/ffmpeg/MediaHandlerFfmpeg.cpp
+@@ -149,7 +149,7 @@ MediaHandlerFfmpeg::cameraNames(std::vector<std::string>& /*names*/) const
+ size_t
+ MediaHandlerFfmpeg::getInputPaddingSize() const
+ {
+-    return FF_INPUT_BUFFER_PADDING_SIZE;
++    return AV_INPUT_BUFFER_PADDING_SIZE;
+ }
+ 
+ } // gnash.media.ffmpeg namespace 
+diff --git a/libmedia/ffmpeg/MediaParserFfmpeg.cpp b/libmedia/ffmpeg/MediaParserFfmpeg.cpp
+index 9ceb8b0..a27ca56 100644
+--- a/libmedia/ffmpeg/MediaParserFfmpeg.cpp
++++ b/libmedia/ffmpeg/MediaParserFfmpeg.cpp
+@@ -64,7 +64,7 @@ AVInputFormat*
+ MediaParserFfmpeg::probeStream()
+ {
+     const size_t probeSize = 4096;
+-    const size_t bufSize = probeSize + FF_INPUT_BUFFER_PADDING_SIZE;
++    const size_t bufSize = probeSize + AV_INPUT_BUFFER_PADDING_SIZE;
+ 
+ 	std::unique_ptr<std::uint8_t[]> buffer(new std::uint8_t[bufSize]);
+ 
+@@ -173,7 +173,7 @@ MediaParserFfmpeg::parseVideoFrame(AVPacket& packet)
+ 
+ 	// TODO: We might avoid the copy as a whole by making EncodedVideoFrame
+ 	//       virtual.
+-	size_t allocSize = packet.size + FF_INPUT_BUFFER_PADDING_SIZE;
++	size_t allocSize = packet.size + AV_INPUT_BUFFER_PADDING_SIZE;
+ 	std::uint8_t* data = new std::uint8_t[allocSize];
+ 	std::copy(packet.data, packet.data+packet.size, data);
+ 	std::unique_ptr<EncodedVideoFrame> frame(new EncodedVideoFrame(data, packet.size, 0, timestamp));
+@@ -221,7 +221,7 @@ MediaParserFfmpeg::parseAudioFrame(AVPacket& packet)
+ 
+ 	// TODO: We might avoid the copy as a whole by making EncodedAudioFrame
+ 	//       virtual.
+-	size_t allocSize = packet.size + FF_INPUT_BUFFER_PADDING_SIZE;
++	size_t allocSize = packet.size + AV_INPUT_BUFFER_PADDING_SIZE;
+ 	std::uint8_t* data = new std::uint8_t[allocSize];
+ 	std::copy(packet.data, packet.data+packet.size, data);
+ 
+diff --git a/libmedia/ffmpeg/ffmpegHeaders.h b/libmedia/ffmpeg/ffmpegHeaders.h
+index d8f9b26..01b6115 100644
+--- a/libmedia/ffmpeg/ffmpegHeaders.h
++++ b/libmedia/ffmpeg/ffmpegHeaders.h
+@@ -64,6 +64,16 @@ extern "C" {
+ }
+ #endif
+ 
++#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(52,94,1)
++#define AV_SAMPLE_FMT_NONE SAMPLE_FMT_NONE
++#define AV_SAMPLE_FMT_U8   SAMPLE_FMT_U8
++#define AV_SAMPLE_FMT_S16  SAMPLE_FMT_S16
++#define AV_SAMPLE_FMT_S32  SAMPLE_FMT_S32
++#define AV_SAMPLE_FMT_FLT  SAMPLE_FMT_FLT
++#define AV_SAMPLE_FMT_DBL  SAMPLE_FMT_DBL
++
++#define AVSampleFormat SampleFormat
++#endif
+ 
+ #ifdef HAVE_SWSCALE_H
+ extern "C" {
+diff --git a/librender/opengl/Renderer_ogl.cpp b/librender/opengl/Renderer_ogl.cpp
+index b377a9e..cd1afda 100644
+--- a/librender/opengl/Renderer_ogl.cpp
++++ b/librender/opengl/Renderer_ogl.cpp
+@@ -756,7 +756,7 @@ public:
+       return OSMesaGetCurrentContext();
+     }
+ # endif
+-    return glXGetCurrentContext();
++    return true;//glXGetCurrentContext();
+ #endif
+   }    
+ 
+diff --git a/librender/opengl/Renderer_ogl.h b/librender/opengl/Renderer_ogl.h
+index a9caac8..0730ded 100644
+--- a/librender/opengl/Renderer_ogl.h
++++ b/librender/opengl/Renderer_ogl.h
+@@ -38,7 +38,7 @@
+ # ifdef WIN32
+ #  define GL_CLAMP_TO_EDGE 0x812F
+ # else
+-# include <GL/glx.h>
++# include <GL/gl.h>
+ # ifdef OSMESA_TESTING
+ #  include <GL/osmesa.h>
+ # endif // OSMESA_TESTING
+diff --git a/librender/opengl/tu_opengl_includes.h b/librender/opengl/tu_opengl_includes.h
+index 230238e..1b05372 100644
+--- a/librender/opengl/tu_opengl_includes.h
++++ b/librender/opengl/tu_opengl_includes.h
+@@ -74,7 +74,7 @@
+ # include <OpenGL/glext.h>
+ #else
+ # include <GL/gl.h>
+-# include <GL/glx.h>
++//# include <GL/glx.h>
+ # include <GL/glu.h>
+ #endif
+ #ifndef APIENTRY
+diff --git a/libsound/mkit/sound_handler_mkit.cpp b/libsound/mkit/sound_handler_mkit.cpp
+index 86235ee..f3dcf49 100644
+--- a/libsound/mkit/sound_handler_mkit.cpp
++++ b/libsound/mkit/sound_handler_mkit.cpp
+@@ -40,10 +40,8 @@
+ namespace gnash {
+ namespace sound {
+ 
+-Mkit_sound_handler::Mkit_sound_handler(media::MediaHandler* m)
+-    :
+-    sound_handler(m),
+-    _audioopen(false)
++void
++Mkit_sound_handler::initAudio()
+ {
+ }
+ 
+@@ -62,114 +60,98 @@ Mkit_sound_handler::openAudio()
+         B_MEDIA_BIG_ENDIAN : B_MEDIA_LITTLE_ENDIAN;
+     format.buffer_size = media_raw_audio_format::wildcard.buffer_size;
+ 
+-    _soundplayer.reset(new BSoundPlayer(&format, "Gnash",
+-            Mkit_sound_handler::FillNextBuffer, NULL, this));
++    _soundplayer = new BSoundPlayer(&format, "Gnash",
++            Mkit_sound_handler::FillNextBuffer, NULL, this);
+     if (B_OK != _soundplayer->InitCheck())
+         throw SoundException(_("Unable to open audio"));
+     _soundplayer->Start();
+ }
+ 
+-Mkit_sound_handler::~Mkit_sound_handler()
++void
++Mkit_sound_handler::closeAudio()
+ {
+-    if (_soundplayer != NULL)
+-        _soundplayer->Stop(true, true);
++	if (_soundplayer != NULL) {
++		_soundplayer->SetHasData(false);		
++		_soundplayer->Stop(true, true);
++	}
+ 
+-//    std::lock_guard<std::mutex> lock(_mutex);
+-//#ifdef GNASH_DEBUG_HAIKU_AUDIO_PAUSING
+-//    log_debug("Pausing Mkit Audio on destruction");
+-//#endif
+-//    SDL_PauseAudio(1);
+-//
+-//    lock.unlock();
+-
+-    // we already locked, so we call 
+-    // the base class (non-locking) deleter
+-    delete_all_sounds();
+-
+-    unplugAllInputStreams();
+-
+-//    SDL_CloseAudio();
++    _audioopen = false;
+ 
+-    if (file_stream) file_stream.close();
++	delete _soundplayer;
++	_soundplayer = NULL;
+ }
+ 
+-void
+-Mkit_sound_handler::FillNextBuffer(void *cookie, void *buffer, size_t size,
+-        const media_raw_audio_format &format)
++Mkit_sound_handler::Mkit_sound_handler(media::MediaHandler* m)
++    :
++    sound_handler(m),
++    _audioopen(false)
+ {
+-    (void) format;
+-
+-    size_t numSamples =
+-        size / sizeof(uint16);
+-    std::int16_t *data = (std::int16_t*) buffer;
+-
+-    Mkit_sound_handler *that =
+-        reinterpret_cast<Mkit_sound_handler*>(cookie);
+-
+-    that->fetchSamples(data, numSamples);
++	initAudio();
+ }
+ 
+ void
+-Mkit_sound_handler::fetchSamples(std::int16_t* to, unsigned int nSamples)
++Mkit_sound_handler::reset()
+ {
+     std::lock_guard<std::mutex> lock(_mutex);
+-    sound_handler::fetchSamples(to, nSamples);
++    sound_handler::delete_all_sounds();
++    sound_handler::stop_all_sounds();
++}
+ 
+-    // TODO: move this to base class !
+-    if (file_stream)
+-    {
+-        // NOTE: if muted, the samples will be silent already
+-        std::uint8_t* stream = reinterpret_cast<std::uint8_t*>(to);
+-        unsigned int len = nSamples*2;
+-        file_stream.write((char*) stream, len);
++Mkit_sound_handler::~Mkit_sound_handler()
++{
++	std::lock_guard<std::mutex> lock(_mutex);
+ 
+-        // now, mute all audio
+-        std::fill(to, to+nSamples, 0);
+-    }
++    sound_handler::delete_all_sounds();
++    sound_handler::stop_all_sounds();
++    sound_handler::unplugAllInputStreams();
+ 
+-    // If nothing is left to play there is no reason to keep polling.
+-    if ( ! hasInputStreams() )
+-    {
+-#ifdef GNASH_DEBUG_HAIKU_AUDIO_PAUSING
+-        log_debug("Pausing Mkit Audio...");
+-#endif
+-        sound_handler::pause();
+-    }
++	closeAudio();
+ }
+ 
+-void
+-Mkit_sound_handler::reset()
++int
++Mkit_sound_handler::createStreamingSound(const media::SoundInfo& sinfo)
+ {
+     std::lock_guard<std::mutex> lock(_mutex);
+-    sound_handler::delete_all_sounds();
+-    sound_handler::stop_all_sounds();
++    return sound_handler::createStreamingSound(sinfo);
+ }
+ 
+ int
+ Mkit_sound_handler::create_sound(std::unique_ptr<SimpleBuffer> data,
+-                                std::unique_ptr<media::SoundInfo> sinfo)
++                                const media::SoundInfo& sinfo)
+ {
+     std::lock_guard<std::mutex> lock(_mutex);
+-    return sound_handler::create_sound(data, sinfo);
++    return sound_handler::create_sound(std::move(data), sinfo);
+ }
+ 
+ sound_handler::StreamBlockId
+-Mkit_sound_handler::addSoundBlock(unsigned char* data,
+-        unsigned int dataBytes, unsigned int nSamples,
+-        int streamId)
++Mkit_sound_handler::addSoundBlock(SimpleBuffer buf,
++        size_t sampleCount, int seekSamples, int handle)
+ {
+ 
+     std::lock_guard<std::mutex> lock(_mutex);
+-    return sound_handler::addSoundBlock(data, dataBytes, nSamples, streamId);
++    return sound_handler::addSoundBlock(std::move(buf), sampleCount, seekSamples, handle);
+ }
+ 
+ void
+-Mkit_sound_handler::stop_sound(int soundHandle)
++Mkit_sound_handler::stopEventSound(int soundHandle)
+ {
+     std::lock_guard<std::mutex> lock(_mutex);
+-    sound_handler::stop_sound(soundHandle);
++    sound_handler::stopEventSound(soundHandle);
+ }
+ 
++void
++Mkit_sound_handler::stopAllEventSounds()
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    sound_handler::stopAllEventSounds();
++}
++
++void
++Mkit_sound_handler::stopStreamingSound(int soundHandle)
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    sound_handler::stopStreamingSound(soundHandle);
++}
+ 
+ void
+ Mkit_sound_handler::delete_sound(int soundHandle)
+@@ -185,7 +167,6 @@ Mkit_sound_handler::stop_all_sounds()
+     sound_handler::stop_all_sounds();
+ }
+ 
+-
+ int
+ Mkit_sound_handler::get_volume(int soundHandle)
+ {
+@@ -193,7 +174,6 @@ Mkit_sound_handler::get_volume(int soundHandle)
+     return sound_handler::get_volume(soundHandle);
+ }
+ 
+-
+ void
+ Mkit_sound_handler::set_volume(int soundHandle, int volume)
+ {
+@@ -222,12 +202,52 @@ Mkit_sound_handler::tell(int soundHandle)
+     return sound_handler::tell(soundHandle);
+ }
+ 
++
++sound_handler*
++create_sound_handler_mkit(media::MediaHandler* m)
++{
++    return new Mkit_sound_handler(m);
++}
++
++void
++Mkit_sound_handler::fetchSamples(std::int16_t* to, unsigned int nSamples)
++{
++    std::lock_guard<std::mutex> lock(_mutex);
++    sound_handler::fetchSamples(to, nSamples);
++
++    // If nothing is left to play there is no reason to keep polling.
++    if ( ! hasInputStreams() )
++    {
++#ifdef GNASH_DEBUG_HAIKU_AUDIO_PAUSING
++        log_debug("Pausing Mkit Audio...");
++#endif
++        sound_handler::pause();
++    }
++}
++
++void
++Mkit_sound_handler::FillNextBuffer(void *cookie, void *buffer, size_t size,
++        const media_raw_audio_format &format)
++{
++    (void) format;
++
++    size_t numSamples =
++        size / sizeof(uint16);
++    std::int16_t *data = (std::int16_t*) buffer;
++
++    Mkit_sound_handler *that =
++        reinterpret_cast<Mkit_sound_handler*>(cookie);
++
++    that->fetchSamples(data, numSamples);
++}
++
++
+ void
+ Mkit_sound_handler::plugInputStream(std::unique_ptr<InputStream> newStreamer)
+ {
+     std::lock_guard<std::mutex> lock(_mutex);
+ 
+-    sound_handler::plugInputStream(newStreamer);
++    sound_handler::plugInputStream(std::move(newStreamer));
+ 
+     { // TODO: this whole block should only be executed when adding
+       // the first stream.
+@@ -237,7 +257,6 @@ Mkit_sound_handler::plugInputStream(std::unique_ptr<InputStream> newStreamer)
+ #endif
+         openAudio();
+         sound_handler::unpause();
+-
+     }
+ }
+ 
+@@ -264,12 +283,12 @@ Mkit_sound_handler::unpause()
+     }
+ }
+ 
+-
+-sound_handler*
+-create_sound_handler_mkit(media::MediaHandler* m)
+-// Factory.
++void
++Mkit_sound_handler::unplugInputStream(InputStream* id)
+ {
+-    return new Mkit_sound_handler(m);
++    std::lock_guard<std::mutex> lock(_mutex);
++
++    sound_handler::unplugInputStream(id);
+ }
+ 
+ } // gnash.sound namespace 
+diff --git a/libsound/mkit/sound_handler_mkit.h b/libsound/mkit/sound_handler_mkit.h
+index 9cad2ac..3e6b3ee 100644
+--- a/libsound/mkit/sound_handler_mkit.h
++++ b/libsound/mkit/sound_handler_mkit.h
+@@ -43,15 +43,19 @@ namespace sound {
+ /// Mkit media kit based sound_handler
+ class Mkit_sound_handler : public sound_handler
+ {
+-    std::unique_ptr<BSoundPlayer> _soundplayer;
++    BSoundPlayer* _soundplayer;
+ 
+     /// play buffer handler function
+     static void FillNextBuffer(void *cookie, void *buffer, size_t size,
+             const media_raw_audio_format &format);
+ 
+-    /// @throw SoundException on error
++    /// Initialize audio card
++    void initAudio();
++
+     void openAudio();
+ 
++    void closeAudio();
++
+     bool _audioopen;
+ 
+     /// Mutex for making sure threads doesn't mess things up
+@@ -62,18 +66,24 @@ public:
+ 
+     ~Mkit_sound_handler();
+ 
++    virtual int createStreamingSound(const media::SoundInfo& sinfo);
++
+     // See dox in sound_handler.h
+-    virtual int create_sound(std::unique_ptr<SimpleBuffer> data, std::unique_ptr<media::SoundInfo> sinfo);
++    virtual int create_sound(std::unique_ptr<SimpleBuffer> data,
++            const media::SoundInfo& sinfo);
+ 
+     // See dox in sound_handler.h
+     // overridden to serialize access to the data buffer slot
+-    virtual StreamBlockId addSoundBlock(unsigned char* data,
+-                                       unsigned int data_bytes,
+-                                       unsigned int sample_count,
+-                                       int streamId);
++    virtual StreamBlockId addSoundBlock(SimpleBuffer buf,
++           size_t sample_count, int seekSamples, int streamId);
+ 
+     // See dox in sound_handler.h
+-    virtual void    stop_sound(int sound_handle);
++    virtual void stopEventSound(int sound_handle);
++
++    // See dox in sound_handler.h
++    virtual void stopAllEventSounds();
++
++    virtual void stopStreamingSound(int sound_handle);
+ 
+     // See dox in sound_handler.h
+     virtual void    delete_sound(int sound_handle);
+@@ -108,9 +118,12 @@ public:
+     virtual unsigned int tell(int sound_handle);
+ 
+     // See dox in sound_handler.h
+-    // Overridden to unpause SDL audio
++    // Overridden to unpause audio
+     void plugInputStream(std::unique_ptr<InputStream> in);
+ 
++    // Overidden to provide thread safety.
++    void unplugInputStream(InputStream* id);
++
+     // See dox in sound_handler.h
+     void fetchSamples(std::int16_t* to, unsigned int nSamples);
+ };
+-- 
+2.30.2
+
+
+From 302c97222d4dd5931eca83c650c40a596a6e321f Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Tue, 28 Sep 2021 13:22:04 +1000
+Subject: Add missing file
+
+
+diff --git a/gui/haiku/adipe.h b/gui/haiku/adipe.h
+new file mode 100644
+index 0000000..f46eb50
+--- /dev/null
++++ b/gui/haiku/adipe.h
+@@ -0,0 +1,15 @@
++#ifndef __ADIPE_H_
++#define __ADIPE_H_
++
++
++#define QQ_LVL 6
++
++#define QQ(x)	do { 							\
++			if ( (x) <= QQ_LVL )				\
++				fprintf(stderr,"QQ %s \t%d \t%s\n",	\
++					__FILE__, __LINE__,		\
++					 __PRETTY_FUNCTION__);      	\
++		} while(0)
++
++#endif
++
+-- 
+2.30.2
+
+
+From 66b485571ce9e44ab91e7ec6859a37f8aae3ea83 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Tue, 28 Sep 2021 16:43:18 +1000
+Subject: Fix application signature
+
+
+diff --git a/gui/haiku/haiku.cpp b/gui/haiku/haiku.cpp
+index 2c70f08..fda1771 100644
+--- a/gui/haiku/haiku.cpp
++++ b/gui/haiku/haiku.cpp
+@@ -129,7 +129,7 @@ class BeApp : public BApplication
+     int32 _mousemovedx, _mousemovedy;
+ public:
+     BeApp(HaikuGui *gui)
+-    : BApplication("application/gnash-player"),
++    : BApplication("application/x-vnd.gnash-player"),
+         _gui(gui), _win(NULL),
+         _pulse_tid(-1),
+         _start_t(time(NULL)),
+-- 
+2.30.2
+

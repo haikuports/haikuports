@@ -1,0 +1,248 @@
+From 6d84ad2b98e14f421128acf37533ca08d2953221 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Thu, 21 Apr 2022 19:11:49 +1000
+Subject: Add Haiku support
+
+
+diff --git a/Makefile b/Makefile
+index b961d79..4adace6 100644
+--- a/Makefile
++++ b/Makefile
+@@ -27,7 +27,12 @@ ifeq ($(ARCH),lin)
+ 		-lGL -lpthread \
+ 		-Ldep/lib -lSDL2 -lsamplerate -lsndfile -ljansson -lcurl \
+ 		-lgtk-x11-2.0 -lgobject-2.0
+-	SOURCES += ext/osdialog/osdialog_gtk2.c
++	SOURCES += ext/osdialog/osdialog_gtk2.c	
++else ifeq ($(ARCH),haiku)
++	# Haiku
++	FLAGS += -DARCH_HAIKU $(shell pkg-config --cflags sdl2)
++	LDFLAGS += -lGL -lSDL2 -lsamplerate -lsndfile -ljansson -lcurl -lbe -ltracker -lnetwork
++	SOURCES += ext/osdialog/osdialog_haiku.cpp
+ else ifeq ($(ARCH),mac)
+ 	# Mac
+ 	FLAGS += -DARCH_MAC \
+diff --git a/Makefile-arch.inc b/Makefile-arch.inc
+index 0ff5fce..ceb7b2f 100644
+--- a/Makefile-arch.inc
++++ b/Makefile-arch.inc
+@@ -8,6 +8,9 @@ ifneq (,$(findstring linux,$(MACHINE)))
+ else ifneq (,$(findstring apple,$(MACHINE)))
+ 	# Mac
+ 	ARCH = mac
++else ifneq (,$(findstring haiku,$(MACHINE)))
++	# Haiku
++	ARCH = haiku
+ else ifneq (,$(findstring mingw,$(MACHINE)))
+ 	# Windows
+ 	ARCH = win
+@@ -15,4 +18,4 @@ else
+ $(error Could not detect architecture. Specify manually with `make ARCH=...`)
+ endif
+ 
+-endif
+\ No newline at end of file
++endif
+diff --git a/src/catalog.cpp b/src/catalog.cpp
+index e2758fa..6126e13 100644
+--- a/src/catalog.cpp
++++ b/src/catalog.cpp
+@@ -5,6 +5,16 @@
+ #include <sys/stat.h>
+ #include <dirent.h>
+ 
++#ifdef ARCH_HAIKU
++typedef struct dirent_haiku {
++	dev_t d_dev;
++	dev_t d_pdev;
++	ino_t d_ino;
++	ino_t d_pino;
++	unsigned short d_reclen;
++	char d_name[MAXNAMLEN];
++} dirent_haiku_t;
++#endif
+ 
+ std::vector<CatalogCategory> catalogCategories;
+ 
+@@ -19,6 +29,24 @@ int alphaEntryComp(const void *a, const void *b) {
+ Sorts alphabetically, omits entries beginning with "."
+ Returns number of entries read
+ */
++#ifdef ARCH_HAIKU
++static int dirEntries(DIR *dir, struct dirent_haiku *entries, int len) {
++	if (!dir)
++		return 0;
++	int i = 0;
++	while (i < len) {
++		struct dirent_haiku *entry = (dirent_haiku_t*)readdir(dir);
++		if (!entry)
++			break;
++		if (entry->d_name[0] == '.')
++			continue;
++		entries[i] = *entry;
++		i++;
++	}
++	qsort(entries, i, sizeof(struct dirent_haiku), alphaEntryComp);
++	return i;
++}
++#else
+ static int dirEntries(DIR *dir, struct dirent *entries, int len) {
+ 	if (!dir)
+ 		return 0;
+@@ -39,12 +67,16 @@ static int dirEntries(DIR *dir, struct dirent *entries, int len) {
+ 	qsort(entries, i, sizeof(struct dirent), alphaEntryComp);
+ 	return i;
+ }
+-
++#endif
+ 
+ void catalogInit() {
+ 	static const char *rootPath = "catalog";
+ 	DIR *rootDir = opendir(rootPath);
++#ifdef ARCH_HAIKU
++	struct dirent_haiku categoryEntries[128];
++#else
+ 	struct dirent categoryEntries[128];
++#endif
+ 	int categoriesLength = dirEntries(rootDir, categoryEntries, 128);
+ 
+ 	for (int i = 0; i < categoriesLength; i++) {
+@@ -67,7 +99,11 @@ void catalogInit() {
+ 		catalogCategory.name = name;
+ 
+ 		DIR *categoryDir = opendir(categoryPath);
++#ifdef ARCH_HAIKU
++		struct dirent_haiku fileEntries[128];
++#else
+ 		struct dirent fileEntries[128];
++#endif
+ 		int filesLength = dirEntries(categoryDir, fileEntries, 128);
+ 
+ 		for (int j = 0; j < filesLength; j++) {
+diff --git a/src/main.cpp b/src/main.cpp
+index d77d894..6353a01 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -10,6 +10,23 @@
+ #include "imgui/examples/sdl_opengl2_example/imgui_impl_sdl.h"
+ 
+ 
++#ifdef ARCH_HAIKU
++#include <stdio.h>
++#include <libgen.h>
++#include <kernel/image.h>
++
++void fixWorkingDirectory() {
++    int32 cookie = 0;
++    image_info info;
++    while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
++	if (info.type != B_APP_IMAGE)
++		continue;	
++	chdir(dirname(realpath(info.name, nullptr)));
++	break;
++    }
++}
++#endif
++
+ #ifdef ARCH_MAC
+ 
+ #include <unistd.h> // for chdir
+@@ -45,7 +62,7 @@ __asm__(".symver realpath,realpath@GLIBC_2.2.5");
+ int main(int argc, char **argv) {
+ 	srand(time(NULL));
+ 
+-#ifdef ARCH_MAC
++#if defined(ARCH_MAC) || defined(ARCH_HAIKU)
+ 	fixWorkingDirectory();
+ #endif
+ 
+@@ -79,7 +96,15 @@ int main(int argc, char **argv) {
+ 	// Initialize modules
+ 	uiInit();
+ 	historyClear();
++#ifdef ARCH_HAIKU
++	char settingsFile[PATH_MAX];
++	char *settingsPath = SDL_GetPrefPath("Synthesis", "WaveEdit");
++	snprintf(settingsFile, PATH_MAX, "%s/autosave.dat", settingsPath);
++	SDL_free(settingsPath);
++	currentBank.load(settingsFile);
++#else
+ 	currentBank.load("autosave.dat");
++#endif
+ 	historyPush();
+ 	catalogInit();
+ 	audioInit();
+@@ -135,7 +160,11 @@ int main(int argc, char **argv) {
+ 		SDL_GL_SwapWindow(window);
+ 	}
+ 
++#ifdef ARCH_HAIKU
++	currentBank.save(settingsFile);
++#else
+ 	currentBank.save("autosave.dat");
++#endif
+ 
+ 	// Cleanup
+ 	uiDestroy();
+diff --git a/src/ui.cpp b/src/ui.cpp
+index 21b3f11..13d051a 100644
+--- a/src/ui.cpp
++++ b/src/ui.cpp
+@@ -6,6 +6,9 @@
+ #ifdef ARCH_MAC
+ 	#include <sys/syslimits.h>
+ #endif
++#ifdef ARCH_HAIKU
++	#include <limits.h>
++#endif
+ #include <libgen.h>
+ 
+ #include <SDL.h>
+@@ -1072,7 +1075,15 @@ void uiInit() {
+ 	// Load UI settings
+ 	// If this gets any more complicated, it should be JSON.
+ 	{
++#ifdef ARCH_HAIKU
++		char settingsFile[PATH_MAX];
++		char *settingsPath = SDL_GetPrefPath("Synthesis", "WaveEdit");
++		snprintf(settingsFile, PATH_MAX, "%s/ui.dat", settingsPath);
++		SDL_free(settingsPath);
++		FILE *f = fopen(settingsFile, "rb");
++#else
+ 		FILE *f = fopen("ui.dat", "rb");
++#endif
+ 		if (f) {
+ 			fread(&styleId, sizeof(styleId), 1, f);
+ 			fclose(f);
+@@ -1086,7 +1097,15 @@ void uiInit() {
+ void uiDestroy() {
+ 	// Save UI settings
+ 	{
++#ifdef ARCH_HAIKU
++		char settingsFile[PATH_MAX];
++		char *settingsPath = SDL_GetPrefPath("Synthesis", "WaveEdit");
++		snprintf(settingsFile, PATH_MAX, "%s/ui.dat", settingsPath);
++		SDL_free(settingsPath);
++		FILE *f = fopen(settingsFile, "wb");
++#else
+ 		FILE *f = fopen("ui.dat", "wb");
++#endif
+ 		if (f) {
+ 			fwrite(&styleId, sizeof(styleId), 1, f);
+ 			fclose(f);
+diff --git a/src/util.cpp b/src/util.cpp
+index 7c91bb0..d813d73 100644
+--- a/src/util.cpp
++++ b/src/util.cpp
+@@ -15,7 +15,7 @@ void openBrowser(const char *url) {
+ 	snprintf(command, sizeof(command), "xdg-open %s", url);
+ 	system(command);
+ #endif
+-#if defined(__APPLE__)
++#if defined(__APPLE__) || defined(__HAIKU__)
+ 	char command[1024];
+ 	snprintf(command, sizeof(command), "open %s", url);
+ 	system(command);
+-- 
+2.30.2
+

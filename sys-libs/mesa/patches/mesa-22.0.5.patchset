@@ -1,0 +1,291 @@
+From 409a1320c8fdbb7b21f01a3db5f8c56e1625e495 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 8 Aug 2021 22:34:39 +1000
+Subject: Fix build for Haiku
+
+
+diff --git a/src/egl/main/egldisplay.c b/src/egl/main/egldisplay.c
+index 131fc22..7c96462 100644
+--- a/src/egl/main/egldisplay.c
++++ b/src/egl/main/egldisplay.c
+@@ -57,6 +57,10 @@
+ #include "eglimage.h"
+ #include "eglsync.h"
+ 
++#ifdef __HAIKU__
++#define static_assert _Static_assert
++#endif
++
+ /* Includes for _eglNativePlatformDetectNativeDisplay */
+ #ifdef HAVE_WAYLAND_PLATFORM
+ #include <wayland-client.h>
+diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
+index e93e8c6..5bef62c 100644
+--- a/src/util/disk_cache_os.c
++++ b/src/util/disk_cache_os.c
+@@ -164,10 +164,19 @@ choose_lru_file_matching(const char *dir_path,
+    if (dir == NULL)
+       return NULL;
+ 
++#ifdef __HAIKU__
++   struct stat info;
++#endif
++
+    /* First count the number of files in the directory */
+    unsigned total_file_count = 0;
+    while ((dir_ent = readdir(dir)) != NULL) {
++#ifdef __HAIKU__
++   stat(dir_ent->d_name, &info);
++   if (S_ISREG(info.st_mode)) {
++#else
+       if (dir_ent->d_type == DT_REG) { /* If the entry is a regular file */
++#endif
+          total_file_count++;
+       }
+    }
+diff --git a/src/util/u_thread.h b/src/util/u_thread.h
+index a421545..d138cc9 100644
+--- a/src/util/u_thread.h
++++ b/src/util/u_thread.h
+@@ -43,10 +43,6 @@
+ #endif
+ #endif
+ 
+-#ifdef __HAIKU__
+-#include <OS.h>
+-#endif
+-
+ #if DETECT_OS_LINUX && !defined(ANDROID)
+ #include <sched.h>
+ #elif defined(_WIN32) && !defined(__CYGWIN__) && _WIN32_WINNT >= 0x0600
+@@ -61,6 +57,11 @@
+ #define cpu_set_t cpuset_t
+ #endif
+ 
++#ifdef __HAIKU__
++#include <OS.h>
++#undef ALIGN
++#endif
++
+ /* For util_set_thread_affinity to size the mask. */
+ #define UTIL_MAX_CPUS               1024  /* this should be enough */
+ #define UTIL_MAX_L3_CACHES          UTIL_MAX_CPUS
+@@ -357,11 +358,13 @@ static inline bool util_barrier_wait(util_barrier *barrier)
+  * way), so thread_id's provide an alternative mechanism
+  */
+ 
++#ifndef __HAIKU__
+ #ifdef _WIN32
+ typedef DWORD thread_id;
+ #else
+ typedef thrd_t thread_id;
+ #endif
++#endif
+ 
+ static inline thread_id
+ util_get_thread_id(void)
+@@ -375,6 +378,8 @@ util_get_thread_id(void)
+     */
+ #ifdef _WIN32
+    return GetCurrentThreadId();
++#elif defined(__HAIKU__)
++   return find_thread(NULL);
+ #else
+    return thrd_current();
+ #endif
+@@ -384,7 +389,7 @@ util_get_thread_id(void)
+ static inline int
+ util_thread_id_equal(thread_id t1, thread_id t2)
+ {
+-#ifdef _WIN32
++#if defined(_WIN32) || defined(__HAIKU__)
+    return t1 == t2;
+ #else
+    return thrd_equal(t1, t2);
+-- 
+2.36.1
+
+
+From 436a579259023ce3e5b0be1f0bbdfca6eae90ca2 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 8 Aug 2021 22:35:54 +1000
+Subject: Add any color_space support
+
+
+diff --git a/src/gallium/targets/haiku-softpipe/SoftwareRenderer.cpp b/src/gallium/targets/haiku-softpipe/SoftwareRenderer.cpp
+index 96f19ae..6939e53 100644
+--- a/src/gallium/targets/haiku-softpipe/SoftwareRenderer.cpp
++++ b/src/gallium/targets/haiku-softpipe/SoftwareRenderer.cpp
+@@ -14,6 +14,7 @@
+ 
+ #include <Autolock.h>
+ #include <interface/DirectWindowPrivate.h>
++#include <interface/ColorConversion.h>
+ #include <GraphicsDefs.h>
+ #include <Screen.h>
+ #include <stdio.h>
+@@ -40,44 +41,50 @@ instantiate_gl_renderer(BGLView *view, ulong opts)
+ 	return new SoftwareRenderer(view, opts);
+ }
+ 
+-struct RasBuf32
++struct RasBuffer
+ {
+ 	int32 width, height, stride;
+ 	int32 orgX, orgY;
+-	int32 *colors;
++	void *colors;
++	color_space pixel_format;
++	int32 pixel_size;	
+ 
+-	RasBuf32(int32 width, int32 height, int32 stride, int32 orgX, int32 orgY, int32 *colors):
++	RasBuffer(int32 width, int32 height, int32 stride, int32 orgX, int32 orgY, void *colors):
+ 		width(width), height(height), stride(stride), orgX(orgX), orgY(orgY), colors(colors)
+ 	{}
+ 
+-	RasBuf32(BBitmap *bmp)
++	RasBuffer(BBitmap *bmp)
+ 	{
+ 		width  = bmp->Bounds().IntegerWidth()  + 1;
+ 		height = bmp->Bounds().IntegerHeight() + 1;
+-		stride = bmp->BytesPerRow()/4;
++		stride = bmp->BytesPerRow();
+ 		orgX   = 0;
+ 		orgY   = 0;
+-		colors = (int32*)bmp->Bits();
++		pixel_format = bmp->ColorSpace();
++		pixel_size = stride / width;
++		colors = bmp->Bits();
+ 	}
+ 
+-	RasBuf32(direct_buffer_info *info)
++	RasBuffer(direct_buffer_info *info)
+ 	{
+ 		width  = 0x7fffffff;
+ 		height = 0x7fffffff;
+-		stride = info->bytes_per_row/4;
++		stride = info->bytes_per_row;
+ 		orgX   = 0;
+ 		orgY   = 0;
+-		colors = (int32*)info->bits;
++		pixel_format = info->pixel_format;
++		pixel_size = info->bits_per_pixel / 8;
++		colors = info->bits;
+ 	}
+ 
+ 	void ClipSize(int32 x, int32 y, int32 w, int32 h)
+ 	{
+ 		if (x < 0) {w += x; x = 0;}
+ 		if (y < 0) {h += y; y = 0;}
+-		if (x + w >  width) {w = width  - x;}
++		if (x + w > width) {w = width  - x;}
+ 		if (y + h > height) {h = height - y;}
+ 		if ((w > 0) && (h > 0)) {
+-			colors += y*stride + x;
++			colors += (y * stride) + (x * pixel_size);
+ 			width  = w;
+ 			height = h;
+ 		} else {
+@@ -98,27 +105,21 @@ struct RasBuf32
+ 		orgY += dy;
+ 	}
+ 
+-	void Clear(int32 color)
++	void Blit(RasBuffer src)
+ 	{
+-		RasBuf32 dst = *this;
+-		dst.stride -= dst.width;
+-		for (; dst.height > 0; dst.height--) {
+-			for (int32 i = dst.width; i > 0; i--)
+-				*dst.colors++ = color;
+-			dst.colors += dst.stride;
+-		}
+-	}
+-
+-	void Blit(RasBuf32 src)
+-	{
+-		RasBuf32 dst = *this;
++		RasBuffer dst = *this;
+ 		int32 x, y;
+ 		x = src.orgX - orgX;
+ 		y = src.orgY - orgY;
+ 		dst.ClipSize(x, y, src.width, src.height);
+ 		src.ClipSize(-x, -y, width, height);
+ 		for (; dst.height > 0; dst.height--) {
+-			memcpy(dst.colors, src.colors, 4*dst.width);
++			if (src.pixel_format == dst.pixel_format) {
++				memcpy(dst.colors, src.colors, src.width * src.pixel_size);
++			} else {
++				BPrivate::ConvertBits(src.colors, dst.colors, src.stride, dst.stride,
++					src.stride, dst.stride, src.pixel_format, dst.pixel_format, src.width, 1);
++			}
+ 			dst.colors += dst.stride;
+ 			src.colors += src.stride;
+ 		}
+@@ -228,11 +229,11 @@ SoftwareRenderer::Display(BBitmap *bitmap, BRect *updateRect)
+ 	} else {
+ 		BAutolock lock(fInfoLocker);
+ 		if (fInfo != NULL) {
+-			RasBuf32 srcBuf(bitmap);
+-			RasBuf32 dstBuf(fInfo);
++			RasBuffer srcBuf(bitmap);
++			RasBuffer dstBuf(fInfo);
+ 			for (uint32 i = 0; i < fInfo->clip_list_count; i++) {
+ 				clipping_rect *clip = &fInfo->clip_list[i];
+-				RasBuf32 dstClip = dstBuf;
++				RasBuffer dstClip = dstBuf;
+ 				dstClip.ClipRect(clip->left, clip->top, clip->right + 1, clip->bottom + 1);
+ 				dstClip.Shift(-fInfo->window_bounds.left, -fInfo->window_bounds.top);
+ 				dstClip.Blit(srcBuf);
+-- 
+2.36.1
+
+
+From 0d3ec4fa641154b41b380c1a5de0cc69fc8de89a Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Mon, 7 Feb 2022 13:01:04 +0900
+Subject: osmesa: fix framebuffer leak on resize
+
+New `st_framebuffer_iface object` pointer value may be the same as recently
+deleted so it will be not freed in `st_framebuffers_purge()`. Framebuffers
+should be freed before new framebuffer will be added to list.
+
+diff --git a/src/gallium/frontends/osmesa/osmesa.c b/src/gallium/frontends/osmesa/osmesa.c
+index 91a250d..9f08709 100644
+--- a/src/gallium/frontends/osmesa/osmesa.c
++++ b/src/gallium/frontends/osmesa/osmesa.c
+@@ -786,6 +786,7 @@ OSMesaMakeCurrent(OSMesaContext osmesa, void *buffer, GLenum type,
+         osmesa->current_buffer->height != height)) {
+       osmesa_destroy_buffer(osmesa->current_buffer);
+       osmesa->current_buffer = NULL;
++      stapi->make_current(stapi, NULL, NULL, NULL);
+    }
+ 
+    if (!osmesa->current_buffer) {
+-- 
+2.36.1
+
+
+From aca7ef315d1ed9ee79ed7c4ba54e63a32c8b5ed5 Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Mon, 7 Feb 2022 15:06:17 +0900
+Subject: Fix path for lavapipe module
+
+
+diff --git a/src/gallium/targets/lavapipe/meson.build b/src/gallium/targets/lavapipe/meson.build
+index 1648118..ddab474 100644
+--- a/src/gallium/targets/lavapipe/meson.build
++++ b/src/gallium/targets/lavapipe/meson.build
+@@ -25,6 +25,9 @@ if with_platform_windows
+   module_dir = join_paths(get_option('prefix'), get_option('bindir'))
+   icd_file_name = 'vulkan_lvp.dll'
+ endif
++if with_platform_haiku
++  module_dir = './'
++endif
+ 
+ lvp_icd = custom_target(
+   'lvp_icd',
+-- 
+2.36.1
+

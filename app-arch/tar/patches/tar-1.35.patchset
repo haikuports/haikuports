@@ -1,0 +1,121 @@
+From 9ac9f4206e5c8bd66789ea53e77fb0bd9479d85c Mon Sep 17 00:00:00 2001
+From: Jonathan Schleifer <js@webkeks.org>
+Date: Thu, 20 Mar 2014 14:52:58 +0100
+Subject: Implement replace-hardlinks option
+
+
+diff --git a/src/common.h b/src/common.h
+index 9451e13..af21882 100644
+--- a/src/common.h
++++ b/src/common.h
+@@ -195,6 +195,8 @@ GLOBAL enum old_files old_files_option;
+ 
+ GLOBAL bool keep_directory_symlink_option;
+ 
++GLOBAL bool simulate_hardlinks_option;
++
+ /* Specified file name for incremental list.  */
+ GLOBAL const char *listed_incremental_option;
+ /* Incremental dump level */
+diff --git a/src/extract.c b/src/extract.c
+index 314d8bc..d90c85f 100644
+--- a/src/extract.c
++++ b/src/extract.c
+@@ -34,6 +34,8 @@ static bool we_are_root;	/* true if our effective uid == 0 */
+ static mode_t newdir_umask;	/* umask when creating new directories */
+ static mode_t current_umask;	/* current umask (which is set to 0 if -p) */
+ 
++static int extract_symlink (char *, int);
++
+ #define ALL_MODE_BITS ((mode_t) ~ (mode_t) 0)
+ 
+ #if ! HAVE_FCHMOD && ! defined fchmod
+@@ -1497,6 +1499,38 @@ extract_link (char *file_name, MAYBE_UNUSED int typeflag)
+   char const *link_name;
+   int rc;
+ 
++	if (simulate_hardlinks_option)
++	{
++	/* symlinks have to be normalized */
++	const char* f = file_name;
++	const char* l = current_stat_info.link_name;
++	int sep_pos = 0;
++	int p_count = 0;
++	char *link_name = (char*) xmalloc(strlen(current_stat_info.link_name) * 2);
++
++	for (; *f && *l; f++, l++)
++	{
++	  if (*f != *l)
++		  break;
++	  if (*f == DIRECTORY_SEPARATOR)
++		  sep_pos = f - file_name;
++	}
++
++	for (p_count = 0; *f; f++)
++	  if (*f == DIRECTORY_SEPARATOR)
++	    p_count++;
++
++	link_name[0] = '\0';
++	while (p_count--)
++	  strcat(link_name, "../");
++
++	strcat(link_name, &current_stat_info.link_name[sep_pos + 1]);
++	free(current_stat_info.link_name);
++	current_stat_info.link_name = link_name;
++
++	return extract_symlink(file_name, typeflag);
++  }
++
+   link_name = current_stat_info.link_name;
+ 
+   if ((! absolute_names_option && contains_dot_dot (link_name))
+@@ -1589,6 +1623,13 @@ extract_symlink (char *file_name, MAYBE_UNUSED int typeflag)
+ #else
+   static int warned_once;
+ 
++  /* recursion is not welcomed here */
++  if (simulate_hardlinks_option && typeflag == LINKTYPE)
++  {
++	link_error (current_stat_info.link_name, file_name);
++	return -1;
++  }
++
+   if (!warned_once)
+     {
+       warned_once = 1;
+diff --git a/src/tar.c b/src/tar.c
+index 7efb003..2a183c1 100644
+--- a/src/tar.c
++++ b/src/tar.c
+@@ -502,6 +502,9 @@ static struct argp_option options[] = {
+   {"check-device", CHECK_DEVICE_OPTION, NULL, 0,
+    N_("check device numbers when creating incremental archives (default)"),
+    GRID_MODIFIER },
++  {"replace-hardlinks", 'Q', 0, 0,
++   N_("replace hardlinks with corresponding symlink when extracting"),
++   GRID_MODIFIER },
+ 
+   {NULL, 0, NULL, 0,
+    N_("Overwrite control:"), GRH_OVERWRITE },
+@@ -1854,6 +1857,10 @@ parse_opt (int key, char *arg, struct argp_state *state)
+       set_archive_format (arg);
+       break;
+ 
++    case 'Q':
++      simulate_hardlinks_option = true;
++      break;
++
+     case INDEX_FILE_OPTION:
+       index_file_name = arg;
+       break;
+@@ -2305,6 +2312,7 @@ decode_options (int argc, char **argv)
+   unquote_option = true;
+   tar_sparse_major = 1;
+   tar_sparse_minor = 0;
++  simulate_hardlinks_option = false;
+ 
+   savedir_sort_order = SAVEDIR_SORT_NONE;
+ 
+-- 
+2.37.3
+

@@ -1,0 +1,396 @@
+From bdd1ea8ec116210a27e28c4b7f2e716bf713268d Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Mon, 19 May 2014 15:38:37 +0000
+Subject: apply wget-1.14.patch
+
+
+diff --git a/configure.ac b/configure.ac
+index 5ef12fe..b565dbb 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -309,6 +309,7 @@ AC_HEADER_STDBOOL
+ AC_CHECK_HEADERS(unistd.h sys/time.h)
+ AC_CHECK_HEADERS(termios.h sys/ioctl.h sys/select.h)
+ AC_CHECK_HEADERS(stdint.h inttypes.h pwd.h wchar.h dlfcn.h)
++AC_CHECK_HEADERS(arpa/inet.h)
+ 
+ AC_CHECK_DECLS(h_errno,,,[#include <netdb.h>])
+ 
+@@ -486,6 +487,9 @@ dnl
+ 
+ PKG_PROG_PKG_CONFIG
+ 
++AC_CHECK_LIB(network, gethostbyname)
++AC_CHECK_LIB(network, socket)
++
+ AS_IF([test "x$with_libpsl" != xno], [
+   PKG_CHECK_MODULES([LIBPSL], libpsl, [
+     with_libpsl=yes
+diff --git a/src/config.h.in b/src/config.h.in
+index 7b922e4..9da87d5 100644
+--- a/src/config.h.in
++++ b/src/config.h.in
+@@ -1367,6 +1367,9 @@
+ /* Define if libcares is available. */
+ #undef HAVE_LIBCARES
+ 
++/* Define to 1 if you have the `bind' library (-lbind). */
++#undef HAVE_LIBBIND
++
+ /* Define to 1 if you have the 'dl' library (-ldl). */
+ #undef HAVE_LIBDL
+ 
+@@ -1379,6 +1382,9 @@
+ /* Define to 1 if you have the <libintl.h> header file. */
+ #undef HAVE_LIBINTL_H
+ 
++/* Define to 1 if you have the `network' library (-lnetwork). */
++#undef HAVE_LIBNETWORK
++
+ /* Define if libpcre is available. */
+ #undef HAVE_LIBPCRE
+ 
+diff --git a/src/connect.c b/src/connect.c
+index d00482f..e75aa9c 100644
+--- a/src/connect.c
++++ b/src/connect.c
+@@ -46,7 +46,7 @@ as that of the covered work.  */
+ #  include <netdb.h>
+ # endif /* def __VMS [else] */
+ # include <netinet/in.h>
+-# ifndef __BEOS__
++# ifdef HAVE_ARPA_INET_H
+ #  include <arpa/inet.h>
+ # endif
+ #endif /* not WINDOWS */
+diff --git a/src/host.h b/src/host.h
+index f07f517..921f58e 100644
+--- a/src/host.h
++++ b/src/host.h
+@@ -41,9 +41,9 @@ as that of the covered work.  */
+ # endif /* def __VMS [else] */
+ # include <sys/socket.h>
+ # include <netinet/in.h>
+-#ifndef __BEOS__
+-# include <arpa/inet.h>
+-#endif
++# ifdef HAVE_ARPA_INET_H
++#  include <arpa/inet.h>
++# endif
+ #endif
+ 
+ struct url;
+-- 
+2.42.1
+
+
+From d133245d1f26216b660c55f55a766bd19a0313ea Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Mon, 19 May 2014 15:47:24 +0000
+Subject: apply and augment wget-1.14-build-fixes.patch
+
+
+diff --git a/src/utils.c b/src/utils.c
+index 9caaf72..1d5a23c 100644
+--- a/src/utils.c
++++ b/src/utils.c
+@@ -53,7 +53,9 @@ as that of the covered work.  */
+ 
+ /* For TIOCGWINSZ and friends: */
+ #ifndef WINDOWS
++#ifndef __HAIKU__
+ # include <sys/ioctl.h>
++#endif
+ # include <termios.h>
+ #endif
+ 
+-- 
+2.42.1
+
+
+From 03fdf51f42f07ebe8efb9076213b0bf3ba96e6a3 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Sun, 14 Feb 2016 11:05:10 +0100
+Subject: Move wget-hsts out of home directory.
+
+
+diff --git a/src/main.c b/src/main.c
+index 77b1a0b..55fea73 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -87,6 +87,10 @@ as that of the covered work.  */
+ # include "vms.h"
+ #endif /* __VMS */
+ 
++#ifdef __HAIKU__
++#include "FindDirectory.h"
++#endif
++
+ #ifndef PATH_SEPARATOR
+ # define PATH_SEPARATOR '/'
+ #endif
+@@ -176,6 +180,16 @@ get_hsts_database (void)
+   if (opt.hsts_file)
+     return xstrdup (opt.hsts_file);
+ 
++#ifdef __HAIKU__
++  {
++    char buffer[256];
++    if (find_directory(B_USER_SETTINGS_DIRECTORY, 0, false, buffer, sizeof(buffer)) == B_OK) {
++      char *dir = aprintf("%s/wget-hsts", buffer);
++      return dir;
++    }
++  }
++#endif
++
+   if (opt.homedir)
+     {
+       char *dir = ajoin_dir_file(opt.homedir, ".wget-hsts");
+-- 
+2.42.1
+
+
+From 72cb9617874d217b433dd549c1a014888b92d530 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Thu, 23 Nov 2017 09:09:48 +0100
+Subject: Handle SSL_ERROR_WANT_READ.
+
+According to OpenSSL docs this isn't supposed to happen, but it does
+and I can't figure out where it would be intercepted in OpenSSL side.
+
+So let's just handle it and retry reads when requestred to do so.
+
+This allows EINTR detection to work, so no error happens when you
+resize terminal anymore.
+
+diff --git a/src/openssl.c b/src/openssl.c
+index a970875..831c255 100644
+--- a/src/openssl.c
++++ b/src/openssl.c
+@@ -505,7 +505,8 @@ openssl_read_peek_callback(void *arg)
+     {
+       ret = fn (conn, buf, bufsize);
+     }
+-  while (ret == -1 && SSL_get_error (conn, ret) == SSL_ERROR_SYSCALL && errno == EINTR);
++  while (ret == -1 && (SSL_get_error (conn, ret) == SSL_ERROR_SYSCALL
++  	|| SSL_get_error (conn, ret) == SSL_ERROR_WANT_READ) && errno == EINTR);
+   args->retval = ret;
+ }
+ 
+-- 
+2.42.1
+
+
+From 553bee2e6e688ae99055f73a6894de80e8372ace Mon Sep 17 00:00:00 2001
+From: Crestwave <crest.wave@yahoo.com>
+Date: Sun, 25 Nov 2018 12:01:08 +0000
+Subject: Also move wget-hsts-test out of the home directory in hsts.c.
+
+
+diff --git a/src/hsts.c b/src/hsts.c
+index e00bb1b..310f30a 100644
+--- a/src/hsts.c
++++ b/src/hsts.c
+@@ -49,6 +49,10 @@ as that of the covered work.  */
+ #include <stdio.h>
+ #include <sys/file.h>
+ 
++#ifdef __HAIKU__
++#include "FindDirectory.h"
++#endif
++
+ struct hsts_store {
+   struct hash_table *table;
+   time_t last_mtime;
+@@ -627,9 +631,22 @@ get_hsts_store_filename (void)
+   char *filename = NULL;
+   FILE *fp = NULL;
+ 
++#ifdef __HAIKU__
++  {
++    char buffer[256];
++    if (find_directory(B_USER_SETTINGS_DIRECTORY, 0, false, buffer, sizeof(buffer)) == B_OK) {
++      filename = ajoin_dir_file (buffer, ".wget-hsts-test");
++    }
++  }
++#endif
++
+   if (opt.homedir)
+     {
+       filename = ajoin_dir_file (opt.homedir, ".wget-hsts-test");
++    }
++
++  if (filename)
++    {
+       fp = fopen (filename, "w");
+       if (fp)
+         fclose (fp);
+-- 
+2.42.1
+
+
+From 909878269f89ad65942bab121cd63f87767796db Mon Sep 17 00:00:00 2001
+From: Crestwave <crest.wave@yahoo.com>
+Date: Mon, 26 Nov 2018 07:13:07 +0000
+Subject: Fix segmentation violation when executing fuzzers.
+
+
+diff --git a/fuzz/wget_cookie_fuzzer.c b/fuzz/wget_cookie_fuzzer.c
+index 9fc3e6d..08afb9e 100644
+--- a/fuzz/wget_cookie_fuzzer.c
++++ b/fuzz/wget_cookie_fuzzer.c
+@@ -58,11 +58,13 @@ FILE *fopen_wgetrc(const char *pathname, const char *mode)
+ 	return NULL;
+ }
+ 
++#ifndef __HAIKU__
+ #ifdef FUZZING
+ void exit_wget(int status)
+ {
+ }
+ #endif
++#endif
+ 
+ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+ {
+diff --git a/fuzz/wget_css_fuzzer.c b/fuzz/wget_css_fuzzer.c
+index 46f37c4..df8f49c 100644
+--- a/fuzz/wget_css_fuzzer.c
++++ b/fuzz/wget_css_fuzzer.c
+@@ -69,6 +69,7 @@ FILE *fopen_wgetrc(const char *pathname, const char *mode)
+ 
+ static int do_jump;
+ static jmp_buf jmpbuf;
++#ifndef __HAIKU__
+ #ifdef FUZZING
+ void exit_wget(int status)
+ {
+@@ -89,6 +90,7 @@ void exit(int status)
+ 	}
+ }
+ #endif
++#endif
+ 
+ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+ {
+diff --git a/fuzz/wget_ftpls_fuzzer.c b/fuzz/wget_ftpls_fuzzer.c
+index dcc69e6..eaa04ab 100644
+--- a/fuzz/wget_ftpls_fuzzer.c
++++ b/fuzz/wget_ftpls_fuzzer.c
+@@ -61,6 +61,7 @@ FILE *fopen_wgetrc(const char *pathname, const char *mode)
+ 
+ static int do_jump;
+ static jmp_buf jmpbuf;
++#ifndef __HAIKU__
+ #ifdef FUZZING
+ void exit_wget(int status)
+ {
+@@ -81,6 +82,7 @@ void exit(int status)
+ 	}
+ }
+ #endif
++#endif
+ 
+ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+ {
+diff --git a/fuzz/wget_html_fuzzer.c b/fuzz/wget_html_fuzzer.c
+index 0f321f2..0f26efd 100644
+--- a/fuzz/wget_html_fuzzer.c
++++ b/fuzz/wget_html_fuzzer.c
+@@ -68,11 +68,13 @@ FILE *fopen_wgetrc(const char *pathname, const char *mode)
+ #endif
+ }
+ 
++#ifndef __HAIKU__
+ #ifdef FUZZING
+ void exit_wget(int status)
+ {
+ }
+ #endif
++#endif
+ 
+ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+ {
+diff --git a/fuzz/wget_netrc_fuzzer.c b/fuzz/wget_netrc_fuzzer.c
+index 1baf816..d07c83c 100644
+--- a/fuzz/wget_netrc_fuzzer.c
++++ b/fuzz/wget_netrc_fuzzer.c
+@@ -60,6 +60,7 @@ FILE *fopen_wgetrc(const char *pathname, const char *mode)
+ 
+ static int do_jump;
+ static jmp_buf jmpbuf;
++#ifndef __HAIKU__
+ #ifdef FUZZING
+ void exit_wget(int status)
+ {
+@@ -80,6 +81,7 @@ void exit(int status)
+ 	}
+ }
+ #endif
++#endif
+ 
+ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+ {
+diff --git a/fuzz/wget_options_fuzzer.c b/fuzz/wget_options_fuzzer.c
+index 7f51240..be974c6 100644
+--- a/fuzz/wget_options_fuzzer.c
++++ b/fuzz/wget_options_fuzzer.c
+@@ -63,7 +63,7 @@ FILE *fopen_wgetrc(const char *pathname, const char *mode)
+ 
+ static bool fuzzing;
+ static jmp_buf jmpbuf;
+-
++#ifndef __HAIKU__
+ #ifdef FUZZING
+ void exit_wget(int status)
+ {
+@@ -102,6 +102,7 @@ int getaddrinfo(const char *node, const char *service, const struct addrinfo *hi
+ 	return libc_getaddrinfo(node, service, hints, res);
+ }
+ #endif
++#endif
+ 
+ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+ {
+diff --git a/fuzz/wget_robots_fuzzer.c b/fuzz/wget_robots_fuzzer.c
+index 24dd4cf..42522c3 100644
+--- a/fuzz/wget_robots_fuzzer.c
++++ b/fuzz/wget_robots_fuzzer.c
+@@ -59,11 +59,13 @@ FILE *fopen_wgetrc(const char *pathname, const char *mode)
+ 	return NULL;
+ }
+ 
++#ifndef __HAIKU__
+ #ifdef FUZZING
+ void exit_wget(int status)
+ {
+ }
+ #endif
++#endif
+ 
+ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+ {
+diff --git a/fuzz/wget_url_fuzzer.c b/fuzz/wget_url_fuzzer.c
+index d6eb42c..c887da4 100644
+--- a/fuzz/wget_url_fuzzer.c
++++ b/fuzz/wget_url_fuzzer.c
+@@ -58,11 +58,13 @@ FILE *fopen_wgetrc(const char *pathname, const char *mode)
+ 	return NULL;
+ }
+ 
++#ifndef __HAIKU__
+ #ifdef FUZZING
+ void exit_wget(int status)
+ {
+ }
+ #endif
++#endif
+ 
+ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+ {
+-- 
+2.42.1
+
+
+
+

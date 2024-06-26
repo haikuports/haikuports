@@ -1,0 +1,161 @@
+From 43917c33d6c824ab6a5662c34c2479596f1dd88d Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Thu, 21 Apr 2022 14:48:55 +1000
+Subject: Add Haiku support
+
+
+diff --git a/osdialog_haiku.cpp b/osdialog_haiku.cpp
+new file mode 100644
+index 0000000..b100791
+--- /dev/null
++++ b/osdialog_haiku.cpp
+@@ -0,0 +1,146 @@
++#include "osdialog.h"
++#include <assert.h>
++#include <stdio.h>
++#include <string.h>
++
++#include <Path.h>
++#include <Entry.h>
++#include <Looper.h>
++#include <Messenger.h>
++#include <FilePanel.h>
++#include <FindDirectory.h>
++#include <Window.h>
++#include <OS.h>
++
++class DirectoryRefFilter : public BRefFilter {
++public:
++	virtual ~DirectoryRefFilter() {	};
++	virtual bool Filter(const entry_ref* ref, BNode* node,
++		struct stat_beos* stat, const char* filetype)
++	{
++		return node->IsDirectory();
++	}
++};
++
++class FilePanelLooper :public BLooper {
++public:
++	FilePanelLooper(BFilePanel *panel);
++	virtual	void MessageReceived(BMessage* message);
++	BPath GetPath() { return path; }
++	uint32 GetState() { return state; }
++private:
++	BFilePanel *filePanel;
++	uint32 state;
++	BPath path;
++};
++
++FilePanelLooper::FilePanelLooper(BFilePanel *panel) : 
++	BLooper("PanelLooper"),	
++	filePanel(panel),
++	state(B_ERROR)
++{	
++	path.Unset();
++}
++
++void FilePanelLooper::MessageReceived(BMessage* message)
++{
++	switch (message->what) {
++		case B_REFS_RECEIVED:
++			{
++				entry_ref ref;
++				if (message->FindRef("refs", &ref) == B_OK) {
++					path.SetTo(&ref);
++					state = B_OK;
++				}
++				break;
++			}
++		case B_SAVE_REQUESTED:
++			{
++				entry_ref ref;
++				const char *name;
++				message->FindRef("directory", &ref);
++				BDirectory  dir(&ref);
++				path.SetTo(&dir, NULL, false);
++				message->FindString("name", &name);
++				path.Append(name);
++				state = B_OK;
++				break;
++			}
++		case B_CANCEL:
++			{
++				if (state != B_OK)
++					state = B_CANCEL;
++				break;
++			}
++		default:
++			break;
++	}
++}
++
++char *osdialog_file(osdialog_file_action action, const char *path, const char *filename, const char *filters) {
++	if (action == OSDIALOG_OPEN || action == OSDIALOG_OPEN_DIR) {
++		bool openDirMode = action == OSDIALOG_OPEN_DIR;
++		uint32 flavors = openDirMode ? B_DIRECTORY_NODE: (B_FILE_NODE | B_SYMLINK_NODE);
++		BFilePanel openPanel(B_OPEN_PANEL, NULL, NULL, flavors, false, NULL,
++			openDirMode ? new DirectoryRefFilter() : NULL, true, true);
++		FilePanelLooper *looper = new FilePanelLooper(&openPanel);
++		openPanel.SetTarget(BMessenger(looper));
++		openPanel.SetPanelDirectory(path);
++		if (openDirMode)
++			openPanel.Window()->SetTitle("Open Folder");
++		looper->Run();
++		openPanel.Show();
++
++		while (openPanel.IsShowing())
++			snooze(100);
++
++		printf("open %d %d (%d %d %d)\n", openDirMode, looper->GetState(), B_CANCEL, B_OK, B_ERROR);
++
++		entry_ref ref;
++		openPanel.Rewind();
++		if (openPanel.GetNextSelectedRef(&ref) == B_OK && looper->GetState() != B_CANCEL) {
++			looper->Lock();
++			looper->Quit();
++			BPath path(&ref);
++			return strdup(path.Path());
++		}
++		if (openDirMode && looper->GetState() != B_CANCEL) {
++			looper->Lock();
++			looper->Quit();
++			openPanel.GetPanelDirectory(&ref);
++			BPath path(&ref);
++			return strdup(path.Path());
++		}
++
++		looper->Lock();
++		looper->Quit();
++	} else if (action == OSDIALOG_SAVE) {
++		BFilePanel savePanel(B_SAVE_PANEL, NULL, NULL, 0, false, NULL, NULL, true, true);
++		FilePanelLooper *looper = new FilePanelLooper(&savePanel);
++		savePanel.SetTarget(BMessenger(looper));
++		savePanel.SetPanelDirectory(path);
++		savePanel.SetSaveText(filename);
++		looper->Run();
++		savePanel.Show();
++
++		while (savePanel.IsShowing())
++			snooze(100);
++
++		if (looper->GetPath().InitCheck() == B_OK && looper->GetState() == B_OK) {
++			BPath path = looper->GetPath();
++			looper->Lock();
++			looper->Quit();
++			return strdup(path.Path());
++		}
++
++		looper->Lock();
++		looper->Quit();
++	}
++
++	return NULL;
++}
++
++
++void osdialog_color_picker() {
++	printf("osdialog_color_picker\n");
++}
+-- 
+2.30.2
+

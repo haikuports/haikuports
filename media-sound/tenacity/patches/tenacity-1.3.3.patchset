@@ -1,0 +1,324 @@
+From 603952650ec17f813d6ca9a19b6f38b42e8aeb16 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Tue, 24 Jan 2023 19:45:07 +0100
+Subject: Fix GTK include paths and libs
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 52c1f4c..3819ebc 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -741,6 +741,11 @@ if(NOT TARGET wxWidgets::wxWidgets)
+   add_library(wxWidgets::wxWidgets INTERFACE IMPORTED)
+   target_link_libraries(wxWidgets::wxWidgets INTERFACE ${wxWidgets_LIBRARIES})
+   target_compile_definitions(wxWidgets::wxWidgets INTERFACE ${wxWidgets_DEFINITIONS} ${wxWidgets_DEFINITIONS_DEBUG})
++
++  target_include_directories( wxWidgets::wxWidgets INTERFACE ${GTK_INCLUDE_DIRS} )
++  target_link_directories( wxWidgets::wxWidgets INTERFACE ${GTK_LIB_DIR} )
++  target_link_libraries( wxWidgets::wxWidgets INTERFACE ${GTK_LIBRARIES} )
++
+ endif()
+ 
+ add_subdirectory(lib-src/libnyquist)
+-- 
+2.42.1
+
+
+From aefb4c0284f7e63b4fef7bbd25e2126e0a8d40f1 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Tue, 24 Jan 2023 19:45:07 +0100
+Subject: Haiku: initialize XDG vars
+
+
+diff --git a/src/TenacityApp.cpp b/src/TenacityApp.cpp
+index 1115e69..2091e3c 100644
+--- a/src/TenacityApp.cpp
++++ b/src/TenacityApp.cpp
+@@ -50,6 +50,12 @@ It handles initialization and termination by subclassing wxApp.
+ #endif
+ #endif
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#include <fs_info.h>
++#include <glib.h>
++#endif
++
+ // chmod, lstat, geteuid
+ #ifdef __UNIX__
+ #include <sys/types.h>
+@@ -482,6 +488,30 @@ public:
+    };
+ };
+ 
++#ifdef __HAIKU__
++void initialize_xdg_paths(void)
++{
++   char dir[B_PATH_NAME_LENGTH + B_FILE_NAME_LENGTH];
++   char dirs[B_PATH_NAME_LENGTH + B_FILE_NAME_LENGTH];
++   dev_t volume = dev_for_path("/boot");
++
++   if (find_directory(B_SYSTEM_SETTINGS_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++      g_setenv ("XDG_CONFIG_DIRS", dir, FALSE);
++   if (find_directory(B_USER_NONPACKAGED_DATA_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++      g_setenv ("XDG_DATA_HOME", dir, FALSE);
++   if (find_directory(B_USER_SETTINGS_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++      g_setenv ("XDG_CONFIG_HOME", dir, FALSE);
++   if (find_directory(B_USER_CACHE_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++      g_setenv ("XDG_CACHE_HOME", dir, FALSE);
++   if (find_directory(B_SYSTEM_DATA_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK &&
++         find_directory(B_SYSTEM_NONPACKAGED_DATA_DIRECTORY, volume, false, dirs, sizeof(dirs)) == B_OK) {
++      strcat(dirs, ":");
++      strcat(dirs, dir);
++      g_setenv ("XDG_DATA_DIRS", dirs, FALSE);
++   }
++}
++#endif
++
+ #if defined(__WXMAC__)
+ 
+ IMPLEMENT_APP_NO_MAIN(TenacityApp)
+@@ -511,6 +541,10 @@ int main(int argc, char *argv[])
+    stdout = freopen("/dev/null", "w", stdout);
+    stderr = freopen("/dev/null", "w", stderr);
+ 
++#ifdef __HAIKU__
++   initialize_xdg_paths();
++#endif
++
+    return wxEntry(argc, argv);
+ }
+ 
+-- 
+2.42.1
+
+
+From f74fdad814cda884730ebf30983877587ade2050 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Tue, 24 Jan 2023 19:45:07 +0100
+Subject: Release sLocale smart pointer before exit. Fixes crash on exit.
+
+
+diff --git a/libraries/lib-strings/Languages.cpp b/libraries/lib-strings/Languages.cpp
+index 4ec0eac..0c7d648 100644
+--- a/libraries/lib-strings/Languages.cpp
++++ b/libraries/lib-strings/Languages.cpp
+@@ -328,6 +328,11 @@ void GetLanguages( FilePaths pathList,
+ static std::unique_ptr<wxLocale> sLocale;
+ static wxString sLocaleName;
+ 
++void UnsetLocale(void)
++{
++   sLocale.reset();
++}
++
+ wxString SetLang( const FilePaths &pathList, const wxString & lang )
+ {
+    wxString result = lang;
+diff --git a/libraries/lib-strings/Languages.h b/libraries/lib-strings/Languages.h
+index 81092d0..d9068f8 100644
+--- a/libraries/lib-strings/Languages.h
++++ b/libraries/lib-strings/Languages.h
+@@ -36,6 +36,9 @@ void GetLanguages( FilePaths pathList,
+ STRINGS_API
+ wxString GetSystemLanguageCode(const FilePaths &pathList);
+ 
++STRINGS_API
++void UnsetLocale(void);
++
+ /*!
+  @param tenacityPathList paths to search for .mo files, grouped into subdirectories for the different languages
+  @param lang a language code; or if empty or "System", then default to system language.
+diff --git a/src/TenacityApp.cpp b/src/TenacityApp.cpp
+index 2091e3c..79eddc5 100644
+--- a/src/TenacityApp.cpp
++++ b/src/TenacityApp.cpp
+@@ -545,7 +545,9 @@ int main(int argc, char *argv[])
+    initialize_xdg_paths();
+ #endif
+ 
+-   return wxEntry(argc, argv);
++   int res = wxEntry(argc, argv);
++   Languages::UnsetLocale();
++   return res;
+ }
+ 
+ #else
+-- 
+2.42.1
+
+
+From 80797a9fc3ed1f0b153dbc72c0f8efe11f7b3aaf Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Mon, 31 Jul 2023 18:15:17 +0200
+Subject: Haiku: use CLOCK_MONOTONIC
+
+
+diff --git a/src/AudioIO.cpp b/src/AudioIO.cpp
+index a37d6aa..d8db382 100644
+--- a/src/AudioIO.cpp
++++ b/src/AudioIO.cpp
+@@ -922,7 +922,11 @@ static double SystemTime(bool usingAlsa)
+    if (usingAlsa) {
+       struct timespec now;
+       // CLOCK_MONOTONIC_RAW is unaffected by NTP or adj-time
++#ifdef __HAIKU__
++      clock_gettime(CLOCK_MONOTONIC, &now);
++#else
+       clock_gettime(CLOCK_MONOTONIC_RAW, &now);
++#endif
+       //return now.tv_sec + now.tv_nsec * 0.000000001;
+       return (now.tv_sec + now.tv_nsec * 0.000000001) - streamStartTime;
+    }
+-- 
+2.42.1
+
+
+From d9ca725e630f1c726256c7e64e499a7a1524cecf Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Mon, 31 Jul 2023 18:29:04 +0200
+Subject: Use POSIX shared memory
+
+
+diff --git a/src/TenacityApp.cpp b/src/TenacityApp.cpp
+index 79eddc5..4cdf189 100644
+--- a/src/TenacityApp.cpp
++++ b/src/TenacityApp.cpp
+@@ -60,6 +60,7 @@ It handles initialization and termination by subclassing wxApp.
+ #ifdef __UNIX__
+ #include <sys/types.h>
+ #include <sys/file.h>
++#include <sys/mman.h>
+ #include <sys/stat.h>
+ #include <cstdio>
+ #endif
+@@ -817,6 +818,7 @@ TenacityApp::TenacityApp()
+ 
+ TenacityApp::~TenacityApp()
+ {
++   shm_unlink("/TenacityShm");
+ }
+ 
+ // The `main program' equivalent, creating the windows and returning the
+@@ -1633,7 +1635,6 @@ bool TenacityApp::CreateSingleInstanceChecker(const wxString &dir)
+ 
+ #include <sys/ipc.h>
+ #include <sys/sem.h>
+-#include <sys/shm.h>
+ 
+ // Return true if there are no other instances of Audacity running,
+ // false otherwise.
+@@ -1656,8 +1657,40 @@ bool TenacityApp::CreateSingleInstanceChecker(const wxString &dir)
+ 
+    // Create and map the shared memory segment where the port number
+    // will be stored.
+-   int memid = shmget(memkey, sizeof(int), IPC_CREAT | S_IRUSR | S_IWUSR);
+-   int *portnum = (int *) shmat(memid, nullptr, 0);
++   int memfd = shm_open("/TenacityShm", O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
++   if (memfd == -1)
++   {
++      AudacityMessageBox(
++         XO("Unable to create shared memory segment.\n\n"
++            "error code=%d : \"%s\".").Format(errno, strerror(errno)),
++         XO("Tenacity Startup Failure"),
++         wxOK | wxICON_ERROR);
++
++      return false;
++   }
++
++   if (ftruncate(memfd, sizeof(int)) != 0)
++   {
++      AudacityMessageBox(
++         XO("Unable to initialize shared memory segment.\n\n"
++            "error code=%d : \"%s\".").Format(errno, strerror(errno)),
++         XO("Tenacity Startup Failure"),
++         wxOK | wxICON_ERROR);
++
++      return false;
++   }
++
++   int *portnum = (int *) mmap(nullptr, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0);
++   if (portnum == MAP_FAILED)
++   {
++      AudacityMessageBox(
++         XO("Unable to map shared memory segment.\n\n"
++            "error code=%d : \"%s\".").Format(errno, strerror(errno)),
++         XO("Tenacity Startup Failure"),
++         wxOK | wxICON_ERROR);
++
++      return false;
++   }
+ 
+    // Create (or return) the SERVER semaphore ID
+    int servid = semget(servkey, 1, IPC_CREAT | S_IRUSR | S_IWUSR);
+@@ -1800,6 +1833,8 @@ bool TenacityApp::CreateSingleInstanceChecker(const wxString &dir)
+          return false;
+       }
+ 
++      munmap(portnum, sizeof(int));
++
+       // We've successfully created the socket server and the app
+       // should continue to initialize.
+       return true;
+@@ -1891,6 +1926,8 @@ bool TenacityApp::CreateSingleInstanceChecker(const wxString &dir)
+    // Send an empty string to force existing Audacity to front
+    sock->WriteMsg(wxEmptyString, sizeof(wxChar));
+ 
++   munmap(portnum, sizeof(int));
++
+    // We've forwarded all of the filenames, so let the caller know
+    // to terminate.
+    return false;
+-- 
+2.42.1
+
+
+From 8c387344d2cf7420f0bc259ac24e782b156a3371 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Mon, 31 Jul 2023 18:55:31 +0200
+Subject: Haiku: replace references to topdir
+
+This commit reflects the content of  #c7f757d23 for Haiku.
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 603664e..4c66bc0 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -1381,9 +1381,9 @@ else()
+                DESTINATION "${_LIBDIR}"
+                USE_SOURCE_PERMISSIONS
+                FILES_MATCHING PATTERN "*.so*" )
+-      install( FILES "${topdir}/LICENSE.txt" "${topdir}/README.md"
++      install( FILES "${CMAKE_SOURCE_DIR}/LICENSE.txt" "${CMAKE_SOURCE_DIR}/README.md"
+                DESTINATION "${_DATADIR}/doc/${APP_NAME}" )
+-      install( FILES "${topdir}/presets/EQDefaultCurves.xml"
++      install( FILES "${CMAKE_SOURCE_DIR}/presets/EQDefaultCurves.xml"
+                DESTINATION "${_PKGDATA}" )
+    else()
+       install( TARGETS ${TARGET} RUNTIME )
+-- 
+2.42.1
+
+
+From 6d96e7644e0b43366198b0473bafbcbbadc89b5d Mon Sep 17 00:00:00 2001
+From: Begasus <begasus@gmail.com>
+Date: Wed, 13 Dec 2023 11:36:46 +0100
+Subject: Build fix (check for gtk headers)
+
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 4c66bc0..4f60203 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -1087,7 +1087,7 @@ list( APPEND LIBRARIES
+       $<$<BOOL:${USE_SOUNDTOUCH}>:SoundTouch::SoundTouch>
+       $<$<BOOL:${USE_VAMP}>:VampHostSDK::VampHostSDK>
+       $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD,NetBSD,CYGWIN>:${GLIB_LIBRARIES}>
+-      $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD,NetBSD,CYGWIN>:GTK::GTK>
++      $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD,NetBSD,CYGWIN,Haiku>:GTK::GTK>
+       $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD,NetBSD,CYGWIN>:pthread>
+       $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD,NetBSD,CYGWIN>:rt>
+ )
+-- 
+2.42.1
+

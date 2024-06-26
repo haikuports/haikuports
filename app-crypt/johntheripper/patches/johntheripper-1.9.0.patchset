@@ -1,0 +1,249 @@
+From 0d2dbbf3727c5c1565034d889dc9b9c4b5f1a470 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Sun, 24 Dec 2017 19:41:43 +0700
+Subject: Import partial patch from 1.8.0 by Leorize
+
+
+diff --git a/src/params.h b/src/params.h
+index b6d7cd1..d46eef5 100644
+--- a/src/params.h
++++ b/src/params.h
+@@ -111,8 +111,10 @@
+ #ifndef JOHN_SYSTEMWIDE_HOME
+ #define JOHN_SYSTEMWIDE_HOME		"/usr/share/john"
+ #endif
++#ifndef JOHN_PRIVATE_HOME
+ #define JOHN_PRIVATE_HOME		"~/.john"
+ #endif
++#endif
+ 
+ #ifndef OMP_FALLBACK
+ #define OMP_FALLBACK			0
+@@ -162,16 +164,20 @@
+  * File names.
+  */
+ #ifdef __DJGPP__
++#ifndef CFG_FULL_NAME
+ #define CFG_FULL_NAME			"$JOHN/john.ini"
+ #else
+ #define CFG_FULL_NAME			"$JOHN/john.conf"
+ #endif
++#endif
+ #if JOHN_SYSTEMWIDE
+ #ifdef __DJGPP__
++#ifndef CFG_PRIVATE_FULL_NAME
+ #define CFG_PRIVATE_FULL_NAME		JOHN_PRIVATE_HOME "/john.ini"
+ #else
+ #define CFG_PRIVATE_FULL_NAME		JOHN_PRIVATE_HOME "/john.conf"
+ #endif
++#endif
+ #define POT_NAME			JOHN_PRIVATE_HOME "/john.pot"
+ #define SEC_POT_NAME			JOHN_PRIVATE_HOME "/secure.pot"
+ #define LOG_NAME			JOHN_PRIVATE_HOME "/john.log"
+diff --git a/src/path.c b/src/path.c
+index 06714e5..7ebf010 100644
+--- a/src/path.c
++++ b/src/path.c
+@@ -30,9 +30,16 @@ static int john_home_length;
+ #include <pwd.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#endif
+ 
+ static char *user_home_path = NULL;
+ static int user_home_length;
++static char *user_config_path = NULL;
++static int user_config_length;
++static char *user_data_path = NULL;
++static int user_data_length;
+ #endif
+ 
+ 
+@@ -72,6 +79,26 @@ void path_init(char **argv)
+ 	memcpy(user_home_path, home_dir, user_home_length - 1);
+ 	user_home_path[user_home_length - 1] = '/';
+ 
++	if (user_config_path) return;
++#ifdef __HAIKU__
++	user_config_path = mem_alloc(PATH_BUFFER_SIZE);
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, (dev_t)-1, false,
++			user_config_path, PATH_BUFFER_SIZE) != B_OK)
++		return;
++	user_config_length = strlen(user_config_path) + 1;
++	user_config_path[user_config_length - 1] = '/';
++#endif
++
++	if (user_data_path) return;
++#ifdef __HAIKU__
++	user_data_path = mem_alloc(PATH_BUFFER_SIZE);
++	if (find_directory(B_USER_VAR_DIRECTORY, (dev_t)-1, false,
++			user_data_path, PATH_BUFFER_SIZE) != B_OK)
++		return;
++	user_data_length = strlen(user_data_path) + 1;
++	user_data_path[user_data_length - 1] = '/';
++#endif
++
+ #ifdef JOHN_PRIVATE_HOME
+ 	private = path_expand(JOHN_PRIVATE_HOME);
+ 	if (mkdir(private, S_IRUSR | S_IWUSR | S_IXUSR)) {
+@@ -131,6 +158,24 @@ const char *path_expand(const char *name)
+ 		}
+ 		return name + 2;
+ 	}
++	if (!strncmp(name, "~config/", 8)) {
++		if (user_config_path &&
++		    user_config_length + strlen(name) - 8 < PATH_BUFFER_SIZE) {
++			strnzcpy(&user_config_path[user_config_length], &name[8],
++				PATH_BUFFER_SIZE - user_config_length);
++			return user_config_path;
++		}
++		return name + 8;
++	}
++	if (!strncmp(name, "~data/", 6)) {
++		if (user_data_path &&
++		    user_data_length + strlen(name) - 6 < PATH_BUFFER_SIZE) {
++			strnzcpy(&user_data_path[user_data_length], &name[6],
++				PATH_BUFFER_SIZE - user_data_length);
++			return user_data_path;
++		}
++		return name + 6;
++	}
+ #endif
+ 
+ 	return name;
+@@ -200,5 +245,7 @@ void path_done(void)
+ 	MEM_FREE(john_home_path);
+ #if JOHN_SYSTEMWIDE
+ 	MEM_FREE(user_home_path);
++	MEM_FREE(user_config_path);
++	MEM_FREE(user_data_path);
+ #endif
+ }
+diff --git a/src/path.h b/src/path.h
+index c5393d7..0c13241 100644
+--- a/src/path.h
++++ b/src/path.h
+@@ -21,7 +21,7 @@
+ extern void path_init(char **argv);
+ 
+ /*
+- * Expands "$JOHN/" and "~/" in a path name.
++ * Expands "$JOHN/", "~/", "~config/" and "~data/" in a path name.
+  * The returned buffer might be overwritten with subsequent calls.
+  */
+ extern const char *path_expand(const char *name);
+diff --git a/src/x86-64.S b/src/x86-64.S
+index 9b8e369..915d9a2 100644
+--- a/src/x86-64.S
++++ b/src/x86-64.S
+@@ -1750,6 +1750,6 @@ CPU_detect_fail:
+ 	ret
+ #endif
+ 
+-#if defined(__ELF__) && defined(__linux__)
++#if defined(__ELF__) && defined(__linux__) && defined(__HAIKU__)
+ .section .note.GNU-stack,"",@progbits
+ #endif
+diff --git a/src/x86-64.h b/src/x86-64.h
+index f77c44a..d13b126 100644
+--- a/src/x86-64.h
++++ b/src/x86-64.h
+@@ -317,7 +317,9 @@
+ #define SHA512_N_STR		PARA_TO_N(SIMD_COEF_64)
+ #endif
+ 
++#ifndef __HAIKU__
+ #define NT_X86_64
++#endif
+ 
+ #endif	/* !defined(JOHN_NO_SIMD) */
+ 
+-- 
+2.37.3
+
+
+From 42e3a198de8b811434496b0ffa2ace8d00fbb128 Mon Sep 17 00:00:00 2001
+From: begasus <begasus@gmail.com>
+Date: Sat, 28 Nov 2020 13:34:46 +0000
+Subject: BYTE_ORDER is defined in endian.h
+
+
+diff --git a/src/int-util.h b/src/int-util.h
+index ae32613..cf82552 100644
+--- a/src/int-util.h
++++ b/src/int-util.h
+@@ -13,6 +13,10 @@
+ #include <sys/param.h>
+ #endif
+ 
++#if defined(__HAIKU__)
++#include <endian.h>
++#endif
++
+ #if defined(_MSC_VER)
+ #include <stdlib.h>
+ // VC has no sys/parm.h   These defines were taken from defines found on cygwin
+-- 
+2.37.3
+
+
+From 8c93c0d06bba199106497e444b8cedf21cc3f60c Mon Sep 17 00:00:00 2001
+From: Ken Mays <kmays2000@gmail.com>
+Date: Sat, 26 Nov 2022 06:23:12 +0700
+Subject: Import GCC11 patch from upstream
+
+
+diff --git a/src/blake2.h b/src/blake2.h
+index 23443ed..b4398f9 100644
+--- a/src/blake2.h
++++ b/src/blake2.h
+@@ -10,7 +10,7 @@
+    You should have received a copy of the CC0 Public Domain Dedication along with
+    this software. If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
+ */
+-#pragma once
++
+ #ifndef __BLAKE2_H__
+ #define __BLAKE2_H__
+ 
+@@ -57,7 +57,7 @@ extern "C" {
+     uint8_t  personal[BLAKE2S_PERSONALBYTES];  // 32
+   } blake2s_param;
+ 
+-  JTR_ALIGN( 64 ) typedef struct __blake2s_state
++  typedef struct JTR_ALIGN( 64 ) __blake2s_state
+   {
+     uint32_t h[8];
+     uint32_t t[2];
+@@ -82,7 +82,7 @@ extern "C" {
+     uint8_t  personal[BLAKE2B_PERSONALBYTES];  // 64
+   } blake2b_param;
+ 
+-  JTR_ALIGN( 64 ) typedef struct __blake2b_state
++  typedef struct JTR_ALIGN( 64 ) __blake2b_state
+   {
+     uint64_t h[8];
+     uint64_t t[2];
+@@ -94,7 +94,7 @@ extern "C" {
+ #if defined(JOHN_NO_SIMD) || (!defined(__SSE2__) && !defined(__SSE4_1__) && !defined(__XOP__))
+   typedef struct __blake2sp_state
+ #else
+-  JTR_ALIGN( 64 ) typedef struct __blake2sp_state
++  typedef struct JTR_ALIGN( 64 ) __blake2sp_state
+ #endif
+   {
+     blake2s_state S[8][1];
+@@ -106,7 +106,7 @@ extern "C" {
+ #if defined(JOHN_NO_SIMD) || (!defined(__SSE2__) && !defined(__SSE4_1__) && !defined(__XOP__))
+   typedef struct __blake2bp_state
+ #else
+-  JTR_ALIGN( 64 ) typedef struct __blake2bp_state
++  typedef struct JTR_ALIGN( 64 ) __blake2bp_state
+ #endif
+   {
+     blake2b_state S[4][1];
+-- 
+2.37.3
+

@@ -1,0 +1,692 @@
+From 210eb9f1a246c876d522bfe2fbca59197b8ee791 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Mon, 19 Nov 2018 02:18:59 +0100
+Subject: [PATCH 1/9] Haiku doesn't have or need statvfs64
+
+Really, cmake should test for this one instead of hardcoding half of the OSes around.
+---
+ src/common/utility.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/common/utility.cpp b/src/common/utility.cpp
+index f686015ef..0260e3964 100644
+--- a/src/common/utility.cpp
++++ b/src/common/utility.cpp
+@@ -212,7 +212,7 @@ void Utility::setLaunchOnStartup(const QString &appName, const QString &guiName,
+ 
+ qint64 Utility::freeDiskSpace(const QString &path)
+ {
+-#if defined(Q_OS_MAC) || defined(Q_OS_FREEBSD) || defined(Q_OS_FREEBSD_KERNEL) || defined(Q_OS_NETBSD) || defined(Q_OS_OPENBSD)
++#if defined(Q_OS_MAC) || defined(Q_OS_FREEBSD) || defined(Q_OS_FREEBSD_KERNEL) || defined(Q_OS_NETBSD) || defined(Q_OS_OPENBSD) || defined(Q_OS_HAIKU)
+     struct statvfs stat;
+     if (statvfs(path.toLocal8Bit().data(), &stat) == 0) {
+         return (qint64)stat.f_bavail * stat.f_frsize;
+-- 
+2.24.1
+
+
+From cabe2d3cb1441cecb2ddf39547b5cb4c12c5b7a4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Sun, 18 Nov 2018 00:42:03 +0100
+Subject: [PATCH 2/9] Haiku needs _BSD_SOURCE to get timegm()
+
+---
+ src/csync/csync_util.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/csync/csync_util.cpp b/src/csync/csync_util.cpp
+index b6873ff68..4d8fd422b 100644
+--- a/src/csync/csync_util.cpp
++++ b/src/csync/csync_util.cpp
+@@ -25,6 +25,10 @@
+ #define _GNU_SOURCE
+ #endif
+ 
++#ifdef __HAIKU__
++#define _BSD_SOURCE
++#endif
++
+ #include <errno.h>
+ #include <limits.h>
+ #include <stdio.h>
+-- 
+2.24.1
+
+
+From f6d90c028db9cb116881afda6ffe9a7e3f4a7131 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Sun, 18 Nov 2018 00:45:39 +0100
+Subject: [PATCH 3/9] cmake: No -fstack-protector on Haiku yet, libroot lacks
+ the required symbols
+
+---
+ src/CMakeLists.txt | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 3147645f9..7d1e97dba 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -15,7 +15,7 @@ if(NOT TOKEN_AUTH_ONLY)
+ endif()
+ 
+ # TODO: Mingw64 7.3 might also need to be excluded here as it seems to not automatically link libssp
+-if(NOT MSVC)
++if(NOT MSVC AND NOT HAIKU)
+   if(NOT (CMAKE_SYSTEM_PROCESSOR MATCHES "^(alpha|parisc|hppa)") AND NOT CMAKE_CROSSCOMPILING)
+     if((CMAKE_CXX_COMPILER_ID MATCHES "GNU") AND (CMAKE_CXX_COMPILER_VERSION VERSION_LESS 4.9))
+       set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fstack-protector --param=ssp-buffer-size=4")
+-- 
+2.24.1
+
+
+From c23f1a1e066fefef6ca61384230ad12848be5fae Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Sun, 18 Nov 2018 00:41:15 +0100
+Subject: [PATCH 4/9] POSIX mandates that struct timeval be declared in
+ <sys/time.h>
+
+Oddly enough it seems only required on Haiku which doesn't pretend to be POSIX.
+---
+ src/libsync/filesystem.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/libsync/filesystem.cpp b/src/libsync/filesystem.cpp
+index fcf0cc0d7..2ae18b870 100644
+--- a/src/libsync/filesystem.cpp
++++ b/src/libsync/filesystem.cpp
+@@ -20,6 +20,7 @@
+ #include <QDir>
+ #include <QDirIterator>
+ #include <QCoreApplication>
++#include <sys/time.h>
+ 
+ // We use some internals of csync:
+ extern "C" int c_utimes(const char *, const struct timeval *);
+-- 
+2.24.1
+
+
+From 2d6c236d400ab06dc4d732442a0d5c1099a4f1d8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Thu, 22 Nov 2018 01:25:31 +0100
+Subject: [PATCH 5/9] cmake: Haiku needs -lbe
+
+---
+ src/csync/CMakeLists.txt | 5 +++++
+ src/gui/CMakeLists.txt   | 4 ++++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/src/csync/CMakeLists.txt b/src/csync/CMakeLists.txt
+index f881db4ac..b416d8239 100644
+--- a/src/csync/CMakeLists.txt
++++ b/src/csync/CMakeLists.txt
+@@ -99,6 +99,11 @@ if (APPLE)
+     target_link_libraries("${csync_NAME}" ${FOUNDATION_LIBRARY} ${CORESERVICES_LIBRARY})
+ endif()
+ 
++# For src/common/utility_haiku.cpp
++if (HAIKU)
++    target_link_libraries("${csync_NAME}" be)
++endif()
++
+ set_target_properties(
+   "${csync_NAME}"
+     PROPERTIES
+diff --git a/src/gui/CMakeLists.txt b/src/gui/CMakeLists.txt
+index 3a38ed209..cc1ee1990 100644
+--- a/src/gui/CMakeLists.txt
++++ b/src/gui/CMakeLists.txt
+@@ -305,6 +305,10 @@ if (APPLE)
+     target_link_libraries( ${APPLICATION_EXECUTABLE} Qt5::MacExtras)
+ endif()
+ 
++if (HAIKU)
++    target_link_libraries( ${APPLICATION_EXECUTABLE} be)
++endif()
++
+ if(WITH_CRASHREPORTER)
+     target_link_libraries(${APPLICATION_EXECUTABLE} crashreporter-handler)
+ 
+-- 
+2.24.1
+
+
+From aab9db51bf6e27f189ab82fb8fee596474abc8c6 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Thu, 22 Nov 2018 01:27:05 +0100
+Subject: [PATCH 6/9] Haiku: add folderwatcher
+
+Haiku doesn't have inotify.
+---
+ CMakeLists.txt                  |   2 +-
+ src/gui/CMakeLists.txt          |   5 +-
+ src/gui/folderwatcher.cpp       |   2 +
+ src/gui/folderwatcher_haiku.cpp | 144 ++++++++++++++++++++++++++++++++
+ src/gui/folderwatcher_haiku.h   |  72 ++++++++++++++++
+ test/CMakeLists.txt             |   9 +-
+ 6 files changed, 229 insertions(+), 5 deletions(-)
+ create mode 100644 src/gui/folderwatcher_haiku.cpp
+ create mode 100644 src/gui/folderwatcher_haiku.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index bb19880db..b692427e1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -150,7 +150,7 @@ if(BUILD_CLIENT)
+         find_package(Sparkle)
+     endif(APPLE)
+ 
+-    if(UNIX)
++    if(UNIX AND NOT HAIKU)
+         find_package(INotify REQUIRED)
+     else()
+         find_package(INotify)
+diff --git a/src/gui/CMakeLists.txt b/src/gui/CMakeLists.txt
+index cc1ee1990..29083817e 100644
+--- a/src/gui/CMakeLists.txt
++++ b/src/gui/CMakeLists.txt
+@@ -140,7 +140,7 @@ IF( APPLE )
+    endif()
+ ENDIF()
+ 
+-IF( NOT WIN32 AND NOT APPLE )
++IF( NOT WIN32 AND NOT APPLE AND NOT HAIKU )
+ set(client_SRCS ${client_SRCS} folderwatcher_linux.cpp)
+ ENDIF()
+ IF( WIN32 )
+@@ -149,6 +149,9 @@ ENDIF()
+ IF( APPLE )
+ list(APPEND client_SRCS folderwatcher_mac.cpp)
+ ENDIF()
++IF( HAIKU )
++list(APPEND client_SRCS folderwatcher_haiku.cpp)
++ENDIF()
+ 
+ set(3rdparty_SRC
+     ../3rdparty/QProgressIndicator/QProgressIndicator.cpp
+diff --git a/src/gui/folderwatcher.cpp b/src/gui/folderwatcher.cpp
+index 083ff2088..2f2f17358 100644
+--- a/src/gui/folderwatcher.cpp
++++ b/src/gui/folderwatcher.cpp
+@@ -28,6 +28,8 @@
+ #include "folderwatcher_win.h"
+ #elif defined(Q_OS_MAC)
+ #include "folderwatcher_mac.h"
++#elif defined(Q_OS_HAIKU)
++#include "folderwatcher_haiku.h"
+ #elif defined(Q_OS_UNIX)
+ #include "folderwatcher_linux.h"
+ #endif
+diff --git a/src/gui/folderwatcher_haiku.cpp b/src/gui/folderwatcher_haiku.cpp
+new file mode 100644
+index 000000000..090e7d00e
+--- /dev/null
++++ b/src/gui/folderwatcher_haiku.cpp
+@@ -0,0 +1,144 @@
++/*
++ * Copyright (C) by François Revol <revol@free.fr>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
++ * or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
++ * for more details.
++ */
++#include "config.h"
++
++#include "folder.h"
++#include "folderwatcher.h"
++#include "folderwatcher_haiku.h"
++
++
++#include <cerrno>
++#include <QObject>
++#include <QStringList>
++
++#include <Application.h>
++#include <Path.h>
++#include <String.h>
++#include <private/storage/PathMonitor.h>
++
++
++
++namespace OCC {
++
++
++void WatcherHandler::MessageReceived(BMessage* message)
++{
++    qCDebug(lcFolderWatcher) << "WatcherHandler::MessageReceived()" << message->what;
++    if (message->what != B_PATH_MONITOR) {
++        BHandler::MessageReceived(message);
++        return;
++    }
++
++    int32 opcode;
++    if (message->FindInt32("opcode", &opcode) != B_OK)
++        return;
++
++    const char *path = NULL;
++    if (message->FindString("path", &path) != B_OK)
++        return;
++
++    // get the filename
++    // sometimes we have it in the message, but not always
++    BPath p(path);
++    BString fileName(p.Leaf());
++    if (fileName.StartsWith("._sync_")
++        || fileName.StartsWith(".csync_journal.db")
++        || fileName.StartsWith(".owncloudsync.log")
++        || fileName.StartsWith(".sync_")) {
++        return;
++    }
++
++    int32 fields;
++    QStringList paths;
++
++    switch (opcode) {
++        case B_ENTRY_MOVED:
++        {
++            const char *from = NULL;
++            if (message->FindString("from path", &from) != B_OK)
++                return;
++            QString qFrom = QString::fromUtf8(from);
++            paths.append(qFrom);
++            break;
++        }
++        case B_ENTRY_CREATED:
++        case B_ENTRY_REMOVED:
++            break;
++        case B_STAT_CHANGED:
++            if (message->FindInt32("fields", &fields) != B_OK)
++                return;
++            // we're only interested in mtime
++            // and content change... which should always change mtime though
++            // just to be sure, check size changes as well
++            if (fields & (B_STAT_MODIFICATION_TIME | B_STAT_SIZE))
++                break;
++            return;
++        case B_ATTR_CHANGED:
++            // TODO: it is just unacceptable to not handle xattrs on Haiku!
++            // but it must be done properly,
++            // cf. http://dcevents.dublincore.org/IntConf/dc-2011/paper/view/53
++        default:
++            // discard
++            return;
++    }
++
++    //message->PrintToStream();
++
++    QString qPath = QString::fromUtf8(path);
++    paths.append(qPath);
++    emit changed(paths);
++}
++
++
++FolderWatcherPrivate::FolderWatcherPrivate(FolderWatcher *p, const QString &path)
++    : _parent(p)
++    , _folder(path)
++    , _handler(new WatcherHandler)
++{
++    this->startWatching();
++}
++
++FolderWatcherPrivate::~FolderWatcherPrivate()
++{
++    BPrivate::BPathMonitor::StopWatching(BMessenger(_handler));
++    be_app->Lock();
++    be_app->RemoveHandler(_handler);
++    be_app->Unlock();
++    delete _handler;
++}
++
++void FolderWatcherPrivate::startWatching()
++{
++    qCDebug(lcFolderWatcher) << "FolderWatcherPrivate::startWatching()" << _folder;
++
++    // it needs to be attached to a BLooper, which be_app happens to be.
++    be_app->Lock();
++    be_app->AddHandler(_handler);
++    be_app->Unlock();
++
++    connect(_handler, SIGNAL(changed(const QStringList &)),
++        _parent, SLOT(changeDetected(const QStringList &)));
++    connect(_handler, SIGNAL(lostChanges()),
++        _parent, SIGNAL(lostChanges()));
++
++    BMessenger messenger(_handler);
++    uint32 flags = B_WATCH_RECURSIVELY | B_WATCH_NAME | B_WATCH_STAT;
++    status_t err;
++    err = BPrivate::BPathMonitor::StartWatching(_folder.toUtf8().constData(), flags, messenger);
++    if (err != B_OK)
++        qCWarning(lcFolderWatcher) << "BPathMonitor::StartWatching failed: " << strerror(err);
++}
++
++
++} // ns mirall
+diff --git a/src/gui/folderwatcher_haiku.h b/src/gui/folderwatcher_haiku.h
+new file mode 100644
+index 000000000..1023c0e76
+--- /dev/null
++++ b/src/gui/folderwatcher_haiku.h
+@@ -0,0 +1,72 @@
++/*
++ * Copyright (C) by François Revol <revol@free.fr>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
++ * or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
++ * for more details.
++ */
++
++#ifndef MIRALL_FOLDERWATCHER_HAIKU_H
++#define MIRALL_FOLDERWATCHER_HAIKU_H
++
++#include <QObject>
++#include <QString>
++
++#include <Handler.h>
++
++namespace OCC {
++
++/**
++ * @brief The WatcherHandler class
++ * @ingroup gui
++ */
++class WatcherHandler : public QObject, public BHandler {
++    Q_OBJECT
++public:
++    WatcherHandler() : QObject(), BHandler("FolderWatcher") {}
++    virtual ~WatcherHandler() {}
++    virtual void MessageReceived(BMessage* message);
++
++signals:
++    void changed(const QStringList &paths);
++    void lostChanges();
++
++private:
++    QString _path;
++};
++
++/**
++ * @brief Haiku API implementation of FolderWatcher
++ * @ingroup gui
++ */
++class FolderWatcherPrivate : public QObject
++{
++    Q_OBJECT
++public:
++    FolderWatcherPrivate(FolderWatcher *p, const QString &path);
++    ~FolderWatcherPrivate();
++
++    void addPath(const QString &) {}
++    void removePath(const QString &) {}
++
++    void startWatching();
++
++    /// On Haiku the watcher is ready when the ctor finished.
++    bool _ready = 1;
++
++private:
++    FolderWatcher *_parent;
++
++    QString _folder;
++
++    WatcherHandler *_handler;
++};
++}
++
++#endif
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index 13b13eb7e..0007af355 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -20,7 +20,7 @@ owncloud_add_test(Updater "")
+ 
+ SET(FolderWatcher_SRC ../src/gui/folderwatcher.cpp)
+ 
+-IF( NOT WIN32 AND NOT APPLE )
++IF( NOT WIN32 AND NOT APPLE AND NOT HAIKU )
+ list(APPEND FolderWatcher_SRC  ../src/gui/folderwatcher_linux.cpp)
+ ENDIF()
+ IF( WIN32 )
+@@ -30,6 +30,9 @@ IF( APPLE )
+ list(APPEND FolderWatcher_SRC ../src/gui/folderwatcher_mac.cpp)
+ list(APPEND FolderWatcher_SRC ../src/gui/socketapisocket_mac.mm)
+ ENDIF()
++IF( HAIKU )
++list(APPEND FolderWatcher_SRC ../src/gui/folderwatcher_haiku.cpp)
++ENDIF()
+ owncloud_add_test(NetrcParser ../src/cmd/netrcparser.cpp)
+ owncloud_add_test(OwnSql "")
+ owncloud_add_test(SyncJournalDB "")
+@@ -66,9 +69,9 @@ owncloud_add_test(LockedFiles "syncenginetestutils.h;../src/gui/lockwatcher.cpp"
+ 
+ owncloud_add_test(FolderWatcher "${FolderWatcher_SRC}")
+ 
+-if( UNIX AND NOT APPLE )
++if( UNIX AND NOT APPLE AND NOT HAIKU)
+     owncloud_add_test(InotifyWatcher "${FolderWatcher_SRC}")
+-endif(UNIX AND NOT APPLE)
++endif(UNIX AND NOT APPLE AND NOT HAIKU)
+ 
+ owncloud_add_benchmark(LargeSync "syncenginetestutils.h")
+ 
+-- 
+2.24.1
+
+
+From 708bf1a1d4090497ed462c77107339190c04fc6d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Thu, 22 Nov 2018 06:10:40 +0100
+Subject: [PATCH 7/9] Haiku: fix socket path
+
+Seems to end up in ~/config/settings/owncloud/owncloud/ now, not sure it fits,
+but it's better than removing /tmp.
+---
+ src/common/utility.h  | 10 ++++++++++
+ src/gui/socketapi.cpp |  2 +-
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/src/common/utility.h b/src/common/utility.h
+index f1b9779be..ad31d1002 100644
+--- a/src/common/utility.h
++++ b/src/common/utility.h
+@@ -123,6 +123,7 @@ namespace Utility {
+     inline bool isUnix();
+     inline bool isLinux(); // use with care
+     inline bool isBSD(); // use with care, does not match OS X
++    inline bool isHaiku();
+ 
+     OCSYNC_EXPORT QString platformName();
+     // crash helper for --debug
+@@ -287,5 +288,14 @@ inline bool Utility::isBSD()
+ #endif
+ }
+ 
++inline bool Utility::isHaiku()
++{
++#if defined(Q_OS_HAIKU)
++    return true;
++#else
++    return false;
++#endif
++}
++
+ }
+ #endif // UTILITY_H
+diff --git a/src/gui/socketapi.cpp b/src/gui/socketapi.cpp
+index d606c777e..449d97dbd 100644
+--- a/src/gui/socketapi.cpp
++++ b/src/gui/socketapi.cpp
+@@ -210,7 +210,7 @@ SocketApi::SocketApi(QObject *parent)
+         ret = system(cmd.toLocal8Bit());
+ 
+ #endif
+-    } else if (Utility::isLinux() || Utility::isBSD()) {
++    } else if (Utility::isLinux() || Utility::isBSD() || Utility::isHaiku()) {
+         QString runtimeDir;
+         runtimeDir = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+         socketPath = runtimeDir + "/" + Theme::instance()->appName() + "/socket";
+-- 
+2.24.1
+
+
+From ea5fa4da5839ac2549b200997c4ba27f1d2e68d4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Thu, 22 Nov 2018 06:11:13 +0100
+Subject: [PATCH 8/9] Haiku: add utility functions
+
+Autostart is functional now.
+---
+ src/common/utility.cpp       |  4 ++
+ src/common/utility_haiku.cpp | 79 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 83 insertions(+)
+ create mode 100644 src/common/utility_haiku.cpp
+
+diff --git a/src/common/utility.cpp b/src/common/utility.cpp
+index 0260e3964..721e9c777 100644
+--- a/src/common/utility.cpp
++++ b/src/common/utility.cpp
+@@ -52,6 +52,8 @@
+ #include "utility_win.cpp"
+ #elif defined(Q_OS_MAC)
+ #include "utility_mac.cpp"
++#elif defined(Q_OS_HAIKU)
++#include "utility_haiku.cpp"
+ #else
+ #include "utility_unix.cpp"
+ #endif
+@@ -169,6 +171,8 @@ static QLatin1String platform()
+     return QLatin1String("OpenBSD");
+ #elif defined(Q_OS_SOLARIS)
+     return QLatin1String("Solaris");
++#elif defined(Q_OS_HAIKU)
++    return QLatin1String("Haiku");
+ #else
+     return QLatin1String("Unknown OS");
+ #endif
+diff --git a/src/common/utility_haiku.cpp b/src/common/utility_haiku.cpp
+new file mode 100644
+index 000000000..547ea2795
+--- /dev/null
++++ b/src/common/utility_haiku.cpp
+@@ -0,0 +1,79 @@
++/*
++ * Copyright (C) by Klaas Freitag <freitag@owncloud.com>
++ * Copyright (C) by Daniel Molkentin <danimo@owncloud.com>
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++#include <QDir>
++#include <QFile>
++#include <QString>
++
++#include <FindDirectory.h>
++#include <Path.h>
++
++namespace OCC {
++
++static void setupFavLink_private(const QString &folder)
++{
++	Q_UNUSED(folder);
++    // Haiku doesn't really have that concept of bookmarks on folders
++}
++
++// returns the autostart directory the Haiku way
++// should probably use launch_daemon service directly though
++// instead of the old way
++QString getUserAutostartDir_private()
++{
++    BPath path;
++    find_directory(B_USER_SETTINGS_DIRECTORY, &path);
++    QString config = QString::fromUtf8(path.Path());
++    config += QLatin1String("/boot/launch/");
++    return config;
++}
++
++bool hasLaunchOnStartup_private(const QString &appName)
++{
++    QString startupFileLocation = getUserAutostartDir_private() + appName;
++    return QFile::exists(startupFileLocation);
++}
++
++void setLaunchOnStartup_private(const QString &appName, const QString &guiName, bool enable)
++{
++	Q_UNUSED(guiName);
++    QString userAutoStartPath = getUserAutostartDir_private();
++    QString startupFileLocation = userAutoStartPath + appName;
++    if (enable) {
++        if (!QDir().exists(userAutoStartPath) && !QDir().mkpath(userAutoStartPath)) {
++            qCWarning(lcUtility) << "Could not create autostart folder" << userAutoStartPath;
++            return;
++        }
++        if (!QFile::link(QCoreApplication::applicationFilePath(), startupFileLocation)) {
++            qCWarning(lcUtility) << "Could not write autostart symlink" << startupFileLocation;
++            return;
++        }
++    } else {
++        if (!QFile::remove(startupFileLocation)) {
++            qCWarning(lcUtility) << "Could not remove autostart symlink";
++        }
++    }
++}
++
++static inline bool hasDarkSystray_private()
++{
++    return true;
++}
++
++} // namespace OCC
+-- 
+2.24.1
+
+
+From 8eed12325274047bcc5bc7e804c1f9e39994fad2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Revol?= <revol@free.fr>
+Date: Thu, 22 Nov 2018 06:30:21 +0100
+Subject: [PATCH 9/9] Haiku: send proper platform string from updater
+
+Just for the sake of it.
+---
+ src/gui/updater/updater.cpp | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/gui/updater/updater.cpp b/src/gui/updater/updater.cpp
+index 0f119dc7b..b11f2baee 100644
+--- a/src/gui/updater/updater.cpp
++++ b/src/gui/updater/updater.cpp
+@@ -79,6 +79,8 @@ QUrlQuery Updater::getQueryParams()
+         platform = QLatin1String("win32");
+     } else if (Utility::isMac()) {
+         platform = QLatin1String("macos");
++    } else if (Utility::isHaiku()) {
++        platform = QLatin1String("haiku");
+     }
+ 
+     QString sysInfo = getSystemInfo();
+-- 
+2.24.1
+

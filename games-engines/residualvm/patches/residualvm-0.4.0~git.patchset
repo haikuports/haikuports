@@ -1,0 +1,188 @@
+From 776540f0b19e30ac07f90fa7b6e54a68689c9aa4 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Mon, 6 Sep 2021 23:50:35 +1000
+Subject: Fixes for Haiku
+
+
+diff --git a/backends/platform/sdl/posix/posix.cpp b/backends/platform/sdl/posix/posix.cpp
+index 8a8aeaa..a192d89 100644
+--- a/backends/platform/sdl/posix/posix.cpp
++++ b/backends/platform/sdl/posix/posix.cpp
+@@ -52,6 +52,10 @@
+ #include <sys/wait.h>
+ #include <unistd.h>
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#endif
++
+ #ifdef HAS_POSIX_SPAWN
+ #include <spawn.h>
+ #endif
+@@ -138,6 +142,16 @@ Common::String OSystem_POSIX::getDefaultConfigFileName() {
+ 	// On POSIX systems we follow the XDG Base Directory Specification for
+ 	// where to store files. The version we based our code upon can be found
+ 	// over here: http://standards.freedesktop.org/basedir-spec/basedir-spec-0.8.html
++#ifdef __HAIKU__
++	static char settingsDir[PATH_MAX] = "";
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, false, settingsDir, sizeof(settingsDir)) == B_OK) {
++		prefix = settingsDir;
++		prefix += "/ResidualVM";
++	} else {
++		prefix = "/boot/home/config/settings/ResidualVM";
++	}
++	mkdir(prefix.c_str(), 0755);
++#else
+ 	envVar = getenv("XDG_CONFIG_HOME");
+ 	if (!envVar || !*envVar) {
+ 		envVar = getenv("HOME");
+@@ -156,6 +170,7 @@ Common::String OSystem_POSIX::getDefaultConfigFileName() {
+ 	if (!prefix.empty() && Posix::assureDirectoryExists("residualvm", prefix.c_str())) {
+ 		prefix += "/residualvm";
+ 	}
++#endif
+ 
+ 	if (!prefix.empty() && (prefix.size() + 1 + baseConfigName.size()) < MAXPATHLEN) {
+ 		configFile = prefix;
+@@ -180,7 +195,15 @@ Common::String OSystem_POSIX::getXdgUserDir(const char *name) {
+ 
+ 		configHome = Common::String::format("%s/.config", home);
+ 	}
+-
++#if defined(__HAIKU__)
++	static char settingsDir[PATH_MAX] = "";
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, false, settingsDir, sizeof(settingsDir)) == B_OK) {
++		configHome = settingsDir;
++		configHome += "/ResidualVM";
++	} else {
++		configHome = "/boot/home/config/settings/ResidualVM";
++	}
++#endif
+ 	// Find the requested directory line in the xdg-user-dirs configuration file
+ 	//   Example line value: XDG_PICTURES_DIR="$HOME/Pictures"
+ 	Common::FSNode userDirsFile(configHome + "/user-dirs.dirs");
+@@ -296,9 +319,17 @@ Common::String OSystem_POSIX::getDefaultLogFileName() {
+ 
+ 		logFile = ".cache/";
+ 	}
+-
++#if defined(__HAIKU__)
++	static char cacheDir[PATH_MAX] = "";
++	if (find_directory(B_USER_CACHE_DIRECTORY, -1, false, cacheDir, sizeof(cacheDir)) == B_OK) {
++		prefix = cacheDir;
++	} else {
++		prefix = "/boot/home/config/cache";
++	}
++	logFile = "ResidualVM/logs";
++#else
+ 	logFile += "residualvm/logs";
+-
++#endif
+ 	if (!Posix::assureDirectoryExists(logFile, prefix)) {
+ 		return Common::String();
+ 	}
+@@ -361,6 +392,11 @@ bool OSystem_POSIX::openUrl(const Common::String &url) {
+ #ifdef HAS_POSIX_SPAWN
+ 	// inspired by Qt's "qdesktopservices_x11.cpp"
+ 
++#ifdef __HAIKU__
++	if (launchBrowser("open", url))
++		return true;
++#endif
++
+ 	// try "standards"
+ 	if (launchBrowser("xdg-open", url))
+ 		return true;
+diff --git a/backends/saves/posix/posix-saves.cpp b/backends/saves/posix/posix-saves.cpp
+index 7b83154..8636b83 100644
+--- a/backends/saves/posix/posix-saves.cpp
++++ b/backends/saves/posix/posix-saves.cpp
+@@ -26,7 +26,9 @@
+ #define FORBIDDEN_SYMBOL_EXCEPTION_time_h	//On IRIX, sys/stat.h includes sys/time.h
+ #define FORBIDDEN_SYMBOL_EXCEPTION_mkdir
+ #define FORBIDDEN_SYMBOL_EXCEPTION_getenv
++#define FORBIDDEN_SYMBOL_ALLOW_ALL
+ 
++#include "config.h"
+ #include "common/scummsys.h"
+ 
+ #if defined(POSIX) && !defined(DISABLE_DEFAULT_SAVEFILEMANAGER)
+@@ -40,6 +42,10 @@
+ 
+ #include <sys/stat.h>
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#endif
++
+ POSIXSaveFileManager::POSIXSaveFileManager() {
+ 	// Register default savepath.
+ 	Common::String savePath;
+@@ -52,7 +58,16 @@ POSIXSaveFileManager::POSIXSaveFileManager() {
+ 
+ 		ConfMan.registerDefault("savepath", savePath);
+ 	}
+-
++#elif defined(__HAIKU__)
++	static char settingsDir[PATH_MAX] = "";
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, -1, false, settingsDir, sizeof(settingsDir)) == B_OK) {
++		savePath = settingsDir;
++		savePath += "/ResidualVM/Savegames";
++	} else {
++		savePath = "/boot/home/config/settings/ResidualVM/Savegames";
++	}
++	mkdir(savePath.c_str(), 0755);
++	ConfMan.registerDefault("savepath", savePath);
+ #else
+ 	const char *envVar;
+ 
+diff --git a/configure b/configure
+index eb50f9e..c5f5a50 100755
+--- a/configure
++++ b/configure
+@@ -6220,6 +6220,9 @@ $_config_h_data
+ /* Data types */
+ #ifndef SCUMMVM_DONT_DEFINE_TYPES
+ typedef unsigned $type_1_byte byte;
++#ifdef __HAIKU__
++#include <SupportDefs.h>
++#else
+ typedef unsigned int uint;
+ typedef unsigned $type_1_byte uint8;
+ typedef unsigned $type_2_byte uint16;
+@@ -6230,6 +6233,7 @@ typedef signed $type_2_byte int16;
+ typedef signed $type_4_byte int32;
+ typedef signed $type_8_byte int64;
+ #endif
++#endif
+ 
+ typedef $type_ptr  uintptr;
+ 
+diff --git a/engines/icb/jpeg.h b/engines/icb/jpeg.h
+index 6c0f57b..0cb4a41 100644
+--- a/engines/icb/jpeg.h
++++ b/engines/icb/jpeg.h
+@@ -40,6 +40,8 @@ static uint32 *_end_buf;
+ 
+ #ifdef _WIN32
+ static __int64 safeMM0 = 0;
++#elif defined(__HAIKU__)
++static int64_t safeMM0 = 0;
+ #else
+ static __int64_t safeMM0 = 0;
+ #endif
+diff --git a/engines/wintermute/base/gfx/opengl/base_render_opengl3d.cpp b/engines/wintermute/base/gfx/opengl/base_render_opengl3d.cpp
+index 1a0ed7d..8928b70 100644
+--- a/engines/wintermute/base/gfx/opengl/base_render_opengl3d.cpp
++++ b/engines/wintermute/base/gfx/opengl/base_render_opengl3d.cpp
+@@ -28,6 +28,7 @@
+ #include "engines/wintermute/base/gfx/3ds/light3d.h"
+ #include "graphics/opengl/system_headers.h"
+ #include "math/glmath.h"
++#include <GL/glew.h>
+ 
+ #if defined(USE_OPENGL) && !defined(USE_GLES2)
+ 
+-- 
+2.30.2
+

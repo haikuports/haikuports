@@ -1,0 +1,372 @@
+From 0b7b06ea19c0c76f05eeafd3c836e8c939aee4e0 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Sat, 19 Nov 2022 13:44:51 +0100
+Subject: configure: detect -lnetwork
+
+
+diff --git a/configure.ac b/configure.ac
+index 7096136..01ffe07 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -256,7 +256,7 @@ if test "$buildmain" = "yes"; then
+   #include <sys/types.h>
+   #include <utmp.h>])
+ 
+-  AC_SEARCH_LIBS([socket], [xnet])
++  AC_SEARCH_LIBS([socket], [network xnet])
+   AC_SEARCH_LIBS([getaddrinfo], [xnet])
+   AC_SEARCH_LIBS([in6addr_loopback], [socket])
+ 
+-- 
+2.37.3
+
+
+From 9a933dde32a02d832c11b6bb0091f23b48ea9bfa Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Wed, 1 Mar 2023 21:55:23 +0100
+Subject: configure: check for wordexp.h
+
+
+diff --git a/configure.ac b/configure.ac
+index 01ffe07..ae90927 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -256,6 +256,8 @@ if test "$buildmain" = "yes"; then
+   #include <sys/types.h>
+   #include <utmp.h>])
+ 
++  AC_CHECK_HEADERS([wordexp.h])
++
+   AC_SEARCH_LIBS([socket], [network xnet])
+   AC_SEARCH_LIBS([getaddrinfo], [xnet])
+   AC_SEARCH_LIBS([in6addr_loopback], [socket])
+diff --git a/src/commonui/fz_paths.cpp b/src/commonui/fz_paths.cpp
+index a9f64f7..1f9b524 100644
+--- a/src/commonui/fz_paths.cpp
++++ b/src/commonui/fz_paths.cpp
+@@ -15,8 +15,10 @@
+ 	#include <objbase.h>
+ #else
+ 	#include <unistd.h>
++#ifdef HAVE_WORDEXP_H
+ 	#include <wordexp.h>
+ #endif
++#endif
+ 
+ using namespace std::literals;
+ 
+-- 
+2.37.3
+
+
+From b8ab002d0ee6192365ceb54a856bcb8da6a53a3b Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Fri, 3 Mar 2023 14:36:17 +0100
+Subject: Fallback to glob if wordexp is not available. Inspired by OpenBSD
+ downstream patch.
+
+
+diff --git a/configure.ac b/configure.ac
+index ae90927..af4a66a 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -256,8 +256,12 @@ if test "$buildmain" = "yes"; then
+   #include <sys/types.h>
+   #include <utmp.h>])
+ 
++  AC_CHECK_HEADERS([glob.h])
+   AC_CHECK_HEADERS([wordexp.h])
+ 
++  AC_CHECK_FUNCS([glob])
++  AC_CHECK_FUNCS([wordexp])
++
+   AC_SEARCH_LIBS([socket], [network xnet])
+   AC_SEARCH_LIBS([getaddrinfo], [xnet])
+   AC_SEARCH_LIBS([in6addr_loopback], [socket])
+diff --git a/src/commonui/fz_paths.cpp b/src/commonui/fz_paths.cpp
+index 1f9b524..4c84940 100644
+--- a/src/commonui/fz_paths.cpp
++++ b/src/commonui/fz_paths.cpp
+@@ -15,6 +15,9 @@
+ 	#include <objbase.h>
+ #else
+ 	#include <unistd.h>
++#ifdef HAVE_GLOB_H
++	#include <glob.h>
++#endif
+ #ifdef HAVE_WORDEXP_H
+ 	#include <wordexp.h>
+ #endif
+@@ -489,6 +492,8 @@ char const* GetDownloadDirImpl();
+ #elif !defined(FZ_WINDOWS)
+ 
+ namespace {
++
++#if defined(HAVE_WORDEXP)
+ std::string ShellUnescape(std::string const& path)
+ {
+ 	std::string ret;
+@@ -502,6 +507,26 @@ std::string ShellUnescape(std::string const& path)
+ 
+ 	return ret;
+ }
++#elif defined(HAVE_GLOB)
++std::string ShellUnescape(std::string const& path)
++{
++	std::string ret;
++
++	glob_t p;
++	int res = glob(path.c_str(), GLOB_ERR, NULL, &p);
++	if (!res && p.gl_pathc == 1 && p.gl_pathv) {
++		ret = p.gl_pathv[0];
++	}
++	globfree(&p);
++
++	return ret;
++}
++#else
++std::string ShellUnescape(std::string const& path)
++{
++	return path;
++}
++#endif
+ 
+ size_t next_line(fz::file& f, fz::buffer& buf, size_t maxlen = 16 * 1024)
+ {
+-- 
+2.37.3
+
+
+From 6b0efe250f1edab9fc1141810b34878df221602a Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Sat, 19 Nov 2022 13:44:51 +0100
+Subject: adjust folders for Haiku
+
+
+diff --git a/src/commonui/Makefile.am b/src/commonui/Makefile.am
+index dbd9a00..c6ea81a 100644
+--- a/src/commonui/Makefile.am
++++ b/src/commonui/Makefile.am
+@@ -5,6 +5,7 @@ lib_LTLIBRARIES = libfzclient-commonui-private.la
+ libfzclient_commonui_private_la_CPPFLAGS = -I$(top_builddir)/config
+ libfzclient_commonui_private_la_CPPFLAGS += $(LIBFILEZILLA_CFLAGS)
+ libfzclient_commonui_private_la_CPPFLAGS += -DBUILDING_FZ_COMMONUI
++libfzclient_commonui_private_la_CPPFLAGS += -DDATADIR='L"$(datadir)"'
+ 
+ libfzclient_commonui_private_la_CXXFLAGS = -fvisibility=hidden
+ libfzclient_commonui_private_la_LDFLAGS = -no-undefined -release $(PACKAGE_VERSION_MAJOR).$(PACKAGE_VERSION_MINOR).$(PACKAGE_VERSION_MICRO)
+diff --git a/src/commonui/fz_paths.cpp b/src/commonui/fz_paths.cpp
+index 4c84940..9c61680 100644
+--- a/src/commonui/fz_paths.cpp
++++ b/src/commonui/fz_paths.cpp
+@@ -290,6 +290,19 @@ CLocalPath GetFZDataDir(std::vector<std::wstring> const& fileToFind, std::wstrin
+ 		}
+ 	}
+ 
++#ifdef DATADIR
++	std::wstring dataDir(DATADIR);
++	if (testPath(dataDir)) {
++		return ret;
++	}
++
++	if (!prefixSub.empty()) {
++		if (testPath(dataDir + L_DIR_SEP + prefixSub)) {
++			return ret;
++		}
++	}
++#endif
++
+ 	std::wstring selfDir = GetOwnExecutableDir();
+ 	if (!selfDir.empty()) {
+ 		if (searchSelfDir && testPath(selfDir)) {
+@@ -352,7 +365,7 @@ CLocalPath GetDefaultsDir()
+ 
+ #endif
+ 		if (path.empty()) {
+-			path = GetFZDataDir({ L"fzdefaults.xml" }, L"share/filezilla");
++			path = GetFZDataDir({ L"fzdefaults.xml" }, L"filezilla");
+ 		}
+ 		return path;
+ 	}();
+diff --git a/src/interface/FileZilla.cpp b/src/interface/FileZilla.cpp
+index 31f1d72..add523c 100644
+--- a/src/interface/FileZilla.cpp
++++ b/src/interface/FileZilla.cpp
+@@ -298,7 +298,7 @@ int CFileZillaApp::OnExit()
+ bool CFileZillaApp::LoadResourceFiles()
+ {
+ 	AddStartupProfileRecord("CFileZillaApp::LoadResourceFiles"sv);
+-	m_resourceDir = GetFZDataDir({L"resources/defaultfilters.xml"}, L"share/filezilla");
++	m_resourceDir = GetFZDataDir({L"resources/defaultfilters.xml"}, L"filezilla");
+ 
+ 	wxImage::AddHandler(new wxPNGHandler());
+ 
+@@ -326,7 +326,7 @@ bool CFileZillaApp::LoadLocales()
+ 	}
+ #ifndef __WXMAC__
+ 	else {
+-		m_localesDir = GetFZDataDir({L"de/filezilla.mo", L"de/LC_MESSAGES/filezilla.mo"}, L"share/locale", false);
++		m_localesDir = GetFZDataDir({L"de/filezilla.mo", L"de/LC_MESSAGES/filezilla.mo"}, L"locale", false);
+ 	}
+ #endif
+ 	if (!m_localesDir.empty()) {
+diff --git a/src/interface/locale_initializer.cpp b/src/interface/locale_initializer.cpp
+index c7d2fc7..fac6aa7 100644
+--- a/src/interface/locale_initializer.cpp
++++ b/src/interface/locale_initializer.cpp
+@@ -204,7 +204,7 @@ std::string CInitializer::GetDefaultsXmlFile()
+ 	std::string selfPath = fz::to_string(GetOwnExecutableDir());
+ 	file = CheckPathForDefaults(selfPath, 0, "fzdefaults.xml");
+ 	if (selfPath.size() > 5 && fz::ends_with(selfPath, std::string("/bin/"))) {
+-		file = CheckPathForDefaults(selfPath.substr(0, selfPath.size() - 4), 0, "share/filezilla/fzdefaults.xml");
++		file = CheckPathForDefaults(selfPath.substr(0, selfPath.size() - 4), 0, "data/filezilla/fzdefaults.xml");
+ 		if (!file.empty()) {
+ 			return file;
+ 		}
+@@ -225,7 +225,7 @@ std::string CInitializer::GetDefaultsXmlFile()
+ 			path += '/';
+ 		}
+ 		if (segment.size() > 5 && fz::ends_with(segment, std::string("/bin/"))) {
+-			file = CheckPathForDefaults(segment.substr(0, segment.size() - 4), 0, "share/filezilla/fzdefaults.xml");
++			file = CheckPathForDefaults(segment.substr(0, segment.size() - 4), 0, "data/filezilla/fzdefaults.xml");
+ 			if (!file.empty()) {
+ 				return file;
+ 			}
+-- 
+2.37.3
+
+
+From 8276c8bfb1fec087b5c812d51598e754ee356cc9 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Sat, 3 Dec 2022 16:39:13 +0100
+Subject: Haiku: use BNotification
+
+
+diff --git a/src/interface/QueueView.cpp b/src/interface/QueueView.cpp
+index a52d648..d0b28a3 100644
+--- a/src/interface/QueueView.cpp
++++ b/src/interface/QueueView.cpp
+@@ -29,7 +29,9 @@
+ 
+ #include <libfilezilla/glue/wxinvoker.hpp>
+ 
+-#if WITH_LIBDBUS
++#if defined(__HAIKU__)
++#include <Notification.h>
++#elif WITH_LIBDBUS
+ #include "../dbus/desktop_notification.h"
+ #elif defined(__WXGTK__) || defined(__WXMSW__)
+ #include <wx/notifmsg.h>
+@@ -2701,7 +2703,13 @@ void CQueueView::ActionAfter(bool warned)
+ 				msg = _("All files have been successfully transferred");
+ 			}
+ 
+-#if WITH_LIBDBUS
++#if defined(__HAIKU__)
++			BNotification notification((failed_count > 0) ? B_ERROR_NOTIFICATION : B_INFORMATION_NOTIFICATION);
++			notification.SetGroup("FileZilla");
++			notification.SetTitle(BString(title));
++			notification.SetContent(BString(msg));
++			notification.Send();
++#elif WITH_LIBDBUS
+ 			if (!m_desktop_notification) {
+ 				m_desktop_notification = std::make_unique<CDesktopNotification>();
+ 			}
+diff --git a/src/interface/QueueView.h b/src/interface/QueueView.h
+index 7b16d8a..8b120b6 100644
+--- a/src/interface/QueueView.h
++++ b/src/interface/QueueView.h
+@@ -86,7 +86,9 @@ class CMainFrame;
+ class CStatusLineCtrl;
+ class CAsyncRequestQueue;
+ class CQueue;
+-#if WITH_LIBDBUS
++#if defined(__HAIKU__)
++// empty
++#elif WITH_LIBDBUS
+ class CDesktopNotification;
+ #elif defined(__WXGTK__) || defined(__WXMSW__)
+ class wxNotificationMessage;
+@@ -271,7 +273,9 @@ protected:
+ 
+ 	void ReleaseExclusiveEngineLock(CFileZillaEngine* pEngine);
+ 
+-#if WITH_LIBDBUS
++#if defined(__HAIKU__)
++	// empty
++#elif WITH_LIBDBUS
+ 	std::unique_ptr<CDesktopNotification> m_desktop_notification;
+ #elif defined(__WXGTK__) || defined(__WXMSW__)
+ 	std::unique_ptr<wxNotificationMessage> m_desktop_notification;
+-- 
+2.37.3
+
+
+From aac199c59a3de86de0fa330ef9f2e389b467a673 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Mon, 5 Dec 2022 23:03:41 +0100
+Subject: Haiku: initialize XDG vars
+
+
+diff --git a/src/interface/locale_initializer.cpp b/src/interface/locale_initializer.cpp
+index fac6aa7..7806c7f 100644
+--- a/src/interface/locale_initializer.cpp
++++ b/src/interface/locale_initializer.cpp
+@@ -10,6 +10,12 @@
+ #include <locale.h>
+ #include <sys/stat.h>
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#include <fs_info.h>
++#include <glib.h>
++#endif
++
+ std::wstring GetOwnExecutableDir();
+ 
+ struct t_fallbacks
+@@ -76,6 +82,30 @@ static std::string mkstr(const char* str)
+ 	}
+ }
+ 
++#ifdef __HAIKU__
++void initialize_xdg_paths(void)
++{
++	char dir[B_PATH_NAME_LENGTH + B_FILE_NAME_LENGTH];
++	char dirs[B_PATH_NAME_LENGTH + B_FILE_NAME_LENGTH];
++	dev_t volume = dev_for_path("/boot");
++
++	if (find_directory(B_SYSTEM_SETTINGS_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++		g_setenv ("XDG_CONFIG_DIRS", dir, FALSE);
++	if (find_directory(B_USER_NONPACKAGED_DATA_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++		g_setenv ("XDG_DATA_HOME", dir, FALSE);
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++		g_setenv ("XDG_CONFIG_HOME", dir, FALSE);
++	if (find_directory(B_USER_CACHE_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK)
++		g_setenv ("XDG_CACHE_HOME", dir, FALSE);
++	if (find_directory(B_SYSTEM_DATA_DIRECTORY, volume, false, dir, sizeof(dir)) == B_OK &&
++			find_directory(B_SYSTEM_NONPACKAGED_DATA_DIRECTORY, volume, false, dirs, sizeof(dirs)) == B_OK) {
++		strcat(dirs, ":");
++		strcat(dirs, dir);
++		g_setenv ("XDG_DATA_DIRS", dirs, FALSE);
++	}
++}
++#endif
++
+ int main(int argc, char** argv)
+ {
+ 	std::string locale = CInitializer::GetLocaleOption();
+@@ -93,6 +123,10 @@ int main(int argc, char** argv)
+ 		}
+ 	}
+ 
++#ifdef __HAIKU__
++	initialize_xdg_paths();
++#endif
++
+ 	return wxEntry(argc, argv);
+ }
+ 
+-- 
+2.37.3
+

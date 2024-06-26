@@ -13,6 +13,18 @@ include the BeOS GUI. The only way that HandBrake can be used on Haiku at the
 current moment is using the command line tool HandBrakeCLI.
 
 ## HaikuBrake
+
+### Background / Upstreaming
+Between 2014-2016 kallisti5 attempted to upstream some of his changes to
+Handbrake to support Haiku (basic build stuff), but the lead developers on
+Handbrake were pretty hostle at the time to any kind of Haiku patches being
+accepted upstream.
+
+HaikuBrake was forked to try and make a "Haiku friendly" version of Handbrake,
+but after some deep-diving in the code, I kind of gave up. The whole project
+is a tangled mess of old vendored libraries glued together with a pretty
+frontend.
+
 ### Versioning
 There has been an attempt to bring the BeOS GUI back to Haiku. @kallisti5's
 [HaikuBrake](https://github.com/kallisti5/HaikuBrake) is based on a commit with

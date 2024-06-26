@@ -1,0 +1,254 @@
+From 40cf5379f6ae46974b6e883801a4c5aca46ca691 Mon Sep 17 00:00:00 2001
+From: Augustin Cavalier <waddlesplash@gmail.com>
+Date: Sat, 14 Mar 2020 19:20:45 -0400
+Subject: Small changes for Haiku.
+
+
+diff --git a/include/internal/cryptlib.h b/include/internal/cryptlib.h
+index 934d4b0..7c54894 100644
+--- a/include/internal/cryptlib.h
++++ b/include/internal/cryptlib.h
+@@ -66,7 +66,7 @@ DEFINE_LHASH_OF(MEM);
+ # ifndef OPENSSL_SYS_VMS
+ #  define X509_CERT_AREA          OPENSSLDIR
+ #  define X509_CERT_DIR           OPENSSLDIR "/certs"
+-#  define X509_CERT_FILE          OPENSSLDIR "/cert.pem"
++#  define X509_CERT_FILE          OPENSSLDIR "/CARootCertificates.pem"
+ #  define X509_PRIVATE_DIR        OPENSSLDIR "/private"
+ #  define CTLOG_FILE              OPENSSLDIR "/ct_log_list.cnf"
+ # else
+-- 
+2.42.1
+
+
+From 275e3e550d51101af88e236c0962b1d631516679 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Wed, 18 Nov 2020 18:29:38 +0100
+Subject: Use find_directory to locate user certificates
+
+We want this directory (where the user can easily add their own
+certificates) to be non-packaged and under user control. The system
+certificates are centralized in the CARootCertificates.pem file.
+
+This was previously done in BSecureSocket (overriding OpenSSL defaults),
+now it is valid also for apps using OpenSSL directly.
+
+diff --git a/crypto/x509/x509_def.c b/crypto/x509/x509_def.c
+index b8bdcb4..36a628b 100644
+--- a/crypto/x509/x509_def.c
++++ b/crypto/x509/x509_def.c
+@@ -12,6 +12,10 @@
+ #include <openssl/crypto.h>
+ #include <openssl/x509.h>
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#endif
++
+ const char *X509_get_default_private_dir(void)
+ {
+     return X509_PRIVATE_DIR;
+@@ -24,6 +28,20 @@ const char *X509_get_default_cert_area(void)
+ 
+ const char *X509_get_default_cert_dir(void)
+ {
++#ifdef __HAIKU__
++	static char path[PATH_MAX];
++	if (path[0] != 0)
++	{
++		// We already called find_directory
++		return path;
++	}
++
++	if (find_directory(B_SYSTEM_NONPACKAGED_DATA_DIRECTORY, 0, false, path, sizeof(path)) == B_OK)
++	{
++		strlcat(path, "/ssl/certs/", sizeof(path));
++		return path;
++	}
++#endif
+     return X509_CERT_DIR;
+ }
+ 
+-- 
+2.42.1
+
+
+From 1b44c154014f8d58722160fbbdd9b98d75c0f489 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Wed, 13 Dec 2023 14:54:54 +0100
+Subject: Haiku: skip test case test_print_error_format
+
+
+diff --git a/test/errtest.c b/test/errtest.c
+index 2d827ff..da02efd 100644
+--- a/test/errtest.c
++++ b/test/errtest.c
+@@ -21,6 +21,12 @@
+ #endif
+ 
+ #ifndef OPENSSL_NO_DEPRECATED_3_0
++#ifdef __HAIKU__
++static int test_print_error_format(void)
++{
++    return TEST_skip("not supported on Haiku");
++}
++#else
+ # define IS_HEX(ch) ((ch >= '0' && ch <='9') || (ch >= 'A' && ch <='F'))
+ 
+ static int test_print_error_format(void)
+@@ -112,6 +118,7 @@ err:
+     return ret;
+ }
+ #endif
++#endif
+ 
+ /* Test that querying the error queue preserves the OS error. */
+ static int preserves_system_error(void)
+-- 
+2.42.1
+
+
+From 0700cf2914b29350491274fbdcae9b03d0bdab73 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Wed, 13 Dec 2023 14:59:20 +0100
+Subject: Haiku: don't use IPV6_V6ONLY
+
+
+diff --git a/crypto/bio/bio_sock2.c b/crypto/bio/bio_sock2.c
+index 8bdad0c..a02364d 100644
+--- a/crypto/bio/bio_sock2.c
++++ b/crypto/bio/bio_sock2.c
+@@ -263,7 +263,8 @@ int BIO_listen(int sock, const BIO_ADDR *addr, int options)
+     }
+ 
+   /* On OpenBSD it is always ipv6 only with ipv6 sockets thus read-only */
+-# if defined(IPV6_V6ONLY) && !defined(__OpenBSD__)
++  /* IPV6_V6ONLY is broken on Haiku */
++# if defined(IPV6_V6ONLY) && !defined(__OpenBSD__) && !defined(__HAIKU__)
+     if (BIO_ADDR_family(addr) == AF_INET6) {
+         /*
+          * Note: Windows default of IPV6_V6ONLY is ON, and Linux is OFF.
+-- 
+2.42.1
+
+
+From 493ad189c5d4638c7806ac93962d69d9ec3d5c59 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Wed, 13 Dec 2023 17:49:28 +0100
+Subject: Haiku: listening sockets shall default to IPv4
+
+
+diff --git a/crypto/bio/bss_acpt.c b/crypto/bio/bss_acpt.c
+index 8870831..ca52f36 100644
+--- a/crypto/bio/bss_acpt.c
++++ b/crypto/bio/bss_acpt.c
+@@ -96,7 +96,13 @@ static BIO_ACCEPT *BIO_ACCEPT_new(void)
+         ERR_raise(ERR_LIB_BIO, ERR_R_MALLOC_FAILURE);
+         return NULL;
+     }
++
++#ifdef __HAIKU__
++    ret->accept_family = BIO_FAMILY_IPV4;
++#else
+     ret->accept_family = BIO_FAMILY_IPANY;
++#endif
++
+     ret->accept_sock = (int)INVALID_SOCKET;
+     return ret;
+ }
+-- 
+2.42.1
+
+
+From 2991099da38e598e0a601788357692252b591d3c Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Tue, 4 Jun 2024 21:35:22 +0200
+Subject: Haiku: inherit unix, add symbol versioning
+
+
+diff --git a/Configurations/50-haiku.conf b/Configurations/50-haiku.conf
+index 4580e71..c8c2805 100644
+--- a/Configurations/50-haiku.conf
++++ b/Configurations/50-haiku.conf
+@@ -1,35 +1,31 @@
+ my %targets = (
+     "haiku-common" => {
++        inherit_from     => [ "BASE_unix" ],
+         template         => 1,
+-        CC               => "cc",
+         CFLAGS           => add_before(picker(default => "-Wall",
+                                               debug   => "-g -O0",
+                                               release => "-O2")),
+         cflags           => add_before("-DL_ENDIAN -include \$(SRCDIR)/os-dep/haiku.h",
+                                        threads("-D_REENTRANT")),
+-        AR              => "ar",
+-        ARFLAGS         => "qc",
+         HASHBANGPERL    => "/bin/env perl",
+         sys_id           => "HAIKU",
+-        ex_libs          => "-lnetwork",
++        ex_libs          => add("-lnetwork"),
+         perlasm_scheme   => "elf",
+         thread_scheme    => "pthreads",
+         dso_scheme       => "dlfcn",
+-        shared_target    => "gnu-shared",
++        shared_target    => "haiku-shared",
+         shared_cflag     => "-fPIC",
+-        shared_ldflag    => "-shared",
+-        perl_platform    => 'Unix',
++        shared_ldflag    => add_before("-shared"),
+     },
+     "haiku-x86" => {
+         inherit_from     => [ "haiku-common" ],
+-        CFLAGS           => add(picker(release => "-fomit-frame-pointer")),
+         bn_ops           => "BN_LLONG",
+         asm_arch         => 'x86',
+         perlasm_scheme   => 'elf',
+     },
+     "haiku-x86_64" => {
+         inherit_from     => [ "haiku-common" ],
+-        cflags           => add("-m64"),
+         bn_ops           => "SIXTY_FOUR_BIT_LONG",
++        asm_arch         => 'x86_64',
+     },
+ );
+diff --git a/Configurations/shared-info.pl b/Configurations/shared-info.pl
+index edd16f4..105786e 100644
+--- a/Configurations/shared-info.pl
++++ b/Configurations/shared-info.pl
+@@ -40,6 +40,7 @@ my %shared_info;
+         };
+     },
+     'bsd-gcc-shared' => sub { return $shared_info{'linux-shared'}; },
++    'haiku-shared' => sub { return $shared_info{'linux-shared'}; },
+     'darwin-shared' => {
+         module_ldflags        => '-bundle',
+         shared_ldflag         => '-dynamiclib -current_version $(SHLIB_VERSION_NUMBER) -compatibility_version $(SHLIB_VERSION_NUMBER)',
+diff --git a/util/mkdef.pl b/util/mkdef.pl
+index d953467..b8cf3f4 100755
+--- a/util/mkdef.pl
++++ b/util/mkdef.pl
+@@ -114,6 +114,7 @@ my %OS_data = (
+     "solaris-gcc" => 'solaris', # alias
+     linux       => 'solaris',   # alias
+     "bsd-gcc"   => 'solaris',   # alias
++    "haiku"   => 'solaris',   # alias
+     aix         => { writer     => \&writer_aix,
+                      sort       => sorter_unix(),
+                      platforms  => { UNIX                       => 1 } },
+diff --git a/util/shlib_wrap.sh.in b/util/shlib_wrap.sh.in
+index 675d99a..5d9b667 100755
+--- a/util/shlib_wrap.sh.in
++++ b/util/shlib_wrap.sh.in
+@@ -97,7 +97,9 @@ NONSTOP_KERNEL)
+ 	DYLD_LIBRARY_PATH="${THERE}:$DYLD_LIBRARY_PATH"	# MacOS X
+ 	SHLIB_PATH="${THERE}:$SHLIB_PATH"		# legacy HP-UX
+ 	LIBPATH="${THERE}:$LIBPATH"			# AIX, OS/2
++	LIBRARY_PATH="${THERE}:$LIBRARY_PATH"		# Haiku
+ 	export LD_LIBRARY_PATH DYLD_LIBRARY_PATH SHLIB_PATH LIBPATH
++	export LIBRARY_PATH
+ 	# Even though $PATH is adjusted [for Windows sake], it doesn't
+ 	# necessarily does the trick. Trouble is that with introduction
+ 	# of SafeDllSearchMode in XP/2003 it's more appropriate to copy
+-- 
+2.42.1
+

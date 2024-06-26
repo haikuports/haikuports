@@ -1,0 +1,199 @@
+From 5849bcfdda31b2706a0bcb7cc5c6a3ad2e2edf21 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sat, 25 Sep 2021 22:40:52 +1000
+Subject: Haiku fixes
+
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index fdeb8e3..a3b6284 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -40,8 +40,8 @@ if(USE_OPENGL)
+ endif()
+ find_package(PNG REQUIRED)
+ 
+-find_package(Lua)
+-set(USE_SYSTEM_Lua $<AND:$<BOOL:${PREFER_SYSTEM_Lua}>,$<BOOL:${LUA51_FOUND}>,$<NOT:$<BOOL:${WIN32}>>>)
++find_package(Lua ${LUA_VERSION} EXACT REQUIRED)
++set(USE_SYSTEM_Lua $<AND:$<BOOL:${PREFER_SYSTEM_Lua}>,$<BOOL:${LUA_FOUND}>,$<NOT:$<BOOL:${WIN32}>>>)
+ if (NOT LUA_VERSION_STRING VERSION_LESS 5.2 AND LUA_VERSION_STRING VERSION_LESS 5.3)
+     add_definitions("-DLUA_COMPAT_ALL")
+ elseif (LUA_VERSION_STRING VERSION_GREATER_EQUAL "5.3")
+@@ -443,6 +443,8 @@ target_link_libraries(xmoto PUBLIC
+   $<${USE_SYSTEM_XDG}:${XDG_LIBRARY}>
+   $<$<NOT:${USE_SYSTEM_XDG}>:xdgbasedir>
+   ${ZLIB_LIBRARIES}
++  $<$<PLATFORM_ID:Haiku>:network>
++  $<$<PLATFORM_ID:Haiku>:be>
+ )
+ 
+ set_property(TARGET xmoto PROPERTY CXX_STANDARD 11)
+diff --git a/src/common/PolyDraw.h b/src/common/PolyDraw.h
+index 6036920..de0c5ec 100644
+--- a/src/common/PolyDraw.h
++++ b/src/common/PolyDraw.h
+@@ -21,6 +21,8 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ #ifndef __POLYDRAW_H__
+ #define __POLYDRAW_H__
+ 
++#include <SDL.h>
++
+ class PolyDraw {
+ public:
+   struct EdgeValue {
+diff --git a/src/common/VFileIO.cpp b/src/common/VFileIO.cpp
+index c38e39f..f29f79c 100644
+--- a/src/common/VFileIO.cpp
++++ b/src/common/VFileIO.cpp
+@@ -49,6 +49,12 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ 
+ #include <iostream>
+ 
++#ifdef __HAIKU__
++#include <Path.h>
++#include <FindDirectory.h>
++#include <StorageDefs.h>
++#endif
++
+ #ifdef WIN32
+ std::string win32_getHomeDir(bool i_asUtf8 = false) {
+   HANDLE hToken;
+@@ -115,7 +121,7 @@ std::string getPWDDir(bool i_asUtf8 = false) {
+ #endif
+ }
+ 
+-#if !defined(WIN32) && !defined(__MORPHOS__) && !defined(__amigaos4__)
++#if !defined(WIN32) && !defined(__MORPHOS__) && !defined(__amigaos4__) && !defined(__HAIKU__)
+ void strlwr(char *pc) {
+   for (unsigned int i = 0; i < strlen(pc); i++)
+     pc[i] = tolower(pc[i]);
+@@ -1274,6 +1280,27 @@ void XMFS::init(const std::string &AppDir,
+     /* Got a system-wide installation to fall back to! */
+     m_bGotSystemDataDir = true;
+   }
++#elif defined(__HAIKU__)
++  BPath settingsDir;
++  if (find_directory(B_USER_SETTINGS_DIRECTORY, &settingsDir) == B_OK) {
++    m_UserDataDir     = std::string(settingsDir.Path()) + std::string("/") + AppDir;
++    m_UserConfigDir   = std::string(settingsDir.Path()) + std::string("/") + AppDir;
++    m_UserDataDirUTF8 = m_UserDataDir;
++  }
++  BPath cacheDir;
++  if (find_directory(B_USER_CACHE_DIRECTORY, &cacheDir) == B_OK) {
++    m_UserCacheDir    = std::string(cacheDir.Path()) + std::string("/") + AppDir;
++  }
++  BPath appsDir;
++  if (find_directory(B_SYSTEM_APPS_DIRECTORY, &appsDir) == B_OK) {
++  	m_SystemDataDir = std::string(appsDir.Path()) + std::string("/XMoto");
++  }
++  if (!isDir(m_SystemDataDir)) {
++    throw Exception("Bundle path doesn't exist: " + m_SystemDataDir);
++  } else {
++    m_bGotSystemDataDir = true;
++  }
++  m_SystemLocaleDir = std::string(appsDir.Path()) + std::string("/XMoto/locale");
+ #else /* Assume unix-like */
+   /* Determine users home dir, so we can find out where to get/save user
+      files */
+diff --git a/src/drawlib/DrawLib.h b/src/drawlib/DrawLib.h
+index 31d11f1..bf7b0ce 100644
+--- a/src/drawlib/DrawLib.h
++++ b/src/drawlib/DrawLib.h
+@@ -26,6 +26,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ #include "helpers/VMath.h"
+ #include "include/xm_SDL_ttf.h"
+ #include <vector>
++#include <map>
+ 
+ class Img;
+ class Camera;
+diff --git a/src/drawlib/DrawLibSDLgfx.cpp b/src/drawlib/DrawLibSDLgfx.cpp
+index fa07791..54a105b 100644
+--- a/src/drawlib/DrawLibSDLgfx.cpp
++++ b/src/drawlib/DrawLibSDLgfx.cpp
+@@ -27,7 +27,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ #include "xmoto/Game.h"
+ 
+ #ifdef ENABLE_SDLGFX
+-#include "PolyDraw.h"
++#include "common/PolyDraw.h"
+ #include "SDL_gfxPrimitives.h"
+ #include "SDL_rotozoom.h"
+ #include "helpers/iqsort.h"
+diff --git a/src/net/extSDL_net.cpp b/src/net/extSDL_net.cpp
+index 930f875..478ef5d 100644
+--- a/src/net/extSDL_net.cpp
++++ b/src/net/extSDL_net.cpp
+@@ -22,7 +22,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ #include <errno.h>
+ 
+ // read the .h to understand why i redefine SDLNet_TCP_Send
+-#if !defined(WIN32) && !defined(__APPLE__)
++#if !defined(WIN32) && !defined(__APPLE__) && !defined(__HAIKU__)
+ #include <sys/socket.h>
+ 
+ #define SOCKET int
+diff --git a/src/xmoto/Game.cpp b/src/xmoto/Game.cpp
+index be9e5fe..38b5e2f 100644
+--- a/src/xmoto/Game.cpp
++++ b/src/xmoto/Game.cpp
+@@ -128,7 +128,7 @@ void GameApp::_InitWin(bool bInitGraphics) {
+   SDL_WM_SetCaption(XMBuild::getVersionString(true).c_str(),
+                     XMBuild::getVersionString(true).c_str());
+ 
+-#if !defined(WIN32) && !defined(__APPLE__) && !defined(__amigaos4__)
++#if !defined(WIN32) && !defined(__APPLE__) && !defined(__amigaos4__) && !defined(__HAIKU__)
+   SDL_Surface *v_icon = SDL_LoadBMP(
+     (XMFS::getSystemDataDir() + std::string("/xmoto_icone_x.ico")).c_str());
+   if (v_icon != NULL) {
+diff --git a/src/xmoto/GameInit.cpp b/src/xmoto/GameInit.cpp
+index 1968294..42a8d79 100644
+--- a/src/xmoto/GameInit.cpp
++++ b/src/xmoto/GameInit.cpp
+@@ -1008,7 +1008,7 @@ void GameApp::run_unload() {
+   }
+ 
+   /* Shutdown SDL */
+-  SDL_Quit();
++  //SDL_Quit();
+ 
+   XMLDocument::clean();
+ 
+-- 
+2.30.2
+
+
+From d59369121818b733743eea2f7b135feafe2d547a Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sat, 25 Sep 2021 23:19:40 +1000
+Subject: Use system int defs
+
+
+diff --git a/vendor/ode/include/ode/odeconfig.h b/vendor/ode/include/ode/odeconfig.h
+index 6e32fc6..ddb6f3f 100644
+--- a/vendor/ode/include/ode/odeconfig.h
++++ b/vendor/ode/include/ode/odeconfig.h
+@@ -38,6 +38,12 @@
+ #endif
+ 
+ /* Well-defined common data types...need to define for 64 bit systems */
++#ifdef __HAIKU__
++#include <SupportDefs.h>
++#if defined(__x86_64__)
++  #define X86_64_SYSTEM   1
++#endif
++#else
+ #if defined(_M_IA64) || defined(__ia64__) || defined(_M_AMD64) || defined(__x86_64__)
+   #define X86_64_SYSTEM   1
+   typedef int             int32;
+@@ -54,6 +60,7 @@
+   typedef signed char     int8;
+   typedef unsigned char   uint8;
+ #endif
++#endif
+ 
+ /* Visual C does not define these functions */
+ #if defined(_MSC_VER)
+-- 
+2.30.2
+

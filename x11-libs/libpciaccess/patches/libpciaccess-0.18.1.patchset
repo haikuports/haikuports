@@ -1,0 +1,554 @@
+From b13286818a49a8d09f5503e4cedaac6bfc1aa153 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Thu, 18 Apr 2024 23:23:25 +0200
+Subject: Haiku patch
+
+
+diff --git a/meson.build b/meson.build
+index f004d3f..3fc5c6a 100644
+--- a/meson.build
++++ b/meson.build
+@@ -90,6 +90,8 @@ if host_machine.system() == 'netbsd'
+   endif
+ elif host_machine.system() == 'sunos'
+   extra_libs += c.find_library('devinfo')
++elif host_machine.system() == 'haiku'
++  extra_libs += c.find_library('bsd')
+ endif
+ 
+ if host_machine.system() == 'netbsd'
+diff --git a/scanpci/meson.build b/scanpci/meson.build
+index 6ae1d6a..c2ba9d6 100644
+--- a/scanpci/meson.build
++++ b/scanpci/meson.build
+@@ -21,5 +21,5 @@
+ scanpci = executable(
+   'scanpci',
+   'scanpci.c',
+-  dependencies : [dep_pciaccess],
++  dependencies : [dep_pciaccess, extra_libs],
+ )
+diff --git a/scanpci/scanpci.c b/scanpci/scanpci.c
+index 2f86833..761d5d1 100644
+--- a/scanpci/scanpci.c
++++ b/scanpci/scanpci.c
+@@ -31,7 +31,7 @@
+ #include <unistd.h>
+ #include <inttypes.h>
+ 
+-#ifdef HAVE_ERR_H
++#if defined(HAVE_ERR_H)
+ #include <err.h>
+ #else
+ # include <errno.h>
+diff --git a/src/common_init.c b/src/common_init.c
+index 1004038..127cd13 100644
+--- a/src/common_init.c
++++ b/src/common_init.c
+@@ -69,6 +69,8 @@ pci_system_init( void )
+     err = pci_system_hurd_create();
+ #elif defined(__CYGWIN__)
+     err = pci_system_x86_create();
++#elif defined(__HAIKU__)
++    err = pci_system_haiku_create();
+ #else
+ # error "Unsupported OS"
+ #endif
+diff --git a/src/common_interface.c b/src/common_interface.c
+index 6dbaa6b..b00984a 100644
+--- a/src/common_interface.c
++++ b/src/common_interface.c
+@@ -90,12 +90,17 @@
+ 
+ #else
+ 
++#ifndef __HAIKU__
+ #include <sys/endian.h>
++#else
++#include <endian.h>
++#endif
+ 
+ #define HTOLE_16(x)	htole16(x)
+ #define HTOLE_32(x)	htole32(x)
+ 
+-#if defined(__FreeBSD__) || defined(__DragonFly__) || defined(__NetBSD__)
++#if defined(__FreeBSD__) || defined(__DragonFly__) || defined(__NetBSD__) \
++	|| defined(__HAIKU__)
+ #define LETOH_16(x)	le16toh(x)
+ #define LETOH_32(x)	le32toh(x)
+ #else
+diff --git a/src/haiku_pci.c b/src/haiku_pci.c
+new file mode 100644
+index 0000000..89ffed4
+--- /dev/null
++++ b/src/haiku_pci.c
+@@ -0,0 +1,441 @@
++/*
++ * (C) Copyright Eric Anholt 2006
++ * (C) Copyright IBM Corporation 2006
++ * (C) Copyright Mark Kettenis 2011
++ * (C) Copyright Robert Millan 2012
++ * All Rights Reserved.
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * on the rights to use, copy, modify, merge, publish, distribute, sub
++ * license, and/or sell copies of the Software, and to permit persons to whom
++ * the Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.  IN NO EVENT SHALL
++ * IBM AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
++ */
++
++/**
++ * \file haiku_pci.c
++ *
++ * Access the kernel PCI support using /dev/pci's ioctl and mmap interface.
++ *
++ * \author Eric Anholt <eric@anholt.net>
++ */
++
++#ifdef HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <sys/types.h>
++#include <sys/param.h>
++#include <sys/mman.h>
++
++#include <private/drivers/poke.h>
++
++#include "pciaccess.h"
++#include "pciaccess_private.h"
++
++static int pokefd = -1;
++
++/**
++ * haiku private pci_system structure that extends the base pci_system
++ * structure.
++ *
++ * It is initialized once and used as a global, just as pci_system is used.
++ */
++_pci_hidden
++struct haiku_pci_system {
++    /* This must be the first entry in the structure, as pci_system_cleanup()
++     * frees pci_sys.
++     */
++    struct pci_system pci_sys;
++
++} *haiku_pci_sys;
++
++
++/**
++ * Map a memory region for a device using /dev/mem.
++ *
++ * \param dev   Device whose memory region is to be mapped.
++ * \param map   Parameters of the mapping that is to be created.
++ *
++ * \return
++ * Zero on success or an \c errno value on failure.
++ */
++static int
++pci_device_haiku_map_range(struct pci_device *dev,
++			     struct pci_device_mapping *map)
++{
++    int err = 0;
++    mem_map_args            cmd;
++    
++    cmd.signature = POKE_SIGNATURE;
++    cmd.name = "pciaccess_area";
++    cmd.area = -1;
++    cmd.size = map->size;
++    cmd.physical_address = (void*)(map->base);
++    cmd.protection = ((map->flags & PCI_DEV_MAP_FLAG_WRITABLE) != 0)
++        ? (B_READ_AREA | B_WRITE_AREA) : B_READ_AREA;
++    cmd.flags = B_ANY_KERNEL_ADDRESS;
++
++    err = ioctl(pokefd, POKE_MAP_MEMORY, &cmd);
++    if (err < B_OK) {
++        fprintf (stderr, "Cannot map %p\n", (void*)map->base);
++        return err;
++    }
++
++    map->memory = cmd.address;
++    return err;
++}
++
++static int
++pci_device_haiku_unmap_range( struct pci_device *dev,
++				struct pci_device_mapping *map )
++{
++    mem_map_args            cmd;
++    
++    cmd.signature = POKE_SIGNATURE;
++    cmd.area = area_for(map->memory);
++    if (ioctl(pokefd, POKE_UNMAP_MEMORY, &cmd) < 0)
++    	return errno;
++
++    return pci_device_generic_unmap_range(dev, map);
++}
++
++static int
++pci_device_haiku_read( struct pci_device * dev, void * data,
++			 pciaddr_t offset, pciaddr_t size,
++			 pciaddr_t * bytes_read )
++{
++	pci_io_args io;
++
++	bzero(&io, sizeof(io));
++	io.bus = dev->bus;
++	io.device = dev->dev;
++	io.function = dev->func;
++
++    *bytes_read = 0;
++    while ( size > 0 ) {
++	int toread = (size < 4) ? size : 4;
++
++	/* Only power of two allowed. */
++	if (toread == 3)
++	    toread = 2;
++
++	io.offset = offset;
++	io.size = toread;
++
++	if (ioctl(pokefd, POKE_PCI_READ_CONFIG, &io) < 0)
++		return errno;
++
++	memcpy(data, &io.value, toread );
++
++	offset += toread;
++	data = (char *)data + toread;
++	size -= toread;
++	*bytes_read += toread;
++    }
++
++    return 0;
++}
++
++
++static int
++pci_device_haiku_write( struct pci_device * dev, const void * data,
++			  pciaddr_t offset, pciaddr_t size,
++			  pciaddr_t * bytes_written )
++{
++	pci_io_args io;
++
++	bzero(&io, sizeof(io));
++	io.bus = dev->bus;
++	io.device = dev->dev;
++	io.function = dev->func;
++
++    *bytes_written = 0;
++    while ( size > 0 ) {
++	int towrite = (size < 4 ? size : 4);
++
++	/* Only power of two allowed. */
++	if (towrite == 3)
++	    towrite = 2;
++
++	io.offset = offset;
++	io.size = towrite;
++	memcpy( &io.value, data, towrite );
++
++	if (ioctl(pokefd, POKE_PCI_WRITE_CONFIG, &io) < 0)
++		return errno;
++
++	offset += towrite;
++	data = (char *)data + towrite;
++	size -= towrite;
++	*bytes_written += towrite;
++    }
++
++    return 0;
++}
++
++/**
++ * Read a VGA rom using the 0xc0000 mapping.
++ *
++ * This function should be extended to handle access through PCI resources,
++ * which should be more reliable when available.
++ */
++static int
++pci_device_haiku_read_rom( struct pci_device * dev, void * buffer )
++{
++    struct pci_device_private *priv = (struct pci_device_private *) dev;
++#if 0
++    void *bios;
++    pciaddr_t rom_base;
++    uint32_t rom;
++    uint16_t reg;
++    int pci_rom, memfd;
++
++    if ( ( dev->device_class & 0x00ffff00 ) !=
++	 ( ( PCIC_DISPLAY << 16 ) | ( PCIS_DISPLAY_VGA << 8 ) ) )
++    {
++	return ENOSYS;
++    }
++
++    if (priv->rom_base == 0) {
++#if defined(__amd64__) || defined(__i386__)
++	rom_base = 0xc0000;
++	pci_rom = 0;
++#else
++	return ENOSYS;
++#endif
++    } else {
++	rom_base = priv->rom_base;
++	pci_rom = 1;
++
++	pci_device_cfg_read_u16( dev, &reg, PCIR_COMMAND );
++	pci_device_cfg_write_u16( dev, reg | PCIM_CMD_MEMEN, PCIR_COMMAND );
++	pci_device_cfg_read_u32( dev, &rom, PCIR_BIOS );
++	pci_device_cfg_write_u32( dev, rom | PCIM_BIOS_ENABLE, PCIR_BIOS );
++    }
++
++    printf("Using rom_base = 0x%lx\n", (long)rom_base);
++    memfd = open( "/dev/mem", O_RDONLY | O_CLOEXEC );
++    if ( memfd == -1 )
++	return errno;
++
++    bios = mmap( NULL, dev->rom_size, PROT_READ, 0, memfd, rom_base );
++    if ( bios == MAP_FAILED ) {
++	close( memfd );
++	return errno;
++    }
++
++    memcpy( buffer, bios, dev->rom_size );
++
++    munmap( bios, dev->rom_size );
++    close( memfd );
++
++    if (pci_rom) {
++	pci_device_cfg_write_u32( dev, PCIR_BIOS, rom );
++	pci_device_cfg_write_u16( dev, PCIR_COMMAND, reg );
++    }
++#endif
++    return 0;
++}
++
++static int
++pci_device_haiku_probe( struct pci_device * dev )
++{
++    struct pci_device_private *priv = (struct pci_device_private *) dev;
++    return 0;
++}
++
++static void
++pci_system_haiku_destroy(void)
++{
++    free(haiku_pci_sys->pci_sys.devices);
++    haiku_pci_sys = NULL;
++}
++
++static struct pci_io_handle *
++pci_device_haiku_open_legacy_io(struct pci_io_handle *ret,
++    struct pci_device *dev, pciaddr_t base, pciaddr_t size)
++{
++	return NULL;
++}
++
++static uint32_t
++pci_device_haiku_read32(struct pci_io_handle *handle, uint32_t reg)
++{
++	return NULL;
++}
++
++static uint16_t
++pci_device_haiku_read16(struct pci_io_handle *handle, uint32_t reg)
++{
++	return NULL;
++}
++
++static uint8_t
++pci_device_haiku_read8(struct pci_io_handle *handle, uint32_t reg)
++{
++	return NULL;
++}
++
++static void
++pci_device_haiku_write32(struct pci_io_handle *handle, uint32_t reg,
++    uint32_t data)
++{
++}
++
++static void
++pci_device_haiku_write16(struct pci_io_handle *handle, uint32_t reg,
++    uint16_t data)
++{
++}
++
++static void
++pci_device_haiku_write8(struct pci_io_handle *handle, uint32_t reg,
++    uint8_t data)
++{
++}
++
++static int
++pci_device_haiku_map_legacy(struct pci_device *dev, pciaddr_t base,
++    pciaddr_t size, unsigned map_flags, void **addr)
++{
++	struct pci_device_mapping map;
++	int err;
++
++	map.base = base;
++	map.size = size;
++	map.flags = map_flags;
++	map.memory = NULL;
++	err = pci_device_haiku_map_range(dev, &map);
++	*addr = map.memory;
++
++	return err;
++}
++
++static int
++pci_device_haiku_unmap_legacy(struct pci_device *dev, void *addr,
++    pciaddr_t size)
++{
++	struct pci_device_mapping map;
++
++	map.memory = addr;
++	map.size = size;
++	map.flags = 0;
++	return pci_device_haiku_unmap_range(dev, &map);
++}
++
++static const struct pci_system_methods haiku_pci_methods = {
++    .destroy = pci_system_haiku_destroy,
++    .destroy_device = NULL, /* nothing to do for this */
++    .read_rom = pci_device_haiku_read_rom,
++    .probe = pci_device_haiku_probe,
++    .map_range = pci_device_haiku_map_range,
++    .unmap_range = pci_device_haiku_unmap_range,
++    .read = pci_device_haiku_read,
++    .write = pci_device_haiku_write,
++    .fill_capabilities = pci_fill_capabilities_generic,
++    .open_legacy_io = pci_device_haiku_open_legacy_io,
++    .read32 = pci_device_haiku_read32,
++    .read16 = pci_device_haiku_read16,
++    .read8 = pci_device_haiku_read8,
++    .write32 = pci_device_haiku_write32,
++    .write16 = pci_device_haiku_write16,
++    .write8 = pci_device_haiku_write8,
++    .map_legacy = pci_device_haiku_map_legacy,
++    .unmap_legacy = pci_device_haiku_unmap_legacy,
++};
++
++/**
++ * Attempt to access the haiku PCI interface.
++ */
++_pci_hidden int
++pci_system_haiku_create( void )
++{
++    pci_info_args cmd;
++    pci_info	info;
++    int i, err = B_OK;
++
++    /* Try to open the PCI device */
++    pokefd = open (POKE_DEVICE_FULLNAME, O_RDWR);
++    if (pokefd < 0)
++	   return ENXIO;
++
++    haiku_pci_sys = calloc( 1, sizeof( struct haiku_pci_system ) );
++    if ( haiku_pci_sys == NULL ) {
++		return ENOMEM;
++    }
++    pci_sys = &haiku_pci_sys->pci_sys;
++
++    pci_sys->methods = & haiku_pci_methods;
++
++    /* Translate the list of devices into pciaccess's format. */
++    cmd.signature = POKE_SIGNATURE;
++	cmd.index = 0;
++	cmd.info = &info;
++	cmd.status = B_OK;
++	for (cmd.index = 0; err == B_OK && cmd.status == B_OK; cmd.index++) 
++		err = ioctl(pokefd, POKE_GET_NTH_PCI_INFO, &cmd);
++    pci_sys->num_devices = cmd.index;
++    pci_sys->devices = calloc(cmd.index,
++			       sizeof( struct pci_device_private ) );
++
++	cmd.index = 0;
++    for ( i = 0; i < pci_sys->num_devices; i++, cmd.index++) {
++		struct pci_mem_region *region;
++    	err = ioctl(pokefd, POKE_GET_NTH_PCI_INFO, &cmd);
++
++		pci_sys->devices[ i ].base.domain = 0;
++		pci_sys->devices[ i ].base.bus = info.bus;
++		pci_sys->devices[ i ].base.dev = info.device;
++		pci_sys->devices[ i ].base.func = info.function;
++		pci_sys->devices[ i ].base.vendor_id = info.vendor_id;
++		pci_sys->devices[ i ].base.device_id = info.device_id;
++		pci_sys->devices[ i ].base.subvendor_id = info.u.h0.subsystem_vendor_id;
++		pci_sys->devices[ i ].base.subdevice_id = info.u.h0.subsystem_id;
++		pci_sys->devices[ i ].base.revision = info.revision;
++		pci_sys->devices[ i ].base.device_class = (uint32_t)info.class_base << 16 |
++		    (uint32_t)info.class_sub << 8 | (uint32_t)info.class_api;
++		pci_sys->devices[ i ].header_type = info.header_type & 0x7f;
++
++		region = pci_sys->devices[ i ].base.regions;
++		if (pci_sys->devices[ i ].header_type == 0) {
++			for (int j=0; j < 6; j++, region++) {
++				region->is_IO = (info.u.h0.base_register_flags[j] & PCI_address_space) != 0;
++				if (!region->is_IO) {
++					region->is_prefetchable = (info.u.h0.base_register_flags[j] & PCI_address_prefetchable) != 0;
++					region->is_64 = (info.u.h0.base_register_flags[j] & PCI_address_type_64) != 0;
++				}
++				region->base_addr = info.u.h0.base_registers[j];
++				region->size = info.u.h0.base_register_sizes[j];
++				if (region->is_64) {
++					j++;
++					region->base_addr |= (uint64)info.u.h0.base_registers[j] << 32;
++					region->size |= (uint64)info.u.h0.base_register_sizes[j] << 32;
++				}
++			}
++		}
++		pci_sys->devices[ i ].base.rom_size =  info.u.h0.rom_size;
++		pci_sys->devices[ i ].rom_base = info.u.h0.rom_base;
++    }
++
++    return 0;
++}
+diff --git a/src/meson.build b/src/meson.build
+index e319688..ea87690 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -28,6 +28,8 @@ elif host == 'netbsd'
+   _pci_access_host_files += ['netbsd_pci.c', 'common_vgaarb_stub.c']
+ elif host == 'openbsd'
+   _pci_access_host_files += ['openbsd_pci.c']  # VGA arbiter code is in netbsd_pci.c
++elif host == 'haiku'
++  _pci_access_host_files += ['haiku_pci.c']
+ elif host == 'cygwin'
+   _pci_access_host_files += ['x86_pci.c', 'common_vgaarb_stub.c']
+ elif host == 'sunos'
+diff --git a/src/pciaccess_private.h b/src/pciaccess_private.h
+index 078b7be..9126079 100644
+--- a/src/pciaccess_private.h
++++ b/src/pciaccess_private.h
+@@ -198,6 +198,7 @@ extern void pci_system_openbsd_init_dev_mem( int );
+ extern int pci_system_solx_devfs_create( void );
+ extern int pci_system_hurd_create( void );
+ extern int pci_system_x86_create( void );
++extern int pci_system_haiku_create( void );
+ extern void pci_io_cleanup( void );
+ 
+ #endif /* PCIACCESS_PRIVATE_H */
+-- 
+2.42.1
+

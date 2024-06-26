@@ -1,0 +1,948 @@
+From f4b22d41666d3f440bfa13f9d14eb2fc1730b021 Mon Sep 17 00:00:00 2001
+From: Jessica Hamilton <jessica.l.hamilton@gmail.com>
+Date: Mon, 19 Jul 2021 20:29:42 +0000
+Subject: Add support for Haiku.
+
+
+diff --git a/src/aclocal.m4 b/src/aclocal.m4
+index 9920476..0a71a4f 100644
+--- a/src/aclocal.m4
++++ b/src/aclocal.m4
+@@ -1018,16 +1018,19 @@ AC_DEFUN(AC_LIBRARY_NET, [
+    AC_CHECK_FUNC(gethostbyname, , [
+      # Some OSes (eg. Solaris) place it in libnsl:
+      AC_CHECK_LIB(nsl, gethostbyname, , [
+-       # Some strange OSes (SINIX) have it in libsocket:
+-       AC_CHECK_LIB(socket, gethostbyname, , [
+-          # Unfortunately libsocket sometimes depends on libnsl.
+-          # AC_CHECK_LIB's API is essentially broken so the following
+-          # ugliness is necessary:
+-          AC_CHECK_LIB(socket, gethostbyname,
++       # Haiku has it in libnetwork
++       AC_CHECK_LIB(network, gethostbyname, , [
++         # Some strange OSes (SINIX) have it in libsocket:
++         AC_CHECK_LIB(socket, gethostbyname, , [
++           # Unfortunately libsocket sometimes depends on libnsl.
++           # AC_CHECK_LIB's API is essentially broken so the following
++           # ugliness is necessary:
++           AC_CHECK_LIB(socket, gethostbyname,
+              LIBS="-lsocket -lnsl $LIBS",
+                [AC_CHECK_LIB(resolv, gethostbyname,
+-			     LIBS="-lresolv $LIBS" )],
++                 LIBS="-lresolv $LIBS" )],
+              -lnsl)
++         ])
+        ])
+      ])
+    ])
+diff --git a/src/config/shlib.conf b/src/config/shlib.conf
+index 75b7cc3..e7a421a 100644
+--- a/src/config/shlib.conf
++++ b/src/config/shlib.conf
+@@ -294,6 +294,24 @@ mips-*-netbsd*)
+ 	PROFFLAGS=-pg
+ 	;;
+ 
++*-*-haiku*)
++       PICFLAGS=-fPIC
++       SHLIBVEXT='.so.$(LIBMAJOR).$(LIBMINOR)'
++       SHLIBEXT=.so
++       LDCOMBINE='$(CC) -shared'
++       RPATH_FLAG='-Wl,-rpath -Wl,'
++       PROG_RPATH_FLAGS='$(RPATH_FLAG)$(PROG_RPATH)'
++       CC_LINK_SHARED='$(CC) $(PROG_LIBPATH) $(PROG_RPATH_FLAGS) $(CFLAGS) $(LDFLAGS)'
++       CXX_LINK_SHARED='$(CXX) $(PROG_LIBPATH) $(PROG_RPATH_FLAGS) $(CXXFLAGS) $(LDFLAGS)'
++       SHLIB_RPATH_FLAGS='-Wl,-rpath -Wl,$(SHLIB_RDIRS)'
++       SHLIB_EXPFLAGS='$(SHLIB_RPATH_FLAGS) $(SHLIB_DIRS) $(SHLIB_EXPLIBS)'
++       CC_LINK_STATIC='$(CC) $(PROG_LIBPATH) $(CFLAGS) $(LDFLAGS)'
++       CXX_LINK_STATIC='$(CXX) $(PROG_LIBPATH) $(CXXFLAGS) $(LDFLAGS)'
++       RUN_ENV='LIBRARY_PATH=`echo $(PROG_LIBPATH) | sed -e "s/-L//g" -e "s/ /:/g"`'
++       RUN_VARS='LIBRARY_PATH'
++       PROFFLAGS=-pg
++       ;;
++
+ *-*-netbsd*)
+ 	PICFLAGS=-fPIC
+ 	SHLIBVEXT='.so.$(LIBMAJOR).$(LIBMINOR)'
+diff --git a/src/lib/apputils/net-server.c b/src/lib/apputils/net-server.c
+index 294dcfc..7fd1410 100644
+--- a/src/lib/apputils/net-server.c
++++ b/src/lib/apputils/net-server.c
+@@ -640,12 +640,12 @@ create_server_socket(struct sockaddr *addr, int type, const char *prog,
+     return 0;
+ }
+ 
+-static const int one = 1;
++static int one = 1;
+ 
+ static int
+ setnbio(int sock)
+ {
+-    return ioctlsocket(sock, FIONBIO, (const void *)&one);
++    return ioctlsocket(sock, FIONBIO, (void *)&one);
+ }
+ 
+ static int
+diff --git a/src/lib/crypto/builtin/aes/brg_endian.h b/src/lib/crypto/builtin/aes/brg_endian.h
+index c0e32b7..5efed77 100644
+--- a/src/lib/crypto/builtin/aes/brg_endian.h
++++ b/src/lib/crypto/builtin/aes/brg_endian.h
+@@ -38,6 +38,8 @@ Issue Date: 10/09/2018
+ #elif defined( BSD ) && ( BSD >= 199103 ) || defined( __APPLE__ ) || \
+       defined( __CYGWIN32__ ) || defined( __DJGPP__ ) || defined( __osf__ )
+ #  include <machine/endian.h>
++#elif defined( __HAIKU__ )
++#  include <support/ByteOrder.h>
+ #elif defined( __linux__ ) || defined( __GNUC__ ) || defined( __GNU_LIBRARY__ )
+ #  if !defined( __MINGW32__ ) && !defined( _AIX )
+ #    include <endian.h>
+diff --git a/src/lib/krb5/os/sendto_kdc.c b/src/lib/krb5/os/sendto_kdc.c
+index 0f4bf23..229c70e 100644
+--- a/src/lib/krb5/os/sendto_kdc.c
++++ b/src/lib/krb5/os/sendto_kdc.c
+@@ -877,7 +877,7 @@ start_connection(krb5_context context, struct conn_state *state,
+                  struct sendto_callback_info *callback_info)
+ {
+     int fd, e, type;
+-    static const int one = 1;
++    static int one = 1;
+     static const struct linger lopt = { 0, 0 };
+ 
+     type = socktype_for_transport(state->addr.transport);
+@@ -886,7 +886,7 @@ start_connection(krb5_context context, struct conn_state *state,
+         return -1;              /* try other hosts */
+     set_cloexec_fd(fd);
+     /* Make it non-blocking.  */
+-    ioctlsocket(fd, FIONBIO, (const void *) &one);
++    ioctlsocket(fd, FIONBIO, (void *) &one);
+     if (state->addr.transport == TCP) {
+         setsockopt(fd, SOL_SOCKET, SO_LINGER, &lopt, sizeof(lopt));
+         TRACE_SENDTO_KDC_TCP_CONNECT(context, &state->addr);
+diff --git a/src/lib/rpc/auth_gssapi.c b/src/lib/rpc/auth_gssapi.c
+index 8ab7ab5..d62df9b 100644
+--- a/src/lib/rpc/auth_gssapi.c
++++ b/src/lib/rpc/auth_gssapi.c
+@@ -5,7 +5,11 @@
+ 
+ #include <stdio.h>
+ #include <string.h>
+-#include <sys/errno.h>
++#ifdef __HAIKU__
++#  include <errno.h>
++#else
++# include <sys/errno.h>
++#endif
+ 
+ #include <gssapi/gssapi.h>
+ #include <gssapi/gssapi_generic.h>
+diff --git a/src/lib/rpc/bindresvport.c b/src/lib/rpc/bindresvport.c
+index a421dd8..54cf263 100644
+--- a/src/lib/rpc/bindresvport.c
++++ b/src/lib/rpc/bindresvport.c
+@@ -37,7 +37,11 @@
+ #include <stdint.h>
+ #include <unistd.h>
+ #include <sys/types.h>
+-#include <sys/errno.h>
++#ifdef __HAIKU__
++#  include <errno.h>
++#else
++#  include <sys/errno.h>
++#endif
+ #include <sys/socket.h>
+ #include <netinet/in.h>
+ #include <gssrpc/rpc.h>
+diff --git a/src/lib/rpc/clnt_generic.c b/src/lib/rpc/clnt_generic.c
+index 79831e1..1c120c0 100644
+--- a/src/lib/rpc/clnt_generic.c
++++ b/src/lib/rpc/clnt_generic.c
+@@ -40,7 +40,11 @@ static char sccsid[] = "@(#)clnt_generic.c 1.4 87/08/11 (C) 1987 SMI";
+ #include <string.h>
+ #include <gssrpc/rpc.h>
+ #include <sys/socket.h>
+-#include <sys/errno.h>
++#ifdef __HAIKU__
++#  include <errno.h>
++#else
++#  include <sys/errno.h>
++#endif
+ #include <netdb.h>
+ 
+ /*
+diff --git a/src/lib/rpc/pmap_rmt.c b/src/lib/rpc/pmap_rmt.c
+index 8c7e30c..87d7747 100644
+--- a/src/lib/rpc/pmap_rmt.c
++++ b/src/lib/rpc/pmap_rmt.c
+@@ -48,7 +48,7 @@ static char sccsid[] = "@(#)pmap_rmt.c 1.21 87/08/27 Copyr 1984 Sun Micro";
+ #include <gssrpc/pmap_clnt.h>
+ #include <gssrpc/pmap_rmt.h>
+ #include <sys/socket.h>
+-#ifdef sun
++#if defined(sun) || defined(__HAIKU__)
+ #include <sys/sockio.h>
+ #endif
+ #ifdef OSF1
+diff --git a/src/plugins/kdb/db2/libdb2/include/db.hin b/src/plugins/kdb/db2/libdb2/include/db.hin
+index 9ae8f8b..6ec3877 100644
+--- a/src/plugins/kdb/db2/libdb2/include/db.hin
++++ b/src/plugins/kdb/db2/libdb2/include/db.hin
+@@ -40,6 +40,10 @@
+ 
+ #include <sys/types.h>
+ 
++#ifdef __HAIKU__
++#include <stdint.h>
++#endif
++
+ #define	RET_ERROR	-1		/* Return values. */
+ #define	RET_SUCCESS	 0
+ #define	RET_SPECIAL	 1
+-- 
+2.30.2
+
+
+From 1b36444a3eae8e49df04abc5ef0198d76147303f Mon Sep 17 00:00:00 2001
+From: Jessica Hamilton <jessica.l.hamilton@gmail.com>
+Date: Tue, 20 Jul 2021 13:16:44 +0000
+Subject: haiku: also include /boot/system/lib for RUN_ENV
+
+* Needed for `make check` to run
+
+diff --git a/src/config/shlib.conf b/src/config/shlib.conf
+index e7a421a..6aede95 100644
+--- a/src/config/shlib.conf
++++ b/src/config/shlib.conf
+@@ -307,7 +307,7 @@ mips-*-netbsd*)
+        SHLIB_EXPFLAGS='$(SHLIB_RPATH_FLAGS) $(SHLIB_DIRS) $(SHLIB_EXPLIBS)'
+        CC_LINK_STATIC='$(CC) $(PROG_LIBPATH) $(CFLAGS) $(LDFLAGS)'
+        CXX_LINK_STATIC='$(CXX) $(PROG_LIBPATH) $(CXXFLAGS) $(LDFLAGS)'
+-       RUN_ENV='LIBRARY_PATH=`echo $(PROG_LIBPATH) | sed -e "s/-L//g" -e "s/ /:/g"`'
++       RUN_ENV='LIBRARY_PATH=`echo $(PROG_LIBPATH) -L/boot/system/lib | sed -e "s/-L//g" -e "s/ /:/g"`'
+        RUN_VARS='LIBRARY_PATH'
+        PROFFLAGS=-pg
+        ;;
+-- 
+2.30.2
+
+
+From d9f0e038c256f55209c1061ed436aecd77d8ae8c Mon Sep 17 00:00:00 2001
+From: Jessica Hamilton <jessica.l.hamilton@gmail.com>
+Date: Thu, 22 Jul 2021 11:52:18 +0000
+Subject: Replace <sys/errno.h> with <errno.h>
+
+* <sys/errno.h> is archaic, and not available on all platforms
+
+diff --git a/src/lib/rpc/auth_gssapi.c b/src/lib/rpc/auth_gssapi.c
+index d62df9b..1c1a981 100644
+--- a/src/lib/rpc/auth_gssapi.c
++++ b/src/lib/rpc/auth_gssapi.c
+@@ -5,11 +5,7 @@
+ 
+ #include <stdio.h>
+ #include <string.h>
+-#ifdef __HAIKU__
+-#  include <errno.h>
+-#else
+-# include <sys/errno.h>
+-#endif
++#include <errno.h>
+ 
+ #include <gssapi/gssapi.h>
+ #include <gssapi/gssapi_generic.h>
+diff --git a/src/lib/rpc/bindresvport.c b/src/lib/rpc/bindresvport.c
+index 54cf263..ab33399 100644
+--- a/src/lib/rpc/bindresvport.c
++++ b/src/lib/rpc/bindresvport.c
+@@ -37,11 +37,7 @@
+ #include <stdint.h>
+ #include <unistd.h>
+ #include <sys/types.h>
+-#ifdef __HAIKU__
+-#  include <errno.h>
+-#else
+-#  include <sys/errno.h>
+-#endif
++#include <errno.h>
+ #include <sys/socket.h>
+ #include <netinet/in.h>
+ #include <gssrpc/rpc.h>
+diff --git a/src/lib/rpc/clnt_generic.c b/src/lib/rpc/clnt_generic.c
+index 1c120c0..a645682 100644
+--- a/src/lib/rpc/clnt_generic.c
++++ b/src/lib/rpc/clnt_generic.c
+@@ -40,11 +40,7 @@ static char sccsid[] = "@(#)clnt_generic.c 1.4 87/08/11 (C) 1987 SMI";
+ #include <string.h>
+ #include <gssrpc/rpc.h>
+ #include <sys/socket.h>
+-#ifdef __HAIKU__
+-#  include <errno.h>
+-#else
+-#  include <sys/errno.h>
+-#endif
++#include <errno.h>
+ #include <netdb.h>
+ 
+ /*
+-- 
+2.30.2
+
+
+From e8e4b419eea0cc76223cc7f686247c7ca1b886f4 Mon Sep 17 00:00:00 2001
+From: Jessica Hamilton <jessica.l.hamilton@gmail.com>
+Date: Thu, 22 Jul 2021 21:09:19 +0000
+Subject: libdb2: add <stdint.h>
+
+
+diff --git a/src/plugins/kdb/db2/libdb2/include/db.hin b/src/plugins/kdb/db2/libdb2/include/db.hin
+index 6ec3877..0583fc2 100644
+--- a/src/plugins/kdb/db2/libdb2/include/db.hin
++++ b/src/plugins/kdb/db2/libdb2/include/db.hin
+@@ -38,11 +38,8 @@
+ 
+ #include <db-config.h>
+ 
+-#include <sys/types.h>
+-
+-#ifdef __HAIKU__
+ #include <stdint.h>
+-#endif
++#include <sys/types.h>
+ 
+ #define	RET_ERROR	-1		/* Return values. */
+ #define	RET_SUCCESS	 0
+-- 
+2.30.2
+
+
+From 02e54a11fe41beaa1c65953b9f05acd2437a0399 Mon Sep 17 00:00:00 2001
+From: Trung Nguyen <trungnt282910@gmail.com>
+Date: Fri, 24 Jun 2022 15:54:05 +0700
+Subject: haiku: Use different t_trace.ref
+
+Haiku has a different ENOENT value from other OSes.
+
+diff --git a/src/lib/krb5/os/Makefile.in b/src/lib/krb5/os/Makefile.in
+index f523a5a..6a582f8 100644
+--- a/src/lib/krb5/os/Makefile.in
++++ b/src/lib/krb5/os/Makefile.in
+@@ -245,10 +245,14 @@ check-unix-uri: t_locate_kdc
+ 	fi
+ 
+ check-unix-trace: t_trace
+-	rm -f t_trace.out
++	rm -f t_trace.out ; \
+ 	KRB5_TRACE=t_trace.out ; export KRB5_TRACE ; \
+-	$(RUN_TEST) ./t_trace
+-	sed -e 's/^[^:]*: //' t_trace.out | cmp - $(srcdir)/t_trace.ref
++	$(RUN_TEST) ./t_trace ; \
++	if [[ "$(shell uname)" == 'Haiku' ]]; then \
++		sed -e 's/^[^:]*: //' t_trace.out | cmp - $(srcdir)/t_trace_haiku.ref ; \
++	else \
++		sed -e 's/^[^:]*: //' t_trace.out | cmp - $(srcdir)/t_trace.ref ; \
++	fi; \
+ 	rm -f t_trace.out
+ 
+ check-unix-expand: t_expand_path
+diff --git a/src/lib/krb5/os/t_trace_haiku.ref b/src/lib/krb5/os/t_trace_haiku.ref
+new file mode 100644
+index 0000000..5b00eed
+--- /dev/null
++++ b/src/lib/krb5/os/t_trace_haiku.ref
+@@ -0,0 +1,48 @@
++simple format
++int, in decimal: -1
++long, in decimal: -2
++const char *, display as C string: example.data
++size_t and const char *, as a counted string: example.data
++size_t and const char *, as a counted string: (null)
++size_t and const char *, as hex bytes: 6578616D706C652E64617461
++size_t and const char *, as hex bytes: (null)
++size_t and const char *, as four-character hex hash: 7B9A
++size_t and const char *, as four-character hex hash: (null)
++struct remote_address *, show socket type, address, port: stream 0.0.0.0:88
++struct remote_address *, show socket type, address, port: dgram 0.0.0.0:88
++struct remote_address *, show socket type, address, port: transport1234 AF_UNSPEC
++struct remote_address *, show socket type, address, port: transport1234 af5678
++krb5_data *, display as counted string: example.data
++krb5_data *, display as counted string: (null)
++krb5_data *, display as hex bytes: 6578616D706C652E64617461
++krb5_data *, display as hex bytes: (null)
++int, display as number/errorstring: -2147459069/No such file or directory
++krb5_error_code, display as number/errorstring: 0/Success
++const krb5_keyblock *, display enctype and hash of key: 511/7B9A
++const krb5_keyblock *, display enctype and hash of key: (null)
++krb5_key, display enctype and hash of key: 511/7B9A
++krb5_key, display enctype and hash of key: (null)
++const krb5_checksum *, display cksumtype and hex checksum: -1/6578616D706C652E64617461
++krb5_principal, unparse and display: @ATHENA.MIT.EDU
++int, krb5_principal type: unknown
++int, krb5_principal type: principal
++int, krb5_principal type: service instance
++int, krb5_principal type: service with host as instance
++int, krb5_principal type: service with host as components
++int, krb5_principal type: unique ID
++int, krb5_principal type: X.509
++int, krb5_principal type: SMTP email
++int, krb5_principal type: Windows 2000 UPN
++int, krb5_principal type: well-known
++int, krb5_principal type: Windows 2000 UPN and SID
++int, krb5_principal type: NT 4 style name
++int, krb5_principal type: NT 4 style name and SID
++int, krb5_principal type: ?
++krb5_pa_data **, display list of padata type numbers: PA-PW-SALT (3), 0
++krb5_pa_data **, display list of padata type numbers: (empty)
++krb5_enctype, display shortest name of enctype: aes128-cts
++krb5_enctype *, display list of enctypes: 5, rc4-hmac-exp, 511
++krb5_enctype *, display list of enctypes: (empty)
++krb5_ccache, display type:name: FILE:/path/to/ccache
++krb5_keytab, display name: FILE:/etc/krb5.keytab
++krb5_creds *, display clientprinc -> serverprinc: @ATHENA.MIT.EDU -> @ZEUS.MIT.EDU
+-- 
+2.30.2
+
+
+From 657f17d761c8331b3588236f7d5d84d4da9a3fe4 Mon Sep 17 00:00:00 2001
+From: Trung Nguyen <trungnt282910@gmail.com>
+Date: Tue, 28 Jun 2022 13:14:38 +0700
+Subject: haiku: Fix tests
+
+
+diff --git a/src/appl/gss-sample/gss-misc.c b/src/appl/gss-sample/gss-misc.c
+index 1d051ed..a77824e 100644
+--- a/src/appl/gss-sample/gss-misc.c
++++ b/src/appl/gss-sample/gss-misc.c
+@@ -119,7 +119,16 @@ read_all(int fildes, void *data, unsigned int nbyte)
+     tv.tv_usec = 0;
+ 
+     for (ptr = buf; nbyte; ptr += ret, nbyte -= ret) {
++#ifndef __HAIKU__
+         if (select(FD_SETSIZE, &rfds, NULL, NULL, &tv) <= 0
++#else
++        // On Haiku, FD_SETSIZE is 1024:
++        // (https://xref.landonf.org/source/xref/haiku/headers/posix/sys/select.h#24)
++        // but select checks for nfds <= table_size, which is
++        // usually DEFAULT_FD_TABLE_SIZE, or 256:
++        // https://xref.landonf.org/source/xref/haiku/headers/private/kernel/vfs.h#27
++        if (select(256, &rfds, NULL, NULL, &tv) <= 0
++#endif
+             || !FD_ISSET(fildes, &rfds))
+             return (ptr - buf);
+         ret = recv(fildes, ptr, nbyte, 0);
+diff --git a/src/lib/krb5/os/write_msg.c b/src/lib/krb5/os/write_msg.c
+index a9d6050..28fae72 100644
+--- a/src/lib/krb5/os/write_msg.c
++++ b/src/lib/krb5/os/write_msg.c
+@@ -45,6 +45,9 @@ k5_write_messages(krb5_context context, krb5_pointer fdp, krb5_data *outbuf,
+         int nbufs1;
+         sg_buf sg[4];
+         krb5_int32 len[2];
++#ifdef __HAIKU__
++        char empty_buf[1];
++#endif
+ 
+         if (nbufs > 1)
+             nbufs1 = 2;
+@@ -52,12 +55,22 @@ k5_write_messages(krb5_context context, krb5_pointer fdp, krb5_data *outbuf,
+             nbufs1 = 1;
+         len[0] = htonl(outbuf[0].length);
+         SG_SET(&sg[0], &len[0], 4);
++#ifndef __HAIKU__
+         SG_SET(&sg[1], outbuf[0].length ? outbuf[0].data : NULL,
++#else
++        // See https://xref.landonf.org/source/xref/haiku/src/system/kernel/fs/socket.cpp#165
++        // Many functions in Haiku does not support NULL for iovec.
++        SG_SET(&sg[1], outbuf[0].length ? outbuf[0].data : empty_buf,
++#endif
+                outbuf[0].length);
+         if (nbufs1 == 2) {
+             len[1] = htonl(outbuf[1].length);
+             SG_SET(&sg[2], &len[1], 4);
++#ifndef __HAIKU__
+             SG_SET(&sg[3], outbuf[1].length ? outbuf[1].data : NULL,
++#else
++            SG_SET(&sg[3], outbuf[1].length ? outbuf[1].data : empty_buf,
++#endif
+                    outbuf[1].length);
+         }
+         if (krb5int_net_writev(context, fd, sg, nbufs1 * 2) < 0) {
+diff --git a/src/lib/rpc/svc_tcp.c b/src/lib/rpc/svc_tcp.c
+index 56fe7b6..c0c9f20 100644
+--- a/src/lib/rpc/svc_tcp.c
++++ b/src/lib/rpc/svc_tcp.c
+@@ -146,6 +146,9 @@ svctcp_create(
+ 	struct sockaddr_storage ss;
+ 	struct sockaddr *sa = (struct sockaddr *)&ss;
+ 	socklen_t len;
++#ifdef __HAIKU__
++	bool_t sock_already_bound = FALSE;
++#endif
+ 
+ 	if (sock == RPC_ANYSOCK) {
+ 		if ((sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
+@@ -162,9 +165,30 @@ svctcp_create(
+ 			perror("svc_tcp.c - cannot getsockname");
+ 			return ((SVCXPRT *)NULL);
+ 		}
++#ifdef __HAIKU__
++		switch (sa->sa_family) {
++			case AF_INET:
++				struct sockaddr_in *sin = (struct sockaddr_in *)sa;
++				if (sin->sin_port != 0)
++					sock_already_bound = TRUE;
++				break;
++			case AF_INET6:
++				struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)sa;
++				if (sin6->sin6_port != 0)
++					sock_already_bound = TRUE;
++				break;
++		}
++#endif
+ 	}
+ 
++#ifndef __HAIKU__
+ 	if (bindresvport_sa(sock, sa)) {
++#else
++	// In Haiku, bind() does not fail if the socket is already bound,
++	// but unbinds and rebinds the socket. This is problematic
++	// for sockets that are already bound to a specific port.
++	if (!sock_already_bound && bindresvport_sa(sock, sa)) {
++#endif
+ 		sa_setport(sa, 0);
+ 		(void)bind(sock, sa, sa_socklen(sa));
+ 	}
+diff --git a/src/lib/rpc/svc_udp.c b/src/lib/rpc/svc_udp.c
+index 8ecbdf2..75c501e 100644
+--- a/src/lib/rpc/svc_udp.c
++++ b/src/lib/rpc/svc_udp.c
+@@ -118,6 +118,9 @@ svcudp_bufcreate(
+ 	struct sockaddr_storage ss;
+ 	struct sockaddr *sa = (struct sockaddr *)&ss;
+ 	socklen_t len;
++#ifdef __HAIKU__
++	bool_t sock_already_bound = FALSE;
++#endif
+ 
+ 	if (sock == RPC_ANYSOCK) {
+ 		if ((sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
+@@ -134,9 +137,30 @@ svcudp_bufcreate(
+ 			perror("svcudp_create - cannot getsockname");
+ 			return ((SVCXPRT *)NULL);
+ 		}
++#ifdef __HAIKU__
++		switch (sa->sa_family) {
++			case AF_INET:
++				struct sockaddr_in *sin = (struct sockaddr_in *)sa;
++				if (sin->sin_port != 0)
++					sock_already_bound = TRUE;
++				break;
++			case AF_INET6:
++				struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)sa;
++				if (sin6->sin6_port != 0)
++					sock_already_bound = TRUE;
++				break;
++		}
++#endif
+ 	}
+ 
++#ifndef __HAIKU__
+ 	if (bindresvport_sa(sock, sa)) {
++#else
++	// In Haiku, bind() does not fail if the socket is already bound,
++	// but unbinds and rebinds the socket. This is problematic
++	// for sockets that are already bound to a specific port.
++	if (!sock_already_bound && bindresvport_sa(sock, sa)) {
++#endif
+ 		sa_setport(sa, 0);
+ 		(void)bind(sock, sa, sa_socklen(sa));
+ 	}
+-- 
+2.30.2
+
+
+From c7d565559dc60e5e37c031f0e9fbd5bf0b833a6d Mon Sep 17 00:00:00 2001
+From: Trung Nguyen <trungnt282910@gmail.com>
+Date: Wed, 29 Jun 2022 15:08:48 +0700
+Subject: haiku: Fix LDCOMBINE flags to include soname
+
+---
+ src/config/shlib.conf | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/config/shlib.conf b/src/config/shlib.conf
+index 6aede9564..c12cc0960 100644
+--- a/src/config/shlib.conf
++++ b/src/config/shlib.conf
+@@ -297,8 +297,9 @@ mips-*-netbsd*)
+ *-*-haiku*)
+        PICFLAGS=-fPIC
+        SHLIBVEXT='.so.$(LIBMAJOR).$(LIBMINOR)'
++       SHLIBSEXT='.so.$(LIBMAJOR)'
+        SHLIBEXT=.so
+-       LDCOMBINE='$(CC) -shared'
++       LDCOMBINE='$(CC) -shared -Wl,-soname -Wl,$(LIBPREFIX)$(LIBBASE)$(SHLIBSEXT)'
+        RPATH_FLAG='-Wl,-rpath -Wl,'
+        PROG_RPATH_FLAGS='$(RPATH_FLAG)$(PROG_RPATH)'
+        CC_LINK_SHARED='$(CC) $(PROG_LIBPATH) $(PROG_RPATH_FLAGS) $(CFLAGS) $(LDFLAGS)'
+--
+2.30.2
+
+
+From e4770642e26652907811e61404e64a5a543ab52e Mon Sep 17 00:00:00 2001
+From: Trung Nguyen <trungnt282910@gmail.com>
+Date: Wed, 29 Jun 2022 21:00:06 +0700
+Subject: haiku: getaddrinfo and gethostbyname workarounds.
+
+getaddrinfo does not resolve for the local hostname ("shredder" on
+most Haiku systems). Therefore, we have to compare the passed name
+to the output of gethostname.
+
+The same goes to gethostbyname (used by some test applications).
+---
+ src/appl/gss-sample/gss-client.c    | 22 +++++++++++
+ src/appl/simple/client/sim_client.c |  3 ++
+ src/appl/user_user/client.c         |  4 ++
+ src/include/fake-addrinfo.h         |  8 ++++
+ src/kdc/t_bigreply.py               |  3 +-
+ src/lib/rpc/unit-test/client.c      | 18 +++++++++
+ src/tests/t_bogus_kdc_req.py        |  3 +-
+ src/tests/t_cve-2012-1014.py        |  3 +-
+ src/tests/t_cve-2012-1015.py        |  3 +-
+ src/tests/t_cve-2021-36222.py       |  3 +-
+ src/util/support/fake-addrinfo.c    | 60 ++++++++++++++++++++++++++++-
+ 11 files changed, 124 insertions(+), 6 deletions(-)
+
+diff --git a/src/appl/gss-sample/gss-client.c b/src/appl/gss-sample/gss-client.c
+index 6e2aa3369..9f4016f32 100644
+--- a/src/appl/gss-sample/gss-client.c
++++ b/src/appl/gss-sample/gss-client.c
+@@ -69,6 +69,28 @@
+ #include "gss-misc.h"
+ #include "port-sockets.h"
+ 
++#ifdef __HAIKU__
++#include <limits.h>
++static struct hostent *
++haiku_gethostbyname(const char *name)
++{
++    char local_hostname[HOST_NAME_MAX + 1];
++
++    if (name != NULL) {
++        if (gethostname(local_hostname, sizeof(local_hostname)) < 0) {
++            return NULL;
++        }
++        if (strcmp(name, local_hostname) == 0) {
++            name = "localhost";
++        }
++    }
++
++    return gethostbyname(name);
++}
++#undef gethostbyname
++#define gethostbyname haiku_gethostbyname
++#endif
++
+ static int verbose = 1;
+ static int spnego = 0;
+ static gss_OID_desc gss_spnego_mechanism_oid_desc =
+diff --git a/src/appl/simple/client/sim_client.c b/src/appl/simple/client/sim_client.c
+index 08f06abe5..eab631fae 100644
+--- a/src/appl/simple/client/sim_client.c
++++ b/src/appl/simple/client/sim_client.c
+@@ -40,6 +40,9 @@
+ #ifdef HAVE_UNISTD_H
+ #include <unistd.h>
+ #endif
++#ifdef __HAIKU__
++#include "fake-addrinfo.h" /* Haiku has a buggy gethostbyname. */
++#endif
+ 
+ #include "simple.h"
+ 
+diff --git a/src/appl/user_user/client.c b/src/appl/user_user/client.c
+index 9a05345ce..79af6ce7e 100644
+--- a/src/appl/user_user/client.c
++++ b/src/appl/user_user/client.c
+@@ -33,6 +33,10 @@
+ #include <arpa/inet.h>
+ #include <netdb.h>
+ 
++#ifdef __HAIKU__
++#include "fake-addrinfo.h" /* Haiku has a buggy gethostbyname. */
++#endif
++
+ int main (int argc, char *argv[])
+ {
+     int s;
+diff --git a/src/include/fake-addrinfo.h b/src/include/fake-addrinfo.h
+index 6d18d4f46..3542a09bb 100644
+--- a/src/include/fake-addrinfo.h
++++ b/src/include/fake-addrinfo.h
+@@ -220,6 +220,10 @@ extern int krb5int_getnameinfo (const struct sockaddr *sa, socklen_t salen,
+                                 char *hbuf, size_t hbuflen,
+                                 char *sbuf, size_t sbuflen,
+                                 int flags);
++#ifdef __HAIKU__
++extern struct hostent *krb5int_gethostbyname(const char *name);
++#endif
++
+ #ifndef IMPLEMENT_FAKE_GETADDRINFO
+ #undef  getaddrinfo
+ #define getaddrinfo krb5int_getaddrinfo
+@@ -229,6 +233,10 @@ extern int krb5int_getnameinfo (const struct sockaddr *sa, socklen_t salen,
+ #define gai_strerror krb5int_gai_strerror
+ #undef  getnameinfo
+ #define getnameinfo krb5int_getnameinfo
++#ifdef __HAIKU__
++#undef  gethostbyname
++#define gethostbyname krb5int_gethostbyname
++#endif // __HAIKU__
+ #endif
+ 
+ #endif /* FAI_DEFINED */
+diff --git a/src/kdc/t_bigreply.py b/src/kdc/t_bigreply.py
+index ea101ff75..f61914b6f 100644
+--- a/src/kdc/t_bigreply.py
++++ b/src/kdc/t_bigreply.py
+@@ -1,4 +1,5 @@
+ from k5test import *
++import platform
+ import struct
+ 
+ # Set the maximum UDP reply size very low, so that all replies go
+@@ -19,7 +20,7 @@ realm.run([kvno, realm.host_princ], expected_trace=msgs)
+ # Pretend to send an absurdly long request over TCP, and verify that
+ # we get back a reply of plausible length to be an encoded
+ # KRB_ERR_RESPONSE_TOO_BIG error.
+-s = socket.create_connection((hostname, realm.portbase))
++s = socket.create_connection((hostname if platform.system() != 'Haiku' else (hostname if socket.gethostname() != hostname else 'localhost'), realm.portbase))
+ s.sendall(b'\xFF\xFF\xFF\xFF')
+ lenbytes = s.recv(4)
+ assert(len(lenbytes) == 4)
+diff --git a/src/lib/rpc/unit-test/client.c b/src/lib/rpc/unit-test/client.c
+index c9a812bc5..b04582519 100644
+--- a/src/lib/rpc/unit-test/client.c
++++ b/src/lib/rpc/unit-test/client.c
+@@ -20,6 +20,10 @@
+ #include <gssrpc/auth_gssapi.h>
+ #include "rpc_test.h"
+ 
++#ifdef __HAIKU__
++#include <limits.h>
++#endif
++
+ #define BIG_BUF 4096
+ /* copied from auth_gssapi.c for hackery */
+ struct auth_gssapi_data {
+@@ -67,6 +71,9 @@ main(argc, argv)
+      struct sockaddr_in sin;
+      struct hostent *h;
+      struct timeval tv;
++#ifdef __HAIKU__
++     char local_hostname[HOST_NAME_MAX + 1];
++#endif
+ 
+      extern int krb5_gss_dbg_client_expcreds;
+      krb5_gss_dbg_client_expcreds = 1;
+@@ -124,6 +131,17 @@ main(argc, argv)
+      }
+ 
+      /* get server address */
++#ifdef __HAIKU__
++     if (host != NULL) {
++          if (gethostname(local_hostname, sizeof(local_hostname)) < 0) {
++               perror("gethostname");
++               exit(1);
++          }
++          if (strcmp(host, local_hostname) == 0) {
++               host = "localhost";
++          }
++     }
++#endif
+      h = gethostbyname(host);
+      if (h == NULL) {
+ 	 fprintf(stderr, "Can't resolve hostname %s\n", host);
+diff --git a/src/tests/t_bogus_kdc_req.py b/src/tests/t_bogus_kdc_req.py
+index a101c0e10..83f5473f4 100755
+--- a/src/tests/t_bogus_kdc_req.py
++++ b/src/tests/t_bogus_kdc_req.py
+@@ -1,4 +1,5 @@
+ import base64
++import platform
+ import socket
+ from k5test import *
+ 
+@@ -9,7 +10,7 @@ realm = K5Realm()
+ # from failures in decode_krb5_as_req() and decode_krb5_tgs_req().
+ 
+ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+-a = (hostname, realm.portbase)
++a = (hostname if platform.system() != 'Haiku' else (hostname if socket.gethostname() != hostname else 'localhost'), realm.portbase)
+ 
+ 
+ # Bogus AS-REQ
+diff --git a/src/tests/t_cve-2012-1014.py b/src/tests/t_cve-2012-1014.py
+index 8447e0ee7..bb4eb862a 100755
+--- a/src/tests/t_cve-2012-1014.py
++++ b/src/tests/t_cve-2012-1014.py
+@@ -1,4 +1,5 @@
+ import base64
++import platform
+ import socket
+ from k5test import *
+ 
+@@ -9,7 +10,7 @@ realm = K5Realm()
+ # Affects only krb5-1.10.x.
+ 
+ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+-a = (hostname, realm.portbase)
++a = (hostname if platform.system() != 'Haiku' else (hostname if socket.gethostname() != hostname else 'localhost'), realm.portbase)
+ 
+ x1 = base64.b16decode('6A5E305BA103020105A2030201')
+ x2 = base64.b16decode('A44F304DA007030500FEDCBA90A10E30' +
+diff --git a/src/tests/t_cve-2012-1015.py b/src/tests/t_cve-2012-1015.py
+index ae5678cac..b7cc7edcf 100755
+--- a/src/tests/t_cve-2012-1015.py
++++ b/src/tests/t_cve-2012-1015.py
+@@ -1,4 +1,5 @@
+ import base64
++import platform
+ import socket
+ from k5test import *
+ 
+@@ -11,7 +12,7 @@ realm = K5Realm()
+ # pointer in an unpatched KDC.
+ 
+ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+-a = (hostname, realm.portbase)
++a = (hostname if platform.system() != 'Haiku' else (hostname if socket.gethostname() != hostname else 'localhost'), realm.portbase)
+ 
+ x1 = base64.b16decode('6A81A030819DA103020105A20302010A' +
+                       'A30E300C300AA10402020095A2020400' +
+diff --git a/src/tests/t_cve-2021-36222.py b/src/tests/t_cve-2021-36222.py
+index 57e04993b..0048071fa 100644
+--- a/src/tests/t_cve-2021-36222.py
++++ b/src/tests/t_cve-2021-36222.py
+@@ -1,3 +1,4 @@
++import platform
+ import socket
+ from k5test import *
+ 
+@@ -7,7 +8,7 @@ realm = K5Realm()
+ # without FAST
+ 
+ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+-a = (hostname, realm.portbase)
++a = (hostname if platform.system() != 'Haiku' else (hostname if socket.gethostname() != hostname else 'localhost'), realm.portbase)
+ 
+ m = ('6A81A0' '30819D'          # [APPLICATION 10] SEQUENCE
+      'A103' '0201' '05'         #  [1] pvno = 5
+diff --git a/src/util/support/fake-addrinfo.c b/src/util/support/fake-addrinfo.c
+index 480456ad1..052be0e0f 100644
+--- a/src/util/support/fake-addrinfo.c
++++ b/src/util/support/fake-addrinfo.c
+@@ -136,11 +136,18 @@ extern /*@dependent@*/ char *gai_strerror (int code) /*@*/;
+ 
+ #include "cache-addrinfo.h"
+ 
+-#if (defined (__linux__) && defined(HAVE_GETADDRINFO)) || defined (_AIX)
++#if (defined (__linux__) && defined(HAVE_GETADDRINFO)) || defined (_AIX) || defined(__HAIKU__)
+ /* See comments below.  */
+ #  define WRAP_GETADDRINFO
+ #endif
+ 
++#ifdef __HAIKU__
++# include <limits.h>            /* HOST_NAME_MAX */
++# include <netdb.h>             /* gethostbyname */
++# include <string.h>            /* strcmp */
++# include <unistd.h>            /* gethostname */
++#endif
++
+ #if defined (__linux__) && defined(HAVE_GETADDRINFO)
+ /* Define COPY_FIRST_CANONNAME for glibc 2.3 and prior. */
+ #include <features.h>
+@@ -349,6 +356,17 @@ system_freeaddrinfo (struct addrinfo *ai)
+ 
+ #endif /* ! HAVE_GETADDRINFO */
+ 
++#ifdef __HAIKU__
++static inline struct hostent *
++system_gethostbyname (const char *name)
++{
++    return gethostbyname(name);
++}
++
++#undef gethostbyname
++#define gethostbyname    my_fake_gethostbyname
++#endif
++
+ #if (!defined (HAVE_GETADDRINFO) || defined (WRAP_GETADDRINFO)) && defined(DEBUG_ADDRINFO)
+ /* Some debug routines.  */
+ 
+@@ -1098,6 +1116,10 @@ getaddrinfo (const char *name, const char *serv, const struct addrinfo *hint,
+     int service_port = 0;
+     int socket_type = 0;
+ #endif
++#ifdef __HAIKU__
++    // One for the null.
++    char local_hostname[HOST_NAME_MAX + 1];
++#endif
+ 
+ #ifdef DEBUG_ADDRINFO
+     debug_dump_getaddrinfo_args(name, serv, hint);
+@@ -1131,6 +1153,15 @@ getaddrinfo (const char *name, const char *serv, const struct addrinfo *hint,
+     }
+ #endif
+ 
++#ifdef __HAIKU__
++    if (name != NULL) {
++        if (gethostname(local_hostname, sizeof(local_hostname)) < 0)
++            return EAI_SYSTEM;
++        if (strcmp(name, local_hostname) == 0)
++            name = "localhost";
++    }
++#endif
++
+     aierr = system_getaddrinfo (name, serv, hint, result);
+     if (aierr || *result == 0) {
+ #ifdef DEBUG_ADDRINFO
+@@ -1298,6 +1329,26 @@ void freeaddrinfo (struct addrinfo *ai)
+ }
+ #endif /* WRAP_GETADDRINFO */
+ 
++#ifdef __HAIKU__
++static inline
++struct hostent *
++gethostbyname (const char *name)
++{
++    char local_hostname[HOST_NAME_MAX + 1];
++
++    if (name != NULL) {
++        if (gethostname(local_hostname, sizeof(local_hostname)) < 0) {
++            return NULL;
++        }
++        if (strcmp(name, local_hostname) == 0) {
++            name = "localhost";
++        }
++    }
++
++    return system_gethostbyname(name);
++}
++#endif
++
+ #ifdef FAI_CACHE
+ static int krb5int_lock_fac (void)
+ {
+@@ -1341,3 +1392,10 @@ int krb5int_getnameinfo (const struct sockaddr *sa, socklen_t salen,
+ {
+     return getnameinfo(sa, salen, hbuf, hbuflen, sbuf, sbuflen, flags);
+ }
++
++#ifdef __HAIKU__
++struct hostent *krb5int_gethostbyname (const char *name)
++{
++    return gethostbyname(name);
++}
++#endif
+-- 
+2.30.2
+

@@ -1,0 +1,364 @@
+From a4183f0963861f86d1bb4750d14c6396c4bd3577 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Zolt=C3=A1n=20Mizsei?= <zmizsei@extrowerk.com>
+Date: Fri, 4 Dec 2020 18:45:29 +0100
+Subject: Haiku patches
+
+
+diff --git a/buildconfig/Setup.SDL2.in b/buildconfig/Setup.SDL2.in
+index 8a6afa1..b567e6e 100644
+--- a/buildconfig/Setup.SDL2.in
++++ b/buildconfig/Setup.SDL2.in
+@@ -29,8 +29,8 @@ imageext src_c/imageext.c $(SDL) $(IMAGE) $(PNG) $(JPEG) $(DEBUG)
+ font src_c/font.c $(SDL) $(FONT) $(DEBUG)
+ mixer src_c/mixer.c $(SDL) $(MIXER) $(DEBUG)
+ mixer_music src_c/music.c $(SDL) $(MIXER) $(DEBUG)
+-scrap src_c/scrap.c $(SDL) $(SCRAP) $(DEBUG)
+-pypm src_c/pypm.c $(SDL) $(PORTMIDI) $(PORTTIME) $(DEBUG)
++#scrap src_c/scrap.c $(SDL) $(SCRAP) $(DEBUG)
++#pypm src_c/pypm.c $(SDL) $(PORTMIDI) $(PORTTIME) $(DEBUG)
+ 
+ _sdl2.sdl2 src_c/_sdl2/sdl2.c $(SDL) $(DEBUG) -Isrc_c
+ _sdl2.audio src_c/_sdl2/audio.c $(SDL) $(DEBUG) -Isrc_c
+@@ -68,7 +68,7 @@ time src_c/time.c $(SDL) $(DEBUG)
+ joystick src_c/joystick.c $(SDL) $(DEBUG)
+ draw src_c/draw.c $(SDL) $(DEBUG)
+ image src_c/image.c $(SDL) $(DEBUG)
+-transform src_c/transform.c src_c/rotozoom.c src_c/scale2x.c src_c/scale_mmx.c $(SDL) $(DEBUG)
++transform src_c/transform.c src_c/rotozoom.c src_c/scale2x.c $(SDL) $(DEBUG)
+ mask src_c/mask.c src_c/bitmask.c $(SDL) $(DEBUG)
+ bufferproxy src_c/bufferproxy.c $(SDL) $(DEBUG)
+ pixelarray src_c/pixelarray.c $(SDL) $(DEBUG)
+diff --git a/buildconfig/config.py b/buildconfig/config.py
+index d92c366..48fb8ea 100644
+--- a/buildconfig/config.py
++++ b/buildconfig/config.py
+@@ -191,6 +191,9 @@ def main(auto=False):
+             import config_msys as CFG
+         except ImportError:
+             import buildconfig.config_msys as CFG
++    elif sys.platform == 'haiku1' or sys.platform == 'haiku1_x86':
++        print_('Using Haiku configuration...\n')
++        import buildconfig.config_haiku as CFG
+     elif sys.platform == 'darwin':
+         print_('Using Darwin configuration...\n')
+         try:
+diff --git a/buildconfig/config_haiku.py b/buildconfig/config_haiku.py
+new file mode 100644
+index 0000000..f126996
+--- /dev/null
++++ b/buildconfig/config_haiku.py
+@@ -0,0 +1,229 @@
++"""Config on Unix"""
++
++import os, sys
++from glob import glob
++import platform
++import logging
++from distutils.sysconfig import get_python_inc
++
++configcommand = os.environ.get('SDL_CONFIG', 'sdl-config',)
++configcommand = configcommand + ' --version --cflags --libs'
++localbase = os.environ.get('LOCALBASE', '')
++if os.environ.get('PYGAME_EXTRA_BASE', ''):
++    extrabases = os.environ['PYGAME_EXTRA_BASE'].split(':')
++else:
++    extrabases = []
++
++
++class DependencyProg:
++    def __init__(self, name, envname, exename, minver, defaultlibs, version_flag="--version"):
++        self.name = name
++        command = os.environ.get(envname, exename)
++        self.lib_dir = ''
++        self.inc_dir = ''
++        self.libs = []
++        self.cflags = ''
++        try:
++            # freetype-config for freetype2 version 2.3.7 on Debian lenny
++            # does not recognize multiple command line options. So execute
++            # 'command' separately for each option.
++            config = (os.popen(command + ' ' + version_flag).readlines() +
++                      os.popen(command + ' --cflags').readlines() +
++                      os.popen(command + ' --libs').readlines())
++            flags = ' '.join(config[1:]).split()
++
++            # remove this GNU_SOURCE if there... since python has it already,
++            #   it causes a warning.
++            if '-D_GNU_SOURCE=1' in flags:
++                flags.remove('-D_GNU_SOURCE=1')
++            self.ver = config[0].strip()
++            if minver and self.ver < minver:
++                err= 'WARNING: requires %s version %s (%s found)' % (self.name, self.ver, minver)
++                raise ValueError(err)
++            self.found = 1
++            self.cflags = ''
++            for f in flags:
++                if f[:2] in ('-l', '-D', '-I', '-L'):
++                    self.cflags += f + ' '
++                elif f[:3] == '-Wl':
++                    self.cflags += '-Xlinker ' + f + ' '
++        except (ValueError, TypeError):
++            print ('WARNING: "%s" failed!' % command)
++            self.found = 0
++            self.ver = '0'
++            self.libs = defaultlibs
++
++    def configure(self, incdirs, libdir):
++        if self.found:
++            print (self.name + '        '[len(self.name):] + ': found ' + self.ver)
++            self.found = 1
++        else:
++            print (self.name + '        '[len(self.name):] + ': not found')
++
++class Dependency:
++    def __init__(self, name, checkhead, checklib, libs):
++        self.name = name
++        self.inc_dir = None
++        self.lib_dir = None
++        self.libs = libs
++        self.found = 0
++        self.checklib = checklib
++        self.checkhead = checkhead
++        self.cflags = ''
++
++    def configure(self, incdirs, libdirs):
++        incname = self.checkhead
++        libnames = self.checklib, self.name.lower()
++
++        if incname:
++            for dir in incdirs:
++                path = os.path.join(dir, incname)
++                if os.path.isfile(path):
++                    self.inc_dir = dir
++
++        for dir in libdirs:
++            for name in libnames:
++                path = os.path.join(dir, name)
++                if any(map(os.path.isfile, glob(path+'*'))):
++                    self.lib_dir = dir
++
++        if (incname and self.lib_dir and self.inc_dir) or (not incname and self.lib_dir):
++            print (self.name + '        '[len(self.name):] + ': found')
++            self.found = 1
++        else:
++            print (self.name + '        '[len(self.name):] + ': not found')
++            print(self.name, self.checkhead, self.checklib, incdirs, libdirs)
++
++
++class DependencyPython:
++    def __init__(self, name, module, header):
++        self.name = name
++        self.lib_dir = ''
++        self.inc_dir = ''
++        self.libs = []
++        self.cflags = ''
++        self.found = 0
++        self.ver = '0'
++        self.module = module
++        self.header = header
++
++    def configure(self, incdirs, libdirs):
++        self.found = 1
++        if self.module:
++            try:
++                self.ver = __import__(self.module).__version__
++            except ImportError:
++                self.found = 0
++        if self.found and self.header:
++            fullpath = os.path.join(get_python_inc(0), self.header)
++            if not os.path.isfile(fullpath):
++                self.found = 0
++            else:
++                self.inc_dir = os.path.split(fullpath)[0]
++        if self.found:
++            print (self.name + '        '[len(self.name):] + ': found', self.ver)
++        else:
++            print (self.name + '        '[len(self.name):] + ': not found')
++
++sdl_lib_name = 'SDL'
++
++def main(sdl2=False):
++    global origincdirs, origlibdirs
++
++    #these get prefixes with the $LOCALBASE
++    if sdl2:
++        origincdirs = ['/headers/x86/', '/headers/', '/headers/x86/SDL2/', '/headers/SDL2/']
++        origlibdirs = ['/develop/lib/x86/','develop/lib/','/lib/x86/', '/lib/']
++
++    else:
++        origincdirs = ['/headers/x86', '/headers/', '/headers/x86/SDL', '/headers/SDL']
++        origlibdirs = ['/develop/lib/x86/','develop/lib/','/lib/x86/', '/lib/']
++    if 'ORIGLIBDIRS' in os.environ and os.environ['ORIGLIBDIRS'] != "":
++        origlibdirs = os.environ['ORIGLIBDIRS'].split(":")
++
++    print ('\nHunting dependencies...')
++
++    def find_freetype():
++        """ modern freetype uses pkg-config. However, some older systems don't have that.
++        """
++        pkg_config = DependencyProg(
++            'FREETYPE', 'FREETYPE_CONFIG', 'pkg-config freetype2', '2.0',
++            ['freetype2'], '--modversion'
++        )
++        if pkg_config.found:
++            return pkg_config
++
++        freetype_config = DependencyProg(
++            'FREETYPE', 'FREETYPE_CONFIG', 'freetype-config', '2.0',
++            ['freetype'], '--ftversion'
++        )
++        if freetype_config.found:
++            return freetype_config
++        return pkg_config
++
++    if sdl2:
++        DEPS = [
++            DependencyProg('SDL', 'SDL_CONFIG', 'sdl2-config', '2.0', ['sdl']),
++            Dependency('FONT', 'SDL_ttf.h', 'libSDL2_ttf.so', ['SDL2_ttf']),
++            Dependency('IMAGE', 'SDL_image.h', 'libSDL2_image.so', ['SDL2_image']),
++            Dependency('MIXER', 'SDL_mixer.h', 'libSDL2_mixer.so', ['SDL2_mixer']),
++            #Dependency('GFX', 'SDL_gfxPrimitives.h', 'libSDL2_gfx.so', ['SDL2_gfx']),
++        ]
++    else:
++        DEPS = [
++            DependencyProg('SDL', 'SDL_CONFIG', 'sdl-config', '1.2', ['sdl']),
++            Dependency('FONT', 'SDL_ttf.h', 'libSDL_ttf.so', ['SDL_ttf']),
++            Dependency('IMAGE', 'SDL_image.h', 'libSDL_image.so', ['SDL_image']),
++            Dependency('MIXER', 'SDL_mixer.h', 'libSDL_mixer.so', ['SDL_mixer']),
++            #Dependency('GFX', 'SDL_gfxPrimitives.h', 'libSDL_gfx.so', ['SDL_gfx']),
++        ]
++    DEPS.extend([
++        Dependency('PNG', 'png.h', 'libpng', ['png']),
++        Dependency('JPEG', 'jpeglib.h', 'libjpeg', ['jpeg']),
++        #Dependency('SCRAP', '', 'libX11', ['X11']),
++        #Dependency('GFX', 'SDL_gfxPrimitives.h', 'libSDL_gfx.so', ['SDL_gfx']),
++    ])
++
++    DEPS.append(find_freetype())
++
++    if not DEPS[0].found:
++        raise RuntimeError('Unable to run "sdl-config". Please make sure a development version of SDL is installed.')
++
++    incdirs = []
++    libdirs = []
++    for extrabase in extrabases:
++        incdirs += [extrabase + d for d in origincdirs]
++        libdirs += [extrabase + d for d in origlibdirs]
++    incdirs += ["/boot/system/develop"+d for d in origincdirs]
++    libdirs += ["/boot/system/"+d for d in origlibdirs]
++
++    if localbase:
++        incdirs = [localbase+d for d in origincdirs]
++        libdirs = [localbase+d for d in origlibdirs]
++
++    for arg in DEPS[0].cflags.split():
++        if arg[:2] == '-I':
++            incdirs.append(arg[2:])
++        elif arg[:2] == '-L':
++            libdirs.append(arg[2:])
++    for d in DEPS:
++        d.configure(incdirs, libdirs)
++
++    for d in DEPS[1:]:
++        if not d.found:
++            if "-auto" not in sys.argv:
++                logging.warning(
++                    "Some pygame dependencies were not found. "
++                    "Pygame can still compile and install, but games that "
++                    "depend on those missing dependencies will not run. "
++                    "Use -auto to continue building without all dependencies. "
++                )
++                raise SystemExit("Missing dependencies")
++            break
++
++    return DEPS
++
++if __name__ == '__main__':
++    print ("""This is the configuration subscript for Haiku.
++Please run "config.py" for full configuration.""")
++
+diff --git a/setup.py b/setup.py
+index 1c4c6a3..09737ab 100644
+--- a/setup.py
++++ b/setup.py
+@@ -269,7 +269,7 @@ else:
+ 
+ #headers to install
+ headers = glob.glob(os.path.join('src_c', '*.h'))
+-headers.remove(os.path.join('src_c', 'scale.h'))
++#headers.remove(os.path.join('src_c', 'scale.h'))
+ headers.append(os.path.join('src_c', 'include'))
+ 
+ import distutils.command.install_headers
+@@ -616,22 +616,6 @@ if sys.platform == 'win32':
+ 
+             build_ext.build_extensions(self)
+ 
+-    # Add the precompiled smooth scale MMX functions to transform.
+-    def replace_scale_mmx():
+-        for e in extensions:
+-            if e.name == 'transform':
+-                if '64 bit' in sys.version:
+-                    e.extra_objects.append(
+-                        os.path.join('buildconfig', 'obj', 'win64', 'scale_mmx.obj'))
+-                else:
+-                    e.extra_objects.append(
+-                        os.path.join('buildconfig', 'obj', 'win32', 'scale_mmx.obj'))
+-                for i in range(len(e.sources)):
+-                    if e.sources[i].endswith('scale_mmx.c'):
+-                        del e.sources[i]
+-                        return
+-    replace_scale_mmx()
+-
+ 
+ #clean up the list of extensions
+ for e in extensions[:]:
+diff --git a/src_c/transform.c b/src_c/transform.c
+index c6e5631..b7ddb38 100644
+--- a/src_c/transform.c
++++ b/src_c/transform.c
+@@ -33,7 +33,7 @@
+ #include <math.h>
+ #include <string.h>
+ 
+-#include "scale.h"
++//#include "scale.h"
+ 
+ typedef void (*SMOOTHSCALE_FILTER_P)(Uint8 *, Uint8 *, int, int, int, int,
+                                      int);
+-- 
+2.28.0
+
+
+From 2a59ac4301994c7f836ae2b3d91698b3690185a0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Zolt=C3=A1n=20Mizsei?= <zmizsei@extrowerk.com>
+Date: Fri, 4 Dec 2020 19:18:35 +0100
+Subject: SDL1 support
+
+
+diff --git a/buildconfig/Setup.SDL1.in b/buildconfig/Setup.SDL1.in
+index 9f2cc98..9b650f7 100644
+--- a/buildconfig/Setup.SDL1.in
++++ b/buildconfig/Setup.SDL1.in
+@@ -29,8 +29,8 @@ imageext src_c/imageext.c $(SDL) $(IMAGE) $(PNG) $(JPEG) $(DEBUG)
+ font src_c/font.c $(SDL) $(FONT) $(DEBUG)
+ mixer src_c/mixer.c $(SDL) $(MIXER) $(DEBUG)
+ mixer_music src_c/music.c $(SDL) $(MIXER) $(DEBUG)
+-scrap src_c/scrap.c $(SDL) $(SCRAP) $(DEBUG)
+-pypm src_c/pypm.c $(SDL) $(PORTMIDI) $(PORTTIME) $(DEBUG)
++#scrap src_c/scrap.c $(SDL) $(SCRAP) $(DEBUG)
++#pypm src_c/pypm.c $(SDL) $(PORTMIDI) $(PORTTIME) $(DEBUG)
+ 
+ GFX = src_c/SDL_gfx/SDL_gfxPrimitives.c
+ #GFX = src_c/SDL_gfx/SDL_gfxBlitFunc.c src_c/SDL_gfx/SDL_gfxPrimitives.c
+@@ -63,7 +63,7 @@ joystick src_c/joystick.c $(SDL) $(DEBUG)
+ draw src_c/draw.c $(SDL) $(DEBUG)
+ image src_c/image.c $(SDL) $(DEBUG)
+ overlay src_c/overlay.c $(SDL) $(DEBUG)
+-transform src_c/transform.c src_c/rotozoom.c src_c/scale2x.c src_c/scale_mmx.c $(SDL) $(DEBUG)
++transform src_c/transform.c src_c/rotozoom.c src_c/scale2x.c $(SDL) $(DEBUG)
+ mask src_c/mask.c src_c/bitmask.c $(SDL) $(DEBUG)
+ bufferproxy src_c/bufferproxy.c $(SDL) $(DEBUG)
+ pixelarray src_c/pixelarray.c $(SDL) $(DEBUG)
+-- 
+2.28.0

@@ -1,0 +1,173 @@
+From d15ffeefe04c66b6b7e22cb9cd39b9576423f630 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 16 Dec 2020 09:17:44 +1000
+Subject: Add haiku file icons support
+
+
+diff --git a/krusader/Panel/PanelView/krview.cpp b/krusader/Panel/PanelView/krview.cpp
+index 6ee6227..b28f939 100644
+--- a/krusader/Panel/PanelView/krview.cpp
++++ b/krusader/Panel/PanelView/krview.cpp
+@@ -316,6 +316,59 @@ QPixmap KrView::processIcon(const QPixmap &icon, bool dim, const QColor & dimCol
+                                 Qt::ThresholdAlphaDither | Qt::NoOpaqueDetection );
+ }
+ 
++#ifdef __HAIKU__
++QPixmap KrView::getIcon(FileItem *fileitem, bool active, int size)
++{
++    QPixmap icon;
++    QString iconName = fileitem->getIcon();
++    if (!fileitem->getUrl().path().isNull())
++    	iconName = fileitem->getUrl().path();
++    QString cacheName;
++
++    if(!size)
++        size = _FilelistIconSize.toInt();
++
++    QColor dimColor;
++    int dimFactor;
++    bool dim = !active && KrColorCache::getColorCache().getDimSettings(dimColor, dimFactor);
++
++    if (iconName.isNull())
++        iconName = "";
++
++    cacheName.append(QString::number(size));
++    if(fileitem->isSymLink())
++        cacheName.append("LINK_");
++    if(dim)
++        cacheName.append("DIM_");
++    cacheName.append(iconName);
++
++    if (!QPixmapCache::find(cacheName, icon)) {
++		QPixmap pixmap = QPixmap(size, size);
++		if (fileitem->getUrl().path().isNull())
++			pixmap = Icon(iconName, Icon("unknown")).pixmap(size);
++		else {
++			pixmap.fill(Qt::transparent);
++			QString filename = fileitem->getUrl().path();
++			if (filename == "/")
++				filename = "/system/servers/mount_server";
++		
++			BFile file(filename.toUtf8(), O_RDONLY);
++			BNodeInfo nodeInfo(&file);
++			icon_size iconSize = (icon_size)size;
++			BRect rect(0, 0, iconSize - 1, iconSize -1);
++			BBitmap bitmap(rect, B_RGBA32);
++			if (nodeInfo.GetTrackerIcon(&bitmap, iconSize) == B_NO_ERROR) {
++				QImage image(iconSize, iconSize, QImage::Format_ARGB32);
++				memcpy((uchar*)image.bits(), (uchar*)bitmap.Bits(), iconSize * iconSize * 4);
++				pixmap = QPixmap::fromImage(image).scaled(size, size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
++			}
++		}
++        icon = processIcon(pixmap, dim, dimColor, dimFactor, fileitem->isSymLink());
++        QPixmapCache::insert(cacheName, icon);
++    }
++    return icon;
++}
++#else
+ QPixmap KrView::getIcon(FileItem *fileitem, bool active, int size/*, KRListItem::cmpColor color*/)
+ {
+     // KConfigGroup ag( krConfig, "Advanced");
+@@ -353,6 +406,7 @@ QPixmap KrView::getIcon(FileItem *fileitem, bool active, int size/*, KRListItem:
+ 
+     return icon;
+ }
++#endif
+ 
+ QPixmap KrView::getIcon(FileItem *fileitem)
+ {
+diff --git a/krusader/Panel/PanelView/krview.h b/krusader/Panel/PanelView/krview.h
+index 8d23700..2da1c33 100644
+--- a/krusader/Panel/PanelView/krview.h
++++ b/krusader/Panel/PanelView/krview.h
+@@ -33,6 +33,13 @@
+ #include <QDropEvent>
+ #include <QPixmap>
+ 
++#ifdef __HAIKU__
++#include <File.h>
++#include <NodeInfo.h>
++#include <Rect.h>
++#include <Bitmap.h>
++#endif
++
+ #include "krviewproperties.h"
+ 
+ class KrView;
+-- 
+2.28.0
+
+
+From 508680fa7fcd6dd194547b2c10f0ece299a5cc7e Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 16 Dec 2020 09:18:03 +1000
+Subject: Link with be and tracker libraries
+
+
+diff --git a/krusader/CMakeLists.txt b/krusader/CMakeLists.txt
+index 0ade19c..dcd2cf3 100644
+--- a/krusader/CMakeLists.txt
++++ b/krusader/CMakeLists.txt
+@@ -77,6 +77,8 @@ target_link_libraries(krusader
+                       KF5::WindowSystem
+                       Qt5::PrintSupport
+                       Qt5::Concurrent
++                      be
++                      tracker
+ )
+ 
+ if(SYNCHRONIZER_ENABLED)
+-- 
+2.28.0
+
+
+From bff5210a21181b8b60489c84abf1dbfa0afba0d2 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 16 Dec 2020 09:18:24 +1000
+Subject: kwalletd autostart
+
+
+diff --git a/krusader/main.cpp b/krusader/main.cpp
+index e731ce9..867792b 100644
+--- a/krusader/main.cpp
++++ b/krusader/main.cpp
+@@ -116,7 +116,11 @@ int main(int argc, char *argv[])
+ #endif
+ 
+     KAboutData aboutData(QStringLiteral("krusader"),
++#ifndef Q_OS_HAIKU
+         (geteuid() ? i18n("Krusader") : i18n("Krusader - ROOT PRIVILEGES")), versionName,
++#else
++        i18n("Krusader"), versionName,
++#endif
+         i18n(description), KAboutLicense::GPL_V2,
+         i18n("© 2000-2003 Shie Erlich, Rafi Yanai\n© 2004-2019 Krusader Krew"),
+         i18n("Feedback:\nhttps://forum.kde.org/viewforum.php?f=225\n\nIRC\nserver: "
+@@ -234,6 +238,12 @@ int main(int argc, char *argv[])
+     if (!singleInstanceMode)
+         appName += QString("%1").arg(getpid());
+ 
++#ifdef Q_OS_HAIKU
++	int status=0;
++	QProcess kwalletProcess;
++	kwalletProcess.start("/bin/kwalletd5", QStringList());
++#endif
++
+     if (!QDBusConnection::sessionBus().isConnected()) {
+         fprintf(stderr, "Cannot connect to the D-BUS session bus.\n"
+                 "To start it, run:\n"
+@@ -313,5 +323,11 @@ int main(int argc, char *argv[])
+         delete splash;
+     }
+     // let's go.
++#ifdef Q_OS_HAIKU
++	status = app.exec();
++	kwalletProcess.kill();
++	return status;
++#else
+     return app.exec();
++#endif
+ }
+-- 
+2.28.0
+

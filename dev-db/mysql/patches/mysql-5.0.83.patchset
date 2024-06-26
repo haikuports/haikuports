@@ -1,0 +1,188 @@
+From f76c957b3f4c07ebd5cba6d1e0d5de7bca83ece8 Mon Sep 17 00:00:00 2001
+From: Begasus <begasus@gmail.com>
+Date: Fri, 1 May 2020 09:19:05 +0000
+Subject: applying patch mysql-5.0.83.patch
+
+
+diff --git a/configure.in b/configure.in
+index 4d2b683..16f5698 100644
+--- a/configure.in
++++ b/configure.in
+@@ -884,7 +884,8 @@ AC_CHECK_LIB(nsl_r, gethostbyname_r, [],
+   AC_CHECK_LIB(nsl, gethostbyname_r))
+ AC_CHECK_FUNC(gethostbyname_r)
+ 
+-AC_CHECK_FUNC(setsockopt, , AC_CHECK_LIB(socket, setsockopt))
++AC_SEARCH_LIBS(socket, [socket network])
++AC_SEARCH_LIBS(setsockopt,[socket network])
+ AC_CHECK_FUNC(yp_get_default_domain, ,
+   AC_CHECK_LIB(nsl, yp_get_default_domain))
+ AC_CHECK_FUNC(p2open, , AC_CHECK_LIB(gen, p2open))
+@@ -893,7 +894,7 @@ AC_CHECK_FUNC(bind, , AC_CHECK_LIB(bind, bind))
+ # Check if crypt() exists in libc or libcrypt, sets LIBS if needed
+ AC_SEARCH_LIBS(crypt, crypt, AC_DEFINE(HAVE_CRYPT, 1, [crypt]))
+ # See if we need a library for address lookup.
+-AC_SEARCH_LIBS(inet_aton, [socket nsl resolv])
++AC_SEARCH_LIBS(inet_aton, [socket nsl resolv network])
+ 
+ # For the sched_yield() function on Solaris
+ AC_CHECK_FUNC(sched_yield, , AC_CHECK_LIB(posix4, sched_yield))
+@@ -1939,6 +1940,13 @@ dnl
+ MYSQL_CHECK_TIME_T
+ 
+ 
++
++AC_CHECK_MEMBERS([struct rusage.ru_maxrss, struct rusage.ru_idrss, struct rusage.ru_minflt, struct rusage.ru_majflt,
++ struct rusage.ru_nswap, struct rusage.ru_inblock, struct rusage.ru_oublock, struct rusage.ru_msgsnd, struct rusage.ru_msgrcv,
++ struct rusage.ru_nsignals, struct rusage.ru_nvcsw, struct rusage.ru_nivcsw ],[AC_DEFINE([ADDITIONAL_RUSAGE_MEMBERS],[1],[
++Define 1 if structure have this members])],,)
++
++
+ # do we need #pragma interface/#pragma implementation ?
+ # yes if it's gcc 2.x, and not icc pretending to be gcc, and not cygwin
+ AC_MSG_CHECKING(the need for @%:@pragma interface/implementation)
+diff --git a/dbug/dbug_analyze.c b/dbug/dbug_analyze.c
+index 3263b2c..620055f 100644
+--- a/dbug/dbug_analyze.c
++++ b/dbug/dbug_analyze.c
+@@ -100,13 +100,13 @@ static int verbose;
+ 	while(0)
+ 
+ 
+-struct stack_t {
++struct my_stack_t {
+     unsigned int pos;			/* which function? */
+     unsigned long time;			/* Time that this was entered */
+     unsigned long children;		/* Time spent in called funcs */
+ };
+ 
+-static struct stack_t fn_stack[STACKSIZ+1];
++static struct my_stack_t fn_stack[STACKSIZ+1];
+ 
+ static unsigned int stacktop = 0;	/* Lowest stack position is a dummy */
+ 
+@@ -130,7 +130,7 @@ void push (name_pos, time_entered)
+ register unsigned int name_pos;
+ register unsigned long time_entered;
+ {
+-    register struct stack_t *t;
++    register struct my_stack_t *t;
+ 
+     DBUG_ENTER("push");
+     if (++stacktop > STACKSIZ) {
+@@ -157,7 +157,7 @@ register unsigned int *name_pos;
+ register unsigned long *time_entered;
+ register unsigned long *child_time;
+ {
+-    register struct stack_t *temp;
++    register struct my_stack_t *temp;
+     register unsigned int rtnval;
+ 
+     DBUG_ENTER ("pop");
+@@ -313,7 +313,7 @@ FILE *inf;
+   unsigned int oldpos;
+   unsigned long oldtime;
+   unsigned long oldchild;
+-  struct stack_t *t;
++  struct my_stack_t *t;
+ 
+   DBUG_ENTER ("process");
+   while (fgets (buf,BUFSIZ,inf) != NULL) {
+diff --git a/mysys/my_init.c b/mysys/my_init.c
+index 07469e4..32d196c 100644
+--- a/mysys/my_init.c
++++ b/mysys/my_init.c
+@@ -162,6 +162,7 @@ void my_end(int infoflag)
+     /* Purify assumes that rus is uninitialized after getrusage call */
+     bzero((char*) &rus, sizeof(rus));
+ #endif
++#ifdef ADDITIONAL_RUSAGE_MEMBERS
+     if (!getrusage(RUSAGE_SELF, &rus))
+       fprintf(info_file,"\n\
+ User time %.2f, System time %.2f\n\
+@@ -179,6 +180,7 @@ Voluntary context switches %ld, Involuntary context switches %ld\n",
+ 	      rus.ru_msgsnd, rus.ru_msgrcv, rus.ru_nsignals,
+ 	      rus.ru_nvcsw, rus.ru_nivcsw);
+ #endif
++#endif
+ #if ( defined(MSDOS) || defined(__NETWARE__) ) && !defined(__WIN__)
+     fprintf(info_file,"\nRun time: %.1f\n",(double) clock()/CLOCKS_PER_SEC);
+ #endif
+-- 
+2.26.0
+
+
+From ccb29e0e557803802c9fefda8c3df149dcb1595a Mon Sep 17 00:00:00 2001
+From: begasus <begasus@gmail.com>
+Date: Fri, 1 May 2020 09:37:37 +0000
+Subject: Fix conflicting types for int32 and uint32
+
+
+diff --git a/include/my_global.h b/include/my_global.h
+index 31bcb77..5d2ce69 100644
+--- a/include/my_global.h
++++ b/include/my_global.h
+@@ -892,10 +892,18 @@ typedef unsigned char	uint8;	/* Short for unsigned integer >= 8  bits */
+ typedef unsigned short	uint16; /* Short for unsigned integer >= 16 bits */
+ 
+ #if SIZEOF_INT == 4
++#if defined(__HAIKU__)
++#include <SupportDefs.h>
++#else
+ #ifndef HAVE_INT_8_16_32
+ typedef int		int32;
+ #endif
++#endif
++#if defined(__HAIKU__)
++#include <SupportDefs.h>
++#else
+ typedef unsigned int	uint32; /* Short for unsigned integer >= 32 bits */
++#endif
+ #elif SIZEOF_LONG == 4
+ #ifndef HAVE_INT_8_16_32
+ typedef long		int32;
+-- 
+2.26.0
+
+
+From 3920c19db3c4835db3a386aa04744628d44044ad Mon Sep 17 00:00:00 2001
+From: begasus <begasus@gmail.com>
+Date: Fri, 1 May 2020 12:23:57 +0000
+Subject: Fix invalid conversion from 'char' to 'char*'
+
+
+diff --git a/client/mysql.cc b/client/mysql.cc
+index 89f1f28..53197b7 100644
+--- a/client/mysql.cc
++++ b/client/mysql.cc
+@@ -2567,7 +2567,7 @@ You can turn off this feature to get a quicker startup with -A\n\n");
+         mysql_free_result(fields);
+         break;
+       }
+-      field_names[i][num_fields*2]= '\0';
++      field_names[i][num_fields*2]= NULL;
+       j=0;
+       while ((sql_field=mysql_fetch_field(fields)))
+       {
+diff --git a/server-tools/instance-manager/instance_map.cc b/server-tools/instance-manager/instance_map.cc
+index 571826e..db096fc 100644
+--- a/server-tools/instance-manager/instance_map.cc
++++ b/server-tools/instance-manager/instance_map.cc
+@@ -304,12 +304,12 @@ int Instance_map::load()
+              Options::config_file);
+ 
+     argv_options[1]= defaults_file_arg;
+-    argv_options[2]= '\0';
++    argv_options[2]= NULL;
+ 
+     argc= 2;
+   }
+   else
+-    argv_options[1]= '\0';
++    argv_options[1]= NULL;
+ 
+   /*
+     If the routine failed, we'll simply fallback to defaults in
+-- 
+2.26.0
+

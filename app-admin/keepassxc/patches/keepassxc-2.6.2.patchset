@@ -1,0 +1,152 @@
+From 6773585b905d736159d28abe7afe395d6447084d Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Mon, 4 Jan 2021 14:27:58 +1000
+Subject: Haiku fixes
+
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 0ceccdd..d5de544 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -352,9 +352,9 @@ if(APPLE)
+     endif()
+ endif()
+ if(HAIKU)
+-    target_link_libraries(keepassx_core network)
++    target_link_libraries(keepassx_core Qt5::DBus be network)
+ endif()
+-if(UNIX AND NOT APPLE)
++if(UNIX AND NOT APPLE AND NOT HAIKU)
+     target_link_libraries(keepassx_core Qt5::DBus X11)
+     include_directories(${Qt5Gui_PRIVATE_INCLUDE_DIRS})
+ endif()
+diff --git a/src/core/Resources.cpp b/src/core/Resources.cpp
+index ae8c0d4..b84a3af 100644
+--- a/src/core/Resources.cpp
++++ b/src/core/Resources.cpp
+@@ -161,7 +161,10 @@ QIcon Resources::icon(const QString& name, bool recolor, const QColor& overrideC
+     // See issue #4963: https://github.com/keepassxreboot/keepassxc/issues/4963
+     // and qt5ct issue #80: https://sourceforge.net/p/qt5ct/tickets/80/
+     QIcon::setThemeName("application");
+-
++#ifdef Q_OS_HAIKU
++    QIcon::setFallbackThemeName("haiku");
++    icon = QIcon::fromTheme(name);
++#else
+     icon = QIcon::fromTheme(name);
+     if (getMainWindow() && recolor) {
+         const QRect rect(0, 0, 48, 48);
+@@ -194,7 +197,7 @@ QIcon Resources::icon(const QString& name, bool recolor, const QColor& overrideC
+         icon.setIsMask(true);
+ #endif
+     }
+-
++#endif
+     if (!overrideColor.isValid()) {
+         m_iconCache.insert(name, icon);
+     }
+diff --git a/src/gui/Application.cpp b/src/gui/Application.cpp
+index 0c38970..48a2882 100644
+--- a/src/gui/Application.cpp
++++ b/src/gui/Application.cpp
+@@ -151,6 +151,9 @@ void Application::applyTheme()
+         if (winUtils()->isHighContrastMode()) {
+             appTheme = "classic";
+         }
++#endif
++#ifdef Q_OS_HAIKU
++        appTheme = "classic";
+ #endif
+     }
+ 
+diff --git a/src/gui/osutils/nixutils/NixUtils.cpp b/src/gui/osutils/nixutils/NixUtils.cpp
+index b252458..1168434 100644
+--- a/src/gui/osutils/nixutils/NixUtils.cpp
++++ b/src/gui/osutils/nixutils/NixUtils.cpp
+@@ -27,12 +27,16 @@
+ #include <QStyle>
+ #include <QTextStream>
+ 
++#ifdef __HAIKU__
++#include <InterfaceDefs.h>
++#else
+ #include <qpa/qplatformnativeinterface.h>
+ // namespace required to avoid name clashes with declarations in XKBlib.h
+ namespace X11
+ {
+ #include <X11/XKBlib.h>
+ }
++#endif
+ 
+ QPointer<NixUtils> NixUtils::m_instance = nullptr;
+ 
+@@ -64,6 +68,15 @@ bool NixUtils::isDarkMode() const
+ 
+ QString NixUtils::getAutostartDesktopFilename(bool createDirs) const
+ {
++#ifdef __HAIKU__
++    QDir autostartDir;
++    auto confHome = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
++    autostartDir.setPath(confHome + QStringLiteral("/config/settings/boot/launch/"));
++    if (createDirs && !autostartDir.exists()) {
++        autostartDir.mkpath(".");
++    }
++    return QFile(autostartDir.absoluteFilePath("keepassxc")).fileName();
++#else
+     QDir autostartDir;
+     auto confHome = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation);
+     if (confHome.isEmpty()) {
+@@ -76,6 +89,7 @@ QString NixUtils::getAutostartDesktopFilename(bool createDirs) const
+ 
+     return QFile(autostartDir.absoluteFilePath(qApp->property("KPXC_QUALIFIED_APPNAME").toString().append(".desktop")))
+         .fileName();
++#endif
+ }
+ 
+ bool NixUtils::isLaunchAtStartupEnabled() const
+@@ -94,6 +108,13 @@ void NixUtils::setLaunchAtStartup(bool enable)
+         }
+         QTextStream stream(&desktopFile);
+         stream.setCodec("UTF-8");
++#ifdef __HAIKU__
++        stream << QStringLiteral("#!/bin/sh") << '\n'
++               << QApplication::applicationFilePath() << endl;
++        desktopFile.close();
++		desktopFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther |
++			QFileDevice::WriteOwner | QFileDevice::ExeOwner | QFileDevice::ExeGroup | QFileDevice::ExeOther);
++#else
+         stream << QStringLiteral("[Desktop Entry]") << '\n'
+                << QStringLiteral("Name=") << QApplication::applicationDisplayName() << '\n'
+                << QStringLiteral("GenericName=") << tr("Password Manager") << '\n'
+@@ -109,6 +130,7 @@ void NixUtils::setLaunchAtStartup(bool enable)
+                << QStringLiteral("MimeType=application/x-keepass2;") << '\n'
+                << QStringLiteral("X-GNOME-Autostart-enabled=true") << endl;
+         desktopFile.close();
++#endif
+     } else if (isLaunchAtStartupEnabled()) {
+         QFile::remove(getAutostartDesktopFilename());
+     }
+@@ -116,6 +138,12 @@ void NixUtils::setLaunchAtStartup(bool enable)
+ 
+ bool NixUtils::isCapslockEnabled()
+ {
++#ifdef __HAIKU__
++	key_info keystate;
++	if (get_key_info(&keystate) == B_OK) {
++		return keystate.modifiers & B_SCROLL_LOCK;
++	}
++#else
+     QPlatformNativeInterface* native = QGuiApplication::platformNativeInterface();
+     auto* display = native->nativeResourceForWindow("display", nullptr);
+     if (!display) {
+@@ -131,6 +159,6 @@ bool NixUtils::isCapslockEnabled()
+     }
+ 
+     // TODO: Wayland
+-
++#endif
+     return false;
+ }
+-- 
+2.28.0
+

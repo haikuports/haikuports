@@ -1,0 +1,383 @@
+From 3e3979c2ae83dd20ead2ae41dff99090a982d274 Mon Sep 17 00:00:00 2001
+From: X512 <danger_mail@list.ru>
+Date: Wed, 16 Mar 2022 07:04:18 +0900
+Subject: [libunwind] Haiku: Signal frame unwinding support
+
+---
+ src/UnwindCursor.hpp | 70 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 66 insertions(+), 4 deletions(-)
+
+diff --git a/src/UnwindCursor.hpp b/src/UnwindCursor.hpp
+index e537ed84dd..aff638d5cd 100644
+--- a/src/UnwindCursor.hpp
++++ b/src/UnwindCursor.hpp
+@@ -942,6 +942,9 @@ private:
+   template <typename Registers> int stepThroughSigReturn(Registers &) {
+     return UNW_STEP_END;
+   }
++#elif defined(__HAIKU__)
++  bool setInfoForSigReturn();
++  int stepThroughSigReturn();
+ #endif
+ 
+ #if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
+@@ -1198,7 +1201,7 @@ private:
+   unw_proc_info_t  _info;
+   bool             _unwindInfoMissing;
+   bool             _isSignalFrame;
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
+   bool             _isSigReturn = false;
+ #endif
+ };
+@@ -1895,7 +1898,7 @@ bool UnwindCursor<A, R>::getInfoFromSEH(pint_t pc) {
+ 
+ template <typename A, typename R>
+ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
+   _isSigReturn = false;
+ #endif
+ 
+@@ -1997,7 +2000,7 @@ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
+   }
+ #endif // #if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
+ 
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
+   if (setInfoForSigReturn())
+     return;
+ #endif
+@@ -2066,6 +2069,65 @@ int UnwindCursor<A, R>::stepThroughSigReturn(Registers_arm64 &) {
+   _isSignalFrame = true;
+   return UNW_STEP_SUCCESS;
+ }
++#elif defined(__HAIKU__)
++
++#include <commpage_defs.h>
++#include <signal.h>
++
++extern "C" {
++extern void *__gCommPageAddress;
++}
++
++template <typename A, typename R>
++bool UnwindCursor<A, R>::setInfoForSigReturn() {
++#if defined(_LIBUNWIND_TARGET_X86_64)
++  addr_t signal_handler = (((addr_t*)__gCommPageAddress)[COMMPAGE_ENTRY_X86_SIGNAL_HANDLER] + (addr_t)__gCommPageAddress);
++	addr_t signal_handler_ret = signal_handler + 45;
++#endif
++  pint_t pc = static_cast<pint_t>(this->getReg(UNW_REG_IP));
++  if (pc == signal_handler_ret) {
++    //printf("signal frame detected\n");
++    _info = {};
++    _info.start_ip = signal_handler;
++    _info.end_ip = signal_handler_ret;
++    _isSigReturn = true;
++    return true;
++  }
++  return false;
++}
++
++template <typename A, typename R>
++int UnwindCursor<A, R>::stepThroughSigReturn() {
++  //printf("stepThroughSigReturn\n");
++  _isSignalFrame = true;
++  pint_t sp = _registers.getSP();
++  // printf("sp: %p\n", (void*)sp);
++#if defined(_LIBUNWIND_TARGET_X86_64)
++  vregs *regs = (vregs*)(sp + 0x70);
++  //printf("&regs: %p\n", regs);
++ 
++  _registers.setRegister(UNW_REG_IP, regs->rip);
++  _registers.setRegister(UNW_REG_SP, regs->rsp);
++  _registers.setRegister(UNW_X86_64_RAX, regs->rax);
++  _registers.setRegister(UNW_X86_64_RDX, regs->rdx);
++  _registers.setRegister(UNW_X86_64_RCX, regs->rcx);
++  _registers.setRegister(UNW_X86_64_RBX, regs->rbx);
++  _registers.setRegister(UNW_X86_64_RSI, regs->rsi);
++  _registers.setRegister(UNW_X86_64_RDI, regs->rdi);
++  _registers.setRegister(UNW_X86_64_RBP, regs->rbp);
++  _registers.setRegister(UNW_X86_64_R8,  regs->r8);
++  _registers.setRegister(UNW_X86_64_R9,  regs->r9);
++  _registers.setRegister(UNW_X86_64_R10, regs->r10);
++  _registers.setRegister(UNW_X86_64_R11, regs->r11);
++  _registers.setRegister(UNW_X86_64_R12, regs->r12);
++  _registers.setRegister(UNW_X86_64_R13, regs->r13);
++  _registers.setRegister(UNW_X86_64_R14, regs->r14);
++  _registers.setRegister(UNW_X86_64_R15, regs->r15);
++  // TODO: XMM
++#endif
++
++  return UNW_STEP_SUCCESS;
++}
+ #endif // defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64)
+ 
+ template <typename A, typename R>
+@@ -2076,7 +2138,7 @@ int UnwindCursor<A, R>::step() {
+ 
+   // Use unwinding info to modify register set as if function returned.
+   int result;
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
+   if (_isSigReturn) {
+     result = this->stepThroughSigReturn();
+   } else
+-- 
+2.35.0
+
+
+From 75b77fac13bcbaff3c3f2bb82cc20d061616e608 Mon Sep 17 00:00:00 2001
+From: Trung Nguyen <trungnt282910@gmail.com>
+Date: Thu, 7 Jul 2022 22:19:34 +0700
+Subject: [libunwind] Haiku: Initial support
+
+---
+ cmake/config-ix.cmake        | 14 +++++++++++++-
+ include/__libunwind_config.h |  3 +++
+ src/CMakeLists.txt           | 26 ++++++++++++++++++++++++++
+ src/Registers.hpp            |  9 ++++++++-
+ src/UnwindCursor.hpp         | 24 +++++++++++++++---------
+ src/config.h                 |  6 ++++++
+ 6 files changed, 71 insertions(+), 11 deletions(-)
+
+diff --git a/cmake/config-ix.cmake b/cmake/config-ix.cmake
+index 3e42818882..ca4e608719 100644
+--- a/cmake/config-ix.cmake
++++ b/cmake/config-ix.cmake
+@@ -5,7 +5,11 @@ include(CheckLibraryExists)
+ include(CheckSymbolExists)
+ include(CheckCSourceCompiles)
+ 
+-check_library_exists(c fopen "" LIBUNWIND_HAS_C_LIB)
++if (HAIKU)
++  check_library_exists(root fopen "" LIBUNWIND_HAS_ROOT_LIB)
++else()
++  check_library_exists(c fopen "" LIBUNWIND_HAS_C_LIB)
++endif()
+ 
+ if (NOT LIBUNWIND_USE_COMPILER_RT)
+   if (ANDROID)
+@@ -29,6 +33,9 @@ if (LIBUNWIND_HAS_NODEFAULTLIBS_FLAG)
+   if (LIBUNWIND_HAS_C_LIB)
+     list(APPEND CMAKE_REQUIRED_LIBRARIES c)
+   endif ()
++  if (LIBUNWIND_HAS_ROOT_LIB)
++    list(APPEND CMAKE_REQUIRED_LIBRARIES root)
++  endif ()
+   if (LIBUNWIND_USE_COMPILER_RT)
+     find_compiler_rt_library(builtins LIBUNWIND_BUILTINS_LIBRARY)
+     list(APPEND CMAKE_REQUIRED_LIBRARIES "${LIBUNWIND_BUILTINS_LIBRARY}")
+@@ -93,3 +100,8 @@ else()
+   check_library_exists(dl dladdr "" LIBUNWIND_HAS_DL_LIB)
+   check_library_exists(pthread pthread_once "" LIBUNWIND_HAS_PTHREAD_LIB)
+ endif()
++
++if(HAIKU)
++  set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -D_DEFAULT_SOURCE")
++  check_library_exists(bsd dl_iterate_phdr "" LIBUNWIND_HAS_BSD_LIB)
++endif()
+\ No newline at end of file
+diff --git a/include/__libunwind_config.h b/include/__libunwind_config.h
+index 34ac6f717d..21744546f1 100644
+--- a/include/__libunwind_config.h
++++ b/include/__libunwind_config.h
+@@ -31,6 +31,9 @@
+ # if defined(__linux__)
+ #  define _LIBUNWIND_TARGET_LINUX 1
+ # endif
++# if defined(__HAIKU__)
++#  define _LIBUNWIND_TARGET_HAIKU 1
++# endif
+ # if defined(__i386__)
+ #  define _LIBUNWIND_TARGET_I386
+ #  define _LIBUNWIND_CONTEXT_SIZE 8
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index dc2c5e0087..93d2d49967 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -103,6 +103,32 @@ if (APPLE)
+   endif ()
+ endif ()
+ 
++if (HAIKU)
++  add_library_flags_if(LIBUNWIND_HAS_ROOT_LIB root)
++
++  add_library_flags_if(LIBUNWIND_HAS_BSD_LIB bsd)
++  add_compile_flags_if(LIBUNWIND_HAS_BSD_LIB -D_DEFAULT_SOURCE=1)
++  add_compile_flags_if(LIBUNWIND_HAS_BSD_LIB -D_LIBUNWIND_USE_HAIKU_BSD_LIB=1)
++
++  add_compile_flags("-DPT_GNU_EH_FRAME=PT_EH_FRAME")
++
++  find_path(LIBUNWIND_HAIKU_PRIVATE_HEADERS
++            "commpage_defs.h"
++            PATHS ${CMAKE_SYSTEM_INCLUDE_PATH}
++            PATH_SUFFIXES "/private/system"
++            NO_DEFAULT_PATH
++            REQUIRED)
++
++  include_directories(SYSTEM "${LIBUNWIND_HAIKU_PRIVATE_HEADERS}")
++  if (LIBUNWIND_TARGET_TRIPLE)
++    if (${LIBUNWIND_TARGET_TRIPLE} MATCHES "^x86_64")
++      include_directories(SYSTEM "${LIBUNWIND_HAIKU_PRIVATE_HEADERS}/arch/x86_64")
++    endif()
++  else()
++    include_directories(SYSTEM "${LIBUNWIND_HAIKU_PRIVATE_HEADERS}/arch/${CMAKE_SYSTEM_PROCESSOR}")
++  endif()
++endif()
++
+ string(REPLACE ";" " " LIBUNWIND_COMPILE_FLAGS "${LIBUNWIND_COMPILE_FLAGS}")
+ string(REPLACE ";" " " LIBUNWIND_CXX_FLAGS "${LIBUNWIND_CXX_FLAGS}")
+ string(REPLACE ";" " " LIBUNWIND_C_FLAGS "${LIBUNWIND_C_FLAGS}")
+diff --git a/src/Registers.hpp b/src/Registers.hpp
+index efeaf43559..f8e820dc19 100644
+--- a/src/Registers.hpp
++++ b/src/Registers.hpp
+@@ -339,7 +339,7 @@ inline bool Registers_x86_64::validRegister(int regNum) const {
+     return true;
+   if (regNum < 0)
+     return false;
+-  if (regNum > 15)
++  if (regNum > 16)
+     return false;
+   return true;
+ }
+@@ -382,6 +382,8 @@ inline uint64_t Registers_x86_64::getRegister(int regNum) const {
+     return _registers.__r14;
+   case UNW_X86_64_R15:
+     return _registers.__r15;
++  case UNW_X86_64_RIP:
++    return _registers.__rip;
+   }
+   _LIBUNWIND_ABORT("unsupported x86_64 register");
+ }
+@@ -442,6 +444,9 @@ inline void Registers_x86_64::setRegister(int regNum, uint64_t value) {
+   case UNW_X86_64_R15:
+     _registers.__r15 = value;
+     return;
++  case UNW_X86_64_RIP:
++    _registers.__rip = value;
++    return;
+   }
+   _LIBUNWIND_ABORT("unsupported x86_64 register");
+ }
+@@ -484,6 +489,8 @@ inline const char *Registers_x86_64::getRegisterName(int regNum) {
+     return "r14";
+   case UNW_X86_64_R15:
+     return "r15";
++  case UNW_X86_64_RIP:
++    return "rip";
+   case UNW_X86_64_XMM0:
+     return "xmm0";
+   case UNW_X86_64_XMM1:
+diff --git a/src/UnwindCursor.hpp b/src/UnwindCursor.hpp
+index aff638d5cd..45751ec0ae 100644
+--- a/src/UnwindCursor.hpp
++++ b/src/UnwindCursor.hpp
+@@ -646,7 +646,7 @@ template <typename A, typename R>
+ bool UnwindCursor<A, R>::validReg(int regNum) {
+   if (regNum == UNW_REG_IP || regNum == UNW_REG_SP) return true;
+ #if defined(_LIBUNWIND_TARGET_X86_64)
+-  if (regNum >= UNW_X86_64_RAX && regNum <= UNW_X86_64_R15) return true;
++  if (regNum >= UNW_X86_64_RAX && regNum <= UNW_x86_64_RIP) return true;
+ #elif defined(_LIBUNWIND_TARGET_ARM)
+   if (regNum >= UNW_ARM_R0 && regNum <= UNW_ARM_R15) return true;
+ #elif defined(_LIBUNWIND_TARGET_AARCH64)
+@@ -659,7 +659,8 @@ template <typename A, typename R>
+ unw_word_t UnwindCursor<A, R>::getReg(int regNum) {
+   switch (regNum) {
+ #if defined(_LIBUNWIND_TARGET_X86_64)
+-  case UNW_REG_IP: return _msContext.Rip;
++  case UNW_REG_IP:
++  case UNW_x86_64_RIP: return _msContext.Rip;
+   case UNW_X86_64_RAX: return _msContext.Rax;
+   case UNW_X86_64_RDX: return _msContext.Rdx;
+   case UNW_X86_64_RCX: return _msContext.Rcx;
+@@ -709,7 +710,8 @@ template <typename A, typename R>
+ void UnwindCursor<A, R>::setReg(int regNum, unw_word_t value) {
+   switch (regNum) {
+ #if defined(_LIBUNWIND_TARGET_X86_64)
+-  case UNW_REG_IP: _msContext.Rip = value; break;
++  case UNW_REG_IP:
++  case UNW_x86_64_RIP: _msContext.Rip = value; break;
+   case UNW_X86_64_RAX: _msContext.Rax = value; break;
+   case UNW_X86_64_RDX: _msContext.Rdx = value; break;
+   case UNW_X86_64_RCX: _msContext.Rcx = value; break;
+@@ -942,7 +944,7 @@ private:
+   template <typename Registers> int stepThroughSigReturn(Registers &) {
+     return UNW_STEP_END;
+   }
+-#elif defined(__HAIKU__)
++#elif defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+   bool setInfoForSigReturn();
+   int stepThroughSigReturn();
+ #endif
+@@ -1201,7 +1203,8 @@ private:
+   unw_proc_info_t  _info;
+   bool             _unwindInfoMissing;
+   bool             _isSignalFrame;
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) \
++    || defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+   bool             _isSigReturn = false;
+ #endif
+ };
+@@ -1898,7 +1901,8 @@ bool UnwindCursor<A, R>::getInfoFromSEH(pint_t pc) {
+ 
+ template <typename A, typename R>
+ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) \
++    || defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+   _isSigReturn = false;
+ #endif
+ 
+@@ -2000,7 +2004,8 @@ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
+   }
+ #endif // #if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
+ 
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) \
++    || defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+   if (setInfoForSigReturn())
+     return;
+ #endif
+@@ -2069,7 +2074,7 @@ int UnwindCursor<A, R>::stepThroughSigReturn(Registers_arm64 &) {
+   _isSignalFrame = true;
+   return UNW_STEP_SUCCESS;
+ }
+-#elif defined(__HAIKU__)
++#elif defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+ 
+ #include <commpage_defs.h>
+ #include <signal.h>
+@@ -2138,7 +2143,8 @@ int UnwindCursor<A, R>::step() {
+ 
+   // Use unwinding info to modify register set as if function returned.
+   int result;
+-#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) || defined(__HAIKU__)
++#if defined(_LIBUNWIND_TARGET_LINUX) && defined(_LIBUNWIND_TARGET_AARCH64) \
++    || defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+   if (_isSigReturn) {
+     result = this->stepThroughSigReturn();
+   } else
+diff --git a/src/config.h b/src/config.h
+index 9efed05405..116a7d481a 100644
+--- a/src/config.h
++++ b/src/config.h
+@@ -43,6 +43,12 @@
+   // For ARM EHABI, Bionic didn't implement dl_iterate_phdr until API 21. After
+   // API 21, dl_iterate_phdr exists, but dl_unwind_find_exidx is much faster.
+   #define _LIBUNWIND_USE_DL_UNWIND_FIND_EXIDX 1
++#elif defined(__HAIKU__)
++  #if defined(_LIBUNWIND_USE_HAIKU_BSD_LIB)
++    #define _LIBUNWIND_USE_DL_ITERATE_PHDR 1
++  #endif
++  #define _LIBUNWIND_SUPPORT_DWARF_UNWIND 1
++  #define _LIBUNWIND_SUPPORT_DWARF_INDEX 1
+ #else
+   // Assume an ELF system with a dl_iterate_phdr function.
+   #define _LIBUNWIND_USE_DL_ITERATE_PHDR 1
+-- 
+2.35.0
+

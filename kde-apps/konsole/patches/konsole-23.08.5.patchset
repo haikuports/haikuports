@@ -1,0 +1,107 @@
+From dce57aea33defb6cee689695b8da74c3a9720477 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 3 Mar 2024 22:00:00 +1000
+Subject: Fix for Haiku
+
+
+diff --git a/data/CMakeLists.txt b/data/CMakeLists.txt
+index 9fa030f..ee8a75c 100644
+--- a/data/CMakeLists.txt
++++ b/data/CMakeLists.txt
+@@ -3,5 +3,5 @@ add_subdirectory( color-schemes )
+ add_subdirectory( keyboard-layouts )
+ add_subdirectory( layouts )
+ 
+-install( FILES konsole.knsrc DESTINATION ${KDE_INSTALL_KNSRCDIR})
++install( FILES konsole.knsrc DESTINATION ${KDE_INSTALL_DATADIR}/knsrcfiles)
+ install(FILES konsolerc DESTINATION ${KDE_INSTALL_CONFDIR})
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index d44727f..2e1278b 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -90,6 +90,10 @@ if(${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD")
+     list(APPEND konsole_LIBS util)
+ endif()
+ 
++if(HAIKU)
++    list(APPEND konsole_LIBS network)
++endif()
++
+ # TODO: Move this to an internal folder if it grows too much.
+ # This konsoleprivate_core is the "core" library that depends in nothing from konsole itself
+ # so we can start to detangle the codebase.
+diff --git a/src/Pty.cpp b/src/Pty.cpp
+index 011b203..204157b 100644
+--- a/src/Pty.cpp
++++ b/src/Pty.cpp
+@@ -253,7 +253,7 @@ void Pty::addEnvironmentVariables(const QStringList &environmentVariables)
+ 
+     // extra safeguard to make sure $TERM is always set
+     if (!isTermEnvAdded) {
+-        setEnv(QStringLiteral("TERM"), QStringLiteral("xterm-256color"));
++        setEnv(QStringLiteral("TERM"), QStringLiteral("xterm-color"));
+     }
+ }
+ 
+diff --git a/src/Vt102Emulation.cpp b/src/Vt102Emulation.cpp
+index 62cc67f..d5440bf 100644
+--- a/src/Vt102Emulation.cpp
++++ b/src/Vt102Emulation.cpp
+@@ -2412,11 +2412,19 @@ void Vt102Emulation::sendKeyEvent(QKeyEvent *event)
+         // Alt+[Character] results in Esc+[Character] being sent
+         // (unless there is an entry defined for this particular combination
+         //  in the keyboard modifier)
++#ifdef Q_OS_HAIKU
++        const bool wantsControlModifier = ((entry.modifiers() & entry.modifierMask() & Qt::ControlModifier) != 0U);
++#else
+         const bool wantsAltModifier = ((entry.modifiers() & entry.modifierMask() & Qt::AltModifier) != 0U);
++#endif
+         const bool wantsMetaModifier = ((entry.modifiers() & entry.modifierMask() & Qt::MetaModifier) != 0U);
+         const bool wantsAnyModifier = ((entry.state() & entry.stateMask() & KeyboardTranslator::AnyModifierState) != 0);
+ 
++#ifdef Q_OS_HAIKU
++        if (((modifiers & Qt::ControlModifier) != 0U) && !(wantsControlModifier || wantsAnyModifier) && !event->text().isEmpty()) {
++#else
+         if (((modifiers & Qt::AltModifier) != 0U) && !(wantsAltModifier || wantsAnyModifier) && !event->text().isEmpty()) {
++#endif
+             textToSend.prepend("\033");
+         }
+         if (((modifiers & Qt::MetaModifier) != 0U) && !(wantsMetaModifier || wantsAnyModifier) && !event->text().isEmpty()) {
+diff --git a/src/profile/Profile.cpp b/src/profile/Profile.cpp
+index 8ac27eb..99bd221 100644
+--- a/src/profile/Profile.cpp
++++ b/src/profile/Profile.cpp
+@@ -71,7 +71,7 @@ const std::vector<Profile::PropertyInfo> Profile::DefaultProperties = {
+     {Command, "Command", nullptr, QString()},
+     {Arguments, "Arguments", nullptr, QStringList()},
+     {MenuIndex, "MenuIndex", nullptr, QLatin1String("0")},
+-    {Environment, "Environment", GENERAL_GROUP, QStringList{QLatin1String("TERM=xterm-256color"), QLatin1String("COLORTERM=truecolor")}},
++    {Environment, "Environment", GENERAL_GROUP, QStringList{QLatin1String("TERM=xterm-color"), QLatin1String("COLORTERM=truecolor")}},
+     {Directory, "Directory", GENERAL_GROUP, QString()},
+     {LocalTabTitleFormat, "LocalTabTitleFormat", GENERAL_GROUP, QLatin1String("%d : %n")},
+     {LocalTabTitleFormat, "tabtitle", nullptr, QLatin1String("%d : %n")},
+diff --git a/src/session/Session.cpp b/src/session/Session.cpp
+index e821e46..c2776b4 100644
+--- a/src/session/Session.cpp
++++ b/src/session/Session.cpp
+@@ -519,14 +519,16 @@ void Session::run()
+     }
+ 
+     // if a program was specified via setProgram(), but it couldn't be found (but a fallback was), print a warning
++#ifndef Q_OS_HAIKU
+     if (exec != checkProgram(_program)) {
+         terminalWarning(i18n("Could not find '%1', starting '%2' instead.  Please check your profile settings.", _program, exec));
+     } else if (exec != checkProgram(exec)) {
+         terminalWarning(i18n("Could not find '%1', starting '%2' instead.  Please check your profile settings.", exec, checkProgram(exec)));
+     }
++#endif
+ 
+     // if no arguments are specified, fall back to program name
+-    QStringList arguments = _arguments.join(QLatin1Char(' ')).isEmpty() ? QStringList() << exec : _arguments;
++    QStringList arguments = _arguments.join(QLatin1Char(' ')).isEmpty() ? QStringList() << exec << QStringLiteral("-login") : _arguments;
+ 
+     // For historical reasons, the first argument in _arguments is the
+     // name of the program to execute, remove it in favor of the actual program name
+-- 
+2.43.2
+

@@ -1,0 +1,1135 @@
+From 31078b4655db11a17af10d097b49c43f1686a190 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 24 Sep 2021 00:04:13 +1000
+Subject: Fix build for Haiku
+
+
+diff --git a/include/platform.h b/include/platform.h
+index 1b2e820..7bb6c3f 100644
+--- a/include/platform.h
++++ b/include/platform.h
+@@ -46,6 +46,12 @@
+ #include <setjmp.h>
+ #endif
+ 
++#ifdef __HAIKU__
++#include <sys/select.h>
++#include <sys/stat.h>
++#define lseek64 lseek
++#endif
++
+ #ifdef __APPLE__
+ #define lseek64 lseek
+ #endif
+@@ -73,7 +79,11 @@
+ #else
+ #pragma clang diagnostic ignored "-Winvalid-offsetof"
+ #include <limits.h>
++#ifdef __HAIKU__
++#define THREAD_LOCAL
++#else
+ #define THREAD_LOCAL thread_local
++#endif
+ #if ( __WORDSIZE == 64 )
+ #define BOXEDWINE_64   1
+ #endif
+diff --git a/lib/imgui/addon/imguitinyfiledialogs.cpp b/lib/imgui/addon/imguitinyfiledialogs.cpp
+index 8c11de8..ad65f10 100644
+--- a/lib/imgui/addon/imguitinyfiledialogs.cpp
++++ b/lib/imgui/addon/imguitinyfiledialogs.cpp
+@@ -1739,6 +1739,17 @@ static int isDarwin ( )
+ 	return lsIsDarwin ;
+ }
+ 
++static int isHaiku ( )
++{
++	static int lsIsHaiku = -1 ;
++	struct utsname lUtsname ;
++	if ( lsIsHaiku < 0 )
++	{
++		lsIsHaiku = !uname(&lUtsname) && !strcmp(lUtsname.sysname,"Haiku") ;
++	}
++	return lsIsHaiku ;
++}
++
+ 
+ static int dirExists ( char const * const aDirPath )
+ {
+@@ -2042,7 +2053,7 @@ static int whiptailPresent ( )
+ static int graphicMode()
+ {
+ 	return !( tinyfd_forceConsole && (isatty(1) || terminalName()) )
+-			&& ( getenv ( "DISPLAY" ) || isDarwin() ) ;
++			&& ( getenv ( "DISPLAY" ) || isDarwin() || isHaiku() ) ;
+ }
+ 
+ 
+@@ -2123,6 +2134,16 @@ static int kdialogPresent ( )
+ }
+ 
+ 
++static int filepanelPresent ( )
++{
++	static int lFilepPanelPresent = -1 ;
++#ifdef __HAIKU__
++	lFilepPanelPresent = 1 ;
++#endif
++	return lFilepPanelPresent && graphicMode ( ) ;
++}
++
++
+ static int zenityPresent ( )
+ {
+ 	static int lZenityPresent = -1 ;
+@@ -3267,6 +3288,29 @@ char const * saveFileDialog (
+ 			strcat(lDialogString, "\"") ;
+ 	    }
+     }
++ 	else if ( filepanelPresent() )
++	{
++		strcpy ( lDialogString , "filepanel --save" ) ;
++		if ( aDefaultPathAndFile && strlen(aDefaultPathAndFile) )
++		{
++			strcat(lDialogString, " --directory \"") ;
++			strcat(lDialogString, aDefaultPathAndFile ) ;
++			strcat(lDialogString , "\"" ) ;
++		}
++		getLastName ( lString , aDefaultPathAndFile ) ;
++		if ( strlen(lString) )
++		{
++			strcat(lDialogString, " --name \"") ;
++			strcat(lDialogString, lString ) ;
++			strcat(lDialogString , "\"" ) ;
++		}
++		if ( aTitle && strlen(aTitle) )
++		{
++			strcat(lDialogString, " --title \"") ;
++			strcat(lDialogString, aTitle) ;
++			strcat(lDialogString, "\"") ;
++		}
++	}
+     else if ( ! xdialogPresent() && tkinter2Present ( ) )
+     {
+ 
+@@ -3599,6 +3643,26 @@ char const * openFileDialog (
+ 			strcat(lDialogString, "\"") ;
+ 		}
+ 	}
++	else if ( filepanelPresent() )
++	{
++		strcpy ( lDialogString , "filepanel --load" ) ;
++		if ( aDefaultPathAndFile && strlen(aDefaultPathAndFile) )
++		{
++			strcat(lDialogString, " --directory \"") ;
++			strcat(lDialogString, aDefaultPathAndFile ) ;
++			strcat(lDialogString , "\"" ) ;
++		}
++		if ( !aAllowMultipleSelects )
++		{
++			strcat ( lDialogString , " --single" ) ;
++		}
++		if ( aTitle && strlen(aTitle) )
++		{
++			strcat(lDialogString, " --title \"") ;
++			strcat(lDialogString, aTitle) ;
++			strcat(lDialogString, "\"") ;
++		}
++	}
+     else if ( ! xdialogPresent() && tkinter2Present ( ) )
+     {
+ 		strcpy ( lDialogString , gPython2Name ) ;
+@@ -3859,6 +3923,22 @@ char const * selectFolderDialog (
+ 			strcat(lDialogString, "\"") ;
+ 		}
+ 	}
++	else if ( filepanelPresent() )
++	{
++		strcpy ( lDialogString , "filepanel --kind d" ) ;
++		if ( aDefaultPath && strlen(aDefaultPath) )
++		{
++			strcat(lDialogString, " --directory \"") ;
++			strcat(lDialogString, aDefaultPath ) ;
++			strcat(lDialogString , "\"" ) ;
++		}
++		if ( aTitle && strlen(aTitle) )
++		{
++			strcat(lDialogString, " --title \"") ;
++			strcat(lDialogString, aTitle) ;
++			strcat(lDialogString, "\"") ;
++		}
++	}
+ 	else if ( ! xdialogPresent() && tkinter2Present ( ) )
+ 	{
+ 		strcpy ( lDialogString , gPython2Name ) ;
+diff --git a/lib/imgui/examples/imgui_impl_sdl.cpp b/lib/imgui/examples/imgui_impl_sdl.cpp
+index 9fd2cc4..2bb562d 100644
+--- a/lib/imgui/examples/imgui_impl_sdl.cpp
++++ b/lib/imgui/examples/imgui_impl_sdl.cpp
+@@ -250,7 +250,7 @@ static void ImGui_ImplSDL2_UpdateMousePosAndButtons()
+     io.MouseDown[2] = g_MousePressed[2] || (mouse_buttons & SDL_BUTTON(SDL_BUTTON_MIDDLE)) != 0;
+     g_MousePressed[0] = g_MousePressed[1] = g_MousePressed[2] = false;
+ 
+-#if SDL_HAS_CAPTURE_AND_GLOBAL_MOUSE && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IOS)
++#if SDL_HAS_CAPTURE_AND_GLOBAL_MOUSE && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !defined(__HAIKU__) && !(defined(__APPLE__) && TARGET_OS_IOS)
+     SDL_Window* focused_window = SDL_GetKeyboardFocus();
+     if (g_Window == focused_window)
+     {
+diff --git a/lib/poco/Foundation/CMakeLists.txt b/lib/poco/Foundation/CMakeLists.txt
+index 6b276be..1a95b71 100644
+--- a/lib/poco/Foundation/CMakeLists.txt
++++ b/lib/poco/Foundation/CMakeLists.txt
+@@ -159,6 +159,9 @@ else()
+ 			elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "AIX")
+ 				target_compile_definitions(Foundation PUBLIC _XOPEN_SOURCE=500 POCO_HAVE_FD_POLL)
+ 				target_link_libraries(Foundation PUBLIC pthread ${CMAKE_DL_LIBS} rt)
++			elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "Haiku")
++				target_compile_definitions(Foundation PUBLIC _XOPEN_SOURCE=500 POCO_HAVE_FD_POLL)
++				target_link_libraries(Foundation PUBLIC root bsd network)
+ 			else()
+ 				target_compile_definitions(Foundation PUBLIC _XOPEN_SOURCE=500 POCO_HAVE_FD_EPOLL)
+ 				target_link_libraries(Foundation PUBLIC pthread ${CMAKE_DL_LIBS} rt)
+diff --git a/lib/poco/Foundation/include/Poco/NamedEvent_UNIX.h b/lib/poco/Foundation/include/Poco/NamedEvent_UNIX.h
+index e593790..bf5d47d 100644
+--- a/lib/poco/Foundation/include/Poco/NamedEvent_UNIX.h
++++ b/lib/poco/Foundation/include/Poco/NamedEvent_UNIX.h
+@@ -19,7 +19,7 @@
+ 
+ 
+ #include "Poco/Foundation.h"
+-#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX)
++#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX) || defined(__HAIKU__)
+ #include <semaphore.h>
+ #endif
+ 
+@@ -39,7 +39,7 @@ private:
+ 	std::string getFileName();
+ 
+ 	std::string _name;
+-#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX)
++#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX) || defined(__HAIKU__)
+ 	sem_t* _sem;
+ #else
+ 	int _semid;  // semaphore id
+diff --git a/lib/poco/Foundation/include/Poco/NamedMutex_UNIX.h b/lib/poco/Foundation/include/Poco/NamedMutex_UNIX.h
+index da77a32..1e7f8ad 100644
+--- a/lib/poco/Foundation/include/Poco/NamedMutex_UNIX.h
++++ b/lib/poco/Foundation/include/Poco/NamedMutex_UNIX.h
+@@ -21,7 +21,7 @@
+ #include "Poco/Foundation.h"
+ #include <sys/types.h>
+ #include <sys/stat.h>
+-#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX)
++#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX) || defined(__HAIKU__)
+ #include <semaphore.h>
+ #endif
+ 
+@@ -42,7 +42,7 @@ private:
+ 	std::string getFileName();
+ 
+ 	std::string _name;
+-#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX)
++#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX) || defined(__HAIKU__)
+ 	sem_t* _sem;
+ #else
+ 	int _semid;  // semaphore id
+diff --git a/lib/poco/Foundation/include/Poco/Platform.h b/lib/poco/Foundation/include/Poco/Platform.h
+index 799db41..84fe3a1 100644
+--- a/lib/poco/Foundation/include/Poco/Platform.h
++++ b/lib/poco/Foundation/include/Poco/Platform.h
+@@ -39,6 +39,7 @@
+ #define POCO_OS_CYGWIN        0x000d
+ #define POCO_OS_NACL	      0x000e
+ #define POCO_OS_ANDROID       0x000f
++#define POCO_OS_HAIKU         0x0010
+ #define POCO_OS_UNKNOWN_UNIX  0x00ff
+ #define POCO_OS_WINDOWS_NT    0x1001
+ #define POCO_OS_WINDOWS_CE    0x1011
+@@ -89,6 +90,9 @@
+ #elif defined(__QNX__)
+ 	#define POCO_OS_FAMILY_UNIX 1
+ 	#define POCO_OS POCO_OS_QNX
++#elif defined(__HAIKU__)
++	#define POCO_OS_FAMILY_UNIX 1
++	#define POCO_OS POCO_OS_HAIKU
+ #elif defined(__CYGWIN__)
+ 	#define POCO_OS_FAMILY_UNIX 1
+ 	#define POCO_OS POCO_OS_CYGWIN
+diff --git a/lib/poco/Foundation/include/Poco/Types.h b/lib/poco/Foundation/include/Poco/Types.h
+index 6489a6f..e8f30de 100644
+--- a/lib/poco/Foundation/include/Poco/Types.h
++++ b/lib/poco/Foundation/include/Poco/Types.h
+@@ -49,7 +49,7 @@ using UIntPtr = std::uintptr_t;
+ 		#if defined(__LP64__)
+ 			#define POCO_PTR_IS_64_BIT 1
+ 			#define POCO_LONG_IS_64_BIT 1
+-			#if POCO_OS == POCO_OS_LINUX || POCO_OS == POCO_OS_FREE_BSD || POCO_OS == POCO_OS_ANDROID
++			#if POCO_OS == POCO_OS_LINUX || POCO_OS == POCO_OS_FREE_BSD || POCO_OS == POCO_OS_ANDROID || POCO_OS == POCO_OS_HAIKU
+ 				#define POCO_INT64_IS_LONG 1
+ 			#endif
+ 		#endif
+diff --git a/lib/poco/Foundation/src/Environment_UNIX.cpp b/lib/poco/Foundation/src/Environment_UNIX.cpp
+index b7e57e4..95f027e 100644
+--- a/lib/poco/Foundation/src/Environment_UNIX.cpp
++++ b/lib/poco/Foundation/src/Environment_UNIX.cpp
+@@ -294,7 +294,9 @@ void EnvironmentImpl::nodeIdImpl(NodeId& id)
+ #include <arpa/inet.h>
+ #include <netdb.h>
+ #include <net/if.h>
++#ifndef __HAIKU__
+ #include <net/if_arp.h>
++#endif
+ #include <unistd.h>
+ 
+ 
+@@ -310,7 +312,7 @@ void EnvironmentImpl::nodeIdImpl(NodeId& id)
+ 
+ 	struct hostent* pHost = gethostbyname(name);
+ 	if (!pHost) return;
+-
++#ifndef __HAIKU__
+ 	int s = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
+ 	if (s == -1) return;
+ 
+@@ -323,6 +325,7 @@ void EnvironmentImpl::nodeIdImpl(NodeId& id)
+ 	close(s);
+ 	if (rc < 0) return;
+ 	std::memcpy(&id, ar.arp_ha.sa_data, sizeof(id));
++#endif
+ }
+ 
+ 
+diff --git a/lib/poco/Foundation/src/File_UNIX.cpp b/lib/poco/Foundation/src/File_UNIX.cpp
+index 4cccb62..1519395 100644
+--- a/lib/poco/Foundation/src/File_UNIX.cpp
++++ b/lib/poco/Foundation/src/File_UNIX.cpp
+@@ -23,7 +23,7 @@
+ #if defined(POCO_OS_FAMILY_BSD)
+ #include <sys/param.h>
+ #include <sys/mount.h>
+-#elif (POCO_OS == POCO_OS_SOLARIS) || (POCO_OS == POCO_OS_QNX)
++#elif (POCO_OS == POCO_OS_SOLARIS) || (POCO_OS == POCO_OS_QNX) || (POCO_OS == POCO_OS_HAIKU)
+ #include <sys/statvfs.h>
+ #else
+ #include <sys/statfs.h>
+@@ -35,7 +35,7 @@
+ #include <utime.h>
+ #include <cstring>
+ 
+-#if (POCO_OS == POCO_OS_SOLARIS) || (POCO_OS == POCO_OS_QNX)
++#if (POCO_OS == POCO_OS_SOLARIS) || (POCO_OS == POCO_OS_QNX) || (POCO_OS == POCO_OS_HAIKU)
+ #define STATFSFN statvfs
+ #define STATFSSTRUCT statvfs
+ #else
+diff --git a/lib/poco/Foundation/src/NamedEvent_UNIX.cpp b/lib/poco/Foundation/src/NamedEvent_UNIX.cpp
+index 978e6e0..8cb16d9 100644
+--- a/lib/poco/Foundation/src/NamedEvent_UNIX.cpp
++++ b/lib/poco/Foundation/src/NamedEvent_UNIX.cpp
+@@ -18,7 +18,7 @@
+ #include <fcntl.h>
+ #include <sys/stat.h>
+ #include <errno.h>
+-#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX)
++#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX) || defined(__HAIKU__)
+ #include <semaphore.h>
+ #else
+ #include <unistd.h>
+@@ -31,7 +31,7 @@
+ namespace Poco {
+ 
+ 
+-#if (POCO_OS == POCO_OS_LINUX) || (POCO_OS == POCO_OS_ANDROID) || (POCO_OS == POCO_OS_CYGWIN) || (POCO_OS == POCO_OS_FREE_BSD)
++#if (POCO_OS == POCO_OS_LINUX) || (POCO_OS == POCO_OS_ANDROID) || (POCO_OS == POCO_OS_CYGWIN) || (POCO_OS == POCO_OS_FREE_BSD) || (POCO_OS == POCO_OS_HAIKU)
+ 	union semun
+ 	{
+ 		int                 val;
+@@ -53,7 +53,7 @@ NamedEventImpl::NamedEventImpl(const std::string& name):
+ 	_name(name)
+ {
+ 	std::string fileName = getFileName();
+-#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX)
++#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX) || defined(__HAIKU__)
+ 	_sem = sem_open(fileName.c_str(), O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO, 0);
+ 	if ((long) _sem == (long) SEM_FAILED)
+ 		throw SystemException(Poco::format("cannot create named mutex %s (sem_open() failed, errno=%d)", fileName, errno), _name);
+@@ -84,7 +84,7 @@ NamedEventImpl::NamedEventImpl(const std::string& name):
+ 
+ NamedEventImpl::~NamedEventImpl()
+ {
+-#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX)
++#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX) || defined(__HAIKU__)
+ 	sem_close(_sem);
+ #endif
+ }
+@@ -92,7 +92,7 @@ NamedEventImpl::~NamedEventImpl()
+ 
+ void NamedEventImpl::setImpl()
+ {
+-#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX)
++#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX) || defined(__HAIKU__)
+ 	if (sem_post(_sem) != 0)
+ 	   	throw SystemException("cannot set named event", _name);
+ #else
+@@ -108,7 +108,7 @@ void NamedEventImpl::setImpl()
+ 
+ void NamedEventImpl::waitImpl()
+ {
+-#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX)
++#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX) || defined(__HAIKU__)
+ 	int err;
+ 	do
+ 	{
+diff --git a/lib/poco/Foundation/src/NamedMutex_UNIX.cpp b/lib/poco/Foundation/src/NamedMutex_UNIX.cpp
+index 6cfa136..15d68b1 100644
+--- a/lib/poco/Foundation/src/NamedMutex_UNIX.cpp
++++ b/lib/poco/Foundation/src/NamedMutex_UNIX.cpp
+@@ -18,7 +18,7 @@
+ #include <fcntl.h>
+ #include <sys/stat.h>
+ #include <errno.h>
+-#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(_AIX)
++#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(_AIX) || defined(__HAIKU__)
+ #include <semaphore.h>
+ #else
+ #include <unistd.h>
+@@ -31,7 +31,7 @@
+ namespace Poco {
+ 
+ 
+-#if (POCO_OS == POCO_OS_LINUX) || (POCO_OS == POCO_OS_ANDROID) || (POCO_OS == POCO_OS_CYGWIN) || (POCO_OS == POCO_OS_FREE_BSD)
++#if (POCO_OS == POCO_OS_LINUX) || (POCO_OS == POCO_OS_ANDROID) || (POCO_OS == POCO_OS_CYGWIN) || (POCO_OS == POCO_OS_FREE_BSD) || (POCO_OS == POCO_OS_HAIKU)
+ 	union semun
+ 	{
+ 		int                 val;
+@@ -53,7 +53,7 @@ NamedMutexImpl::NamedMutexImpl(const std::string& name):
+ 	_name(name)
+ {
+ 	std::string fileName = getFileName();
+-#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX)
++#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX) || defined(__HAIKU__)
+ 	_sem = sem_open(fileName.c_str(), O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO, 1);
+ 	if ((long) _sem == (long) SEM_FAILED)
+ 		throw SystemException(Poco::format("cannot create named mutex %s (sem_open() failed, errno=%d)", fileName, errno), _name);
+@@ -89,7 +89,7 @@ NamedMutexImpl::NamedMutexImpl(const std::string& name):
+ 
+ NamedMutexImpl::~NamedMutexImpl()
+ {
+-#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX)
++#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX) || defined(__HAIKU__)
+ 	sem_close(_sem);
+ #else
+ 	if (_owned) semctl(_semid, 0, IPC_RMID, 0);
+@@ -99,7 +99,7 @@ NamedMutexImpl::~NamedMutexImpl()
+ 
+ void NamedMutexImpl::lockImpl()
+ {
+-#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX)
++#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX) || defined(__HAIKU__)
+ 	int err;
+ 	do
+ 	{
+@@ -125,7 +125,7 @@ void NamedMutexImpl::lockImpl()
+ 
+ bool NamedMutexImpl::tryLockImpl()
+ {
+-#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX)
++#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX) || defined(__HAIKU__)
+ 	return sem_trywait(_sem) == 0;
+ #else
+ 	struct sembuf op;
+@@ -139,7 +139,7 @@ bool NamedMutexImpl::tryLockImpl()
+ 
+ void NamedMutexImpl::unlockImpl()
+ {
+-#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX)
++#if defined(sun) || defined(__APPLE__) || defined(__osf__) || defined(__QNX__) || defined(_AIX) || defined(__HAIKU__)
+ 	if (sem_post(_sem) != 0)
+ 	   	throw SystemException("cannot unlock named mutex", _name);
+ #else
+diff --git a/lib/zlib/contrib/minizip/ioapi.c b/lib/zlib/contrib/minizip/ioapi.c
+index faaadf4..83cb8d7 100644
+--- a/lib/zlib/contrib/minizip/ioapi.c
++++ b/lib/zlib/contrib/minizip/ioapi.c
+@@ -19,7 +19,7 @@
+ #define FOPEN_FUNC(filename, mode) fopen(filename, mode)
+ #define FTELLO_FUNC(stream) ftello(stream)
+ #define FSEEKO_FUNC(stream, offset, origin) fseeko(stream, offset, origin)
+-#elif defined(__ANDROID__)
++#elif defined(__ANDROID__) || defined(__HAIKU__)
+ // In darwin and perhaps other BSD variants off_t is a 64 bit value, hence no need for specific 64 bit functions
+ #define FOPEN_FUNC(filename, mode) fopen(filename, mode)
+ #define FTELLO_FUNC(stream) ftell(stream)
+diff --git a/platform/linux/memory64.cpp b/platform/linux/memory64.cpp
+index 1fee9c9..7fdbc81 100644
+--- a/platform/linux/memory64.cpp
++++ b/platform/linux/memory64.cpp
+@@ -21,6 +21,10 @@
+ #include <string.h>
+ #include <errno.h>
+ 
++#if defined(__HAIKU__)
++#include <OS.h>
++#endif
++
+ #include "../../source/emulation/hardmmu/hard_memory.h"
+ 
+ U32 nativeMemoryPagesAllocated;
+@@ -154,6 +158,26 @@ static bool isAddressRangeInUse(void* p, U64 len) {
+     }
+     return true;
+ }
++
++#elif defined(__HAIKU__)
++static bool isAddressRangeInUse(void* p, U64 len) {
++	area_info info;
++	ssize_t cookie = 0;
++	while (get_next_area_info(0, &cookie, &info) == B_OK) {
++        unsigned long startAddress = (unsigned long)info.address;
++        unsigned long endAddress= (unsigned long)info.address + info.size;
++        if (startAddress>=(U64)p && startAddress<(U64)p+len) {
++            return true;
++        }
++        if (endAddress>=(U64)p && endAddress<(U64)p+len) {
++            return true;
++        }
++        if (startAddress<(U64)p + len && endAddress>(U64)p) {
++            return true;
++        }
++	}
++	return false;
++}
+ #else
+ 
+ static bool isAddressRangeInUse(void* p, U64 len) {
+diff --git a/platform/linux/platform.cpp b/platform/linux/platform.cpp
+index 97f99d3..ccf8fa4 100644
+--- a/platform/linux/platform.cpp
++++ b/platform/linux/platform.cpp
+@@ -22,6 +22,10 @@
+ #include <string.h>
+ #include <sys/types.h>
+ #include <sys/socket.h>
++#ifdef __HAIKU__
++#include <sys/select.h>
++#include <sys/stat.h>
++#endif
+ #include <SDL.h>
+ #ifdef BOXEDWINE_BINARY_TRANSLATOR
+ #include "../../source/emulation/cpu/binaryTranslation/btCpu.h"
+@@ -88,7 +92,12 @@ void Platform::listNodes(const std::string& nativePath, std::vector<ListNodeResu
+ 	if (dp) {
+         	while(NULL != (dptr = readdir(dp))) {
+ 			if (strcmp(dptr->d_name, ".") && strcmp(dptr->d_name, ".."))  {
+-				results.push_back(ListNodeResult(dptr->d_name, (dptr->d_type & DT_DIR)!=0));
++				struct stat sp;
++				std::string pathFileName = nativePath + "/" + dptr->d_name;
++				if (stat(pathFileName.c_str(), &sp) == 0) {
++					bool isDir =  S_ISDIR(sp.st_mode);
++					results.push_back(ListNodeResult(dptr->d_name, isDir));
++				}
+ 			}
+         	}
+         	closedir(dp);
+@@ -186,7 +195,11 @@ const char* Platform::getResourceFilePath(const std::string& location) {
+ }
+ 
+ void Platform::openFileLocation(const std::string& location) {
++#ifdef __HAIKU__
++    std::string cmd = "open \"";
++#else
+     std::string cmd = "xdg-open \"";
++#endif
+     cmd+=location;
+     cmd+="\"";
+     system(cmd.c_str());
+@@ -222,6 +235,7 @@ void Platform::setCpuAffinityForThread(KThread* thread, U32 count) {
+ }
+ #else
+ void Platform::setCpuAffinityForThread(KThread* thread, U32 count) {
++#ifndef __HAIKU__
+     if (KSystem::cpuAffinityCountForApp) {
+         U32 cores = Platform::getCpuCount();
+         if (cores <= 1) {
+@@ -242,6 +256,7 @@ void Platform::setCpuAffinityForThread(KThread* thread, U32 count) {
+ 
+         sched_setaffinity((pid_t)((BtCPU*)thread->cpu)->nativeHandle, sizeof(cpu_set_t), &mask);
+     }
++#endif
+ }
+ #endif
+ #endif
+@@ -249,12 +264,14 @@ void Platform::setCpuAffinityForThread(KThread* thread, U32 count) {
+ #ifdef BOXEDWINE_X64
+ #include <cpuid.h>
+ bool platformHasBMI2() {
++#ifndef __HAIKU__
+     int regs[4];
+ 
+     __cpuid_count(7, 0, regs[0], regs[1], regs[2], regs[3]);
+     if (regs[1] & (1 << 8)) {
+         return true;
+     }
++#endif
+     return false;
+ }
+ #endif
+diff --git a/platform/linux/platformThreads-x64.cpp b/platform/linux/platformThreads-x64.cpp
+index 62baffb..46a0c57 100644
+--- a/platform/linux/platformThreads-x64.cpp
++++ b/platform/linux/platformThreads-x64.cpp
+@@ -107,6 +107,7 @@ union CAST_FPU {
+ #define CONTEXT_FPU_REG_7_HIGH(context) ((S16*)&context->uc_mcontext.fpregs->_st[7].exponent)
+ 
+ #endif
++#ifndef __HAIKU__
+ #include <ucontext.h>
+ 
+ void syncFromException(BtCPU* cpu, ucontext_t* context, bool includeFPU) {
+@@ -267,6 +268,7 @@ void syncToException(BtCPU* cpu, ucontext_t* context, bool includeFPU) {
+         }
+     }
+ }
++#endif
+ 
+ class InException {
+ public:
+@@ -282,6 +284,7 @@ U32 exceptionCount;
+ 
+ // this will quickly store the info then exit to signalHandler() to perform the logic there
+ void platformHandler(int sig, siginfo_t* info, void* vcontext) {
++#ifndef __HAIKU__
+     exceptionCount++;
+     KThread* currentThread = KThread::currentThread();
+     if (!currentThread) {
+@@ -315,8 +318,9 @@ void platformHandler(int sig, siginfo_t* info, void* vcontext) {
+         }
+     }
+     context->CONTEXT_RIP = (U64)cpu->thread->process->runSignalAddress;
++#endif
+ }
+-
++#ifndef __HAIKU__
+ int getFPUCode(int code) {
+     switch (code) {
+     case FPE_INTDIV: return K_FPE_INTDIV;
+@@ -329,8 +333,10 @@ int getFPUCode(int code) {
+     default: klog("getFPUCode unhandled code %d", code); return 0;
+     }
+ }
++#endif
+ 
+ void signalHandler() {
++#ifndef __HAIKU__
+     BOXEDWINE_CRITICAL_SECTION;
+     KThread* currentThread = KThread::currentThread();
+     x64CPU* cpu = (x64CPU*)currentThread->cpu;
+@@ -391,6 +397,7 @@ void signalHandler() {
+         return;
+     }
+     kpanic("unhandled exception %d", cpu->exceptionSigNo);
++#endif
+ }
+ 
+ #endif
+diff --git a/project/linux/build.sh b/project/linux/build.sh
+old mode 100644
+new mode 100755
+index 28ad02f..e24008f
+--- a/project/linux/build.sh
++++ b/project/linux/build.sh
+@@ -1,4 +1,4 @@
+ #!/bin/bash
+ mkdir -p bin
+ sh buildPocoLib.sh
+-gcc -std=c++17 -O2 -Wall -Wno-delete-incomplete -Wno-unused-result -Wno-unknown-pragmas -Wno-unused-local-typedefs -Wno-unused-variable -Wno-unused-function -Wno-unused-but-set-variable -I../../include -I../../lib/poco/Net/include -I../../lib/poco/Crypto/include -I../../lib/poco/Util/include -I../../lib/poco/Foundation/include -I../../lib/poco/NetSSL_OpenSSL/include -I../../lib/glew/include -I../../lib/imgui ../../lib/imgui/imgui.cpp ../../lib/pugixml/src/*.cpp ../../lib/imgui/imgui_draw.cpp ../../lib/imgui/imgui_widgets.cpp ../../lib/imgui/examples/imgui_impl_opengl2.cpp ../../lib/imgui/examples/imgui_impl_sdl.cpp ../../lib/imgui/addon/imguitinyfiledialogs.cpp ../../source/sdl/*.cpp ../../source/sdl/singleThreaded/*.cpp ../../lib/glew/src/glew.cpp ../../source/ui/*.cpp ../../source/ui/controls/*.cpp ../../source/ui/data/*.cpp ../../source/ui/opengl/*.cpp ../../source/ui/utils/*.cpp ../../platform/sdl/*.cpp ../../platform/linux/*.cpp ../../source/emulation/cpu/*.cpp ../../source/emulation/cpu/common/*.cpp ../../source/emulation/cpu/normal/*.cpp ../../source/emulation/softmmu/*.cpp ../../source/io/*.cpp ../../source/kernel/*.cpp ../../source/kernel/devs/*.cpp ../../source/kernel/proc/*.cpp ../../source/kernel/sys/*.cpp ../../source/kernel/loader/*.cpp ../../source/util/*.cpp ../../source/opengl/sdl/*.cpp ../../source/opengl/*.cpp -o bin/boxedwine -L./linux_build/lib -lPocoNetSSL -lPocoNet -lPocoCrypto -lPocoUtil -lPocoFoundation -lssl -lcrypto -lpthread -lm -lz -lminizip -DBOXEDWINE_RECORDER -DBOXEDWINE_ZLIB -DBOXEDWINE_HAS_SETJMP -DSDL2=1 "-DGLH=<SDL_opengl.h>" -DBOXEDWINE_OPENGL_SDL `sdl2-config --cflags --libs` -lGL -lstdc++ -lstdc++fs -DSIMDE_SSE2_NO_NATIVE -DPOCO_UTIL_NO_JSONCONFIGURATION -DPOCO_UTIL_NO_XMLCONFIGURATION -DBOXEDWINE_POSIX -DBOXEDWINE_OPENGL_IMGUI_V2
++gcc -std=c++17 -O2 -Wall -Wno-delete-incomplete -Wno-unused-result -Wno-unknown-pragmas -Wno-unused-local-typedefs -Wno-unused-variable -Wno-unused-function -Wno-unused-but-set-variable -I../../include -I../../lib/poco/Net/include -I../../lib/poco/Crypto/include -I../../lib/poco/Util/include -I../../lib/poco/Foundation/include -I../../lib/poco/NetSSL_OpenSSL/include -I../../lib/glew/include -I../../lib/imgui ../../lib/imgui/imgui.cpp ../../lib/pugixml/src/*.cpp ../../lib/imgui/imgui_draw.cpp ../../lib/imgui/imgui_widgets.cpp ../../lib/imgui/examples/imgui_impl_opengl2.cpp ../../lib/imgui/examples/imgui_impl_sdl.cpp ../../lib/imgui/addon/imguitinyfiledialogs.cpp ../../source/sdl/*.cpp ../../source/sdl/singleThreaded/*.cpp ../../lib/glew/src/glew.cpp ../../source/ui/*.cpp ../../source/ui/controls/*.cpp ../../source/ui/data/*.cpp ../../source/ui/opengl/*.cpp ../../source/ui/utils/*.cpp ../../platform/sdl/*.cpp ../../platform/linux/*.cpp ../../source/emulation/cpu/*.cpp ../../source/emulation/cpu/common/*.cpp ../../source/emulation/cpu/normal/*.cpp ../../source/emulation/softmmu/*.cpp ../../source/io/*.cpp ../../source/kernel/*.cpp ../../source/kernel/devs/*.cpp ../../source/kernel/proc/*.cpp ../../source/kernel/sys/*.cpp ../../source/kernel/loader/*.cpp ../../source/util/*.cpp ../../source/opengl/sdl/*.cpp ../../source/opengl/*.cpp -o bin/boxedwine -L./linux_build/lib -lPocoNetSSL -lPocoNet -lPocoCrypto -lPocoUtil -lPocoFoundation -lssl -lcrypto -lnetwork -lbsd -lz -lminizip -DBOXEDWINE_RECORDER -DBOXEDWINE_ZLIB -DBOXEDWINE_HAS_SETJMP -DSDL2=1 "-DGLH=<SDL_opengl.h>" -DBOXEDWINE_OPENGL_SDL `sdl2-config --cflags --libs` -lGL -lstdc++ -lstdc++fs -DSIMDE_SSE2_NO_NATIVE -DPOCO_UTIL_NO_JSONCONFIGURATION -DPOCO_UTIL_NO_XMLCONFIGURATION -DBOXEDWINE_POSIX -DBOXEDWINE_OPENGL_IMGUI_V2
+diff --git a/project/linux/build64.sh b/project/linux/build64.sh
+index d140831..1f12614 100644
+--- a/project/linux/build64.sh
++++ b/project/linux/build64.sh
+@@ -1,4 +1,4 @@
+ #!/bin/bash
+ mkdir -p bin
+ sh buildPocoLib.sh
+-gcc -std=c++17 -O2 -Wall -Wno-delete-incomplete -Wno-invalid-offsetof -Wno-unused-result -Wno-unknown-pragmas -Wno-unused-local-typedefs -Wno-unused-variable -Wno-unused-function -Wno-unused-but-set-variable -I../../include -I../../lib/poco/Net/include -I../../lib/poco/Crypto/include -I../../lib/poco/Util/include -I../../lib/poco/Foundation/include -I../../lib/poco/NetSSL_OpenSSL/include -I../../lib/glew/include -I../../lib/imgui ../../lib/imgui/imgui.cpp ../../lib/pugixml/src/*.cpp ../../lib/imgui/imgui_draw.cpp ../../lib/imgui/imgui_widgets.cpp ../../lib/imgui/examples/imgui_impl_opengl2.cpp ../../lib/imgui/examples/imgui_impl_sdl.cpp ../../lib/imgui/addon/imguitinyfiledialogs.cpp ../../source/sdl/*.cpp ../../source/sdl/multiThreaded/*.cpp ../../lib/glew/src/glew.cpp ../../source/ui/*.cpp ../../source/ui/controls/*.cpp ../../source/ui/data/*.cpp ../../source/ui/opengl/*.cpp ../../source/ui/utils/*.cpp ../../platform/sdl/*.cpp ../../platform/linux/*.cpp ../../source/emulation/cpu/*.cpp ../../source/emulation/cpu/common/*.cpp ../../source/emulation/cpu/normal/*.cpp ../../source/emulation/cpu/x64/*.cpp ../../source/emulation/cpu/binaryTranslation/*.cpp ../../source/emulation/hardmmu/*.cpp ../../source/emulation/softmmu/*.cpp ../../source/io/*.cpp ../../source/kernel/*.cpp ../../source/kernel/devs/*.cpp ../../source/kernel/proc/*.cpp ../../source/kernel/sys/*.cpp ../../source/kernel/loader/*.cpp ../../source/util/*.cpp ../../source/opengl/sdl/*.cpp ../../source/opengl/*.cpp -o bin/boxedwine64 -L./linux_build/lib -lPocoNetSSL -lPocoNet -lPocoCrypto -lPocoUtil -lPocoFoundation -lssl -lcrypto -lpthread -lm -lz -lminizip -DBOXEDWINE_RECORDER -DBOXEDWINE_ZLIB -DBOXEDWINE_HAS_SETJMP -DSDL2=1 "-DGLH=<SDL_opengl.h>" -DBOXEDWINE_OPENGL_SDL `sdl2-config --cflags --libs` -lGL -lstdc++ -lstdc++fs -DSIMDE_SSE2_NO_NATIVE -DBOXEDWINE_64 -DBOXEDWINE_64BIT_MMU -DBOXEDWINE_X64 -DBOXEDWINE_MULTI_THREADED -DPOCO_UTIL_NO_JSONCONFIGURATION -DPOCO_UTIL_NO_XMLCONFIGURATION -DBOXEDWINE_POSIX -DBOXEDWINE_OPENGL_IMGUI_V2 -DBOXEDWINE_BINARY_TRANSLATOR
++gcc -std=c++17 -O2 -Wall -Wno-delete-incomplete -Wno-invalid-offsetof -Wno-unused-result -Wno-unknown-pragmas -Wno-unused-local-typedefs -Wno-unused-variable -Wno-unused-function -Wno-unused-but-set-variable -I../../include -I../../lib/poco/Net/include -I../../lib/poco/Crypto/include -I../../lib/poco/Util/include -I../../lib/poco/Foundation/include -I../../lib/poco/NetSSL_OpenSSL/include -I../../lib/glew/include -I../../lib/imgui ../../lib/imgui/imgui.cpp ../../lib/pugixml/src/*.cpp ../../lib/imgui/imgui_draw.cpp ../../lib/imgui/imgui_widgets.cpp ../../lib/imgui/examples/imgui_impl_opengl2.cpp ../../lib/imgui/examples/imgui_impl_sdl.cpp ../../lib/imgui/addon/imguitinyfiledialogs.cpp ../../source/sdl/*.cpp ../../source/sdl/multiThreaded/*.cpp ../../lib/glew/src/glew.cpp ../../source/ui/*.cpp ../../source/ui/controls/*.cpp ../../source/ui/data/*.cpp ../../source/ui/opengl/*.cpp ../../source/ui/utils/*.cpp ../../platform/sdl/*.cpp ../../platform/linux/*.cpp ../../source/emulation/cpu/*.cpp ../../source/emulation/cpu/common/*.cpp ../../source/emulation/cpu/normal/*.cpp ../../source/emulation/cpu/x64/*.cpp ../../source/emulation/cpu/binaryTranslation/*.cpp ../../source/emulation/hardmmu/*.cpp ../../source/emulation/softmmu/*.cpp ../../source/io/*.cpp ../../source/kernel/*.cpp ../../source/kernel/devs/*.cpp ../../source/kernel/proc/*.cpp ../../source/kernel/sys/*.cpp ../../source/kernel/loader/*.cpp ../../source/util/*.cpp ../../source/opengl/sdl/*.cpp ../../source/opengl/*.cpp -o bin/boxedwine64 -L./linux_build/lib -lPocoNetSSL -lPocoNet -lPocoCrypto -lPocoUtil -lPocoFoundation -lssl -lcrypto -lnetwork -lz -lminizip -DBOXEDWINE_RECORDER -DBOXEDWINE_ZLIB -DBOXEDWINE_HAS_SETJMP -DSDL2=1 "-DGLH=<SDL_opengl.h>" -DBOXEDWINE_OPENGL_SDL `sdl2-config --cflags --libs` -lGL -lstdc++ -lstdc++fs -DSIMDE_SSE2_NO_NATIVE -DBOXEDWINE_64 -DBOXEDWINE_64BIT_MMU -DBOXEDWINE_X64 -DBOXEDWINE_MULTI_THREADED -DPOCO_UTIL_NO_JSONCONFIGURATION -DPOCO_UTIL_NO_XMLCONFIGURATION -DBOXEDWINE_POSIX -DBOXEDWINE_OPENGL_IMGUI_V2 -DBOXEDWINE_BINARY_TRANSLATOR
+diff --git a/project/linux/buildPocoLib.sh b/project/linux/buildPocoLib.sh
+old mode 100644
+new mode 100755
+diff --git a/project/linux/fastAuto.sh b/project/linux/fastAuto.sh
+index 425f634..e55eb55 100755
+--- a/project/linux/fastAuto.sh
++++ b/project/linux/fastAuto.sh
+@@ -1,5 +1,5 @@
+ #!/bin/bash
+-/bin/bash build.sh
++#/bin/bash build.sh
+ 
+ mkdir auto
+ curl -z auto/auto-abiword-32.zip -o auto/auto-abiword-32.zip http://208.113.132.187/automation/auto-abiword-32.zip
+diff --git a/source/kernel/knativesocket.cpp b/source/kernel/knativesocket.cpp
+index c1f5f60..fd94771 100644
+--- a/source/kernel/knativesocket.cpp
++++ b/source/kernel/knativesocket.cpp
+@@ -21,6 +21,10 @@ static int winsock_intialized;
+ void closesocket(int socket) { close(socket); }
+ #endif
+ 
++#ifdef __HAIKU__
++#include <sys/select.h>
++#endif
++
+ std::vector<std::shared_ptr<KNativeSocketObject>> waitingNativeSockets;
+ fd_set waitingReadset;
+ fd_set waitingWriteset;
+@@ -287,8 +291,10 @@ KNativeSocketObject::KNativeSocketObject(U32 domain, U32 type, U32 protocol) : K
+         nativeType = SOCK_DGRAM;
+     } else if (type == K_SOCK_RAW) {
+         nativeType = SOCK_RAW;
++#ifndef __HAIKU__
+     } else if (type == K_SOCK_RDM) {
+         nativeType = SOCK_RDM;
++#endif
+     } else if (type == K_SOCK_SEQPACKET) {
+         nativeType = SOCK_SEQPACKET;
+     } else {
+@@ -303,12 +309,16 @@ KNativeSocketObject::KNativeSocketObject(U32 domain, U32 type, U32 protocol) : K
+         nativeProtocol = IPPROTO_IGMP;
+     } else if (protocol == 6) {
+         nativeProtocol = IPPROTO_TCP;
++#ifndef __HAIKU__
+     } else if (protocol == 12) {
+         nativeProtocol = IPPROTO_PUP;
++#endif
+     } else if (protocol == 17) {
+         nativeProtocol = IPPROTO_UDP;
++#ifndef __HAIKU__
+     } else if (protocol == 22) {
+         nativeProtocol = IPPROTO_IDP;
++#endif
+     } else if (protocol == 255) {
+         nativeProtocol = IPPROTO_RAW;
+     } else {
+-- 
+2.30.2
+
+
+From 05cab0820bcba981b058338e8e1c2cf7c668ec88 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 24 Sep 2021 11:57:35 +1000
+Subject: Add makefile for Haiku build
+
+
+diff --git a/project/haiku/Makefile b/project/haiku/Makefile
+new file mode 100644
+index 0000000..232b1ed
+--- /dev/null
++++ b/project/haiku/Makefile
+@@ -0,0 +1,221 @@
++NAME = Boxedwine
++TYPE = APP
++APP_MIME_SIG = application/x-vnd.boxedwine
++
++SRCS = ../../lib/glew/src/glew.cpp \
++	../../lib/imgui/addon/imguitinyfiledialogs.cpp \
++	../../lib/imgui/examples/imgui_impl_opengl2.cpp \
++	../../lib/imgui/examples/imgui_impl_sdl.cpp \
++	../../lib/imgui/imgui_draw.cpp \
++	../../lib/imgui/imgui_widgets.cpp \
++	../../lib/imgui/imgui.cpp \
++	../../lib/pugixml/src/pugixml.cpp \
++	../../platform/linux/dynamic.cpp \
++	../../platform/linux/memory64.cpp \
++	../../platform/linux/platform.cpp \
++	../../platform/linux/platformThreads-x64.cpp \
++	../../platform/linux/platformThreads.cpp \
++	../../platform/sdl/kdspaudio.cpp \
++	../../platform/sdl/knativeaudio.cpp \
++	../../platform/sdl/knativesynchronization.cpp \
++	../../platform/sdl/knativesystem.cpp \
++	../../platform/sdl/knativethread.cpp \
++	../../platform/sdl/knativewindow.cpp \
++	../../platform/sdl/sdlcallback.cpp \
++	../../source/emulation/cpu/common/common_arith.cpp \
++	../../source/emulation/cpu/common/common_bit.cpp \
++	../../source/emulation/cpu/common/common_fpu.cpp \
++	../../source/emulation/cpu/common/common_mmx.cpp \
++	../../source/emulation/cpu/common/common_other.cpp \
++	../../source/emulation/cpu/common/common_pushpop.cpp \
++	../../source/emulation/cpu/common/common_sse.cpp \
++	../../source/emulation/cpu/common/common_sse2.cpp \
++	../../source/emulation/cpu/common/common_xchg.cpp \
++	../../source/emulation/cpu/common/cpu.cpp \
++	../../source/emulation/cpu/common/fpu.cpp \
++	../../source/emulation/cpu/common/lazyFlags.cpp \
++	../../source/emulation/cpu/decoder.cpp \
++	../../source/emulation/cpu/normal/instructions.cpp \
++	../../source/emulation/cpu/normal/normal_shift.cpp \
++	../../source/emulation/cpu/normal/normal_strings.cpp \
++	../../source/emulation/cpu/normal/normalCPU.cpp \
++	../../source/emulation/cpu/srcgen.cpp \
++	../../source/emulation/softmmu/soft_code_page.cpp \
++	../../source/emulation/softmmu/soft_copy_on_write_page.cpp \
++	../../source/emulation/softmmu/soft_file_map.cpp \
++	../../source/emulation/softmmu/soft_invalid_page.cpp \
++	../../source/emulation/softmmu/soft_memory.cpp \
++	../../source/emulation/softmmu/soft_native_page.cpp \
++	../../source/emulation/softmmu/soft_no_page.cpp \
++	../../source/emulation/softmmu/soft_ondemand_page.cpp \
++	../../source/emulation/softmmu/soft_ram.cpp \
++	../../source/emulation/softmmu/soft_ro_page.cpp \
++	../../source/emulation/softmmu/soft_rw_page.cpp \
++	../../source/emulation/softmmu/soft_wo_page.cpp \
++	../../source/io/fs.cpp \
++	../../source/io/fsdiropennode.cpp \
++	../../source/io/fsfilenode.cpp \
++	../../source/io/fsfileopennode.cpp \
++	../../source/io/fsmemnode.cpp \
++	../../source/io/fsmemopennode.cpp \
++	../../source/io/fsnode.cpp \
++	../../source/io/fsopennode.cpp \
++	../../source/io/fsvirtualnode.cpp \
++	../../source/io/fszip.cpp \
++	../../source/io/fszipnode.cpp \
++	../../source/io/fszipopennode.cpp \
++	../../source/kernel/devs/devdsp.cpp \
++	../../source/kernel/devs/devfb.cpp \
++	../../source/kernel/devs/devinput.cpp \
++	../../source/kernel/devs/devmixer.cpp \
++	../../source/kernel/devs/devnull.cpp \
++	../../source/kernel/devs/devsequencer.cpp \
++	../../source/kernel/devs/devtty.cpp \
++	../../source/kernel/devs/devurandom.cpp \
++	../../source/kernel/devs/devzero.cpp \
++	../../source/kernel/kepoll.cpp \
++	../../source/kernel/kfile.cpp \
++	../../source/kernel/kfiledescriptor.cpp \
++	../../source/kernel/kfilelock.cpp \
++	../../source/kernel/kmemory.cpp \
++	../../source/kernel/knativesocket.cpp \
++	../../source/kernel/kobject.cpp \
++	../../source/kernel/kpoll.cpp \
++	../../source/kernel/kprocess.cpp \
++	../../source/kernel/kscheduler.cpp \
++	../../source/kernel/ksignal.cpp \
++	../../source/kernel/ksocket.cpp \
++	../../source/kernel/ksocketobject.cpp \
++	../../source/kernel/ksystem.cpp \
++	../../source/kernel/kthread.cpp \
++	../../source/kernel/ktimer.cpp \
++	../../source/kernel/kunixsocket.cpp \
++	../../source/kernel/loader/loader.cpp \
++	../../source/kernel/proc/bufferaccess.cpp \
++	../../source/kernel/proc/cpuinfo.cpp \
++	../../source/kernel/proc/meminfo.cpp \
++	../../source/kernel/proc/self.cpp \
++	../../source/kernel/sys/cpumaxfreq.cpp \
++	../../source/kernel/sys/cpuonline.cpp \
++	../../source/kernel/sys/cpuscalingcurfreq.cpp \
++	../../source/kernel/sys/cpuscalingmaxfreq.cpp \
++	../../source/kernel/syscall.cpp \
++	../../source/opengl/boxedwineGL.cpp \
++	../../source/opengl/glcommon.cpp \
++	../../source/opengl/glext.cpp \
++	../../source/opengl/glfunctions_ext1.cpp \
++	../../source/opengl/glfunctions_ext2.cpp \
++	../../source/opengl/glfunctions_ext3.cpp \
++	../../source/opengl/glMarshal.cpp \
++	../../source/opengl/glMarshalSize.cpp \
++	../../source/opengl/glMarshalVertex.cpp \
++	../../source/opengl/sdl/sdlgl.cpp \
++	../../source/sdl/main.cpp \
++	../../source/sdl/singleThreaded/mainloop.cpp \
++	../../source/sdl/startupArgs.cpp \
++	../../source/sdl/wineaudiodrv.cpp \
++	../../source/sdl/winedrv.cpp \
++	../../source/ui/controls/appbar.cpp \
++	../../source/ui/controls/appChooserDlg.cpp \
++	../../source/ui/controls/baseDlg.cpp \
++	../../source/ui/controls/baseView.cpp \
++	../../source/ui/controls/containersView.cpp \
++	../../source/ui/controls/downloadDlg.cpp \
++	../../source/ui/controls/helpView.cpp \
++	../../source/ui/controls/ImGuiLayout.cpp \
++	../../source/ui/controls/installView.cpp \
++	../../source/ui/controls/listView.cpp \
++	../../source/ui/controls/listViewItem.cpp \
++	../../source/ui/controls/menubar.cpp \
++	../../source/ui/controls/okDlg.cpp \
++	../../source/ui/controls/optionsView.cpp \
++	../../source/ui/controls/spinnerControl.cpp \
++	../../source/ui/controls/uiSettings.cpp \
++	../../source/ui/controls/unzipDlg.cpp \
++	../../source/ui/controls/waitDlg.cpp \
++	../../source/ui/controls/yesNoDlg.cpp \
++	../../source/ui/data/appFile.cpp \
++	../../source/ui/data/boxedApp.cpp \
++	../../source/ui/data/boxedContainer.cpp \
++	../../source/ui/data/boxedReg.cpp \
++	../../source/ui/data/boxedTexture.cpp \
++	../../source/ui/data/boxedwineData.cpp \
++	../../source/ui/data/configFile.cpp \
++	../../source/ui/data/globalSettings.cpp \
++	../../source/ui/mainui.cpp \
++	../../source/ui/opengl/platformhelper.cpp \
++	../../source/ui/utils/boxedTranslation.cpp \
++	../../source/ui/utils/readIcons.cpp \
++	../../source/ui/utils/uihelper.cpp \
++	../../source/util/crc.cpp \
++	../../source/util/fileutils.cpp \
++	../../source/util/log.cpp \
++	../../source/util/networkutils.cpp \
++	../../source/util/player.cpp \
++	../../source/util/recorder.cpp \
++	../../source/util/stringutil.cpp \
++	../../source/util/synchronization.cpp \
++	../../source/util/threadutils.cpp \
++
++RDEFS =
++RSRCS =
++
++LIBS = PocoNetSSL \
++	PocoNet \
++	PocoCrypto \
++	PocoUtil \
++	PocoFoundation \
++	$(STDCPPLIBS) \
++	stdc++fs \
++	minizip \
++	network \
++	bsd \
++	ssl \
++	crypto \
++	GL \
++	GLU \
++	SDL2 \
++	z
++
++LIBPATHS = poco_build/lib
++
++SYSTEM_INCLUDE_PATHS = \
++	/system/develop/headers/SDL2 \
++	../../lib/imgui
++
++LOCAL_INCLUDE_PATHS = \
++	../../include \
++	../../lib/poco/Net/include \
++	../../lib/poco/Crypto/include \
++	../../lib/poco/Util/include \
++	../../lib/poco/Foundation/include \
++	../../lib/poco/NetSSL_OpenSSL/include \
++	../../lib/glew/include \
++	../../lib/imgui
++
++OPTIMIZE := FULL
++
++DEFINES = \
++	SIMDE_SSE2_NO_NATIVE \
++	POCO_UTIL_NO_JSONCONFIGURATION \
++	POCO_UTIL_NO_XMLCONFIGURATION \
++	BOXEDWINE_POSIX \
++	BOXEDWINE_OPENGL_IMGUI_V2 \
++	BOXEDWINE_OPENGL_SDL \
++	BOXEDWINE_RECORDER \
++	BOXEDWINE_ZLIB \
++	BOXEDWINE_HAS_SETJMP \
++	GLH="<SDL_opengl.h>" \
++	SDL2=1
++
++WARNINGS = NONE
++SYMBOLS :=
++DEBUGGER :=
++
++COMPILER_FLAGS = -std=c++17
++LINKER_FLAGS =
++
++## Include the Makefile-Engine
++DEVEL_DIRECTORY := \
++	$(shell findpaths -r "makefile_engine" B_FIND_PATH_DEVELOP_DIRECTORY)
++include $(DEVEL_DIRECTORY)/etc/makefile-engine
+diff --git a/project/haiku/buildPoco.sh b/project/haiku/buildPoco.sh
+new file mode 100755
+index 0000000..a18debb
+--- /dev/null
++++ b/project/haiku/buildPoco.sh
+@@ -0,0 +1,27 @@
++#!/bin/sh
++
++cmake \
++	-H../../lib/poco \
++	-B./poco_build \
++	-DENABLE_SEVENZIP=OFF \
++	-DENABLE_XML=OFF \
++	-DENABLE_JSON=OFF \
++	-DENABLE_DATA=OFF \
++	-DENABLE_DATA_SQLITE=OFF \
++	-DENABLE_DATA_MYSQL=OFF \
++	-DENABLE_DATA_ODBC=OFF \
++	-DENABLE_MONGODB=OFF \
++	-DENABLE_REDIS=OFF \
++	-DENABLE_PDF=OFF \
++	-DENABLE_ZIP=OFF \
++	-DENABLE_APACHECONNECTOR=OFF \
++	-DENABLE_CPPPARSER=OFF \
++	-DENABLE_ENCODINGS=OFF \
++	-DENABLE_PAGECOMPILER=OFF \
++	-DENABLE_PAGECOMPILER_FILE2PAGE=OFF \
++	-DENABLE_TESTS=OFF \
++	-DENABLE_JWT=OFF \
++	-DCMAKE_BUILD_TYPE=Release \
++	-DBUILD_SHARED_LIBS=OFF
++
++cmake --build ./poco_build
+-- 
+2.30.2
+
+
+From 99715b62145c418da38883fdb9e80baf2543e8c5 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 24 Sep 2021 13:19:50 +1000
+Subject: Use system settings dir
+
+
+diff --git a/lib/imgui/imgui.cpp b/lib/imgui/imgui.cpp
+index 0b67534..93c8771 100644
+--- a/lib/imgui/imgui.cpp
++++ b/lib/imgui/imgui.cpp
+@@ -790,6 +790,11 @@ CODE
+ #define _CRT_SECURE_NO_WARNINGS
+ #endif
+ 
++#ifdef __HAIKU__
++#include <Path.h>
++#include <FindDirectory.h>
++#endif
++
+ #include "imgui.h"
+ #ifndef IMGUI_DISABLE
+ 
+@@ -1035,8 +1040,26 @@ ImGuiIO::ImGuiIO()
+     DisplaySize = ImVec2(-1.0f, -1.0f);
+     DeltaTime = 1.0f/60.0f;
+     IniSavingRate = 5.0f;
++#ifdef __HAIKU__
++	BPath settingsDir;
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, &settingsDir, true, NULL) == B_OK) {
++		settingsDir.Append("Boxedwine");
++
++		BPath iniPath = settingsDir;
++		iniPath.Append("imgui.ini");
++		IniFilename = strdup(iniPath.Path());
++
++		BPath logPath = settingsDir;
++		logPath.Append("imgui_log.txt");
++		LogFilename = strdup(logPath.Path());
++	} else {
++		IniFilename = "imgui.ini";
++    	LogFilename = "imgui_log.txt";
++	}
++#else
+     IniFilename = "imgui.ini";
+     LogFilename = "imgui_log.txt";
++#endif
+     MouseDoubleClickTime = 0.30f;
+     MouseDoubleClickMaxDist = 6.0f;
+     for (int i = 0; i < ImGuiKey_COUNT; i++)
+diff --git a/project/haiku/Makefile b/project/haiku/Makefile
+index 232b1ed..d164793 100644
+--- a/project/haiku/Makefile
++++ b/project/haiku/Makefile
+@@ -160,21 +160,23 @@ SRCS = ../../lib/glew/src/glew.cpp \
+ RDEFS =
+ RSRCS =
+ 
+-LIBS = PocoNetSSL \
++LIBS = \
++	be \
++	bsd \
++	crypto \
++	GL \
++	GLU \
++	SDL2 \
++	minizip \
++	network \
++	PocoNetSSL \
+ 	PocoNet \
+ 	PocoCrypto \
+ 	PocoUtil \
+ 	PocoFoundation \
++	ssl \
+ 	$(STDCPPLIBS) \
+ 	stdc++fs \
+-	minizip \
+-	network \
+-	bsd \
+-	ssl \
+-	crypto \
+-	GL \
+-	GLU \
+-	SDL2 \
+ 	z
+ 
+ LIBPATHS = poco_build/lib
+-- 
+2.30.2
+
+
+From be0024e15b82c4fae949ca1876376cfad307ea56 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 24 Sep 2021 14:00:34 +1000
+Subject: Use system GLEW
+
+
+diff --git a/project/haiku/Makefile b/project/haiku/Makefile
+index d164793..1797876 100644
+--- a/project/haiku/Makefile
++++ b/project/haiku/Makefile
+@@ -2,7 +2,7 @@ NAME = Boxedwine
+ TYPE = APP
+ APP_MIME_SIG = application/x-vnd.boxedwine
+ 
+-SRCS = ../../lib/glew/src/glew.cpp \
++SRCS = \
+ 	../../lib/imgui/addon/imguitinyfiledialogs.cpp \
+ 	../../lib/imgui/examples/imgui_impl_opengl2.cpp \
+ 	../../lib/imgui/examples/imgui_impl_sdl.cpp \
+@@ -165,6 +165,7 @@ LIBS = \
+ 	bsd \
+ 	crypto \
+ 	GL \
++	GLEW \
+ 	GLU \
+ 	SDL2 \
+ 	minizip \
+@@ -192,7 +193,6 @@ LOCAL_INCLUDE_PATHS = \
+ 	../../lib/poco/Util/include \
+ 	../../lib/poco/Foundation/include \
+ 	../../lib/poco/NetSSL_OpenSSL/include \
+-	../../lib/glew/include \
+ 	../../lib/imgui
+ 
+ OPTIMIZE := FULL
+-- 
+2.30.2
+
+
+From 8787574e1f77550efefd7999f362a500a74d687a Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Fri, 24 Sep 2021 14:02:19 +1000
+Subject: Add SDL2 include for x86 arch
+
+
+diff --git a/project/haiku/Makefile b/project/haiku/Makefile
+index 1797876..55f6ff1 100644
+--- a/project/haiku/Makefile
++++ b/project/haiku/Makefile
+@@ -184,6 +184,7 @@ LIBPATHS = poco_build/lib
+ 
+ SYSTEM_INCLUDE_PATHS = \
+ 	/system/develop/headers/SDL2 \
++	/system/develop/headers/x86/SDL2 \
+ 	../../lib/imgui
+ 
+ LOCAL_INCLUDE_PATHS = \
+-- 
+2.30.2
+
