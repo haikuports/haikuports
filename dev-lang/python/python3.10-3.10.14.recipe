@@ -10,21 +10,16 @@ Python is free to use, even for commercial products, because of its \
 OSI-approved open source license."
 HOMEPAGE="https://www.python.org"
 LICENSE="Python"
-COPYRIGHT="1990-2023 Python Software Foundation"
-REVISION="3"
+COPYRIGHT="1990-2024 Python Software Foundation"
+REVISION="1"
 SOURCE_URI="https://www.python.org/ftp/python/$portVersion/Python-$portVersion.tar.xz"
-CHECKSUM_SHA256="5c88848668640d3e152b35b4536ef1c23b2ca4bd2c957ef1ecbb053f571dd3f6"
+CHECKSUM_SHA256="9c50481faa8c2832329ba0fc8868d0a606a680fc4f60ec48d26ce8e076751fda"
 SOURCE_DIR="Python-$portVersion"
 
 pyShortVer="${portVersion%.*}"
 pyVersionCompat="$portVersion compat >= $pyShortVer"
 
 PATCHES="python$pyShortVer-$portVersion.patchset"
-if [ "$secondaryArchSuffix" = _x86 ] ; then
-	PATCHES+="
-		python${pyShortVer}_x86-$portVersion.patchset
-	"
-fi
 
 ARCHITECTURES="all !x86_gcc2"
 SECONDARY_ARCHITECTURES="x86"
@@ -43,7 +38,6 @@ GLOBAL_WRITABLE_FILES="
 
 PROVIDES="
 	python$pyShortVer$secondaryArchSuffix = $pyVersionCompat
-	python310$secondaryArchSuffix = $pyVersionCompat
 	cmd:2to3_$pyShortVer = $pyVersionCompat
 	cmd:idle$pyShortVer = $pyVersionCompat
 	cmd:pydoc$pyShortVer = $pyVersionCompat
@@ -60,6 +54,7 @@ PROVIDES="
 	"
 REQUIRES="
 	haiku$secondaryArchSuffix
+	timezone_data
 	cmd:file
 	lib:libbz2$secondaryArchSuffix
 	lib:libedit$secondaryArchSuffix
@@ -68,8 +63,8 @@ REQUIRES="
 	lib:libintl$secondaryArchSuffix
 	lib:liblzma$secondaryArchSuffix
 	lib:libncurses$secondaryArchSuffix
-	lib:libssl$secondaryArchSuffix
 	lib:libsqlite3$secondaryArchSuffix
+	lib:libssl$secondaryArchSuffix
 	lib:libz$secondaryArchSuffix
 	"
 REPLACES="
@@ -85,8 +80,8 @@ BUILD_REQUIRES="
 	devel:libncurses$secondaryArchSuffix
 	devel:libsqlite3$secondaryArchSuffix
 	devel:libssl$secondaryArchSuffix
-	devel:libtclstub8.6$secondaryArchSuffix
-	devel:libtk8.6$secondaryArchSuffix
+#	devel:libtclstub8.6$secondaryArchSuffix	# "Disable" these two, as tkinter deadlocks on Haiku.
+#	devel:libtk8.6$secondaryArchSuffix		# Try again when libtk drops undroidwish for xlibe.
 	devel:libz$secondaryArchSuffix
 	"
 BUILD_PREREQUIRES="
@@ -100,6 +95,17 @@ BUILD_PREREQUIRES="
 	cmd:make
 	cmd:pkg_config$secondaryArchSuffix
 	"
+
+# If set to "yes", the resulting "_tests" package is around 30 MB in size.
+packageTests="no"
+if [ "$packageTests" = "yes" ]; then
+	PROVIDES_tests="
+		python$pyShortVer${secondaryArchSuffix}_tests = $portVersion
+		"
+	REQUIRES_tests="
+		python$pyShortVer$secondaryArchSuffix == $portVersion base
+		"
+fi
 
 BUILD()
 {
@@ -124,17 +130,13 @@ BUILD()
 		--with-ensurepip=no \
 		--with-readline=editline \
 		--with-system-expat \
-		--with-system-ffi
-		# configure: WARNING: --with(out)-system-ffi is ignored on this platform
+		--with-tzpath=$dataDir/zoneinfo
 		# --with-lto # this one is too CPU/RAM intensive.
 
-	# prevent make from rebuilding stuff that requires python
-	touch Parser/asdl* Python/Python-ast.c Include/Python-ast.h
-
-	rm -f python
+	# Uncomment when doing repeated builds (for testing different flags/options).
+	# echo "[.recipe] Cleaning before rebuild:" && make clean && rm -f python
 
 	# NOTE: When using "--enable-optimizations" above, using "make $jobArgs" might be unreliable.
-	# make clean # Uncomment when doing repeated builds (for testing different flags/options).
 	make $jobArgs
 }
 
@@ -148,7 +150,7 @@ INSTALL()
 		# On x86_gcc2, move lib-dynload to lib/python3.x/
 		mv $libDir/python$pyShortVer/lib-dynload $prefix/lib/python$pyShortVer/
 	fi
-	prepareInstalledDevelLibs libpython$pyShortVer
+	prepareInstalledDevelLib libpython$pyShortVer
 	fixPkgconfig
 	if [ "$targetArchitecture" = x86_gcc2 ]; then
 		# fix pkgconfig to match configure flags
@@ -162,10 +164,16 @@ INSTALL()
 	mkdir -p $prefix/non-packaged/lib/python$pyShortVer
 	mv $prefix/lib/python$pyShortVer/site-packages $prefix/non-packaged/lib/python$pyShortVer/
 
-	# drop testsuite altogether; move to a separate package if needed
-	cd $prefix/lib/python$pyShortVer
-	rm -rf ctypes/test distutils/tests idlelib/idle_test lib2to3/tests \
-		sqlite3/test test tkinter/test unittest/test
+	if [ "$packageTests" = "yes" ]; then
+		packageEntries tests \
+			$prefix/lib/python$pyShortVer/idlelib/idle_test \
+			$prefix/lib/python$pyShortVer/test
+	else
+		# drop testsuite altogether
+		cd $prefix/lib/python$pyShortVer
+		rm -rf ctypes/test distutils/tests idlelib/idle_test lib2to3/tests sqlite3/test test \
+			tkinter/test unittest/test
+	fi
 }
 
 # Some of the test will crash, invoking the crash dialog, and will hang waiting for
@@ -173,7 +181,7 @@ INSTALL()
 # the following lines in the file "~/config/settings/system/debug_server/settings":
 ##---
 # executable_actions {
-#	/sources/Python-3*/python kill
+#	/sources/Python-3.*/python kill
 # }
 ##---
 
@@ -183,23 +191,51 @@ INSTALL()
 # But that needs support from Haiku's debug_server, as we can't change settings from
 # the recipe's building environment at the moment (https://dev.haiku-os.org/ticket/10301)
 
-# For reference, tests results on hrev57578 (x64): 351 tests OK. 30 tests failed. 19 tests skipped.
+# To see the available test-runs options:
+# > hp -E python3.nn
+# > LIBRARY_PATH=%A:/boot/system/lib python -m test --help
+# or:
+# > LD_PRELOAD=./libpython3.nn.so.1.0 python -m test --help
+#
+# To only execute a particular test (from the $sourceDir):
+#
+# > LD_PRELOAD=./libpython3.nn.so.1.0 python -m test test_datetime -W
+#
+# Beware that running test that way can cause some test to fail, while they work fine under
+# "hp --test"'s chroot. (test_sysconfig.MakefileTests.test_parse_makefile, for example).
+# Problem is "os.getcwd()" will return wrong data, causing some file operations to fail.
+
+# For reference... Tests results on beta4 (x64):
+# 25 test ommited. 320 tests OK. 24 tests failed. 27 tests skipped.
+# On verbose re-run stage:
+# 25 test ommited. 323 tests OK. 21 tests failed. 27 tests skipped.
 TEST()
 {
 	# Remove tests data left-overs, if any
-	rm -f -r /boot/system/cache/tmp/
-	rm -f -d -r build/test_python*
+	# rm -f -r /boot/system/cache/tmp/
+	# rm -f -d -r build/test_python*
+	make $jobArgs test EXTRATESTOPTS="--cleanup"
 
 	local test_options=(
 		# Use this to get same test order on different runs (actual value not important).
-		--randseed 8668208
+		--randseed 7858065
+
+		# Print the names of the 10 slowest tests.
+		--slowest
 
 		# Possibly useful?
 		# --tempdir=/another_drive/tmp
 
 		# Enable/disable certain tests by "resource" type:
-		# -uall,-audio,-cpu,-curses,-decimal,-gui,-largefile,-network,-subprocess,-tzdata,-urlfetch
+		# -uall,-audio,-cpu,-curses,-decimal,-gui,-largefile,-network,-subprocess,-urlfetch
+		# make test --help says that "-unone" is the default, but the build is doing this:
+		# "resources: all,-audio,-gui,-largefile" instead.
+		#
+		# Let's be explicit to avoid surprises:
+		-unone,curses,tzdata
+	)
 
+	local tests_to_exclude=(
 		# distutils is deprecated, and will be removed on 3.12.
 		-x test_distutils
 
@@ -266,10 +302,48 @@ TEST()
 		-x test_httpservers
 		-x test_logging
 		-x test_xmlrpc
+
+		# These hang at least once on beta4.
+		-x test_docxmlrpc
+		-x test_wsgiref   # low/no CPU usage.
+		-x test_poplib    # mid/high CPU usage.
+		-x test_ftplib    # segfaults sometimes?
+		-x test_smtplib   # timeouts sometimes, others, hangs?
+		-x test_eintr     # sometimes runs, others hangs. Seems related to file locking.
+	)
+
+	local tests_that_fail=(
+		test_asyncore
+		test_builtin
+		test_c_locale_coercion
+		test_compileall
+		test_ctypes
+		test_datetime
+		test_fcntl
+		test_genericpath
+		test_json
+		test_mailbox
+		test_os
+		test_pathlib
+		test_popen
+		test_posix
+		test_pty
+		test_re
+		test_readline
+		test_shutil
+		test_site
+		test_tarfile
+		test_time
+		test_tools
+		test_utf8_mode
 	)
 
 	local -x LOGNAME=buildbot # this skips tests_tools/test_freeze, copied from Gentoo's ebuild
-	make $jobArgs test EXTRATESTOPTS="${test_options[*]}"
+
+	# This runs the full test suite (minus the tests that we explicitly exclude).
+	make $jobArgs test EXTRATESTOPTS="${test_options[*]} ${tests_to_exclude[*]}"
+	# Use this instead, to only run the tests that fail:
+	# make $jobArgs test EXTRATESTOPTS="${test_options[*]} ${tests_that_fail[*]}"
 
 	# Occasionally, some test fails seemingly due to the racy nature of tempfile.mktemp().
 	# Even the help for that function says to NOT use it, but some tests still do.
