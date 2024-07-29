@@ -533,39 +533,130 @@ index 0b3d142..880a108 100644
 2.45.2
 
 
-From 235f9aef9790b298c90c467da688384d0debbcda Mon Sep 17 00:00:00 2001
+From ef012b0d6049fc98f1cd0f42d7c4e0a672d6a817 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
-Date: Sun, 23 Jun 2024 17:35:15 +0200
-Subject: disable locking mutexes at fork
+Date: Sun, 28 Jul 2024 21:30:57 +0200
+Subject: Reinit mutexes after a fork()
 
-This is broken on Haiku.
- * mutex_unlock fails with EPERM (according to a panic message from miniperl)
- * the child process hangs in _kern_mutex_lock, pegging a core
+This is based on a patch by Niko Tyni <ntyni@debian.org> and Petr Salinger,
+but ported to the current version.
 
-TODO: is this safe?
+See http://bugs.debian.org/628493. The Debian version of the patch was also
+submitted upstream at https://github.com/Perl/perl5/issues/13237 but is
+unlikely that it will eventually be accepted.
 
+diff --git a/embed.fnc b/embed.fnc
+index 6903959..5b485d6 100644
+--- a/embed.fnc
++++ b/embed.fnc
+@@ -648,6 +648,7 @@ Adp	|OP *	|apply_builtin_cv_attributes				\
+ 				|NN CV *cv				\
+ 				|NULLOK OP *attrlist
+ CTp	|void	|atfork_lock
++CTp	|void	|atfork_reinit
+ CTp	|void	|atfork_unlock
+ Cop	|SV **	|av_arylen_p	|NN AV *av
+ Adp	|void	|av_clear	|NN AV *av
+diff --git a/embed.h b/embed.h
+index df70b1c..3295c71 100644
+--- a/embed.h
++++ b/embed.h
+@@ -132,6 +132,7 @@
+ # define apply_attrs_string(a,b,c,d)            Perl_apply_attrs_string(aTHX_ a,b,c,d)
+ # define apply_builtin_cv_attributes(a,b)       Perl_apply_builtin_cv_attributes(aTHX_ a,b)
+ # define atfork_lock                            Perl_atfork_lock
++# define atfork_reinit                          Perl_atfork_reinit
+ # define atfork_unlock                          Perl_atfork_unlock
+ # define av_clear(a)                            Perl_av_clear(aTHX_ a)
+ # define av_count(a)                            Perl_av_count(aTHX_ a)
+diff --git a/ext/ExtUtils-Miniperl/lib/ExtUtils/Miniperl.pm b/ext/ExtUtils-Miniperl/lib/ExtUtils/Miniperl.pm
+index d7d4b71..8c5fa96 100644
+--- a/ext/ExtUtils-Miniperl/lib/ExtUtils/Miniperl.pm
++++ b/ext/ExtUtils-Miniperl/lib/ExtUtils/Miniperl.pm
+@@ -122,7 +122,7 @@ main(int argc, char **argv, char **env)
+      * --GSAR 2001-07-20 */
+     PTHREAD_ATFORK(Perl_atfork_lock,
+                    Perl_atfork_unlock,
+-                   Perl_atfork_unlock);
++                   Perl_atfork_reinit);
+ #endif
+ 
+     PERL_SYS_FPU_INIT;
+diff --git a/miniperlmain.c b/miniperlmain.c
+index 38951e0..c724d2f 100644
+--- a/miniperlmain.c
++++ b/miniperlmain.c
+@@ -96,7 +96,7 @@ main(int argc, char **argv, char **env)
+      * --GSAR 2001-07-20 */
+     PTHREAD_ATFORK(Perl_atfork_lock,
+                    Perl_atfork_unlock,
+-                   Perl_atfork_unlock);
++                   Perl_atfork_reinit);
+ #endif
+ 
+     PERL_SYS_FPU_INIT;
+diff --git a/proto.h b/proto.h
+index 70c3799..2129bfd 100644
+--- a/proto.h
++++ b/proto.h
+@@ -227,6 +227,10 @@ PERL_CALLCONV void
+ Perl_atfork_lock(void);
+ #define PERL_ARGS_ASSERT_ATFORK_LOCK
+ 
++PERL_CALLCONV void
++Perl_atfork_reinit(void);
++#define PERL_ARGS_ASSERT_ATFORK_REINIT
++
+ PERL_CALLCONV void
+ Perl_atfork_unlock(void);
+ #define PERL_ARGS_ASSERT_ATFORK_UNLOCK
 diff --git a/util.c b/util.c
-index 4053ca4..66db5e2 100644
+index 4053ca4..e4e9d55 100644
 --- a/util.c
 +++ b/util.c
-@@ -2846,7 +2846,7 @@ Perl_atfork_lock(void)
-   PERL_TSA_ACQUIRE(PL_op_mutex)
+@@ -2858,7 +2858,7 @@ Perl_atfork_lock(void)
  #endif
- {
--#if defined(USE_ITHREADS)
-+#if defined(USE_ITHREADS) && !defined(__HAIKU__)
-     /* locks must be held in locking order (if any) */
- #  ifdef USE_PERLIO
-     MUTEX_LOCK(&PL_perlio_mutex);
-@@ -2871,7 +2871,7 @@ Perl_atfork_unlock(void)
-   PERL_TSA_RELEASE(PL_op_mutex)
+ }
+ 
+-/* this is called in both parent and child after the fork() */
++/* this is called in parent after the fork() */
+ void
+ Perl_atfork_unlock(void)
+ #if defined(USE_ITHREADS)
+@@ -2883,6 +2883,21 @@ Perl_atfork_unlock(void)
  #endif
- {
--#if defined(USE_ITHREADS)
-+#if defined(USE_ITHREADS) && !defined(__HAIKU__)
-     /* locks must be released in same order as in atfork_lock() */
- #  ifdef USE_PERLIO
-     MUTEX_UNLOCK(&PL_perlio_mutex);
+ }
+ 
++/* this is called in child after the fork() */
++void
++Perl_atfork_reinit(void)
++{
++#if defined(USE_ITHREADS)
++#  ifdef USE_PERLIO
++    MUTEX_INIT(&PL_perlio_mutex);
++#  endif
++#  ifdef MYMALLOC
++    MUTEX_INIT(&PL_malloc_mutex);
++#  endif
++    OP_REFCNT_INIT;
++#endif
++}
++
+ /*
+ =for apidoc_section $concurrency
+ =for apidoc my_fork
+@@ -2903,7 +2918,10 @@ Perl_my_fork(void)
+ #if defined(USE_ITHREADS) && !defined(HAS_PTHREAD_ATFORK)
+     atfork_lock();
+     pid = fork();
+-    atfork_unlock();
++    if (pid != 0)
++        atfork_unlock();
++    else
++        atfork_reinit();
+ #else
+     /* atfork_lock() and atfork_unlock() are installed as pthread_atfork()
+      * handlers elsewhere in the code */
 -- 
 2.45.2
 
