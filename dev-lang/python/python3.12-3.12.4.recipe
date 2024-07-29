@@ -10,10 +10,10 @@ Python is free to use, even for commercial products, because of its \
 OSI-approved open source license."
 HOMEPAGE="https://www.python.org"
 LICENSE="Python"
-COPYRIGHT="1990-2023 Python Software Foundation"
-REVISION="2"
+COPYRIGHT="1990-2024 Python Software Foundation"
+REVISION="1"
 SOURCE_URI="https://www.python.org/ftp/python/$portVersion/Python-${portVersion}.tar.xz"
-CHECKSUM_SHA256="be28112dac813d2053545c14bf13a16401a21877f1a69eb6ea5d84c4a0f3d870"
+CHECKSUM_SHA256="f6d419a6d8743ab26700801b4908d26d97e8b986e14f95de31b32de2b0e79554"
 SOURCE_DIR="Python-$portVersion"
 
 pyShortVer="${portVersion%.*}"
@@ -72,8 +72,8 @@ BUILD_REQUIRES="
 	devel:libncurses$secondaryArchSuffix
 	devel:libsqlite3$secondaryArchSuffix
 	devel:libssl$secondaryArchSuffix
-	devel:libtclstub8.6$secondaryArchSuffix
-	devel:libtk8.6$secondaryArchSuffix
+#	devel:libtclstub8.6$secondaryArchSuffix	# "Disable" these two, as tkinter deadlocks on Haiku.
+#	devel:libtk8.6$secondaryArchSuffix		# Try again when libtk drops undroidwish for xlibe.
 	devel:libz$secondaryArchSuffix
 	"
 BUILD_PREREQUIRES="
@@ -114,7 +114,7 @@ BUILD()
 	# "compiler flags are generated in two sets, BASECFLAGS and OPT.  OPT is just
 	# for debug/optimization stuff.  BASECFLAGS is for flags that are required
 	# just to get things to compile and link."
-	export BASECFLAGS="-D_BSD_SOURCE"
+	export BASECFLAGS="-pipe -D_BSD_SOURCE"
 
 	# Not exporting OPT ends up with "-g -fwrapv -O3 -Wall" being used,
 	# and using OPT="" means the build ends up being "-O0".
@@ -185,11 +185,6 @@ INSTALL()
 		sed -i -e 's,headers/x86,headers,' $developLibDir/pkgconfig/python*.pc
 	fi
 
-	## Provide symlink to libpython3.nn.so
-	# Having `libpython3.nn.so` can help software like CudaText (via python4delphi), for example,
-	# to detect the different Python versions available for runtime loading.
-	ln -sr $libDir/libpython${pyShortVer}.so.1.0 $libDir/libpython${pyShortVer}.so
-
 	mkdir -p $prefix/lib/python$pyShortVer/vendor-packages
 	echo 'This directory contains packaged python modules.' \
 		>$prefix/lib/python$pyShortVer/vendor-packages/README
@@ -225,17 +220,18 @@ INSTALL()
 
 # To see the available test-runs options:
 # > hp -E python3.nn
-# > LIBRARY_PATH=/sources/Python-3.nn.n:%A/lib:/boot/home/config/non-packaged/lib:/boot/home/config/lib:/boot/system/non-packaged/lib:/boot/system/lib python -m test --help
-# or just:
+# > LIBRARY_PATH=%A:/boot/system/lib python -m test --help
+# or:
 # > LD_PRELOAD=./libpython3.nn.so.1.0 python -m test --help
 #
 # To only execute a particular test (from the $sourceDir):
 #
 # > LD_PRELOAD=./libpython3.nn.so.1.0 python -m test test_datetime -W
 
-# For reference, results on hrev57581 (64 bits):
-# Total duration: 4 min 10 sec
-# Total test files: run=437/424 failed=22 skipped=24 resource_denied=9 rerun=22
+# For reference, results on hrev56578+96 (64 bits VBox):
+#Total duration: 12 min 39 sec
+#Total tests: run=36,147 failures=254 skipped=1,798
+#Total test files: run=442/424 failed=23 skipped=33 resource_denied=6 rerun=24
 TEST()
 {
 	# Remove tests data left-overs, if any:
@@ -247,7 +243,7 @@ TEST()
 		# Use this to get same test order on different runs (actual value not important).
 		--randseed 7858065
 
- 		# Print the names of the 10 slowest tests.
+		# Print the names of the 10 slowest tests.
 		--slowest
 
 		# Possibly useful?
@@ -260,14 +256,19 @@ TEST()
 		#
 		# Let's be explicit to avoid surprises:
 		-unone,curses,tzdata
+	)
+
+	local tests_to_exclude=(
+		# distutils is deprecated, and will be removed on 3.12.
+		-x test_distutils
 
 		# The following tests invoke the crash dialog, and unless your configure
 		# debug_server default action to "kill" or "report", they will hang waiting for
 		# user input. See comment above TEST().
 		-x test_faulthandler
 		-x test_futures # from test_asyncio. Crashes: Exception (Segment violation)
-		-x test_subprocess	# tends to hang.
-		-x test_threading	# tends to hang.
+		-x test_subprocess # tends to hang.
+		-x test_threading # tends to hang.
 
 		# Many of the tests hang/stall. We have two options:
 		#
@@ -275,6 +276,7 @@ TEST()
 		# 2- Set a TIMEOUT (eg: --timeout=300).
 		#
 		# Option 1: Works, but requires manual identification/mainteinance.
+		#
 		# Option 2: Doesn't requires maintaining a list of stalling tests, but:
 		# at the end of the test run it causes:
 		# - "unmounting failed: Device/File/Resource Busy" errors, as there are
@@ -314,7 +316,7 @@ TEST()
 		-x test_sslproto # Exception on Exception handler.
 		-x test_streams
 		-x test_unix_events
-	#	-i TestThreadedServer # in test_asyncio.functioonal
+	#	-i TestThreadedServer # in test_asyncio.functional
 
 		# These not always hang/stall, but they do it enough to warrant skipping for now.
 		-x test_imaplib
@@ -347,8 +349,48 @@ TEST()
 		# between 1 to 3+ minutes to end (and gets re-run!). Run it manually if needed, or
 		# re-enable once those SSLSocket warninings, that also pop up on other tests, get resolved.
 		-x test_ftplib
+
+		# 3.12.4 hang at least once on beta4.
+		-x test_importlib
+	)
+
+	local tests_that_fail=(
+		test_c_locale_coercion
+		test_compileall
+		test_datetime
+		test_fcntl
+		test_fork1
+		test_genericpath
+		test_import
+		test_json
+		test_pathlib
+		test_popen
+		test_pty
+		test_re
+		test_readline
+		test_shutil
+		test_site
+		test_support
+		test_sysconfig
+		test_tarfile
+		test_termios
+		test_time
+		test_tools
+		test_utf8_mode
+		test_zipfile
 	)
 
 	local -x LOGNAME=buildbot # this skips tests_tools/test_freeze, copied from Gentoo's ebuild
-	make $jobArgs test EXTRATESTOPTS="${test_options[*]}"
+
+	# This runs the full test suite (minus the tests that we explicitly exclude).
+	make $jobArgs test EXTRATESTOPTS="${test_options[*]} ${tests_to_exclude[*]}"
+	# Use this instead, to only run the tests that fail:
+	# make $jobArgs test EXTRATESTOPTS="${test_options[*]} ${tests_that_fail[*]}"
+
+	# Occasionally, some test fails seemingly due to the racy nature of tempfile.mktemp().
+	# Even the help for that function says to NOT use it, but some tests still do.
+	#
+	# If you find some strange "æ" suffix on temp dirnames, ej:
+	#    "cwd: /sources/Python-3.10.12/build/test_python_10324æ"
+	# That's due to usages of os_helper.FS_NONASCII.
 }
