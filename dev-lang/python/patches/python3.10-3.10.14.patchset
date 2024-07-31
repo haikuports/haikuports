@@ -1,14 +1,18 @@
-From 5be29419ed996bdc3b6545c3f7c5d4cf345e43ca Mon Sep 17 00:00:00 2001
+From 8f72108a053605954500f69c86fa62714553cd73 Mon Sep 17 00:00:00 2001
 From: Oscar Lesta <oscar.lesta@gmail.com>
-Date: Sun, 7 Apr 2024 00:24:39 -0300
-Subject: Initial Haiku patch.
+Date: Thu, 25 Jul 2024 17:26:26 -0300
+Subject: Initial Haiku patch (re-worked a bit).
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 This combines:
-- Original "initial Haiku patch" from Jérôme Duval.
-- A variation of Adrien Destugues changes in setup.py from his x86 patch.
+
+* The original "initial Haiku patch" from Jérôme Duval.
+* A variation of Adrien Destugues changes in setup.py from his x86 patch.
+
+Ideally, we can continue moving changes from here into "per topic" commits,
+leaving here mostly only make/config related changes, for example.
 
 diff --git a/Include/pyport.h b/Include/pyport.h
 index 6ab0ae4..ad8c45c 100644
@@ -23,130 +27,6 @@ index 6ab0ae4..ad8c45c 100644
     // Use UTF-8 as the filesystem encoding.
     // See PyUnicode_DecodeFSDefaultAndSize(), PyUnicode_EncodeFSDefault(),
     // Py_DecodeLocale() and Py_EncodeLocale().
-diff --git a/Lib/distutils/command/install.py b/Lib/distutils/command/install.py
-index 01d5331..b109392 100644
---- a/Lib/distutils/command/install.py
-+++ b/Lib/distutils/command/install.py
-@@ -33,13 +33,15 @@ SCHEME_KEYS = ('purelib', 'platlib', 'headers', 'scripts', 'data')
- # alter locations for packages installations in a single place.
- # Note that this module is deprecated (PEP 632); all consumers
- # of this information should switch to using sysconfig directly.
--INSTALL_SCHEMES = {"unix_prefix": {}, "unix_home": {}, "nt": {}}
-+INSTALL_SCHEMES = {"unix_prefix": {}, "unix_home": {}, "nt": {},
-+    "haiku": {}, "haiku_vendor": {}, "haiku_home": {}}
- 
- # Copy from sysconfig._INSTALL_SCHEMES
- for key in SCHEME_KEYS:
-     for distutils_scheme_name, sys_scheme_name in (
-             ("unix_prefix", "posix_prefix"), ("unix_home", "posix_home"),
--            ("nt", "nt")):
-+            ("nt", "nt"), ("haiku", "haiku"), ("haiku_vendor", "haiku_vendor"),
-+            ("haiku_home", "haiku_home")):
-         sys_key = key
-         sys_scheme = sysconfig._INSTALL_SCHEMES[sys_scheme_name]
-         if key == "headers" and key not in sys_scheme:
-@@ -86,6 +88,13 @@ if HAS_USER_SITE:
-         'data'   : '$userbase',
-         }
- 
-+    INSTALL_SCHEMES['haiku_user'] = {
-+        'purelib': '$usersite',
-+        'platlib': '$usersite',
-+        'headers': '$userbase/develop/headers/python$py_version_short/$dist_name',
-+        'scripts': '$userbase/bin',
-+        'data'   : '$userbase',
-+        }
- 
- class install(Command):
- 
-@@ -431,10 +440,16 @@ class install(Command):
-                 raise DistutilsPlatformError(
-                     "User base directory is not specified")
-             self.install_base = self.install_platbase = self.install_userbase
--            self.select_scheme("unix_user")
-+            if sys.platform.startswith('haiku'):
-+                self.select_scheme("haiku_user")
-+            else:
-+                self.select_scheme("unix_user")
-         elif self.home is not None:
-             self.install_base = self.install_platbase = self.home
--            self.select_scheme("unix_home")
-+            if sys.platform.startswith('haiku'):
-+                self.select_scheme("haiku_home")
-+            else:
-+                self.select_scheme("unix_home")
-         else:
-             if self.prefix is None:
-                 if self.exec_prefix is not None:
-@@ -450,7 +465,13 @@ class install(Command):
- 
-             self.install_base = self.prefix
-             self.install_platbase = self.exec_prefix
--            self.select_scheme("unix_prefix")
-+            if sys.platform.startswith('haiku'):
-+                if os.environ.get('HAIKU_USE_VENDOR_DIRECTORIES') == '1':
-+                    self.select_scheme("haiku_vendor")
-+                else:
-+                    self.select_scheme("haiku")
-+            else:
-+                self.select_scheme("unix_prefix")
- 
-     def finalize_other(self):
-         """Finalizes options for non-posix platforms"""
-diff --git a/Lib/distutils/sysconfig.py b/Lib/distutils/sysconfig.py
-index 3414a76..9115cdc 100644
---- a/Lib/distutils/sysconfig.py
-+++ b/Lib/distutils/sysconfig.py
-@@ -292,7 +292,8 @@ def get_python_inc(plat_specific=0, prefix=None):
-                 incdir = os.path.join(get_config_var('srcdir'), 'Include')
-                 return os.path.normpath(incdir)
-         python_dir = 'python' + get_python_version() + build_flags
--        return os.path.join(prefix, "include", python_dir)
-+        inc_dir = "include" if sys.platform != "haiku1" else "develop/headers"
-+        return os.path.join(prefix, inc_dir, python_dir)
-     elif os.name == "nt":
-         if python_build:
-             # Include both the include and PC dir to ensure we can find
-@@ -327,19 +328,27 @@ def get_python_lib(plat_specific=0, standard_lib=0, prefix=None):
-             prefix = plat_specific and EXEC_PREFIX or PREFIX
- 
-     if os.name == "posix":
--        if plat_specific or standard_lib:
--            # Platform-specific modules (any module from a non-pure-Python
--            # module distribution) or standard Python library modules.
--            libdir = sys.platlibdir
-+        if sys.platform.startswith('haiku'):
-+            if standard_lib:
-+                return os.path.join(prefix,
-+                                    "lib", "python" + get_python_version())
-+            return os.path.join(prefix, "non-packaged",
-+                                "lib", "python" + get_python_version(),
-+                                "site-packages")
-         else:
--            # Pure Python
--            libdir = "lib"
--        libpython = os.path.join(prefix, libdir,
--                                 "python" + get_python_version())
--        if standard_lib:
--            return libpython
--        else:
--            return os.path.join(libpython, "site-packages")
-+            if plat_specific or standard_lib:
-+                # Platform-specific modules (any module from a non-pure-Python
-+                # module distribution) or standard Python library modules.
-+                libdir = sys.platlibdir
-+
-+                # Pure Python
-+                libdir = "lib"
-+            libpython = os.path.join(prefix, libdir,
-+                                     "python" + get_python_version())
-+            if standard_lib:
-+                return libpython
-+            else:
-+                return os.path.join(libpython, "site-packages")
-     elif os.name == "nt":
-         if standard_lib:
-             return os.path.join(prefix, "Lib")
 diff --git a/Lib/plat-haiku1/regen b/Lib/plat-haiku1/regen
 new file mode 100644
 index 0000000..4372ee2
@@ -157,104 +37,6 @@ index 0000000..4372ee2
 +HEADERS=/boot/develop/headers
 +set -v
 +eval $PYTHON_FOR_BUILD ../../Tools/scripts/h2py.py -i "'(u_long)'" $HEADERS/posix/netinet/in.h
-diff --git a/Lib/site.py b/Lib/site.py
-index 5302037..05d8dce 100644
---- a/Lib/site.py
-+++ b/Lib/site.py
-@@ -291,6 +291,14 @@ def _getuserbase():
-         return joinuser("~", "Library", sys._framework,
-                         "%d.%d" % sys.version_info[:2])
- 
-+    if sys.platform.startswith('haiku'):
-+        try:
-+            import subprocess
-+            return subprocess.run(['finddir', 'B_USER_NONPACKAGED_DIRECTORY'],
-+                stdout=subprocess.PIPE, check=True).stdout.rstrip().decode('utf-8')
-+        except:
-+            pass
-+
-     return joinuser("~", ".local")
- 
- 
-@@ -375,7 +383,14 @@ def getsitepackages(prefixes=None):
-         if sys.platlibdir != "lib":
-             libdirs.append("lib")
- 
--        if os.sep == '/':
-+        if sys.platform.startswith('haiku'):
-+           sitepackages.append(os.path.join(prefix, "non-packaged", "lib",
-+                                       "python%d.%d" % sys.version_info[:2],
-+                                       "site-packages"))
-+           sitepackages.append(os.path.join(prefix, "lib",
-+                                       "python%d.%d" % sys.version_info[:2],
-+                                       "vendor-packages"))
-+        elif os.sep == '/':
-             for libdir in libdirs:
-                 path = os.path.join(prefix, libdir,
-                                     "python%d.%d" % sys.version_info[:2],
-@@ -481,8 +496,16 @@ def enablerlcompleter():
-             # each interpreter exit when readline was already configured
-             # through a PYTHONSTARTUP hook, see:
-             # http://bugs.python.org/issue5845#msg198636
--            history = os.path.join(os.path.expanduser('~'),
--                                   '.python_history')
-+            import subprocess
-+            try:
-+                history = os.path.join(subprocess.run(['finddir', 'B_USER_VAR_DIRECTORY'],
-+                            check=True, stdout=subprocess.PIPE).stdout.rstrip().decode('utf-8'),
-+                            'python', 'history')
-+                if not os.path.exists(os.path.dirname(history)):
-+                    os.makedirs(os.path.dirname(history))
-+            except subprocess.CalledProcessError:
-+                history = os.path.join(os.path.expanduser('~'),
-+                                       '.python_history')
-             try:
-                 readline.read_history_file(history)
-             except OSError:
-diff --git a/Lib/sysconfig.py b/Lib/sysconfig.py
-index daf9f00..4f92119 100644
---- a/Lib/sysconfig.py
-+++ b/Lib/sysconfig.py
-@@ -56,6 +56,27 @@ _INSTALL_SCHEMES = {
-         'scripts': '{base}/Scripts',
-         'data': '{base}',
-         },
-+    'haiku': {
-+        'purelib': '{base}/non-packaged/lib/python{py_version_short}/site-packages',
-+        'platlib': '{platbase}/non-packaged/lib/python{py_version_short}/site-packages',
-+        'headers': '{base}/non-packaged/develop/headers/python{py_version_short}',
-+        'scripts': '{base}/non-packaged/bin',
-+        'data'   : '{base}/non-packaged',
-+        },
-+    'haiku_vendor': {
-+        'purelib': '{base}/lib/python{py_version_short}/vendor-packages',
-+        'platlib': '{platbase}/lib/python{py_version_short}/vendor-packages',
-+        'headers': '{base}/develop/headers/python{py_version_short}',
-+        'scripts': '{base}/bin',
-+        'data'   : '{base}',
-+        },
-+    'haiku_home': {
-+        'purelib': '{base}/lib/python',
-+        'platlib': '{base}/lib/python',
-+        'headers': '{base}/develop/headers/python/',
-+        'scripts': '{base}/bin',
-+        'data'   : '{base}',
-+        },
-     }
- 
- 
-diff --git a/Lib/test/test_fileio.py b/Lib/test/test_fileio.py
-index 4269b0e..314aa75 100644
---- a/Lib/test/test_fileio.py
-+++ b/Lib/test/test_fileio.py
-@@ -386,6 +386,7 @@ class OtherFileTests:
-                     self.assertEqual(f.writable(), True)
-                     if sys.platform != "darwin" and \
-                        'bsd' not in sys.platform and \
-+                       'haiku' not in sys.platform and \
-                        not sys.platform.startswith(('sunos', 'aix')):
-                         # Somehow /dev/tty appears seekable on some BSDs
-                         self.assertEqual(f.seekable(), False)
 diff --git a/Makefile.pre.in b/Makefile.pre.in
 index fa99dd8..c898c9f 100644
 --- a/Makefile.pre.in
@@ -595,7 +377,7 @@ index a39610a..82b06a1 100644
 2.45.2
 
 
-From ee95dc6bf81ab8943b7b1f73198ad5dc311047c1 Mon Sep 17 00:00:00 2001
+From e59e464b2220ae95bf697b3c5c73451924546d62 Mon Sep 17 00:00:00 2001
 From: Jerome Duval <jerome.duval@gmail.com>
 Date: Sun, 16 Apr 2017 10:05:42 +0200
 Subject: fix for negative errnos
@@ -633,7 +415,7 @@ index b852ad7..60d4a6e 100644
 2.45.2
 
 
-From 8454b0a55bfd324c5a33deec36fca564c144ca1c Mon Sep 17 00:00:00 2001
+From 7bbbb3ebe4e2b2c7607a4ca011aa4e1b390827c2 Mon Sep 17 00:00:00 2001
 From: Oscar Lesta <oscar.lesta@gmail.com>
 Date: Sat, 6 Apr 2024 23:49:30 -0300
 Subject: Implement CTypes's find_library for Haiku
@@ -724,7 +506,7 @@ index 0c2510e..371eaa5 100644
 2.45.2
 
 
-From ee96d705bca4b4623acb1133cf371e68e9b29c23 Mon Sep 17 00:00:00 2001
+From 9acb3b73870a0a3caf6432f92d1c14dcceb987ec Mon Sep 17 00:00:00 2001
 From: Philipp Wolfer <phil@parolu.io>
 Date: Mon, 23 Sep 2019 09:14:58 +0200
 Subject: webbrowser: Support for default browsers on Haiku
@@ -750,7 +532,7 @@ index ec3cece..6a29d2a 100755
 2.45.2
 
 
-From 390b9112392e602714714c8bb0275beee85914fe Mon Sep 17 00:00:00 2001
+From a5f44dabeeae79d50ad890d398e3a531917bb3c6 Mon Sep 17 00:00:00 2001
 From: Jerome Duval <jerome.duval@gmail.com>
 Date: Fri, 4 Oct 2019 22:02:35 +0200
 Subject: since 3.8, don't reinit locks on fork.
@@ -773,7 +555,7 @@ index d1d4333..bfe60ca 100644
 2.45.2
 
 
-From e7fd48e40d2073832aa88d80d4755fdb97d640fe Mon Sep 17 00:00:00 2001
+From c57a587e7aacb791c7588c81b7c689d5e8c24e62 Mon Sep 17 00:00:00 2001
 From: Jerome Duval <jerome.duval@gmail.com>
 Date: Fri, 15 May 2020 15:20:57 +0200
 Subject: handle errors returned by internal_connect()
@@ -806,7 +588,7 @@ index a4c555c..abdaea7 100644
 2.45.2
 
 
-From 8b5a4fbbc0e540ce1d46543ffbfe4146fd5b4e55 Mon Sep 17 00:00:00 2001
+From 079c6188cb26067e3f4780518563fa1f7853e065 Mon Sep 17 00:00:00 2001
 From: Jerome Duval <jerome.duval@gmail.com>
 Date: Mon, 19 Oct 2020 18:03:09 +0200
 Subject: ttyname_r can use MAXPATHLEN
@@ -836,16 +618,32 @@ index c0421a9..ace1449 100644
 2.45.2
 
 
-From d05bb022b795698408259c6d01778679958000a0 Mon Sep 17 00:00:00 2001
+From 7106f9092ebcac6706f4fb101ae238653bec5ef3 Mon Sep 17 00:00:00 2001
 From: Oscar Lesta <oscar.lesta@gmail.com>
-Date: Fri, 21 Oct 2022 19:58:50 -0300
-Subject: Lib/test: require the "largefile" usage flag for I/O heavy tests.
+Date: Thu, 25 Jul 2024 17:27:04 -0300
+Subject: Miscellaneous "Lib/test/" fixes for Haiku.
+
+This combines test_fileio.py changes from the "initial Haiku patch", plus...
+
+"Lib/test: require the "largefile" usage flag for I/O heavy tests.":
 
 The same was done for Windows and MacOSX already.
 
 This avoids needing several GBs of storage to run the tests
 (unless they "largefile" resource usage flag is enabled).
 
+diff --git a/Lib/test/test_fileio.py b/Lib/test/test_fileio.py
+index 4269b0e..314aa75 100644
+--- a/Lib/test/test_fileio.py
++++ b/Lib/test/test_fileio.py
+@@ -386,6 +386,7 @@ class OtherFileTests:
+                     self.assertEqual(f.writable(), True)
+                     if sys.platform != "darwin" and \
+                        'bsd' not in sys.platform and \
++                       'haiku' not in sys.platform and \
+                        not sys.platform.startswith(('sunos', 'aix')):
+                         # Somehow /dev/tty appears seekable on some BSDs
+                         self.assertEqual(f.seekable(), False)
 diff --git a/Lib/test/test_io.py b/Lib/test/test_io.py
 index 8dae85a..b391a29 100644
 --- a/Lib/test/test_io.py
@@ -889,61 +687,270 @@ index 307e2b9..afc1772 100644
 2.45.2
 
 
-From ed496bf46d87bbefb6e458d0379766187cf95262 Mon Sep 17 00:00:00 2001
-From: Jerome Duval <jerome.duval@gmail.com>
-Date: Tue, 7 Mar 2023 18:29:29 +0100
-Subject: default schemes for Haiku
+From 61d557d4a85f997cb24a15b9fedbd91c6aa99419 Mon Sep 17 00:00:00 2001
+From: Oscar Lesta <oscar.lesta@gmail.com>
+Date: Thu, 25 Jul 2024 17:27:17 -0300
+Subject: _getuserbase(), getsitepackages(), and INSTALL_SCHEMES for Haiku
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
+This combines (at least parts of) previous "commits" on older ".patchset"s:
 
+* Initial Haiku patch.
+* default schemes for Haiku
+
+from Jérôme Duval
+
+* syncronize both _getuserbase() copies on site.py and sysconfig.py.
+* Add missing 'platinclude' to sysconfig's _INSTALL_SCHEMES.
+* Adjust test_sysconfig.test_get_scheme_names for Haiku.
+
+by me, plus:
+
+new changes to allow Python to find modules installed via 'pkgman -H'.
+
+The idea was to have all _getuserbase()/INSTALL_SCHEMES related changes in "one place".
+
+diff --git a/Lib/distutils/command/install.py b/Lib/distutils/command/install.py
+index 01d5331..b109392 100644
+--- a/Lib/distutils/command/install.py
++++ b/Lib/distutils/command/install.py
+@@ -33,13 +33,15 @@ SCHEME_KEYS = ('purelib', 'platlib', 'headers', 'scripts', 'data')
+ # alter locations for packages installations in a single place.
+ # Note that this module is deprecated (PEP 632); all consumers
+ # of this information should switch to using sysconfig directly.
+-INSTALL_SCHEMES = {"unix_prefix": {}, "unix_home": {}, "nt": {}}
++INSTALL_SCHEMES = {"unix_prefix": {}, "unix_home": {}, "nt": {},
++    "haiku": {}, "haiku_vendor": {}, "haiku_home": {}}
+ 
+ # Copy from sysconfig._INSTALL_SCHEMES
+ for key in SCHEME_KEYS:
+     for distutils_scheme_name, sys_scheme_name in (
+             ("unix_prefix", "posix_prefix"), ("unix_home", "posix_home"),
+-            ("nt", "nt")):
++            ("nt", "nt"), ("haiku", "haiku"), ("haiku_vendor", "haiku_vendor"),
++            ("haiku_home", "haiku_home")):
+         sys_key = key
+         sys_scheme = sysconfig._INSTALL_SCHEMES[sys_scheme_name]
+         if key == "headers" and key not in sys_scheme:
+@@ -86,6 +88,13 @@ if HAS_USER_SITE:
+         'data'   : '$userbase',
+         }
+ 
++    INSTALL_SCHEMES['haiku_user'] = {
++        'purelib': '$usersite',
++        'platlib': '$usersite',
++        'headers': '$userbase/develop/headers/python$py_version_short/$dist_name',
++        'scripts': '$userbase/bin',
++        'data'   : '$userbase',
++        }
+ 
+ class install(Command):
+ 
+@@ -431,10 +440,16 @@ class install(Command):
+                 raise DistutilsPlatformError(
+                     "User base directory is not specified")
+             self.install_base = self.install_platbase = self.install_userbase
+-            self.select_scheme("unix_user")
++            if sys.platform.startswith('haiku'):
++                self.select_scheme("haiku_user")
++            else:
++                self.select_scheme("unix_user")
+         elif self.home is not None:
+             self.install_base = self.install_platbase = self.home
+-            self.select_scheme("unix_home")
++            if sys.platform.startswith('haiku'):
++                self.select_scheme("haiku_home")
++            else:
++                self.select_scheme("unix_home")
+         else:
+             if self.prefix is None:
+                 if self.exec_prefix is not None:
+@@ -450,7 +465,13 @@ class install(Command):
+ 
+             self.install_base = self.prefix
+             self.install_platbase = self.exec_prefix
+-            self.select_scheme("unix_prefix")
++            if sys.platform.startswith('haiku'):
++                if os.environ.get('HAIKU_USE_VENDOR_DIRECTORIES') == '1':
++                    self.select_scheme("haiku_vendor")
++                else:
++                    self.select_scheme("haiku")
++            else:
++                self.select_scheme("unix_prefix")
+ 
+     def finalize_other(self):
+         """Finalizes options for non-posix platforms"""
+diff --git a/Lib/distutils/sysconfig.py b/Lib/distutils/sysconfig.py
+index 3414a76..9115cdc 100644
+--- a/Lib/distutils/sysconfig.py
++++ b/Lib/distutils/sysconfig.py
+@@ -292,7 +292,8 @@ def get_python_inc(plat_specific=0, prefix=None):
+                 incdir = os.path.join(get_config_var('srcdir'), 'Include')
+                 return os.path.normpath(incdir)
+         python_dir = 'python' + get_python_version() + build_flags
+-        return os.path.join(prefix, "include", python_dir)
++        inc_dir = "include" if sys.platform != "haiku1" else "develop/headers"
++        return os.path.join(prefix, inc_dir, python_dir)
+     elif os.name == "nt":
+         if python_build:
+             # Include both the include and PC dir to ensure we can find
+@@ -327,19 +328,27 @@ def get_python_lib(plat_specific=0, standard_lib=0, prefix=None):
+             prefix = plat_specific and EXEC_PREFIX or PREFIX
+ 
+     if os.name == "posix":
+-        if plat_specific or standard_lib:
+-            # Platform-specific modules (any module from a non-pure-Python
+-            # module distribution) or standard Python library modules.
+-            libdir = sys.platlibdir
++        if sys.platform.startswith('haiku'):
++            if standard_lib:
++                return os.path.join(prefix,
++                                    "lib", "python" + get_python_version())
++            return os.path.join(prefix, "non-packaged",
++                                "lib", "python" + get_python_version(),
++                                "site-packages")
+         else:
+-            # Pure Python
+-            libdir = "lib"
+-        libpython = os.path.join(prefix, libdir,
+-                                 "python" + get_python_version())
+-        if standard_lib:
+-            return libpython
+-        else:
+-            return os.path.join(libpython, "site-packages")
++            if plat_specific or standard_lib:
++                # Platform-specific modules (any module from a non-pure-Python
++                # module distribution) or standard Python library modules.
++                libdir = sys.platlibdir
++
++                # Pure Python
++                libdir = "lib"
++            libpython = os.path.join(prefix, libdir,
++                                     "python" + get_python_version())
++            if standard_lib:
++                return libpython
++            else:
++                return os.path.join(libpython, "site-packages")
+     elif os.name == "nt":
+         if standard_lib:
+             return os.path.join(prefix, "Lib")
+diff --git a/Lib/site.py b/Lib/site.py
+index 5302037..69d96a3 100644
+--- a/Lib/site.py
++++ b/Lib/site.py
+@@ -291,6 +291,14 @@ def _getuserbase():
+         return joinuser("~", "Library", sys._framework,
+                         "%d.%d" % sys.version_info[:2])
+ 
++    if sys.platform.startswith('haiku'):
++        try:
++            import subprocess
++            return subprocess.check_output(
++                ['finddir', 'B_USER_NONPACKAGED_DIRECTORY']).rstrip().decode('utf-8')
++        except:
++            pass
++
+     return joinuser("~", ".local")
+ 
+ 
+@@ -375,7 +383,31 @@ def getsitepackages(prefixes=None):
+         if sys.platlibdir != "lib":
+             libdirs.append("lib")
+ 
+-        if os.sep == '/':
++        if sys.platform.startswith('haiku'):
++            # Locations under /system/
++            sitepackages.append(os.path.join(prefix, "non-packaged", "lib",
++                                        "python%d.%d" % sys.version_info[:2],
++                                        "site-packages"))
++            sitepackages.append(os.path.join(prefix, "lib",
++                                        "python%d.%d" % sys.version_info[:2],
++                                        "vendor-packages"))
++
++            # For .hpkg installed under ~/config/ (pkgman install -H)
++            # ("pip install --user" uses ~/config/non-packaged/, and gets
++            # handled by the "haiku_user" install scheme.
++            try:
++                import subprocess
++                _home_prefix = subprocess.check_output(
++                    ['finddir', 'B_USER_CONFIG_DIRECTORY']).rstrip().decode('utf-8')
++            except:
++                print("'finddir B_USER_CONFIG_DIRECTORY' failed.")
++                _home_prefix = None
++
++            if _home_prefix is not None:
++                sitepackages.append(os.path.join(_home_prefix, "lib",
++                                        "python%d.%d" % sys.version_info[:2],
++                                        "vendor-packages"))
++        elif os.sep == '/':
+             for libdir in libdirs:
+                 path = os.path.join(prefix, libdir,
+                                     "python%d.%d" % sys.version_info[:2],
 diff --git a/Lib/sysconfig.py b/Lib/sysconfig.py
-index 4f92119..919d883 100644
+index daf9f00..643c8de 100644
 --- a/Lib/sysconfig.py
 +++ b/Lib/sysconfig.py
-@@ -57,25 +57,32 @@ _INSTALL_SCHEMES = {
+@@ -56,6 +56,36 @@ _INSTALL_SCHEMES = {
+         'scripts': '{base}/Scripts',
          'data': '{base}',
          },
-     'haiku': {
-+        'stdlib': '{installed_base}/{platlibdir}/python{py_version_short}',
-+        'platstdlib': '{platbase}/{platlibdir}/python{py_version_short}',
-         'purelib': '{base}/non-packaged/lib/python{py_version_short}/site-packages',
--        'platlib': '{platbase}/non-packaged/lib/python{py_version_short}/site-packages',
--        'headers': '{base}/non-packaged/develop/headers/python{py_version_short}',
-+        'platlib': '{platbase}/non-packaged/{platlibdir}/python{py_version_short}/site-packages',
-+        'include': '{base}/non-packaged/develop/headers/python{py_version_short}',
-         'scripts': '{base}/non-packaged/bin',
-         'data'   : '{base}/non-packaged',
-         },
-     'haiku_vendor': {
-+        'stdlib': '{installed_base}/{platlibdir}/python{py_version_short}',
-+        'platstdlib': '{platbase}/{platlibdir}/python{py_version_short}',
-         'purelib': '{base}/lib/python{py_version_short}/vendor-packages',
-         'platlib': '{platbase}/lib/python{py_version_short}/vendor-packages',
--        'headers': '{base}/develop/headers/python{py_version_short}',
-+        'include': '{base}/develop/headers/python{py_version_short}',
-         'scripts': '{base}/bin',
-         'data'   : '{base}',
-         },
-     'haiku_home': {
-+        'stdlib': '{installed_base}/lib/python',
-+        'platstdlib': '{base}/lib/python',
-         'purelib': '{base}/lib/python',
-         'platlib': '{base}/lib/python',
--        'headers': '{base}/develop/headers/python/',
-+        'include': '{installed_base}/develop/headers/python',
-+        'platinclude': '{installed_base}/develop/headers/python',
-         'scripts': '{base}/bin',
--        'data'   : '{base}',
++    'haiku': {
++        'stdlib': '{installed_base}/lib/python{py_version_short}',
++        'platstdlib': '{platbase}/lib/python{py_version_short}',
++        'purelib': '{base}/non-packaged/lib/python{py_version_short}/site-packages',
++        'platlib': '{platbase}/non-packaged/lib/python{py_version_short}/site-packages',
++        'include': '{installed_base}/non-packaged/develop/headers/python{py_version_short}',
++        'platinclude': '{installed_platbase}/develop/headers/python{py_version_short}',
++        'scripts': '{base}/non-packaged/bin',
++        'data'   : '{base}/non-packaged',
++        },
++    'haiku_vendor': {
++        'stdlib': '{installed_base}/lib/python{py_version_short}',
++        'platstdlib': '{platbase}/lib/python{py_version_short}',
++        'purelib': '{base}/lib/python{py_version_short}/vendor-packages',
++        'platlib': '{platbase}/lib/python{py_version_short}/vendor-packages',
++        'include': '{installed_base}/develop/headers/python{py_version_short}',
++        'platinclude': '{installed_platbase}/develop/headers/python{py_version_short}',
++        'scripts': '{base}/bin',
++        'data'   : '{base}',
++        },
++    'haiku_home': {
++        'stdlib': '{installed_base}/lib/python{py_version_short}',
++        'platstdlib': '{base}/lib/python{py_version_short}',
++        'purelib': '{base}/lib/python{py_version_short}',
++        'platlib': '{base}/lib/python{py_version_short}',
++        'include': '{installed_base}/develop/headers/python{py_version_short}',
++        'platinclude': '{installed_base}/develop/headers/python{py_version_short}',
++        'scripts': '{base}/bin',
 +        'data': '{base}',
-         },
++        },
      }
  
-@@ -127,6 +134,15 @@ if _HAS_USER_BASE:
+ 
+@@ -81,6 +111,14 @@ def _getuserbase():
+         return joinuser("~", "Library", sys._framework,
+                         f"{sys.version_info[0]}.{sys.version_info[1]}")
+ 
++    if sys.platform.startswith('haiku'):
++        try:
++            import subprocess
++            return subprocess.check_output(
++                ['finddir', 'B_USER_NONPACKAGED_DIRECTORY']).rstrip().decode('utf-8')
++        except:
++            pass
++
+     return joinuser("~", ".local")
+ 
+ _HAS_USER_BASE = (_getuserbase() is not None)
+@@ -106,6 +144,15 @@ if _HAS_USER_BASE:
              'scripts': '{userbase}/bin',
              'data': '{userbase}',
              },
 +        'haiku_user': {
-+            'stdlib': '{userbase}/{platlibdir}/python{py_version_short}',
-+            'platstdlib': '{userbase}/{platlibdir}/python{py_version_short}',
++            'stdlib': '{userbase}/lib/python{py_version_short}',
++            'platstdlib': '{userbase}/lib/python{py_version_short}',
 +            'purelib': '{userbase}/lib/python{py_version_short}/site-packages',
 +            'platlib': '{userbase}/lib/python{py_version_short}/site-packages',
 +            'include': '{userbase}/develop/headers/python{py_version_short}',
@@ -953,7 +960,7 @@ index 4f92119..919d883 100644
          'osx_framework_user': {
              'stdlib': '{userbase}/lib/python',
              'platstdlib': '{userbase}/lib/python',
-@@ -246,6 +262,18 @@ def _expand_vars(scheme, vars):
+@@ -225,6 +272,18 @@ def _expand_vars(scheme, vars):
  
  
  def _get_preferred_schemes():
@@ -972,40 +979,61 @@ index 4f92119..919d883 100644
      if os.name == 'nt':
          return {
              'prefix': 'nt',
+diff --git a/Lib/test/test_sysconfig.py b/Lib/test/test_sysconfig.py
+index 5ee9839..35727c6 100644
+--- a/Lib/test/test_sysconfig.py
++++ b/Lib/test/test_sysconfig.py
+@@ -263,9 +263,9 @@ class TestSysConfig(unittest.TestCase):
+         self.assertTrue(os.path.isfile(config_h), config_h)
+ 
+     def test_get_scheme_names(self):
+-        wanted = ['nt', 'posix_home', 'posix_prefix']
++        wanted = ['nt', 'posix_home', 'posix_prefix', 'haiku', 'haiku_vendor', 'haiku_home']
+         if HAS_USER_BASE:
+-            wanted.extend(['nt_user', 'osx_framework_user', 'posix_user'])
++            wanted.extend(['nt_user', 'osx_framework_user', 'posix_user', 'haiku_user'])
+         self.assertEqual(get_scheme_names(), tuple(sorted(wanted)))
+ 
+     @skip_unless_symlink
 -- 
 2.45.2
 
 
-From 35afca4e9dcc0db07ee81c86ee526bb56ff11128 Mon Sep 17 00:00:00 2001
+From f342f4b21f9462464188884de089a35492db86f6 Mon Sep 17 00:00:00 2001
 From: Oscar Lesta <oscar.lesta@gmail.com>
-Date: Fri, 10 Mar 2023 20:15:14 -0300
-Subject: syncronize both _getuserbase() copies on site.py and sysconfig.py.
+Date: Thu, 25 Jul 2024 17:27:28 -0300
+Subject: Fix location of REPL's history file.
 
+Originally from "initial Haiku patch" by Jerome Duval.
 
-diff --git a/Lib/sysconfig.py b/Lib/sysconfig.py
-index 919d883..c306d43 100644
---- a/Lib/sysconfig.py
-+++ b/Lib/sysconfig.py
-@@ -109,6 +109,14 @@ def _getuserbase():
-         return joinuser("~", "Library", sys._framework,
-                         f"{sys.version_info[0]}.{sys.version_info[1]}")
- 
-+    if sys.platform.startswith('haiku'):
-+        try:
+diff --git a/Lib/site.py b/Lib/site.py
+index 69d96a3..16c4ae7 100644
+--- a/Lib/site.py
++++ b/Lib/site.py
+@@ -513,8 +513,16 @@ def enablerlcompleter():
+             # each interpreter exit when readline was already configured
+             # through a PYTHONSTARTUP hook, see:
+             # http://bugs.python.org/issue5845#msg198636
+-            history = os.path.join(os.path.expanduser('~'),
+-                                   '.python_history')
 +            import subprocess
-+            return subprocess.run(['finddir', 'B_USER_NONPACKAGED_DIRECTORY'],
-+                stdout=subprocess.PIPE, check=True).stdout.rstrip().decode('utf-8')
-+        except:
-+            pass
-+
-     return joinuser("~", ".local")
- 
- _HAS_USER_BASE = (_getuserbase() is not None)
++            try:
++                history = os.path.join(subprocess.check_output(
++                            ['finddir', 'B_USER_VAR_DIRECTORY']).rstrip().decode('utf-8'),
++                            'python', 'history')
++                if not os.path.exists(os.path.dirname(history)):
++                    os.makedirs(os.path.dirname(history))
++            except subprocess.CalledProcessError:
++                history = os.path.join(os.path.expanduser('~'),
++                                       '.python_history')
+             try:
+                 readline.read_history_file(history)
+             except OSError:
 -- 
 2.45.2
 
 
-From 04abc5b32668d7119eeb161c2695c726eaa27a1d Mon Sep 17 00:00:00 2001
+From b50776355951dad9d1334882eb5e9d9cb7449ab5 Mon Sep 17 00:00:00 2001
 From: Oscar Lesta <oscar.lesta@gmail.com>
 Date: Sat, 27 Jan 2024 08:14:52 -0300
 Subject: Apply gh-109191 from Python upstream.
@@ -1098,7 +1126,7 @@ index 57c84e5..6d4f5fc 100644
 2.45.2
 
 
-From 7cca300611c2b2ed11332d3140d01254ba00ab1c Mon Sep 17 00:00:00 2001
+From a0b11b560e85fb9a15fa9d4de09d03e15d2226b5 Mon Sep 17 00:00:00 2001
 From: Oscar Lesta <oscar.lesta@gmail.com>
 Date: Sat, 10 Feb 2024 06:01:25 -0300
 Subject: Fix build on nightlies, following the addition of kqueue.
@@ -1164,7 +1192,7 @@ index 3afcb0e..b7a2681 100644
 2.45.2
 
 
-From 678220941448888e3f74de8c2591fa46d6d5e455 Mon Sep 17 00:00:00 2001
+From 14063f36ca6c9ef3d2921053b3cdeaf621f4af17 Mon Sep 17 00:00:00 2001
 From: Alexander von Gluck IV <kallisti5@unixzen.com>
 Date: Thu, 14 Mar 2024 12:54:33 -0500
 Subject: config.guess: Update to universal haiku arch guessing
@@ -1190,62 +1218,6 @@ index e81d3ae..366429c 100755
  	;;
      SX-4:SUPER-UX:*:*)
  	GUESS=sx4-nec-superux$UNAME_RELEASE
--- 
-2.45.2
-
-
-From 1c1c7f12bdde12c8c8650e8ffdf30febc46f4c74 Mon Sep 17 00:00:00 2001
-From: Oscar Lesta <oscar.lesta@gmail.com>
-Date: Sun, 14 Jul 2024 13:32:13 -0300
-Subject: Add missing 'platinclude' to sysconfig's _INSTALL_SCHEMES.
-
-
-diff --git a/Lib/sysconfig.py b/Lib/sysconfig.py
-index c306d43..8bdfa7b 100644
---- a/Lib/sysconfig.py
-+++ b/Lib/sysconfig.py
-@@ -62,6 +62,7 @@ _INSTALL_SCHEMES = {
-         'purelib': '{base}/non-packaged/lib/python{py_version_short}/site-packages',
-         'platlib': '{platbase}/non-packaged/{platlibdir}/python{py_version_short}/site-packages',
-         'include': '{base}/non-packaged/develop/headers/python{py_version_short}',
-+        'platinclude': '{base}/non-packaged/develop/headers/python{py_version_short}',
-         'scripts': '{base}/non-packaged/bin',
-         'data'   : '{base}/non-packaged',
-         },
-@@ -71,6 +72,7 @@ _INSTALL_SCHEMES = {
-         'purelib': '{base}/lib/python{py_version_short}/vendor-packages',
-         'platlib': '{platbase}/lib/python{py_version_short}/vendor-packages',
-         'include': '{base}/develop/headers/python{py_version_short}',
-+        'platinclude': '{base}/develop/headers/python{py_version_short}',
-         'scripts': '{base}/bin',
-         'data'   : '{base}',
-         },
--- 
-2.45.2
-
-
-From ecc79918bbcae65e4f0ae238df40ed0c6bf43d6d Mon Sep 17 00:00:00 2001
-From: Oscar Lesta <oscar.lesta@gmail.com>
-Date: Sun, 14 Jul 2024 15:18:13 -0300
-Subject: Adjust test_sysconfig.test_get_scheme_names for Haiku.
-
-
-diff --git a/Lib/test/test_sysconfig.py b/Lib/test/test_sysconfig.py
-index 5ee9839..35727c6 100644
---- a/Lib/test/test_sysconfig.py
-+++ b/Lib/test/test_sysconfig.py
-@@ -263,9 +263,9 @@ class TestSysConfig(unittest.TestCase):
-         self.assertTrue(os.path.isfile(config_h), config_h)
- 
-     def test_get_scheme_names(self):
--        wanted = ['nt', 'posix_home', 'posix_prefix']
-+        wanted = ['nt', 'posix_home', 'posix_prefix', 'haiku', 'haiku_vendor', 'haiku_home']
-         if HAS_USER_BASE:
--            wanted.extend(['nt_user', 'osx_framework_user', 'posix_user'])
-+            wanted.extend(['nt_user', 'osx_framework_user', 'posix_user', 'haiku_user'])
-         self.assertEqual(get_scheme_names(), tuple(sorted(wanted)))
- 
-     @skip_unless_symlink
 -- 
 2.45.2
 
