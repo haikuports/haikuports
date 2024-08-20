@@ -139,14 +139,14 @@ index 42b446c7e27..4e81ccc33bc 100644
 2.39.2
 
 
-From 15e3d88803128d4fafc23335c0e5e6cab0b29cee Mon Sep 17 00:00:00 2001
+From b7d9ee77c52a4faca1eea9967635a52942abe395 Mon Sep 17 00:00:00 2001
 From: Trung Nguyen <57174311+trungnt2910@users.noreply.github.com>
 Date: Tue, 28 May 2024 22:31:22 +1000
 Subject: [PATCH 2/3] gdbserver: Initial Haiku support
 
 ---
  gdb/nat/haiku-debug.c        |   43 +
- gdb/nat/haiku-nat.c          | 2784 ++++++++++++++++++++++++++++++++++
+ gdb/nat/haiku-nat.c          | 2808 ++++++++++++++++++++++++++++++++++
  gdb/nat/haiku-nat.h          |  429 ++++++
  gdb/nat/haiku-nub-message.c  |   50 +
  gdb/nat/haiku-nub-message.h  |  141 ++
@@ -161,7 +161,7 @@ Subject: [PATCH 2/3] gdbserver: Initial Haiku support
  gdbserver/remote-utils.cc    |    4 +
  gdbsupport/signals.cc        |   10 +
  include/gdb/signals.def      |    4 +-
- 16 files changed, 4922 insertions(+), 2 deletions(-)
+ 16 files changed, 4946 insertions(+), 2 deletions(-)
  create mode 100644 gdb/nat/haiku-debug.c
  create mode 100644 gdb/nat/haiku-nat.c
  create mode 100644 gdb/nat/haiku-nat.h
@@ -224,10 +224,10 @@ index 00000000000..d1796a403f6
 +}
 diff --git a/gdb/nat/haiku-nat.c b/gdb/nat/haiku-nat.c
 new file mode 100644
-index 00000000000..313a676c990
+index 00000000000..30f00926710
 --- /dev/null
 +++ b/gdb/nat/haiku-nat.c
-@@ -0,0 +1,2784 @@
+@@ -0,0 +1,2808 @@
 +/* Internal interfaces for the Haiku code.
 +
 +   Copyright (C) 2024 Free Software Foundation, Inc.
@@ -537,9 +537,9 @@ index 00000000000..313a676c990
 +          }
 +        else if (m_force_stopped)
 +          {
-+            /* Make sure we don't report a THREAD_DEBUGGED event caused by our
-+               own attempt to stop a thread using debug_thread.  */
-+            make ().set_spurious ();
++            /* A thread that has been requested to stop by GDB with
++                     target_stop, and it stopped cleanly, so report as SIG0. */
++            make ().set_stopped (GDB_SIGNAL_0);
 +            RETURN_IF_FAIL (add ());
 +
 +            m_force_stopped = false;
@@ -1122,8 +1122,18 @@ index 00000000000..313a676c990
 +        });
 +
 +        /* Debug and stop existing threads.  */
-+        for_each_thread (team, [] (const thread_info &info) {
-+          debug_thread (info.tid);
++        for_each_thread (team, [&] (const thread_info &info) {
++          if (debug_thread (info.tid) == B_OK)
++            {
++              auto [thread_it, thread_is_new]
++                  = m_threads.try_emplace (info.tid);
++              gdb_assert (thread_is_new);
++              thread_debug_context &thread_context = thread_it->second;
++
++              status_t status
++                  = thread_context.initialize (info.tid, this, false);
++              gdb_assert (status == B_OK);
++            }
 +          return 0;
 +        });
 +      }
@@ -1705,10 +1715,9 @@ index 00000000000..313a676c990
 +
 +  RETURN_AND_SET_ERRNO_IF_FAIL (context->initialize (pid, !is_ours));
 +
-+  {
-+    std::unique_lock lock (team_debug_ports_lock);
-+    team_debug_ports.insert (context->debugger_port ());
-+  }
++  team_debug_ports_lock.lock ();
++  team_debug_ports.insert (context->debugger_port ());
++  team_debug_ports_lock.unlock ();
 +
 +  /* Record the debug entry and also release the pointer.  */
 +  team_debug_contexts.try_emplace (pid, std::move (context));
@@ -1771,7 +1780,6 @@ index 00000000000..313a676c990
 +  haiku_nat_debug_printf ("ptid=%s, resume_kind=%i, sig=%i",
 +                          ptid.to_string ().c_str (), (int)kind, sig);
 +
-+  std::unique_lock lock (team_debug_ports_lock);
 +  if (is_async_p ())
 +    pipe_to_worker.mark ();
 +
@@ -1780,7 +1788,6 @@ index 00000000000..313a676c990
 +      for (auto &[pid, context] : team_debug_contexts)
 +        {
 +          RETURN_AND_SET_ERRNO_IF_FAIL (context->resume (ptid, kind, sig));
-+          team_debug_ports.insert (context->debugger_port ());
 +        }
 +    }
 +  else
@@ -1789,7 +1796,6 @@ index 00000000000..313a676c990
 +      RETURN_AND_SET_ERRNO_IF_FAIL (get_context (ptid.pid (), context));
 +
 +      RETURN_AND_SET_ERRNO_IF_FAIL (context->resume (ptid, kind, sig));
-+      team_debug_ports.insert (context->debugger_port ());
 +    }
 +
 +  return 0;
@@ -1927,13 +1933,13 @@ index 00000000000..313a676c990
 +         A false negative makes GDB hang forever.  */
 +      if (ptid != null_ptid && is_async_p ())
 +        {
++          /* There might be queued events in the debug context.
++             Notify the main loop directly.  */
 +          pipe_to_event_loop.mark ();
 +
-+          team_debug_ports_lock.lock ();
-+          team_debug_ports.insert (chosen_context->debugger_port ());
-+          if (is_async_p ())
-+            pipe_to_worker.mark ();
-+          team_debug_ports_lock.unlock ();
++          /* There might be unread events in the debugger ports.
++             Notify the worker thread as well.  */
++          pipe_to_worker.mark ();
 +        }
 +    }
 +
@@ -2022,10 +2028,12 @@ index 00000000000..313a676c990
 +
 +  while (*sizeLeft > 0)
 +    {
++      int32 read_size
++          = (int32)std::min (*sizeLeft, (int)B_MAX_READ_WRITE_MEMORY_SIZE);
++
 +      RETURN_AND_SET_ERRNO_IF_FAIL (
 +          context->send<B_DEBUG_MESSAGE_READ_MEMORY> (
-+              { .address = (void *)memaddr, .size = (int32)*sizeLeft },
-+              reply));
++              { .address = (void *)memaddr, .size = read_size }, reply));
 +
 +      memcpy (myaddr, reply.data, reply.size);
 +      memaddr += reply.size;
@@ -2324,6 +2332,7 @@ index 00000000000..313a676c990
 +      async_worker_thread = spawn_thread (
 +          [] (void *data) -> status_t {
 +            std::vector<object_wait_info> wait_infos;
++            bool wait_for_ports = true;
 +
 +            while (true)
 +              {
@@ -2333,54 +2342,69 @@ index 00000000000..313a676c990
 +                                      .type = B_OBJECT_TYPE_FD,
 +                                      .events = B_EVENT_READ });
 +
-+                team_debug_ports_lock.lock ();
-+                for (port_id port : team_debug_ports)
++                if (wait_for_ports)
 +                  {
-+                    wait_infos.emplace_back (
-+                        object_wait_info{ .object = port,
-+                                          .type = B_OBJECT_TYPE_PORT,
-+                                          .events = B_EVENT_READ });
-+                  }
-+                team_debug_ports_lock.unlock ();
++                    std::lock_guard lock (team_debug_ports_lock);
 +
-+                ssize_t ports_readable;
++                    for (port_id port : team_debug_ports)
++                      {
++                        wait_infos.emplace_back (
++                            object_wait_info{ .object = port,
++                                              .type = B_OBJECT_TYPE_PORT,
++                                              .events = B_EVENT_READ });
++                      }
++                  }
++
++                ssize_t event_count;
 +
 +                do
 +                  {
-+                    ports_readable = wait_for_objects (wait_infos.data (),
-+                                                       wait_infos.size ());
++                    event_count = wait_for_objects (wait_infos.data (),
++                                                    wait_infos.size ());
 +                  }
-+                while (ports_readable == B_INTERRUPTED);
++                while (event_count == B_INTERRUPTED);
 +
-+                gdb_assert (ports_readable > 0);
++                gdb_assert (event_count > 0);
 +
 +                if (wait_infos[0].events & B_EVENT_READ)
 +                  {
-+                    /* Woke up because a new team has been added.  */
-+                    --ports_readable;
++                    /* The main thread has requested us to continue.  */
++                    --event_count;
 +                    pipe_to_worker.flush ();
++                    wait_for_ports = true;
 +                  }
-+
-+                /* Remove dead ports.  */
-+                team_debug_ports_lock.lock ();
-+                for (size_t i = 1; i < wait_infos.size (); ++i)
++                else
 +                  {
-+                    const object_wait_info &wait_info = wait_infos[i];
-+                    if (wait_info.events & B_EVENT_INVALID)
++                    if (wait_infos[0].events != 0)
 +                      {
-+                        team_debug_ports.erase (wait_info.object);
-+                        --ports_readable;
++                        /* Other events in the pipe we are uninterested in.  */
++                        --event_count;
 +                      }
-+                    /* These events are one-shot. They will be re-added by
-+                       resume(). Otherwise, the worker thread loop would just
-+                       go on and on.  */
-+                    if (wait_info.events & B_EVENT_READ)
-+                      team_debug_ports.erase (wait_info.object);
-+                  }
-+                team_debug_ports_lock.unlock ();
 +
-+                /* There are some events to read.  */
-+                if (ports_readable > 0)
++                    /* Wait for the main thread to actually read the ports
++                       before waiting again.  */
++                    wait_for_ports = false;
++                  }
++
++                /* There are ports to process in this iteration.  */
++                if (event_count > 0)
++                  {
++                    std::lock_guard lock (team_debug_ports_lock);
++
++                    for (size_t i = 1; i < wait_infos.size (); ++i)
++                      {
++                        const object_wait_info &wait_info = wait_infos[i];
++                        /* Remove dead ports.  */
++                        if (wait_info.events & B_EVENT_INVALID)
++                          {
++                            team_debug_ports.erase (wait_info.object);
++                            --event_count;
++                          }
++                      }
++                  }
++
++                /* There are some events to read from these ports.  */
++                if (event_count > 0)
 +                  pipe_to_event_loop.mark ();
 +              }
 +          },
@@ -5234,7 +5258,7 @@ index 677b01e7f40..d21d3390df2 100644
 2.39.2
 
 
-From 460898e590738b7a23667c32bbdbd875f8006ebb Mon Sep 17 00:00:00 2001
+From 019ad2f8cffccb9ab8608034455165135d2e116c Mon Sep 17 00:00:00 2001
 From: Trung Nguyen <me@trungnt2910.com>
 Date: Mon, 1 Jul 2024 10:32:51 +0700
 Subject: [PATCH 3/3] gdb: Initial Haiku support
@@ -5247,17 +5271,17 @@ Subject: [PATCH 3/3] gdb: Initial Haiku support
  gdb/configure.host     |   2 +
  gdb/configure.nat      |  25 ++
  gdb/configure.tgt      |  11 +
- gdb/haiku-nat.c        | 766 +++++++++++++++++++++++++++++++++++++++++
+ gdb/haiku-nat.c        | 778 +++++++++++++++++++++++++++++++++++++++++
  gdb/haiku-nat.h        |  75 ++++
- gdb/haiku-tdep.c       | 193 +++++++++++
+ gdb/haiku-tdep.c       | 193 ++++++++++
  gdb/haiku-tdep.h       |  44 +++
  gdb/i386-haiku-nat.c   |  39 +++
  gdb/i386-haiku-tdep.c  |  61 ++++
  gdb/osabi.c            |   1 +
  gdb/osabi.h            |   1 +
- gdb/solib-haiku.c      | 115 +++++++
+ gdb/solib-haiku.c      | 115 ++++++
  gdb/solib-haiku.h      |  27 ++
- 17 files changed, 1678 insertions(+), 1 deletion(-)
+ 17 files changed, 1690 insertions(+), 1 deletion(-)
  create mode 100644 gdb/amd64-haiku-nat.c
  create mode 100644 gdb/amd64-haiku-tdep.c
  create mode 100644 gdb/haiku-nat.c
@@ -5786,10 +5810,10 @@ index 47a674201f9..37eb03a1437 100644
  	;;
 diff --git a/gdb/haiku-nat.c b/gdb/haiku-nat.c
 new file mode 100644
-index 00000000000..b60882c8ae6
+index 00000000000..3faab245b98
 --- /dev/null
 +++ b/gdb/haiku-nat.c
-@@ -0,0 +1,766 @@
+@@ -0,0 +1,778 @@
 +/* Native-dependent code for Haiku.
 +
 +   Copyright (C) 2024 Free Software Foundation, Inc.
@@ -5937,13 +5961,25 @@ index 00000000000..b60882c8ae6
 +  inferior_appeared (inf, pid);
 +  inf->attach_flag = true;
 +
-+  /* Always add a main thread.  */
-+  thread_info *thr = add_thread_silent (this, ptid_t (pid, 0, pid));
-+  switch_to_thread (thr);
++  const haiku_nat::team_info *team_info = haiku_nat::get_team (pid);
++  gdb_assert (team_info != nullptr);
 +
-+  /* Don't consider the thread stopped until we've processed its
-+     initial stop.  */
-+  set_executing (this, thr->ptid, true);
++  haiku_nat::for_each_thread (pid, [&] (const haiku_nat::thread_info &info) {
++    if (info.tid == team_info->debugger_nub_thread)
++      return 0;
++
++    thread_info *thr = add_thread (this, ptid_t (pid, 0, info.tid));
++    /* Don't consider the thread stopped until we've processed its
++       initial stop.  */
++    set_executing (this, thr->ptid, true);
++
++    if (info.tid == info.team)
++      switch_to_thread (thr);
++
++    return 0;
++  });
++
++  gdb_assert (inferior_ptid != null_ptid);
 +
 +  unpusher.release ();
 +}
