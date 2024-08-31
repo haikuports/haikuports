@@ -1,0 +1,153 @@
+From 8687851307e2525cf7fdf5007ec8b5bda7d46e45 Mon Sep 17 00:00:00 2001
+From: Chris Roberts <cpr420@gmail.com>
+Date: Sun, 24 Nov 2013 20:46:25 -0700
+Subject: Search for xattr support on Haiku
+
+
+diff --git a/xar/configure.ac b/xar/configure.ac
+index c1f752b..2710f78 100644
+--- a/xar/configure.ac
++++ b/xar/configure.ac
+@@ -184,6 +184,7 @@ AC_SUBST([enable_autogen])
+ AC_TRY_COMPILE([#include <sys/types.h> 
+ #include <sys/acl.h>], [acl_t a], [AC_DEFINE([HAVE_SYS_ACL_H],[1], [define if you have sys/acl.h and it has a working acl_t type])])
+ AC_CHECK_HEADERS(ext2fs/ext2_fs.h sys/statfs.h sys/xattr.h sys/param.h sys/extattr.h libutil.h)
++AC_SEARCH_LIBS(getxattr, gnu)
+ AC_CHECK_FUNCS(lgetxattr)
+ AC_CHECK_FUNCS(lsetxattr)
+ AC_CHECK_FUNCS(getxattr)
+@@ -197,6 +198,8 @@ AC_CHECK_FUNCS(statvfs)
+ AC_CHECK_FUNCS(statfs)
+ AC_CHECK_FUNCS(strmode)
+ 
++AC_SEARCH_LIBS(strsep, bsd)
++
+ AC_CHECK_MEMBERS([struct statfs.f_fstypename],,,[#include <sys/types.h>
+ #include <sys/param.h>
+ #include <sys/mount.h>])
+diff --git a/xar/lib/linuxattr.c b/xar/lib/linuxattr.c
+index 58ee6a8..a00da8f 100644
+--- a/xar/lib/linuxattr.c
++++ b/xar/lib/linuxattr.c
+@@ -135,7 +135,7 @@ int32_t xar_linuxattr_write(xar_t x, xar_file_t f, void *buf, size_t len, void *
+ 
+ int32_t xar_linuxattr_archive(xar_t x, xar_file_t f, const char* file, const char *buffer, size_t len)
+ {
+-#if defined(HAVE_SYS_XATTR_H) && defined(HAVE_LGETXATTR) && !defined(__APPLE__)
++#if defined(HAVE_SYS_XATTR_H) && defined(HAVE_LGETXATTR) && !defined(__APPLE__) && !defined(__HAIKU__)
+ 	char *i, *buf = NULL;
+ 	int ret, retval=0, bufsz = 1024;
+ 	struct statfs sfs;
+@@ -206,7 +206,7 @@ BAIL:
+ 
+ int32_t xar_linuxattr_extract(xar_t x, xar_file_t f, const char* file, char *buffer, size_t len)
+ {
+-#if defined HAVE_SYS_XATTR_H && defined(HAVE_LSETXATTR) && !defined(__APPLE__)
++#if defined HAVE_SYS_XATTR_H && defined(HAVE_LSETXATTR) && !defined(__APPLE__) && !defined(__HAIKU__)
+ 	const char *fsname = "bogus";
+ 	struct statfs sfs;
+ 	int eaopt = 0;
+-- 
+2.45.2
+
+
+From e350d71c1b3457a40b14bc229d336295fff9cfc0 Mon Sep 17 00:00:00 2001
+From: Oscar Lesta <oscar.lesta@gmail.com>
+Date: Fri, 30 Aug 2024 23:59:13 -0300
+Subject: Some hackish build "fixes".
+
+
+diff --git a/xar/configure.ac b/xar/configure.ac
+index 2710f78..60d6a56 100644
+--- a/xar/configure.ac
++++ b/xar/configure.ac
+@@ -159,6 +159,12 @@ case "${host}" in
+ 	dnl CPPFLAGS="$CPPFLAGS -D_POSIX_PTHREAD_SEMANTICS"
+ 	dnl LIBS="$LIBS -lposix4 -lsocket -lnsl"
+ 	;;
++  *-*-haiku*)
++	CFLAGS="$CFLAGS -Wno-unknown-pragmas"
++	LIBS="$LIBS -lbsd"
++	abi="elf"
++	RPATH=
++	;;
+   *)
+ 	AC_MSG_RESULT([Unsupported operating system: ${host}])
+ 	abi="elf"
+diff --git a/xar/lib/util.c b/xar/lib/util.c
+index 0ea661a..d98e79b 100644
+--- a/xar/lib/util.c
++++ b/xar/lib/util.c
+@@ -38,19 +38,21 @@
+ #include <stdio.h>
+ #include <stdint.h>
+ #include <sys/types.h>
++#ifndef __HAIKU__
+ #include <sys/mount.h>
++#endif
+ #include <sys/param.h>
+ #include <arpa/inet.h>
+ #include <string.h>
+ #include <unistd.h>
+ #include <errno.h>
+ #include <time.h>
+-#include "config.h"
++#include "../include/config.h"
+ #include <ctype.h>
+ #ifndef HAVE_ASPRINTF
+ #include "asprintf.h"
+ #endif
+-#include "xar.h"
++#include "../include/xar.h"
+ #include "archive.h"
+ #include "filetree.h"
+ 
+@@ -587,7 +589,8 @@ size_t xar_optimal_io_size_at_path(const char *path)
+ {
+ 	// Start at 1MiB
+ 	size_t optimal_rsize = 1024 * 1024;
+-	
++
++#ifndef __HAIKU__
+ 	// Stat the destination of the archive to determine the optimal fs operation size
+ 	struct statfs target_mount_stat_fs;
+ 	if ( statfs(path, &target_mount_stat_fs) == 0 )
+@@ -615,6 +618,6 @@ size_t xar_optimal_io_size_at_path(const char *path)
+ 			optimal_rsize = fs_iosize;
+ 		}
+ 	}
+-	
++#endif
+ 	return optimal_rsize;
+ }
+diff --git a/xar/src/xar.c b/xar/src/xar.c
+index 9977e8a..a33a643 100644
+--- a/xar/src/xar.c
++++ b/xar/src/xar.c
+@@ -51,8 +51,8 @@
+ #include <time.h>
+ #include "xar_internal.h"
+ #include "config.h"
+-#include "filetree.h"
+-#include "util.h"
++#include "../lib/filetree.h"
++#include "../lib/util.h"
+ #define SYMBOLIC 1
+ #define NUMERIC  2
+ static int Perms = 0;
+diff --git a/xar/src/xar_internal.h b/xar/src/xar_internal.h
+index b78745c..b26d3da 100644
+--- a/xar/src/xar_internal.h
++++ b/xar/src/xar_internal.h
+@@ -11,7 +11,7 @@
+ #ifdef XARSIG_BUILDING_WITH_XAR
+ #include "xar.h"
+ #else
+-#include <xar/xar.h>
++#include "xar.h"
+ #endif // XARSIG_BUILDING_WITH_XAR
+ 
+ // Undeprecate these for internal usage
+-- 
+2.45.2
+
