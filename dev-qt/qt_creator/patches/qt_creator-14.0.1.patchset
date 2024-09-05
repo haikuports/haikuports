@@ -355,3 +355,95 @@ index 0717bdd..bfcf14a 100644
 -- 
 2.45.2
 
+
+From 39b1854d820123d9126dbb66b9eb976842ffa4ac Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Thu, 5 Sep 2024 17:25:10 +1000
+Subject: Add Haiku provider for AppStatisticsMonitor plugin
+
+
+diff --git a/src/plugins/appstatisticsmonitor/idataprovider.cpp b/src/plugins/appstatisticsmonitor/idataprovider.cpp
+index 23d443c..2ae1200 100644
+--- a/src/plugins/appstatisticsmonitor/idataprovider.cpp
++++ b/src/plugins/appstatisticsmonitor/idataprovider.cpp
+@@ -31,6 +31,11 @@
+ #include <mach/mach_time.h>
+ #endif
+ 
++#ifdef Q_OS_HAIKU
++#include <OS.h>
++#include <kernel/image.h>
++#endif
++
+ using namespace Utils;
+ 
+ namespace AppStatisticsMonitor::Internal {
+@@ -329,12 +334,65 @@ private:
+ };
+ #endif
+ 
++#ifdef Q_OS_HAIKU
++class HaikuDataProvider : public IDataProvider
++{
++public:
++    HaikuDataProvider(qint64 pid, QObject *parent = nullptr)
++        : IDataProvider(pid, parent)
++    {}
++
++    double getCpuConsumption()
++    {
++    	system_info	sysInfo;
++    	get_system_info(&sysInfo);
++
++        team_usage_info usageInfo;
++        status_t status = get_team_usage_info(m_pid, B_TEAM_USAGE_SELF, &usageInfo);
++        if (status != B_OK)
++            return 0.0;
++
++        const double currentTotalCpuTime = (double)usageInfo.user_time + (double)usageInfo.kernel_time;
++        const double cpuUsageDelta = currentTotalCpuTime - m_prevCpuUsage;
++        const auto elapsedTime = std::chrono::steady_clock::now() - m_prevTime;
++        const double elapsedTimeMks = std::chrono::duration_cast<std::chrono::milliseconds>(elapsedTime).count() * 1000.0;
++
++        m_prevCpuUsage = currentTotalCpuTime;
++        m_prevTime = std::chrono::steady_clock::now();
++
++        return (cpuUsageDelta / (elapsedTimeMks * sysInfo.cpu_count)) * 100.0;
++    }
++
++    double getMemoryConsumption()
++    {
++        system_info	sysinfo;
++        get_system_info(&sysinfo);
++        int64 physicalMemory = (int64)sysinfo.max_pages * B_PAGE_SIZE;
++
++        area_info area;
++        ssize_t cookie = 0;
++        int64 teamMemory = 0;
++
++        while (get_next_area_info(m_pid, &cookie, &area) == B_OK)
++            teamMemory += area.ram_size;
++
++        return static_cast<double>(teamMemory) / static_cast<double>(physicalMemory) * 100.0;
++    }
++private:
++    std::chrono::steady_clock::time_point m_prevTime = std::chrono::steady_clock::now();
++    double m_prevCpuUsage = 0;
++    int cpuCount = 1;
++};
++#endif
++
+ IDataProvider *createDataProvider(qint64 pid)
+ {
+ #ifdef Q_OS_WIN
+     return new WindowsDataProvider(pid);
+ #elif defined(Q_OS_MACOS)
+     return new MacDataProvider(pid);
++#elif defined(Q_OS_HAIKU)
++    return new HaikuDataProvider(pid);
+ #else // Q_OS_LINUX
+     return new LinuxDataProvider(pid);
+ #endif
+-- 
+2.45.2
+
