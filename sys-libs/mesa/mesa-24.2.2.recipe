@@ -1,0 +1,191 @@
+SUMMARY="Multi-platform GL implementation"
+DESCRIPTION="Mesa is an open-source implementation of the OpenGL \
+specification, which documents a system for rendering interactive \
+3D graphics. Mesa fills the role of the Haiku OpenGL kit, \
+providing 3D rendering to Haiku applications."
+HOMEPAGE="https://www.mesa3d.org/"
+COPYRIGHT="1999-2024 Brian Paul"
+LICENSE="MIT"
+REVISION="1"
+SOURCE_URI="https://mesa.freedesktop.org/archive/mesa-${portVersion}.tar.xz"
+CHECKSUM_SHA256="fd077d3104edbe459e2b8597d2757ec065f9bd2d620b8c0b9cc88c2bf9891d02"
+
+ADDITIONAL_FILES="50_mesa.json"
+
+ARCHITECTURES="?all !x86_gcc2"
+SECONDARY_ARCHITECTURES="?x86"
+
+libVersion=1.0.0
+libOSMesaVersion=8.0.0
+libVersionCompat="$libVersion compat >= ${libVersion%%.*}"
+libOSMesaVersionCompat="$libOSMesaVersion compat >= ${libOSMesaVersion%%.*}"
+
+PROVIDES="
+	mesa$secondaryArchSuffix = $portVersion
+	lib:libOSMesa$secondaryArchSuffix = $libOSMesaVersionCompat
+	lib:libglapi$secondaryArchSuffix = 0.0.0
+	"
+REQUIRES="
+	haiku$secondaryArchSuffix
+	lib:libz$secondaryArchSuffix
+	lib:libLLVM_17$secondaryArchSuffix
+	lib:libexpat$secondaryArchSuffix
+	lib:libGL$secondaryArchSuffix
+	"
+
+PROVIDES_devel="
+	mesa${secondaryArchSuffix}_devel = $portVersion
+	devel:libOSMesa$secondaryArchSuffix = $libOSMesaVersionCompat
+	devel:libglapi$secondaryArchSuffix = 0.0.0
+	"
+REQUIRES_devel="
+	mesa$secondaryArchSuffix == $portVersion base
+	devel:libGL$secondaryArchSuffix
+	"
+
+SUMMARY_eglvnd="The Mesa glvnd rendering drivers for Haiku"
+DESCRIPTION_eglvnd="This glvnd rendering driver package provides \
+software pipe rendering (with LLVM-bosted performance)."
+
+PROVIDES_eglvnd="
+	mesa${secondaryArchSuffix}_eglvnd = $portVersion
+	"
+REQUIRES_eglvnd="
+	mesa$secondaryArchSuffix == $portVersion base
+	lib:libLLVM_18$secondaryArchSuffix
+	"
+
+SUMMARY_lavapipe="Vulkan software rasteriser driver"
+DESCRIPTION_lavapipe="Lavapipe is Mesa's software-based Vulkan 1.3 \
+implementation akin to LLVMpipe for OpenGL."
+
+PROVIDES_lavapipe="
+	mesa${secondaryArchSuffix}_lavapipe = $portVersion
+	"
+REQUIRES_lavapipe="
+	lib:libLLVM_18$secondaryArchSuffix
+	"
+# We require libglvnd_devel for now for clarity since there is no
+# libglvnd.so and mesa 22.x provides our devel:libGL
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel
+	libglvnd${secondaryArchSuffix}_devel
+	devel:libz$secondaryArchSuffix
+	devel:libLLVM_18$secondaryArchSuffix
+	devel:libexpat$secondaryArchSuffix
+	devel:libvulkan$secondaryArchSuffix
+	mako_python310
+	pyyaml_python310
+	"
+BUILD_PREREQUIRES="
+	cmd:ninja
+	cmd:bison
+	cmd:find
+	cmd:flex
+	cmd:meson
+	cmd:git
+	cmd:llvm_config >= 18
+	cmd:egrep
+	cmd:gcc$secondaryArchSuffix
+	cmd:ld$secondaryArchSuffix
+	cmd:pkg_config$secondaryArchSuffix
+	cmd:python3.10
+	cmd:which
+	"
+
+defineDebugInfoPackage mesa$secondaryArchSuffix \
+	"${addOnsDir/mesa$secondaryArchSuffix/mesa${secondaryArchSuffix}_eglvnd}/opengl/egl_vendor.d/libEGL_mesa.so.0" \
+	"${addOnsDir/mesa$secondaryArchSuffix/mesa${secondaryArchSuffix}_lavapipe}/vulkan/icd.d/libvulkan_lvp.so" \
+	"$libDir"/libOSMesa.so.$libOSMesaVersion \
+
+BUILD()
+{
+	if [ -n "$secondaryArchSuffix" ]; then
+		export HAIKU_SECONDARY_ARCH="$effectiveTargetArchitecture"
+	fi
+
+	mkdir -p build
+
+	# In the future, all we need to do is enable other gallium
+	# drivers so libEGL_mesa contains other drivers in addition
+	# to llvm swpipe.
+	meson build \
+		-Dosmesa=true -Degl=enabled -Dglvnd=enabled \
+		-Dgallium-drivers=swrast \
+		-Dvulkan-drivers=swrast \
+		-Dvulkan-icd-dir=$addOnsDir/vulkan/icd.d \
+		--buildtype=debugoptimized \
+		--prefix=$prefix \
+		--libdir=$libDir \
+		--includedir=$includeDir/os/opengl
+	ninja -C build $jobArgs
+}
+
+INSTALL()
+{
+	ninja -C build install
+
+	# Do a little cleanup
+	rm -rf $prefix/share
+
+	# Mesa's EGL render driver
+	mkdir -p $addOnsDir/opengl/egl_vendor.d
+	mv $libDir/libEGL_mesa.so* "$addOnsDir/opengl/egl_vendor.d/"
+
+	# Vulkan lavapipe driver
+	mv $libDir/libvulkan_lvp.so \
+		"$addOnsDir/vulkan/icd.d"
+
+	# remove stock glvnd json
+	rm -rf $dataDir/glvnd
+	# remove dri stuff
+	rm -rf $dataDir/drirc.d
+
+	rm -rf $libDir/haiku
+
+	# Configure Mesa EGL Vendor Renderer
+	cp "$portDir/additional-files/50_mesa.json" "$addOnsDir/opengl/egl_vendor.d/"
+	# Configure vulkan lavapipe render (Fix path)
+	cp "build/src/gallium/targets/lavapipe/lvp_icd.bepc.json" $addOnsDir/vulkan/icd.d/lvp_icd.json
+	sed -i "s/\/packages\/mesa-.*\/.self\/lib\/libvulkan_lvp.so/.\/libvulkan_lvp.so/" $addOnsDir/vulkan/icd.d/lvp_icd.json
+
+	# Set some nice version info
+	appVersion=${portVersion//\./ }
+	setversion "$addOnsDir/opengl/egl_vendor.d/libEGL_mesa.so.0.0.0" -app $appVersion -long \
+		"Mesa EGL rendering drivers"
+	setversion "$addOnsDir/vulkan/icd.d/libvulkan_lvp.so" -app $appVersion -long \
+		"Vulkan software rasteriser driver"
+
+	prepareInstalledDevelLibs \
+		libOSMesa
+	fixPkgconfig
+
+	sed -i 's/develop\/headers$/develop\/headers\/os\/opengl/' $installDestDir$developLibDir/pkgconfig/osmesa.pc
+
+	# devel package
+	packageEntries devel \
+		$developDir
+
+	# swpipe renderer package
+	packageEntries eglvnd \
+		"$addOnsDir/opengl/egl_vendor.d/libEGL_mesa.so.0.0.0" \
+		"$addOnsDir/opengl/egl_vendor.d/libEGL_mesa.so.0" \
+		"$addOnsDir/opengl/egl_vendor.d/libEGL_mesa.so" \
+		"$addOnsDir/opengl/egl_vendor.d/50_mesa.json"
+
+	# lavapipe renderer package
+	packageEntries lavapipe \
+		"$addOnsDir/vulkan/icd.d/libvulkan_lvp.so" \
+		"$addOnsDir/vulkan/icd.d/lvp_icd.json"
+
+	# Remove empty directories from mesa package
+#	rm -rf "$addOnsDir/vulkan/icd.d"
+#	rm -rf "$addOnsDir/vulkan"
+#	rm -rf "$addOnsDir/opengl/egl_vendor.d"
+#	rm -rf "$addOnsDir/opengl"
+}
+
+TEST()
+{
+	make check
+}
