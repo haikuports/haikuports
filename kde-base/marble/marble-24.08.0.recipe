@@ -12,18 +12,22 @@ COPYRIGHT="2007-2024 Marble Virtual Globe authors"
 LICENSE="GNU LGPL v2.1"
 REVISION="1"
 SOURCE_URI="https://download.kde.org/stable/release-service/$portVersion/src/marble-$portVersion.tar.xz"
-CHECKSUM_SHA256="856cff312725f9644b05cc92d3e437712311d96927e6aa008a44df1c0f4a0b88"
+CHECKSUM_SHA256="bc02c709c15518fa1c6a7dafef2c507e14571d4f722486faca1bf8e18be931a5"
 ADDITIONAL_FILES="marble.rdef.in"
 
 ARCHITECTURES="all !x86_gcc2"
 SECONDARY_ARCHITECTURES="x86"
 
+libVersion="$portVersion"
+libVersionCompat="$libVersion compat >= ${libVersion%%.*}"
+
 PROVIDES="
 	marble$secondaryArchSuffix = $portVersion
-	app:Marble$secondaryArchSuffix = $portVersion
-	lib:libastro$secondaryArchSuffix = $portVersion
+	cmd:marble$secondaryArchSuffix = $portVersion
+#	cmd:marble_qt$secondaryArchSuffix = $portVersion
+	lib:libastro$secondaryArchSuffix = $libVersionCompat
 	lib:libmarbledeclarative$secondaryArchSuffix = $portVersion
-	lib:libmarblewidget_qt5$secondaryArchSuffix = $portVersion
+	lib:libmarblewidget_qt5$secondaryArchSuffix = $libVersionCompat
 	"
 REQUIRES="
 	haiku$secondaryArchSuffix
@@ -71,6 +75,16 @@ REQUIRES="
 	lib:libQt5Widgets$secondaryArchSuffix
 	lib:libQt5Xml$secondaryArchSuffix
 	lib:libz$secondaryArchSuffix
+	"
+
+PROVIDES_devel="
+	marble${secondaryArchSuffix}_devel = $portVersion
+	devel:libastro$secondaryArchSuffix = $libVersionCompat
+	devel:libmarbledeclarative$secondaryArchSuffix = $portVersion
+	devel:libmarblewidget_qt5$secondaryArchSuffix = $libVersionCompat
+	"
+REQUIRES_devel="
+	marble$secondaryArchSuffix == $portVersion base
 	"
 
 BUILD_REQUIRES="
@@ -130,7 +144,12 @@ BUILD_PREREQUIRES="
 	cmd:pkg_config$secondaryArchSuffix
 	"
 
-BUILD()
+TEST_REQUIRES="
+	qthaikuplugins$secondaryArchSuffix
+	lib:libvpx$secondaryArchSuffix
+	"
+
+PATCH()
 {
 	# disable docs generation
 	sed -e '/add_subdirectory(doc)/ s/^#*/#/' -i CMakeLists.txt
@@ -138,39 +157,41 @@ BUILD()
 	sed -e '/install(FILES marble.knsrc/ s/^#*/#/' -i src/apps/marble-kde/CMakeLists.txt
 	# disable doctools
 	sed -e '/    kdoctools_install/ s/^#*/#/' -i src/apps/marble-kde/CMakeLists.txt
+}
 
-	mkdir -p build
-	cd build
-
-	cmake .. \
+BUILD()
+{
+	cmake -Bbuild -S. \
 		-DCMAKE_BUILD_TYPE=Release \
-		-DCMAKE_INSTALL_PREFIX=$appsDir \
-		-DCMAKE_INSTALL_DATADIR=$dataDir \
-		-DCMAKE_INSTALL_DATAROOTDIR=$dataDir \
-		-DCMAKE_INSTALL_FULL_DATAROOTDIR=$dataDir \
-		-DSHARE_INSTALL_PREFIX=$dataDir \
-		-DKDE_INSTALL_BINDIR=$appsDir \
+		$cmakeDirArgs \
+		-DKDE_INSTALL_BINDIR=$binDir \
 		-DKDE_INSTALL_LIBDIR=$libDir \
 		-DKDE_INSTALL_INCLUDEDIR=$includeDir \
 		-DKDE_INSTALL_PLUGINDIR=$addOnsDir/Qt5 \
-		-DKDE_INSTALL_QTPLUGINDIR=$addOnsDir/Qt5 \
+		-DKDE_INSTALL_QMLDIR=$dataDir/Qt5 \
+		-DINCLUDE_INSTALL_DIR=$includeDir \
 		-DMARBLE_DATA_PATH=$dataDir/marble \
 		-DMARBLE_PLUGIN_PATH=$addOnsDir/marble \
-		-DECM_MKSPECS_INSTALL_DIR=$dataDir/Qt5/mkspecs \
-		-DECM_DIR=/system/data/cmake/Modules/ECM/cmake
-
-	make $jobArgs
+		-DMARBLE_PRI_INSTALL_DIR=$dataDir/Qt5/mkspecs \
+		-DQT_PLUGINS_DIR=$addOnsDir/Qt5 \
+		-DECM_DIR=/system/data/cmake/Modules/ECM/cmake \
+		-DBUILD_MARBLE_TESTS=OFF \
+		-Wno-dev
+	make -Cbuild $jobArgs
 }
 
 INSTALL()
 {
-	cd build
-	make install
+	make -Cbuild install
 
-	mv $appsDir/marble $appsDir/Marble
-	rm -rf $appsDir/{bin,mkspecs,include,lib,share}
-	rm -rf $dataDir/{mime,metainfo}
-	rm -rf $libDir/cmake
+	# don't mess with shared_mime_info files
+	rm -rf $dataDir/mime/{aliases,generic-icons,globs,globs2,icons,magic}
+	rm -rf $dataDir/mime/{mime.cache,subclasses,treemagic,types,version,XMLnamespaces}
+	# cleanup
+	rm -rf $dataDir/{applications,metainfo}
+	rm -rf $prefix/share
+	# only keep marble-kde
+	rm -rf $binDir/marble-qt
 
 	local MAJOR="`echo "$portVersion" | cut -d. -f1`"
 	local MIDDLE="`echo "$portVersion" | cut -d. -f2`"
@@ -182,7 +203,24 @@ INSTALL()
 		-e "s|@MINOR@|$MINOR|" \
 		$portDir/additional-files/marble.rdef.in > marble.rdef
 
-	addResourcesToBinaries marble.rdef $appsDir/Marble
+	addResourcesToBinaries marble.rdef $binDir/marble
 
-	addAppDeskbarSymlink $appsDir/Marble
+	addAppDeskbarSymlink $binDir/marble Marble
+
+	prepareInstalledDevelLibs \
+		libastro \
+		libmarbledeclarative \
+		libmarblewidget-qt5
+
+	packageEntries devel \
+		$developDir \
+		$dataDir/Qt5 \
+		$libDir/cmake
+}
+
+TEST()
+{
+	# 82% tests passed, 10 tests failed out of 55
+	export LIBRARY_PATH="$sourceDir/build/src/lib/astro:$sourceDir/build/src/lib/marble:$LIBRARY_PATH"
+	ctest --test-dir build --output-on-failure
 }
