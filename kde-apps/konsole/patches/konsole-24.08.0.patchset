@@ -1,0 +1,126 @@
+From af1b56d8e8e1295f31e318bf2990766615bfb271 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 3 Mar 2024 22:00:00 +1000
+Subject: Fix for Haiku
+
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 4474ceb..9e0f769 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -91,6 +91,10 @@ if(${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD")
+     list(APPEND konsole_LIBS util)
+ endif()
+ 
++if(HAIKU)
++    list(APPEND konsole_LIBS network)
++endif()
++
+ # TODO: Move this to an internal folder if it grows too much.
+ # This konsoleprivate_core is the "core" library that depends in nothing from konsole itself
+ # so we can start to detangle the codebase.
+diff --git a/src/Pty.cpp b/src/Pty.cpp
+index b22d435..b87a360 100644
+--- a/src/Pty.cpp
++++ b/src/Pty.cpp
+@@ -243,7 +243,7 @@ void Pty::addEnvironmentVariables(const QStringList &environmentVariables)
+ 
+     // extra safeguard to make sure $TERM is always set
+     if (!isTermEnvAdded) {
+-        setEnv(QStringLiteral("TERM"), QStringLiteral("xterm-256color"));
++        setEnv(QStringLiteral("TERM"), QStringLiteral("xterm-color"));
+     }
+ }
+ 
+diff --git a/src/Vt102Emulation.cpp b/src/Vt102Emulation.cpp
+index 981ac80..0eba2fa 100644
+--- a/src/Vt102Emulation.cpp
++++ b/src/Vt102Emulation.cpp
+@@ -2417,11 +2417,19 @@ void Vt102Emulation::sendKeyEvent(QKeyEvent *event)
+             // Alt+[Character] results in Esc+[Character] being sent
+             // (unless there is an entry defined for this particular combination
+             //  in the keyboard modifier)
++#ifdef Q_OS_HAIKU
++        const bool wantsControlModifier = ((entry.modifiers() & entry.modifierMask() & Qt::ControlModifier) != 0U);
++#else
+             const bool wantsAltModifier = ((entry.modifiers() & entry.modifierMask() & Qt::AltModifier) != 0U);
++#endif
+             const bool wantsMetaModifier = ((entry.modifiers() & entry.modifierMask() & Qt::MetaModifier) != 0U);
+             const bool wantsAnyModifier = ((entry.state() & entry.stateMask() & KeyboardTranslator::AnyModifierState) != 0);
+ 
++#ifdef Q_OS_HAIKU
++        if (((modifiers & Qt::ControlModifier) != 0U) && !(wantsControlModifier || wantsAnyModifier) && !event->text().isEmpty()) {
++#else
+             if (((modifiers & Qt::AltModifier) != 0U) && !(wantsAltModifier || wantsAnyModifier) && !event->text().isEmpty()) {
++#endif
+                 textToSend.prepend("\033");
+             }
+             if (((modifiers & Qt::MetaModifier) != 0U) && !(wantsMetaModifier || wantsAnyModifier) && !event->text().isEmpty()) {
+diff --git a/src/profile/Profile.cpp b/src/profile/Profile.cpp
+index dd86ff5..1419c13 100644
+--- a/src/profile/Profile.cpp
++++ b/src/profile/Profile.cpp
+@@ -68,7 +68,7 @@ const std::vector<Profile::PropertyInfo> Profile::DefaultProperties = {
+     {Command, "Command", nullptr, QString()},
+     {Arguments, "Arguments", nullptr, QStringList()},
+     {MenuIndex, "MenuIndex", nullptr, QLatin1String("0")},
+-    {Environment, "Environment", GENERAL_GROUP, QStringList{QLatin1String("TERM=xterm-256color"), QLatin1String("COLORTERM=truecolor")}},
++    {Environment, "Environment", GENERAL_GROUP, QStringList{QLatin1String("TERM=xterm-color"), QLatin1String("COLORTERM=truecolor")}},
+     {Directory, "Directory", GENERAL_GROUP, QString()},
+     {LocalTabTitleFormat, "LocalTabTitleFormat", GENERAL_GROUP, QLatin1String("%d : %n")},
+     {LocalTabTitleFormat, "tabtitle", nullptr, QLatin1String("%d : %n")},
+diff --git a/src/session/Session.cpp b/src/session/Session.cpp
+index 93d8835..17f22fa 100644
+--- a/src/session/Session.cpp
++++ b/src/session/Session.cpp
+@@ -516,14 +516,16 @@ void Session::run()
+     }
+ 
+     // if a program was specified via setProgram(), but it couldn't be found (but a fallback was), print a warning
++#ifndef Q_OS_HAIKU
+     if (exec != checkProgram(_program)) {
+         terminalWarning(i18n("Could not find '%1', starting '%2' instead.  Please check your profile settings.", _program, exec));
+     } else if (exec != checkProgram(exec)) {
+         terminalWarning(i18n("Could not find '%1', starting '%2' instead.  Please check your profile settings.", exec, checkProgram(exec)));
+     }
++#endif
+ 
+     // if no arguments are specified, fall back to program name
+-    QStringList arguments = _arguments.join(QLatin1Char(' ')).isEmpty() ? QStringList() << exec : _arguments;
++    QStringList arguments = _arguments.join(QLatin1Char(' ')).isEmpty() ? QStringList() << exec << QStringLiteral("-login") : _arguments;
+ 
+     // For historical reasons, the first argument in _arguments is the
+     // name of the program to execute, remove it in favor of the actual program name
+-- 
+2.45.1
+
+
+From b5a9939f0e4323015fb9034354b6f48a790353d5 Mon Sep 17 00:00:00 2001
+From: Schrijvers Luc <begasus@gmail.com>
+Date: Thu, 28 Mar 2024 12:35:30 +0100
+Subject: Use system themes
+
+
+diff --git a/src/MainWindow.cpp b/src/MainWindow.cpp
+index c8a2369..6c3b88a 100644
+--- a/src/MainWindow.cpp
++++ b/src/MainWindow.cpp
+@@ -367,6 +367,7 @@ void MainWindow::setupActions()
+     });
+ 
+     // Set up themes
++#ifndef Q_OS_HAIKU
+     auto *manager = new KColorSchemeManager(actionCollection());
+     manager->setAutosaveChanges(true);
+     KActionMenu *selectionMenu = KColorSchemeMenu::createMenu(manager, this);
+@@ -375,6 +376,7 @@ void MainWindow::setupActions()
+     winColorSchemeMenu->menu()->setIcon(QIcon::fromTheme(QStringLiteral("preferences-desktop-color")));
+     winColorSchemeMenu->menu()->setTitle(i18n("&Window Color Scheme"));
+     actionCollection()->addAction(QStringLiteral("window-colorscheme-menu"), winColorSchemeMenu);
++#endif
+ 
+     // Full Screen
+     menuAction = KStandardAction::fullScreen(this, &MainWindow::viewFullScreen, this, collection);
+-- 
+2.43.2
+
