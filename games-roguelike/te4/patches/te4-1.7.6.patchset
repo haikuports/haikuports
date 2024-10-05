@@ -1,0 +1,478 @@
+From 9f1702e46b6a570b67a254de4f60f3dda9102e77 Mon Sep 17 00:00:00 2001
+From: Peppersawce <michaelpeppers89@yahoo.it>
+Date: Sat, 5 Oct 2024 14:00:56 +0200
+Subject: Haiku support
+
+diff --git a/bootstrap/boot.lua b/bootstrap/boot.lua
+index 50acf97..1488316 100644
+--- a/bootstrap/boot.lua
++++ b/bootstrap/boot.lua
+@@ -16,16 +16,6 @@ if __SELFEXE then
+ 	-- Remove bin/Debug from the path, to make dev easier
+ 	dir = dir:gsub("bin"..fs.getPathSeparator().."Debug"..fs.getPathSeparator(), "")
+ 
+-	if not __APPLE__ then
+-		-- Now remove executable name
+-		dir = dir:gsub("(.*"..fs.getPathSeparator()..").+", "%1")
+-	else
+-		-- This is a little un-OSX like: we grab our data from the folder containing T-Engine.app
+-		-- It is a bit strange but way way better for people to install addons and such
+-		dir = dir:gsub("(.*"..fs.getPathSeparator()..").+", "%1"):gsub("(.*"..fs.getPathSeparator()..").+", "%1"):gsub("(.*"..fs.getPathSeparator()..").+", "%1")
+---		dir = dir:gsub("(.*"..fs.getPathSeparator()..").+", "%1")..fs.getPathSeparator().."Resources"..fs.getPathSeparator()
+-	end
+-
+ 	print("SelfExe gave us app directory of:", dir)
+ 	fs.mount(dir..fs.getPathSeparator().."game"..fs.getPathSeparator().."thirdparty", "/", true)
+ 	fs.mount(dir..fs.getPathSeparator().."game", "/", true)
+diff --git a/build/te4core.lua b/build/te4core.lua
+index 41df2a7..e250a9f 100644
+--- a/build/te4core.lua
++++ b/build/te4core.lua
+@@ -132,6 +132,11 @@ project "TEngine"
+ 		links { "SDL2", "SDL2_ttf", "SDL2_image", "png", "openal", "vorbisfile", "GL", "GLU", "m", "pthread" }
+ 		defines { [[TENGINE_HOME_PATH='".t-engine"']], 'SELFEXE_BSD' }
+ 
++	configuration "haiku"
++		libdirs {"/boot/system/lib/"}
++		links { "be", "network", "SDL2", "SDL2_ttf", "SDL2_image", "png", "openal", "vorbisfile", "GL", "GLU", "m", "root" }
++		defines { [[TENGINE_HOME_PATH='"config/settings/t-engine"']], [[TENGINE_DATA_PATH='"/boot/system/data/t-engine"']], 'SELFEXE_HAIKU' }
++
+ 	configuration {"Debug"}
+ 		if _OPTIONS.wincross then
+ 			postbuildcommands { "cp ../bin/Debug/t-engine.exe ../", }
+@@ -157,7 +162,7 @@ project "TEngine"
+ ----------------------------------------------------------------
+ project "physfs"
+ 	kind "StaticLib"
+-	language "C"
++	language "C++"
+ 	targetname "physfs"
+ 
+ 	defines {"PHYSFS_SUPPORTS_ZIP"}
+@@ -169,6 +174,8 @@ project "physfs"
+ 		files { "../src/physfs/platform/unix.c", "../src/physfs/platform/posix.c",  }
+ 	configuration "bsd"
+ 		files { "../src/physfs/platform/unix.c", "../src/physfs/platform/posix.c",  }
++	configuration "haiku"
++		files { "../src/physfs/platform/haiku.cpp", "../src/physfs/platform/posix.c",  }
+ 	configuration "windows"
+ 		files { "../src/physfs/platform/windows.c",  }
+ 	configuration "macosx"
+diff --git a/premake4.lua b/premake4.lua
+index e4ac90e..e2f023a 100644
+--- a/premake4.lua
++++ b/premake4.lua
+@@ -50,6 +50,17 @@ configuration "bsd"
+ 		"/usr/local/include",
+ 	}
+ 
++configuration "haiku"
++	libdirs {
++		"/boot/system/lib",
++	}
++	includedirs {
++		"/boot/system/develop/headers",
++		"/boot/system/develop/headers/GL",
++		"/boot/system/develop/headers/SDL2",
++	}
++	buildoptions { '-fPIC', '-Wall', '-w' }
++
+ if _OPTIONS.wincross then
+ configuration "windows"
+ 	libdirs {
+diff --git a/src/core_lua.c b/src/core_lua.c
+index 1f62369..2160bed 100644
+--- a/src/core_lua.c
++++ b/src/core_lua.c
+@@ -625,7 +625,7 @@ static int lua_open_browser(lua_State *L)
+ 	const char *command = "xdg-open \"%s\"";
+ #elif defined(SELFEXE_WINDOWS)
+ 	const char *command = "rundll32 url.dll,FileProtocolHandler \"%s\"";
+-#elif defined(SELFEXE_MACOSX)
++#elif defined(SELFEXE_MACOSX) || defined(SELFEXE_HAIKU)
+ 	const char *command = "open  \"%s\"";
+ #else
+ 	{ return 0; }
+diff --git a/src/getself.c b/src/getself.c
+index 42601a0..a4b610e 100644
+--- a/src/getself.c
++++ b/src/getself.c
+@@ -114,6 +114,22 @@ int get_number_cpus()
+ 	return count;
+ }
+ 
++#elif defined(SELFEXE_HAIKU)
++#include <limits.h>
++#include <stdlib.h>
++#include <unistd.h>
++const char *get_self_executable(int argc, char **argv)
++{
++	static char res[PATH_MAX];
++	realpath(TENGINE_DATA_PATH, res);
++	return res;
++}
++
++int get_number_cpus()
++{
++       return sysconf(_SC_NPROCESSORS_ONLN);
++}
++
+ #else
+ const char *get_self_executable(int argc, char **argv)
+ {
+diff --git a/src/glew.c b/src/glew.c
+index 07f2062..7aa4be1 100644
+--- a/src/glew.c
++++ b/src/glew.c
+@@ -33,7 +33,7 @@
+ 
+ #if defined(_WIN32)
+ #  include <wglew.h>
+-#elif !defined(__ANDROID__) && (!defined(__APPLE__) || defined(GLEW_APPLE_GLX))
++#elif !defined(__ANDROID__) && (!defined(__APPLE__) && !defined(__HAIKU__) || defined(GLEW_APPLE_GLX))
+ #  include <glxew.h>
+ #endif
+ 
+@@ -66,7 +66,7 @@
+ #  define GLXEW_CONTEXT_ARG_DEF_LIST void
+ #endif /* GLEW_MX */
+ 
+-#if defined(__sgi) || defined (__sun) || defined(GLEW_APPLE_GLX)
++#if defined(__sgi) || defined (__sun) || defined(GLEW_APPLE_GLX) || defined(__HAIKU__)
+ #include <dlfcn.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -162,7 +162,7 @@ void* NSGLGetProcAddress (const GLubyte *name)
+ #  define glewGetProcAddress(name) wglGetProcAddress((LPCSTR)name)
+ #elif defined(__APPLE__) && !defined(GLEW_APPLE_GLX)
+ #  define glewGetProcAddress(name) NSGLGetProcAddress(name)
+-#elif defined(__sgi) || defined(__sun)
++#elif defined(__sgi) || defined(__sun) || defined(__HAIKU__)
+ #  define glewGetProcAddress(name) dlGetProcAddress(name)
+ #elif defined(__ANDROID__)
+ #  define glewGetProcAddress(name) NULL /* TODO */
+@@ -11548,7 +11548,7 @@ GLenum GLEWAPIENTRY wglewContextInit (WGLEW_CONTEXT_ARG_DEF_LIST)
+   return GLEW_OK;
+ }
+ 
+-#elif !defined(__ANDROID__) && (!defined(__APPLE__) || defined(GLEW_APPLE_GLX))
++#elif !defined(__ANDROID__) && (!defined(__APPLE__) && !defined(__HAIKU__) || defined(GLEW_APPLE_GLX))
+ 
+ PFNGLXGETCURRENTDISPLAYPROC __glewXGetCurrentDisplay = NULL;
+ 
+@@ -12660,7 +12660,7 @@ GLboolean glewExperimental = GL_FALSE;
+ 
+ #if defined(_WIN32)
+ extern GLenum GLEWAPIENTRY wglewContextInit (void);
+-#elif !defined(__ANDROID__) && (!defined(__APPLE__) || defined(GLEW_APPLE_GLX))
++#elif !defined(__ANDROID__) && (!defined(__APPLE__) && !defined(__HAIKU__) || defined(GLEW_APPLE_GLX))
+ extern GLenum GLEWAPIENTRY glxewContextInit (void);
+ #endif /* _WIN32 */
+ 
+@@ -12671,7 +12671,7 @@ GLenum GLEWAPIENTRY glewInit (void)
+   if ( r != 0 ) return r;
+ #if defined(_WIN32)
+   return wglewContextInit();
+-#elif !defined(__ANDROID__) && (!defined(__APPLE__) || defined(GLEW_APPLE_GLX)) /* _UNIX */
++#elif !defined(__ANDROID__) && (!defined(__APPLE__) && !defined(__HAIKU__) || defined(GLEW_APPLE_GLX)) /* _UNIX */
+   return glxewContextInit();
+ #else
+   return r;
+diff --git a/src/particles.h b/src/particles.h
+index 7434f0e..dbfa340 100644
+--- a/src/particles.h
++++ b/src/particles.h
+@@ -23,6 +23,7 @@
+ 
+ #include "tgl.h"
+ #include "useshader.h"
++#include "lua_externs.h"
+ 
+ typedef struct {
+ 	float size, sizev, sizea;
+diff --git a/src/physfs/archivers/bind_physfs.c b/src/physfs/archivers/bind_physfs.c
+index d02d323..eed73fa 100644
+--- a/src/physfs/archivers/bind_physfs.c
++++ b/src/physfs/archivers/bind_physfs.c
+@@ -195,7 +195,7 @@ static PHYSFS_sint64 BIND_PHYSFS_getLastModTime(dvoid *opaque,
+ 
+ 
+ static fvoid *doOpen(dvoid *opaque, const char *name,
+-                     void *(*openFunc)(const char *filename),
++                     PHYSFS_File *(*openFunc)(const char *filename),
+                      int *fileExists)
+ {
+     char *f = __BIND_PHYSFS_toDependent((char *) opaque, name, NULL);
+diff --git a/src/physfs/physfs_internal.h b/src/physfs/physfs_internal.h
+index 61ee6ef..3dfe823 100644
+--- a/src/physfs/physfs_internal.h
++++ b/src/physfs/physfs_internal.h
+@@ -16,6 +16,7 @@
+ 
+ #include "physfs.h"
+ 
++#include <stdio.h>
+ #include <stdlib.h>  /* make sure NULL is defined... */
+ 
+ #ifdef HAVE_ASSERT_H
+diff --git a/src/physfs/platform/haiku.cpp b/src/physfs/platform/haiku.cpp
+new file mode 100644
+index 0000000..2ca285b
+--- /dev/null
++++ b/src/physfs/platform/haiku.cpp
+@@ -0,0 +1,252 @@
++/*
++ * Haiku platform-dependent support routines for PhysicsFS.
++ *
++ * Please see the file LICENSE.txt in the source's root directory.
++ *
++ *  This file written by Ryan C. Gordon.
++ */
++
++#define __PHYSICSFS_INTERNAL__
++#include "physfs_platforms.h"
++
++#ifdef PHYSFS_PLATFORM_HAIKU
++
++#include <os/kernel/OS.h>
++#include <os/app/Roster.h>
++#include <os/storage/Volume.h>
++#include <os/storage/VolumeRoster.h>
++#include <os/storage/Directory.h>
++#include <os/storage/Entry.h>
++#include <os/storage/Path.h>
++#include <os/kernel/fs_info.h>
++#include <os/device/scsi.h>
++
++#include <errno.h>
++#include <unistd.h>
++
++#include "physfs_internal.h"
++
++int __PHYSFS_platformInit(void)
++{
++    return 1;  /* always succeed. */
++} /* __PHYSFS_platformInit */
++
++
++int __PHYSFS_platformDeinit(void)
++{
++    /* no-op */
++} /* __PHYSFS_platformDeinit */
++
++
++static char *getMountPoint(const char *devname, char *buf, size_t bufsize)
++{
++    BVolumeRoster mounts;
++    BVolume vol;
++
++    mounts.Rewind();
++    while (mounts.GetNextVolume(&vol) == B_NO_ERROR)
++    {
++        fs_info fsinfo;
++        fs_stat_dev(vol.Device(), &fsinfo);
++        if (strcmp(devname, fsinfo.device_name) == 0)
++        {
++            BDirectory directory;
++            BEntry entry;
++            BPath path;
++            const char *str;
++
++            if ( (vol.GetRootDirectory(&directory) < B_OK) ||
++                 (directory.GetEntry(&entry) < B_OK) ||
++                 (entry.GetPath(&path) < B_OK) ||
++                 ( (str = path.Path()) == NULL) )
++                return NULL;
++
++            strncpy(buf, str, bufsize-1);
++            buf[bufsize-1] = '\0';
++            return buf;
++        } /* if */
++    } /* while */
++
++    return NULL;
++} /* getMountPoint */
++
++
++    /*
++     * This function is lifted from Simple Directmedia Layer (SDL):
++     *  https://www.libsdl.org/  ... this is zlib-licensed code, too.
++     */
++static void tryDir(const char *d, PHYSFS_StringCallback callback, void *data)
++{
++    BDirectory dir;
++    dir.SetTo(d);
++    if (dir.InitCheck() != B_NO_ERROR)
++        return;
++
++    dir.Rewind();
++    BEntry entry;
++    while (dir.GetNextEntry(&entry) >= 0)
++    {
++        BPath path;
++        const char *name;
++        entry_ref e;
++
++        if (entry.GetPath(&path) != B_NO_ERROR)
++            continue;
++
++        name = path.Path();
++
++        if (entry.GetRef(&e) != B_NO_ERROR)
++            continue;
++
++        if (entry.IsDirectory())
++        {
++            if (strcmp(e.name, "floppy") != 0)
++                tryDir(name, callback, data);
++            continue;
++        } /* if */
++
++        const int devfd = open(name, O_RDONLY);
++        if (devfd < 0)
++            continue;
++
++        device_geometry g;
++        const int rc = ioctl(devfd, B_GET_GEOMETRY, &g, sizeof (g));
++        close(devfd);
++        if (rc < 0)
++            continue;
++
++        if (g.device_type != B_CD)
++            continue;
++
++        char mntpnt[B_FILE_NAME_LENGTH];
++        if (getMountPoint(name, mntpnt, sizeof (mntpnt)))
++            callback(data, mntpnt);
++    } /* while */
++} /* tryDir */
++
++
++void __PHYSFS_platformDetectAvailableCDs(PHYSFS_StringCallback cb, void *data)
++{
++    tryDir("/dev/disk", cb, data);
++} /* __PHYSFS_platformDetectAvailableCDs */
++
++
++static team_id getTeamID(void)
++{
++    thread_info info;
++    thread_id tid = find_thread(NULL);
++    get_thread_info(tid, &info);
++    return info.team;
++} /* getTeamID */
++
++
++char *__PHYSFS_platformCalcBaseDir(const char *argv0)
++{
++    image_info info;
++    int32 cookie = 0;
++
++    while (get_next_image_info(0, &cookie, &info) == B_OK)
++    {
++        if (info.type == B_APP_IMAGE)
++            break;
++    } /* while */
++
++    BEntry entry(info.name, true);
++    BPath path;
++    status_t rc = entry.GetPath(&path);  /* (path) now has binary's path. */
++    assert(rc == B_OK);
++    rc = path.GetParent(&path); /* chop filename, keep directory. */
++    assert(rc == B_OK);
++    const char *str = path.Path();
++    assert(str != NULL);
++    const size_t len = strlen(str);
++    char *retval = (char *) allocator.Malloc(len + 2);
++    BAIL_IF_MACRO(!retval, ERR_OUT_OF_MEMORY, NULL);
++    strcpy(retval, str);
++    retval[len] = '/';
++    retval[len+1] = '\0';
++    return retval;
++} /* __PHYSFS_platformCalcBaseDir */
++
++
++char *__PHYSFS_platformCalcPrefDir(const char *org, const char *app)
++{
++    const char *userdir = PHYSFS_getUserDir();
++    const char *append = "config/settings/";
++    const size_t len = strlen(userdir) + strlen(append) + strlen(app) + 2;
++    char *retval = (char *) allocator.Malloc(len);
++    BAIL_IF_MACRO(!retval, ERR_OUT_OF_MEMORY, NULL);
++    snprintf(retval, len, "%s%s%s/", userdir, append, app);
++    return retval;
++} /* __PHYSFS_platformCalcPrefDir */
++
++char *__PHYSFS_platformRealPath(const char *path)
++{
++    char resolved_path[MAXPATHLEN];
++    char *retval = NULL;
++
++    errno = 0;
++    BAIL_IF_MACRO(!realpath(path, resolved_path), strerror(errno), NULL);
++    retval = (char *) allocator.Malloc(strlen(resolved_path) + 1);
++    BAIL_IF_MACRO(retval == NULL, ERR_OUT_OF_MEMORY, NULL);
++    strcpy(retval, resolved_path);
++
++    return(retval);
++} /* __PHYSFS_platformRealPath */
++
++
++char *__PHYSFS_platformCurrentDir(void)
++{
++    /*
++     * This can't just do platformRealPath("."), since that would eventually
++     *  just end up calling back into here.
++     */
++
++    int allocSize = 0;
++    char *retval = NULL;
++    char *ptr;
++
++    do
++    {
++        allocSize += 100;
++        ptr = (char *) allocator.Realloc(retval, allocSize);
++        if (ptr == NULL)
++        {
++            if (retval != NULL)
++                allocator.Free(retval);
++            BAIL_MACRO(ERR_OUT_OF_MEMORY, NULL);
++        } /* if */
++
++        retval = ptr;
++        ptr = getcwd(retval, allocSize);
++    } while (ptr == NULL && errno == ERANGE);
++
++    if (ptr == NULL && errno)
++    {
++            /*
++             * getcwd() failed for some reason, for example current
++             * directory not existing.
++             */
++        if (retval != NULL)
++            allocator.Free(retval);
++        BAIL_MACRO(ERR_NO_SUCH_FILE, NULL);
++    } /* if */
++
++    return(retval);
++} /* __PHYSFS_platformCurrentDir */
++
++int __PHYSFS_platformSetDefaultAllocator(PHYSFS_Allocator *a)
++{
++    return(0);  /* just use malloc() and friends. */
++} /* __PHYSFS_platformSetDefaultAllocator */
++
++void *__PHYSFS_platformGetThreadID(void) { return((void *) 0x0001); }
++void *__PHYSFS_platformCreateMutex(void) { return((void *) 0x0001); }
++void __PHYSFS_platformDestroyMutex(void *mutex) {}
++int __PHYSFS_platformGrabMutex(void *mutex) { return(1); }
++void __PHYSFS_platformReleaseMutex(void *mutex) {}
++
++#endif  /* PHYSFS_PLATFORM_HAIKU */
++
++/* end of physfs_platform_haiku.cpp ... */
++
+-- 
+2.45.2
+
