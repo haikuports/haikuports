@@ -1,0 +1,474 @@
+SUMMARY="An interpreted, interactive, object-oriented programming language"
+DESCRIPTION="Python is a programming language that lets you work more quickly \
+and integrate your systems more effectively. You can learn to use Python and \
+see almost immediate gains in productivity and lower maintenance costs.
+
+Python runs on Windows, Linux/Unix, Mac OS X, and has been ported to the Java \
+and .NET virtual machines.
+
+Python is free to use, even for commercial products, because of its \
+OSI-approved open source license."
+HOMEPAGE="https://www.python.org"
+LICENSE="Python"
+COPYRIGHT="1990-2024 Python Software Foundation"
+REVISION="1"
+SOURCE_URI="https://www.python.org/ftp/python/$portVersion/Python-$portVersion.tar.xz"
+CHECKSUM_SHA256="086de5882e3cb310d4dca48457522e2e48018ecd43da9cdf827f6a0759efb07d"
+SOURCE_DIR="Python-$portVersion"
+
+pyShortVer="${portVersion%.*}"
+pyVersionCompat="$portVersion compat >= $pyShortVer"
+
+PATCHES="python$pyShortVer-$portVersion.patchset"
+
+ARCHITECTURES="all !x86_gcc2"
+SECONDARY_ARCHITECTURES="x86"
+
+# On x86_gcc2 we don't want to install the commands in bin/<arch>/, but in bin/.
+commandSuffix=$secondaryArchSuffix
+commandBinDir=$binDir
+if [ "$targetArchitecture" = x86_gcc2 ]; then
+	commandSuffix=
+	commandBinDir=$prefix/bin
+fi
+
+GLOBAL_WRITABLE_FILES="
+	non-packaged/lib/python$pyShortVer/site-packages directory keep-old
+	"
+
+# [RECIPE OPTIONS]>>>
+
+# If this is not intended to be the "default" Python version, set to "false", so "make altinstall"
+# is used, and only version-suffixed commands are used in PROVIDES.
+installAsDefaultPython=false
+
+# Set to "true" if we should build the "tkinter" module.
+# Disabled for now, as tkinter deadlocks on Haiku. Try again when tk drops undroidwish for xlibe.
+enableTkinter=false
+
+# Set to "true" to package all the tests into a separate "_tests" package (around 30 MB in size).
+# Tests are discarded if set to "false".
+packageTests=false
+
+# Set to "false" for faster local/test builds. Around 4 to 5 times faster that way.
+optimizedBuild=true
+
+# Run all tests by default. Set to "true" to make "hp --test" only run then known failing tests.
+runOnlyKnownFailingTests=false
+
+# <<<[RECIPE OPTIONS]
+
+PROVIDES="
+	python$pyShortVer$secondaryArchSuffix = $pyVersionCompat
+	cmd:pydoc$pyShortVer = $pyVersionCompat
+	cmd:python$pyShortVer = $pyVersionCompat
+	cmd:python${pyShortVer}_config = $pyVersionCompat
+	devel:libpython$pyShortVer$secondaryArchSuffix = 1.0
+	lib:libpython$pyShortVer$secondaryArchSuffix = 1.0
+	"
+REQUIRES="
+	haiku$secondaryArchSuffix
+	cmd:file
+	lib:libbz2$secondaryArchSuffix
+	lib:libedit$secondaryArchSuffix
+	lib:libexpat$secondaryArchSuffix
+	lib:libffi$secondaryArchSuffix
+	lib:libintl$secondaryArchSuffix
+	lib:liblzma$secondaryArchSuffix
+#	lib:libmpdec$secondaryArchSuffix	# bundled libmpdecimal scheduled for removal on 3.15
+	lib:libncursesw$secondaryArchSuffix
+	lib:libsqlite3$secondaryArchSuffix	# >= 3.15.2
+	lib:libssl$secondaryArchSuffix
+	lib:libz$secondaryArchSuffix
+	"
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel
+	devel:libbz2$secondaryArchSuffix
+	devel:libedit$secondaryArchSuffix
+	devel:libexpat$secondaryArchSuffix
+	devel:libffi$secondaryArchSuffix
+	devel:liblzma$secondaryArchSuffix
+#	devel:libmpdec$secondaryArchSuffix	# bundled libmpdecimal scheduled for removal on 3.15
+	devel:libncursesw$secondaryArchSuffix
+	devel:libsqlite3$secondaryArchSuffix
+	devel:libssl$secondaryArchSuffix
+	devel:libz$secondaryArchSuffix
+	"
+BUILD_PREREQUIRES="
+	autoconf_archive
+	cmd:aclocal # >= 1.16.4
+	cmd:autoconf # >= 2.71
+	cmd:find
+	cmd:gcc$secondaryArchSuffix
+	cmd:ld$secondaryArchSuffix
+	cmd:libtoolize$secondaryArchSuffix
+	cmd:make
+	cmd:pkg_config$secondaryArchSuffix
+	"
+
+if $installAsDefaultPython; then
+	PROVIDES+="
+		cmd:python3 = $portVersion compat >= $pyShortVer
+		cmd:pydoc3 = $portVersion compat >= $pyShortVer
+		cmd:python3_config = $portVersion compat >= $pyShortVer
+		"
+fi
+
+if $enableTkinter; then
+	PROVIDES+="
+		cmd:idle$pyShortVer = $pyVersionCompat
+		"
+	if $installAsDefaultPython; then
+		PROVIDES+="
+			cmd:idle3 = $portVersion compat >= $pyShortVer
+			"
+	fi
+	BUILD_REQUIRES+="
+		devel:libtclstub8.6$secondaryArchSuffix
+		devel:libtk8.6$secondaryArchSuffix
+		"
+fi
+
+if $packageTests; then
+	PROVIDES_tests="
+		python$pyShortVer${secondaryArchSuffix}_tests = $portVersion
+		"
+	REQUIRES_tests="
+		python$pyShortVer$secondaryArchSuffix == $portVersion base
+		"
+fi
+
+BUILD()
+{
+	autoreconf -fi
+
+	# From ./configure:
+	# "compiler flags are generated in two sets, BASECFLAGS and OPT.  OPT is just
+	# for debug/optimization stuff.  BASECFLAGS is for flags that are required
+	# just to get things to compile and link."
+
+	# If not provided, the Makefile ends up with:
+	#	BASECFLAGS=	-fno-strict-overflow -Wsign-compare
+	#	OPT=		-DNDEBUG -g -O3 -Wall
+	# -NDEBUG gets added by ./configure unless "--with-assertions" is used.
+
+	export BASECFLAGS="-pipe -D_BSD_SOURCE"
+	export OPT="-Wall"	# remove "-g" until we use "defineDebugInfoPackage".
+
+	if $optimizedBuild; then
+		export OPT+=" -O3"
+		maybeEnableOptimizations="--enable-optimizations"
+	else
+		export OPT+=" -O0"
+		maybeEnableOptimizations=
+	fi
+
+	runConfigure --omit-dirs binDir,includeDir ./configure \
+		--bindir=$commandBinDir \
+		--includedir=$developDir/headers \
+		$maybeEnableOptimizations \
+		--enable-shared \
+		--with-ensurepip=no \
+		--with-readline=editline \
+		--with-system-expat \
+		--with-system-libmpdec=no \
+		--with-tzpath=$dataDir/zoneinfo \
+		--without-static-libpython \
+		--with-lto
+
+		# --disable-test-modules # can speed up the build a bit.
+		#
+		# --with-lto # Issues with enabling this flag:
+		#	- Is too CPU intensive (at least 2.5x slower build times).
+		#	- 30% final package size increase, unless "-g" is removed from 'LTOFLAGS="$LTOFLAGS -g"'
+		#	   on "configure.ac".
+		#	but resulting Python is about 5% faster, at least on the "pystone.py" syntetic benchmark.
+		#
+		# --enable-experimental-jit=yes-off # PYTHON_JIT=1 to enable it at runtime. Requires:
+		#   - cmd:python3.11 or newer.
+		#   - cmd:clang >= 18
+		#   - patching Tools/jit/_target.py so it recognizes Haiku's triplet.
+
+	# Uncomment when doing repeated builds (for testing different flags/options).
+	# echo "[.recipe] Cleaning before rebuild:" && make clean && rm -f python
+
+	# NOTE: When using "--enable-optimizations" above, using "make $jobArgs" might be unreliable.
+	# Can see several instances of, for example:
+	#
+	# libgcov profiling error:/sources/Python-3.xx.x/Objects/<filename_here>.gcda:Merge mismatch for function <some_number>
+	#
+	# Build might end OK (with only some "missing profile" warnings later on), or it can fail
+	# with something like:
+	#
+	# "Parser/parser.c:38718:1: error: corrupted profile info: invalid time profile"
+	#
+	# Not using multiple jobs for make solves both the warnings and the possible error.
+
+	if $optimizedBuild; then
+		make -j 1
+	else
+		make $jobArgs
+	fi
+}
+
+INSTALL()
+{
+	if $installAsDefaultPython; then
+		make install
+	else
+		# altinstall avoids clobbering $prefix/bin/{idle3,pydoc3,python3,python3-config}
+		make altinstall
+	fi
+
+	rm $libDir/libpython3.so
+
+	# No point in having this if we don't have a working tkinter.
+	if ! $enableTkinter; then
+		rm $prefix/bin/idle$pyShortVer
+		if $installAsDefaultPython; then
+			rm -f $prefix/bin/idle3
+		fi
+	fi
+
+	if [ "$targetArchitecture" = x86_gcc2 ]; then
+		# On x86_gcc2, move lib-dynload to lib/python3.x/
+		mv $libDir/python$pyShortVer/lib-dynload $prefix/lib/python$pyShortVer/
+	fi
+	prepareInstalledDevelLib libpython$pyShortVer
+	fixPkgconfig
+	if [ "$targetArchitecture" = x86_gcc2 ]; then
+		# fix pkgconfig to match configure flags
+		sed -i -e 's,headers/x86,headers,' $developLibDir/pkgconfig/python*.pc
+	fi
+
+	mkdir -p $prefix/lib/python$pyShortVer/vendor-packages
+	echo 'This directory contains packaged python modules.' \
+		>$prefix/lib/python$pyShortVer/vendor-packages/README
+
+	mkdir -p $prefix/non-packaged/lib/python$pyShortVer
+	mv $prefix/lib/python$pyShortVer/site-packages $prefix/non-packaged/lib/python$pyShortVer/
+
+	if $packageTests; then
+		packageEntries tests \
+			$prefix/lib/python$pyShortVer/idlelib/idle_test \
+			$prefix/lib/python$pyShortVer/test
+	else
+		# drop testsuite altogether
+		cd $prefix/lib/python$pyShortVer
+		rm -rf idlelib/idle_test test
+	fi
+}
+
+# Some of the test will crash, invoking the crash dialog, and will hang waiting for
+# user's interaction. To avoid that, make sure to configure your system by adding
+# the following lines in the file "~/config/settings/system/debug_server/settings":
+##---
+# executable_actions {
+#	/sources/Python-3.*/python kill
+# }
+##---
+
+# For some tests that purposefully crash, it would make sense to add support for
+# crash-report suppression (as done for other platforms) on "tests/support/__init__,py"'s
+# SuppressCrashReport class.
+# But that needs support from Haiku's debug_server, as we can't change settings from
+# the recipe's building environment at the moment (https://dev.haiku-os.org/ticket/10301)
+
+# To see the available test-runs options:
+# > hp -E python3.nn
+# > LIBRARY_PATH=%A:/boot/system/lib python -m test --help
+# or:
+# > LD_PRELOAD=./libpython3.nn.so.1.0 python -m test --help
+#
+# To only execute a particular test (from the $sourceDir):
+#
+# > LD_PRELOAD=./libpython3.nn.so.1.0 python -m test test_datetime -W
+#
+# Beware that running tests that way can cause some tests to fail, while they work fine under
+# "hp --test"'s chroot. (test_sysconfig.MakefileTests.test_parse_makefile, for example).
+# Problem is "os.getcwd()" will return wrong data, causing some file operations to fail.
+
+# For reference, results on hrev58174 (64 bits VBox):
+# Total duration: 14 min 56 sec
+# Total tests: run=36,985 failures=224 skipped=1,403
+# Total test files: run=421/409 failed=17 skipped=28 resource_denied=5 rerun=17
+TEST()
+{
+	# Remove tests data left-overs, if any:
+	# rm -f -r /boot/system/cache/tmp/
+	# rm -f -d -r build/test_python*
+	make $jobArgs test EXTRATESTOPTS="--cleanup"
+
+	local test_options=(
+		# Use this to get same test order on different runs (actual value not important).
+		--randseed 7858065
+
+		# Print the names of the 10 slowest tests.
+		--slowest
+
+		# Possibly useful?
+		# --tempdir=/another_drive/tmp
+
+		# Enable/disable certain tests by "resource" type:
+		# -uall,-audio,-cpu,-curses,-decimal,-gui,-largefile,-network,-subprocess,-urlfetch
+		# make test --help says that "-unone" is the default, but the build is doing this:
+		# "resources: all,-audio,-gui,-largefile" instead.
+		#
+		# Let's be explicit to avoid surprises:
+		-unone,curses,tzdata
+	)
+
+	local tests_to_exclude=(
+		# distutils is deprecated, and will be removed on 3.12.
+		-x test_distutils
+
+		# The following tests invoke the crash dialog, and unless your configure
+		# debug_server default action to "kill" or "report", they will hang waiting for
+		# user input. See comment above TEST().
+		-x test_faulthandler
+		-x test_futures # from test_asyncio. Crashes: Exception (Segment violation)
+		-x test_subprocess # tends to hang.
+		-x test_threading # tends to hang.
+
+		# Many of the tests hang/stall. We have two options:
+		#
+		# 1- Manually remove the problematic test-cases.
+		# 2- Set a TIMEOUT (eg: --timeout=300).
+		#
+		# Option 1: Works, but requires manual identification/mainteinance.
+		#
+		# Option 2: Doesn't requires maintaining a list of stalling tests, but:
+		# at the end of the test run it causes:
+		# - "unmounting failed: Device/File/Resource Busy" errors, as there are
+		#   dangling threads running when the tests timeout (requiring `killall python`)
+		# - The time it takes to run the full suite largely increases.
+		#
+		# Let's use Option 1, for now at least.
+
+		# These hang reliably.
+		-x test__xxsubinterpreters
+		-x test_cmd_line
+		-x test_concurrent_futures
+		-x test_eintr
+		-x test_interpreters
+		-x test_multiprocessing_fork
+		-x test_multiprocessing_forkserver
+		-x test_multiprocessing_main_handling
+		-x test_multiprocessing_spawn
+		-x test_os
+		-x test_posix
+		-x test_random
+		-x test_socketserver
+		-x test_threaded_import # test_importlib/test_threaded_import
+		-x test_tracemalloc
+		-x test_uuid
+
+		# "test_asyncio" doesn't seems to runs reliably, even after individually skipping
+		# all the problematic test-cases that could be identify by running them one by one.
+		# -x test_asyncio
+		# The following are all under test_asyncio/
+		-x test_base_events
+		-x test_buffered_proto # Exception on Exception handler.
+		-x test_events
+		-x test_sendfile
+		-x test_server # Exception on Exception handler.
+		-x test_sock_lowlevel
+		-x test_sslproto # Exception on Exception handler.
+		-x test_streams
+		-x test_unix_events
+	#	-i TestThreadedServer # in test_asyncio.functional
+
+		# These not always hang/stall, but they do it enough to warrant skipping for now.
+		-x test_imaplib
+		-x test_signal
+		-x test_socket
+		-x test_ssl
+		-x test_urllib2_localnet
+
+		# 3.11
+		-x test_urllib2net
+		-x test_venv
+
+		# 3.12 Either too slow or hangs;
+		-x test_builtin
+		-x test_mailbox
+		-x test_tempfile
+		-x test_thread
+
+		# 3.12.1
+		-x test_queue
+
+		# 3.11.8 / 3.12.2 (hang on nightlies, at least)
+		-x test_httplib
+		-x test_httpservers
+		-x test_logging
+		-x test_xmlrpc
+
+		# 3.12.6, on beta5
+		-x test_readline # hangs when running tests in parallel (or as part of the suite, at least).
+
+		# 3.13.0a3
+		# these shouldn't run unless the GUI resource is enabled.
+		-x test_idle
+		-x test_tkinter
+		-x test_ttk
+
+		# should probably also disable:
+		# -x test_pydoc
+		-x test_mmap # this one is a HDD killer :-(
+		# -x test_getpass
+		# -x test_perfmaps
+		# -x test_sqlite3
+		# -x test___all__ # ???
+
+		# 3.13.0b1 (these seem to hang)
+		-x test_fork1
+		-x test_pty
+
+		# need to find how to avoid re-running the failing tests
+
+		# 3.13.0rc1
+		# -x test_li[???] # at least one test with name starting with "test_li" seems to hang.
+
+		# 3.13.0rc2
+		-x test_ftplib # Hangs with high CPU usage.
+	)
+
+	local tests_that_fail=(
+	    test_c_locale_coercion
+	    test_cmd
+#	    test_compile # out of memory (with 2 GB of RAM)
+	    test_datetime
+	    test_fcntl
+#	    test_ftplib
+	    test_genericpath # os.path.getatime() should return an int.
+	    test_json
+	    test_kqueue # hangs.
+	    test_math
+	    test_popen
+	    test_pyrepl # several: "module 'termios' has no attribute 'VREPRINT'". Adding hasattr(termios, 'VREPRINT') still results in error.
+	    test_re
+#	    test_readline # hangs sometimes.
+	    test_shutil
+	    test_tarfile # os.path.getmtime() should return an int. Also, path.stat().st_mtime and pathlib.Path(TEMPDIR).stat().st_mtime seems to be using different scales: 1723.215266 vs 1723215266.0319815
+	    test_termios
+	    test_time
+	    test_tools
+	)
+
+	local -x LOGNAME=buildbot # this skips tests_tools/test_freeze, copied from Gentoo's ebuild
+
+	if $runOnlyKnownFailingTests; then
+		make $jobArgs test EXTRATESTOPTS="${test_options[*]} ${tests_that_fail[*]}"
+	else
+		# Runs the full test suite (minus the tests that we explicitly exclude).
+		make $jobArgs test EXTRATESTOPTS="${test_options[*]} ${tests_to_exclude[*]}"
+	fi
+
+	# Occasionally, some test fails seemingly due to the racy nature of tempfile.mktemp().
+	# Even the help for that function says to NOT use it, but some tests still do.
+	#
+	# If you find some strange "æ" suffix on temp dirnames, ej:
+	#    "cwd: /sources/Python-3.nn.nn/build/test_python_10324æ"
+	# That's due to usages of os_helper.FS_NONASCII.
+}
