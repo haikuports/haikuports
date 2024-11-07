@@ -1,0 +1,392 @@
+Index: acinclude.m4
+===================================================================
+--- acinclude.m4	(revision 7737)
++++ acinclude.m4	(working copy)
+@@ -206,10 +206,9 @@
+   dnl AC_CHECK_LIB(m, main, echo)
+   dnl AC_CHECK_LIB(z, main, echo)
+ 
+-  C_LIB=-lc
++  GB_LIBC()
+ 
+-  AC_SUBST(C_LIB)
+-
++  dnl ---- Check for C++ libraries
+   AC_CHECK_LIB(gcc_s, main, CXX_LIB="$CXX_LIB -lgcc_s")
+   AC_CHECK_LIB(stdc++, main, CXX_LIB="$CXX_LIB -lstdc++")
+ 
+@@ -370,6 +369,13 @@
+       GBX_THREAD_INC="-pthread -D_REENTRANT"
+       GBX_THREAD_LDFLAGS=""
+       ;;
++    *-*-haiku* )
++      THREAD_LIB=""
++      THREAD_INC=""
++      GBX_THREAD_LIB=""
++      GBX_THREAD_INC=""
++      GBX_THREAD_LDFLAGS=""
++      ;;
+     *)
+       THREAD_LIB="-lpthread"
+       THREAD_INC="-D_REENTRANT"
+@@ -393,6 +399,30 @@
+ 
+ 
+ ## ---------------------------------------------------------------------------
++## GB_LIBC
++## Detect C library
++## ---------------------------------------------------------------------------
++
++AC_DEFUN([GB_LIBC],
++[
++  case "${host}" in
++    *-*-haiku* )
++      dnl Haiku has implicit C library in libroot.
++      C_LIB=""
++      ;;
++    *)
++      C_LIB="-lc"
++      ;;
++  esac
++
++  AC_MSG_CHECKING(for C library)
++  AC_MSG_RESULT($C_LIB)
++
++  AC_SUBST(C_LIB)
++])
++
++
++## ---------------------------------------------------------------------------
+ ## GB_MATH
+ ## Detect mathematic libraries
+ ## ---------------------------------------------------------------------------
+@@ -403,6 +433,9 @@
+     *-*-freebsd* )
+       MATH_LIB="-lm"
+       ;;
++    *-*-haiku* )
++      MATH_LIB=""
++      ;;
+     *)
+       MATH_LIB="-lm"
+       ;;
+@@ -521,6 +554,12 @@
+       AC_DEFINE(OS_HURD, 1, [Target system is Hurd])
+       AC_DEFINE(SYSTEM, "Hurd", [Operating system])
+       ;;
++    *-*-haiku* )
++      SYSTEM=HAIKU
++      dnl AC_DEFINE(OS_GNU, 1, [Target system is of GNU family])
++      AC_DEFINE(OS_HAIKU, 1, [Target system is Haiku])
++      AC_DEFINE(SYSTEM, "Haiku", [Operating system])
++      ;;
+     * )
+       SYSTEM=UNKNOWN
+       AC_DEFINE(SYSTEM, "unknown", [Operating system])
+@@ -641,6 +680,18 @@
+ 
+ gb_sub_dir_list_64=`echo "$gb_sub_dir_list" | sed s/"lib"/"lib64"/g`
+ 
++if test $SYSTEM == "HAIKU"; then
++  gb_arch="`getarch`"
++  gb_main_dir_list="$gb_main_dir_list `findpaths -c' ' -a "$gb_arch" B_FIND_PATH_DEVELOP_DIRECTORY`"
++  gb_arch_inc_subdir=headers
++  gb_arch_lib_subdir=lib
++  if test "$gb_arch" != "`getarch -p`"; then
++    gb_arch_inc_subdir="headers/$gb_arch"
++    gb_arch_lib_subdir="lib/$gb_arch"
++  fi
++  gb_sub_dir_list=`echo "$gb_sub_dir_list" | sed "s:include:$gb_arch_inc_subdir:g;s:lib:$gb_arch_lib_subdir:g"`
++fi
++
+ ## if there is 'lib' inside sub-directories, then we decide to search "lib64" first.
+ 
+ if test "$gb_sub_dir_list_64" != "$gb_sub_dir_list"; then
+Index: gb.httpd/configure.ac
+===================================================================
+--- gb.httpd/configure.ac	(revision 7737)
++++ gb.httpd/configure.ac	(working copy)
+@@ -96,7 +96,9 @@
+ 	    GB_AC_LBL_CHECK_LIB(socket, gethostbyname,
+ 		V_NETLIBS="-lsocket -lnsl $V_NETLIBS",
+ 		AC_CHECK_LIB(resolv, gethostbyname,
+-		    V_NETLIBS="-lresolv $V_NETLIBS"),
++		    V_NETLIBS="-lresolv $V_NETLIBS",
++		    AC_CHECK_LIB(network, gethostbyname,
++			V_NETLIBS="-lnetwork V_NETLIBS")),
+ 		-lnsl))))
+ AC_CHECK_FUNC(socket, ,
+     AC_CHECK_LIB(socket, socket,
+Index: gb.net/src/CDnsClient.c
+===================================================================
+--- gb.net/src/CDnsClient.c	(revision 7737)
++++ gb.net/src/CDnsClient.c	(working copy)
+@@ -530,7 +530,7 @@
+ 	else
+ 	{ /* Synchronous mode */
+ 		inet_aton(THIS->sHostIP,&addr);
+-#ifdef __sun__
++#if defined(__sun__) || defined(__HAIKU__)
+ 		stHost=gethostbyaddr((const char *)&addr,sizeof(addr),AF_INET);
+ #else
+ 		stHost=gethostbyaddr(&addr,sizeof(addr),AF_INET);
+Index: gb.net/src/CSerialPort.c
+===================================================================
+--- gb.net/src/CSerialPort.c	(revision 7737)
++++ gb.net/src/CSerialPort.c	(working copy)
+@@ -42,6 +42,10 @@
+ #define TIOCINQ FIONREAD
+ #endif
+ 
++#ifndef TIOCM_RNG
++#define TIOCM_RNG TIOCM_RI
++#endif
++
+ #include "main.h"
+ #include "tools.h"
+ 
+@@ -652,8 +656,12 @@
+ 
+ 	if (THIS->status)
+ 	{
++#ifdef TIOCINQ
+ 		if (ioctl(THIS->port, TIOCINQ, &ret))
+ 			GB.Error("Unable to read input buffer size: &1", strerror(errno));
++#else
++			GB.Error("Unable to read input buffer size: &1", strerror(ENOSYS));
++#endif
+ 	}
+ 
+ 	GB.ReturnInteger(ret);
+@@ -666,8 +674,12 @@
+ 
+ 	if (THIS->status)
+ 	{
++#ifdef TIOCOUTQ
+ 		if (ioctl(THIS->port, TIOCOUTQ, &ret))
+ 			GB.Error("Unable to read output buffer size: &1", strerror(errno));
++#else
++			GB.Error("Unable to read output buffer size: &1", strerror(ENOSYS));
++#endif
+ 	}
+ 
+ 	GB.ReturnInteger(ret);
+Index: gb.net/src/CSocket.c
+===================================================================
+--- gb.net/src/CSocket.c	(revision 7737)
++++ gb.net/src/CSocket.c	(working copy)
+@@ -32,6 +32,7 @@
+ #include <sys/socket.h>
+ #include <sys/ioctl.h>
+ #include <sys/poll.h>
++#include <sys/time.h>
+ #include <sys/un.h>
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
+Index: gb.xml/src/element.cpp
+===================================================================
+--- gb.xml/src/element.cpp	(revision 7737)
++++ gb.xml/src/element.cpp	(working copy)
+@@ -19,6 +19,7 @@
+ 
+ ***************************************************************************/
+ 
++#define _GNU_SOURCE /* for memrchr() */
+ #include "element.h"
+ 
+ #include "node.h"
+Index: gb.xml/src/html/cssfilter.cpp
+===================================================================
+--- gb.xml/src/html/cssfilter.cpp	(revision 7737)
++++ gb.xml/src/html/cssfilter.cpp	(working copy)
+@@ -1,3 +1,4 @@
++#define _GNU_SOURCE /* for memrchr() */
+ #include "cssfilter.h"
+ #include "htmlmain.h"
+ #include "htmlelement.h"
+Index: gb.xml/src/utils.cpp
+===================================================================
+--- gb.xml/src/utils.cpp	(revision 7737)
++++ gb.xml/src/utils.cpp	(working copy)
+@@ -19,6 +19,7 @@
+ 
+ ***************************************************************************/
+ 
++#define _GNU_SOURCE /* for memrchr() */
+ #include "utils.h"
+ #include "gbinterface.h"
+ #include "gb_common.h"
+Index: main/configure.ac
+===================================================================
+--- main/configure.ac	(revision 7737)
++++ main/configure.ac	(working copy)
+@@ -9,6 +9,14 @@
+ LT_INIT 
+ AM_PROG_CC_C_O
+ 
++dnl ---- Check for POSIX.1-2001 calls
++
++AC_CHECK_FUNCS(getpriority setpriority waitpid statvfs)
++
++dnl ---- Haiku needs -lbsd for daemon()
++
++AC_SEARCH_LIBS(daemon, bsd)
++
+ dnl ---- Check for internationalization library
+ 
+ GB_COMPONENT(
+@@ -87,7 +95,7 @@
+ dnl ---- We do not use libtool to load shared libraries anymore!
+ 
+ AC_DEFINE(DONT_USE_LTDL, 1, [Do not use libtool to load shared libraries])
+-if test "$SYSTEM" != "OPENBSD" && test "$SYSTEM" != "FREEBSD"; then
++if test "$SYSTEM" != "OPENBSD" && test "$SYSTEM" != "FREEBSD" && test "$SYSTEM" != "HAIKU"; then
+   DL_LIB="-ldl"
+ else
+   DL_LIB=""
+Index: main/gbc/gbi.c
+===================================================================
+--- main/gbc/gbi.c	(revision 7737)
++++ main/gbc/gbi.c	(working copy)
+@@ -45,7 +45,7 @@
+ 
+ #include <dlfcn.h>
+ 
+-#if defined(OS_LINUX) || defined(OS_GNU) || defined(OS_OPENBSD) || defined(OS_FREEBSD) || defined(OS_CYGWIN)
++#if defined(OS_LINUX) || defined(OS_GNU) || defined(OS_OPENBSD) || defined(OS_FREEBSD) || defined(OS_CYGWIN) || defined(OS_HAIKU)
+ 	#define lt_dlinit() (0)
+ 	#define lt_dlhandle void *
+ 	#define lt_dlopenext(_path) dlopen(_path, RTLD_LAZY)
+Index: main/gbx/gbx_c_application.c
+===================================================================
+--- main/gbx/gbx_c_application.c	(revision 7737)
++++ main/gbx/gbx_c_application.c	(working copy)
+@@ -238,8 +238,12 @@
+ 		if (!_daemon && VPROP(GB_BOOLEAN))
+ 		{
+ 			old_pid = getpid();
++#ifdef HAVE_DAEMON
+ 			if (daemon(FALSE, FALSE))
+ 				THROW_SYSTEM(errno, NULL);
++#else
++			THROW_SYSTEM(ENOSYS, NULL);
++#endif
+ 			// Argh! daemon() changes the current process id...
+ 			_daemon = TRUE;
+ 			init_again(old_pid);
+@@ -257,12 +261,16 @@
+ 
+ BEGIN_PROPERTY(Application_Priority)
+ 
+-	int pr;
++	int pr = -1;
+ 
+ 	if (READ_PROPERTY)
+ 	{
+ 		errno = 0;
++#ifdef HAVE_GETPRIORITY
+ 		pr = getpriority(PRIO_PROCESS, 0);
++#else
++		errno = ENOSYS;
++#endif
+ 		if (pr == -1 && errno > 0)
+ 			THROW_SYSTEM(errno, NULL);
+ 		GB_ReturnInteger(pr);
+@@ -276,8 +284,12 @@
+ 		else if (pr > 19)
+ 			pr = 19;
+ 
++#ifdef HAVE_SETPRIORITY
+ 		if (setpriority(PRIO_PROCESS, 0, VPROP(GB_INTEGER)) < 0)
+ 			THROW_SYSTEM(errno, NULL);
++#else
++		THROW_SYSTEM(ENOSYS, NULL);
++#endif
+ 	}
+ 
+ END_PROPERTY
+Index: main/gbx/gbx_c_process.c
+===================================================================
+--- main/gbx/gbx_c_process.c	(revision 7737)
++++ main/gbx/gbx_c_process.c	(working copy)
+@@ -834,7 +834,11 @@
+ {
+ 	int status;
+ 
++#ifdef HAVE_WAITPID
++	if (waitpid(process->pid, &status, WNOHANG) == process->pid)
++#else
+ 	if (wait4(process->pid, &status, WNOHANG, NULL) == process->pid)
++#endif
+ 	{
+ 		process->status = status;
+ 		_last_status = status;
+Index: main/gbx/gbx_c_task.c
+===================================================================
+--- main/gbx/gbx_c_task.c	(revision 7737)
++++ main/gbx/gbx_c_task.c	(working copy)
+@@ -120,7 +120,11 @@
+ 	while (_object)
+ 	{
+ 		next = THIS->list.next;
++#ifdef HAVE_WAITPID
++		if (waitpid(THIS->pid, &status, WNOHANG) == THIS->pid)
++#else
+ 		if (wait4(THIS->pid, &status, WNOHANG, NULL) == THIS->pid)
++#endif
+ 		{
+ 			THIS->status = status;
+ 			stop_task(THIS);
+Index: main/lib/signal/csignal.c
+===================================================================
+--- main/lib/signal/csignal.c	(revision 7737)
++++ main/lib/signal/csignal.c	(working copy)
+@@ -42,7 +42,11 @@
+ #define SIGPWR -1
+ #endif
+ 
+-#ifdef OS_CYGWIN
++#ifndef SIGIO
++#define SIGIO -1
++#endif
++
++#if defined(OS_CYGWIN) || defined(OS_HAIKU)
+ #define SIGIOT -1
+ #endif
+ 
+Index: main/share/gb_file_temp.h
+===================================================================
+--- main/share/gb_file_temp.h	(revision 7737)
++++ main/share/gb_file_temp.h	(working copy)
+@@ -39,7 +39,9 @@
+ 
+ #ifdef PROJECT_EXEC
+ 
+-#if defined(OS_FREEBSD) || defined(OS_OPENBSD)
++#ifdef HAVE_STATVFS
++#include <sys/statvfs.h>
++#elif defined(OS_FREEBSD) || defined(OS_OPENBSD)
+ #include <sys/mount.h>
+ #else
+ #include <sys/statfs.h>
+@@ -1077,12 +1079,20 @@
+ 
+ int64_t FILE_free(const char *path)
+ {
++#ifdef HAVE_STATVFS
++	struct statvfs info;
++#else
+ 	struct statfs info;
++#endif
+ 
+ 	if (FILE_is_relative(path))
+ 		return 0;
+ 
++#ifdef HAVE_STATVFS
++	statvfs(path, &info);
++#else
+ 	statfs(path, &info);
++#endif
+ 	return (int64_t)(getuid() == 0 ? info.f_bfree : info.f_bavail) * info.f_bsize;
+ }
+ 
