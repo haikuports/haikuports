@@ -1,14 +1,13 @@
-From db5ba6e7d07ca3b651a3f1ccf3a531f54a3c869e Mon Sep 17 00:00:00 2001
+From 6076d86c68168512b9ad2a89a0de737337614be2 Mon Sep 17 00:00:00 2001
 From: Oscar Lesta <oscar.lesta@gmail.com>
-Date: Thu, 13 Jun 2024 15:14:54 -0300
+Date: Wed, 11 Dec 2024 14:31:18 -0300
 Subject: Haiku support for mDNSPosix and dns-sd.
 
 `cd mDNSPosix && make` should work out of the box now.
 
-Tried enabling the `HAVE_IPV6` code paths (except on the narrow places where it
-caused errors on Haiku: mDNSPosix.c's `SetupIPv6Socket()` and `SetupSocket()`),
-but had to disable it, as otherwise it causes `mdnsd` to immediatly exit
-without further info.
+Enabled the `HAVE_IPV6` code paths, except on the narrow places where it
+causes errors on Haiku: mDNSPosix.c's `SetupIPv6Socket()` and `SetupSocket()`.
+Added comments there about what fails. IPv6 functionality remains untested.
 
 Also, added a "how to browse for any services" example to `dns-sd` man page
 (weird it wasn't there already, as one it seems to be quite a common thing to
@@ -34,7 +33,7 @@ index 9d62e99..92879a7 100755
  TARGETS = build/dns-sd
  LIBS = -L../mDNSPosix/$(BUILDDIR)/ -ldns_sd
 diff --git a/mDNSPosix/Makefile b/mDNSPosix/Makefile
-index 0417065..83b5b75 100755
+index 0417065..049e807 100755
 --- a/mDNSPosix/Makefile
 +++ b/mDNSPosix/Makefile
 @@ -51,6 +51,8 @@ ifeq ($(SYSTEM), Darwin)
@@ -59,7 +58,7 @@ index 0417065..83b5b75 100755
 +
 +	# From Jin Ma's GSoC:
 +	# CFLAGS_OS = -DRTM_NEWADDR=0xc -DRTM_DELADDR=0xd -DRTM_IFINFO=0xe
-+	CFLAGS_OS = -DHAVE_IPV6=0 -DTARGET_OS_HAIKU
++	CFLAGS_OS = -DHAVE_IPV6 -D_PLATFORM_HAS_STRONG_PRNG_ -Wno-unused-variable -Wno-unused-parameter -Wno-unused-function
 +
 +	LINKOPTS = -lnetwork -lbsd
 +
@@ -85,30 +84,37 @@ index 0417065..83b5b75 100755
  endif
  endif
 diff --git a/mDNSPosix/mDNSPosix.c b/mDNSPosix/mDNSPosix.c
-index 3b761d0..ee75d63 100644
+index 3b761d0..c9636ce 100644
 --- a/mDNSPosix/mDNSPosix.c
 +++ b/mDNSPosix/mDNSPosix.c
-@@ -1064,7 +1064,8 @@ mDNSlocal int SetupIPv6Socket(int fd)
+@@ -1062,9 +1062,9 @@ mDNSlocal void ClearInterfaceList(mDNS *const m)
+ 
+ mDNSlocal int SetupIPv6Socket(int fd)
  {
-     int err;
+-    int err;
++    int err = 0;
  
 -    #if defined(IPV6_PKTINFO)
-+    #if defined(IPV6_PKTINFO) && !defined(__HAIKU__)
-+    // On Haiku, this errors out with: setsockopt - IPV6_PKTINFO: Protocol option not available
++    #if defined(IPV6_PKTINFO) && HAVE_IPV6
      err = setsockopt(fd, IPPROTO_IPV6, IPV6_2292_PKTINFO, &kOn, sizeof(kOn));
      if (err < 0) { err = errno; perror("setsockopt - IPV6_PKTINFO"); }
      #else
-@@ -1224,7 +1225,8 @@ mDNSlocal int SetupSocket(struct sockaddr *intfAddr, mDNSIPPort port, int interf
-         if (err == 0) {
-             err = SetupIPv6Socket(*sktPtr);
-         }
--    #if defined(IPV6_HOPLIMIT)
-+    #if defined(IPV6_HOPLIMIT) && !defined(__HAIKU__)
-+    // On Haiku, it errors with message: "setsockopt - IPV6_HOPLIMIT: Protocol option not available"
+@@ -1257,12 +1257,13 @@ mDNSlocal int SetupSocket(struct sockaddr *intfAddr, mDNSIPPort port, int interf
+ 
+         // We want to receive only IPv6 packets on this socket.
+         // Without this option, we may get IPv4 addresses as mapped addresses.
++#ifndef __HAIKU__ // Haiku errors out with: "setsockopt - IPV6_V6ONLY: Operation not supported"
          if (err == 0)
          {
-             err = setsockopt(*sktPtr, IPPROTO_IPV6, IPV6_2292_HOPLIMIT, &kOn, sizeof(kOn));
-@@ -1725,6 +1727,9 @@ mDNSlocal mDNSu32       ProcessRoutingNotification(int sd)
+             err = setsockopt(*sktPtr, IPPROTO_IPV6, IPV6_V6ONLY, &kOn, sizeof(kOn));
+             if (err < 0) { err = errno; perror("setsockopt - IPV6_V6ONLY"); }
+         }
+-
++#endif
+         // Per the mDNS spec, send unicast packets with TTL 255
+         if (err == 0)
+         {
+@@ -1725,6 +1726,9 @@ mDNSlocal mDNSu32       ProcessRoutingNotification(int sd)
  // Read through the messages on sd and if any indicate that any interface records should
  // be torn down and rebuilt, return affected indices as a bitmask. Otherwise return 0.
  {
@@ -118,7 +124,7 @@ index 3b761d0..ee75d63 100644
      ssize_t readCount;
      char buff[4096];
      struct ifa_msghdr       *pRSMsg = (struct ifa_msghdr*) buff;
-@@ -1747,7 +1752,7 @@ mDNSlocal mDNSu32       ProcessRoutingNotification(int sd)
+@@ -1747,7 +1751,7 @@ mDNSlocal mDNSu32       ProcessRoutingNotification(int sd)
          else
              result |= 1 << pRSMsg->ifam_index;
      }
@@ -127,11 +133,47 @@ index 3b761d0..ee75d63 100644
      return result;
  }
  
+diff --git a/mDNSPosix/mDNSUNP.h b/mDNSPosix/mDNSUNP.h
+index 420b038..b451406 100644
+--- a/mDNSPosix/mDNSUNP.h
++++ b/mDNSPosix/mDNSUNP.h
+@@ -31,10 +31,16 @@
+ // The following are the supported non-linux posix OSes -
+ // netbsd, freebsd and openbsd.
+ #if HAVE_IPV6
++#ifdef __HAIKU__
++// ToDo: Check if these are actually correct. setsockopt() doesn't complains at least.
++#define IPV6_2292_PKTINFO  IPV6_RECVPKTINFO
++#define IPV6_2292_HOPLIMIT IPV6_RECVHOPLIMIT
++#else
+ #define IPV6_2292_PKTINFO  19
+ #define IPV6_2292_HOPLIMIT 20
+ #endif
+ #endif
++#endif
+ 
+ #ifdef  __cplusplus
+ extern "C" {
 diff --git a/mDNSShared/CommonServices.h b/mDNSShared/CommonServices.h
-index 7efb077..c9d7511 100644
+index 7efb077..3e441b9 100644
 --- a/mDNSShared/CommonServices.h
 +++ b/mDNSShared/CommonServices.h
-@@ -186,6 +186,10 @@ extern "C" {
+@@ -118,6 +118,14 @@ extern "C" {
+     #endif
+ #endif
+ 
++#if ( !defined( TARGET_OS_HAIKU ) )
++    #if ( defined(__HAIKU__) )
++        #define TARGET_OS_HAIKU       1
++    #else
++        #define TARGET_OS_HAIKU       0
++    #endif
++#endif
++
+ #if 0
+ #pragma mark == Includes ==
+ #endif
+@@ -186,6 +194,10 @@ extern "C" {
      #include    <arpa/inet.h>
      #include    <sys/socket.h>
  
@@ -142,7 +184,7 @@ index 7efb077..c9d7511 100644
  #elif ( TARGET_OS_LINUX )
  
  // Linux
-@@ -447,7 +451,7 @@ typedef int socklen_t;
+@@ -447,7 +459,7 @@ typedef int socklen_t;
  // - Mac OS X when not building with BSD headers
  // - Windows
  
@@ -152,7 +194,7 @@ index 7efb077..c9d7511 100644
  #endif
  
 diff --git a/mDNSShared/PlatformCommon.c b/mDNSShared/PlatformCommon.c
-index 5635458..3917156 100644
+index c308af3..64db255 100644
 --- a/mDNSShared/PlatformCommon.c
 +++ b/mDNSShared/PlatformCommon.c
 @@ -26,7 +26,11 @@
@@ -197,12 +239,12 @@ index 49a6159..6d27782 100644
  #include "DebugServices.h"				// For check_compile_time_code().
  #include "mdns_strict.h"
 -- 
-2.45.1
+2.45.2
 
 
-From 9f23df4e4a0e102f296862ef33bcac3651d11938 Mon Sep 17 00:00:00 2001
+From 2a6c0c4e41acc5a8f6e38a12a2a89bfea16bf4ac Mon Sep 17 00:00:00 2001
 From: Oscar Lesta <oscar.lesta@gmail.com>
-Date: Sun, 23 Jun 2024 15:41:16 -0300
+Date: Wed, 11 Dec 2024 14:31:32 -0300
 Subject: Fix location of resolv.conf file.
 
 
@@ -223,5 +265,68 @@ index 9675591..d3fcd97 100644
  extern mStatus mDNSPlatformPosixRefreshInterfaceList(mDNS *const m);
  // See comment in implementation.
 -- 
-2.45.1
+2.45.2
+
+
+From f984e61586d5529286c1eec92efe9761bbe657c9 Mon Sep 17 00:00:00 2001
+From: Oscar Lesta <oscar.lesta@gmail.com>
+Date: Wed, 11 Dec 2024 18:54:38 -0300
+Subject: mdnsd: admit only one instance, and exit if given unexpected
+ arguments.
+
+
+diff --git a/mDNSPosix/PosixDaemon.c b/mDNSPosix/PosixDaemon.c
+index 9a0f692..8e8133c 100644
+--- a/mDNSPosix/PosixDaemon.c
++++ b/mDNSPosix/PosixDaemon.c
+@@ -39,6 +39,11 @@
+ #include <sys/types.h>
+ #include <sys/socket.h>
+ 
++#if __HAIKU__
++#include <SupportDefs.h>
++#include <syslog.h>
++#endif
++
+ #if __APPLE__
+ #undef daemon
+ extern int daemon(int, int);
+@@ -104,9 +109,33 @@ mDNSlocal void ParseCmdLineArgs(int argc, char **argv)
+ {
+     if (argc > 1)
+     {
+-        if (0 == strcmp(argv[1], "-debug")) mDNS_DebugMode = mDNStrue;
+-        else printf("Usage: %s [-debug]\n", argv[0]);
++        if (0 != strcmp(argv[1], "-debug"))
++        {
++            printf("Usage: %s [-debug]\n", argv[0]);
++            exit(-1);
++        }
++        mDNS_DebugMode = mDNStrue;
++    }
++
++#if __HAIKU__
++    if (access(PID_FILE, F_OK) == 0)
++    {
++        FILE *fp = fopen(PID_FILE, "r");
++        if (fp != NULL)
++        {
++            pid_t old_pid;
++            fscanf(fp, " %" B_PRId32, &old_pid);
++            fclose(fp);
++
++            if (kill(old_pid, 0) == 0) {
++                printf("mdnsd: already in execution. Bailing out.\n");
++                syslog(LOG_DAEMON, "mdnsd: already in execution. Bailing out.\n");
++                exit(-1);
++            }
++        }
+     }
++#endif
++
+     if (!mDNS_DebugMode)
+     {
+         int result = daemon(0, 0);
+-- 
+2.45.2
 
