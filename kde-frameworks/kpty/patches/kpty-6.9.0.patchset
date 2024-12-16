@@ -1,0 +1,437 @@
+From 8e0cb4f16e52a81bb3a05dd2a3d7d0f0295bc389 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Mon, 1 Nov 2021 09:20:04 +1000
+Subject: Use bsd openpty for haiku
+
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 2735eef..97fcdf3 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -8,7 +8,7 @@ set_target_properties(KF6Pty PROPERTIES
+ )
+ 
+ target_sources(KF6Pty PRIVATE
+-    kpty.cpp
++    kpty_haiku.cpp
+     kptydevice.cpp
+     kptydevice.h
+     kpty.h
+@@ -42,7 +42,8 @@ target_link_libraries(KF6Pty PUBLIC Qt6::Core
+                                     KF6::CoreAddons # KProcess
+                              PRIVATE
+                                     ${UTIL_LIBRARY}
+-                                    KF6::I18n)
++                                    KF6::I18n
++                                    bsd)
+ 
+ target_include_directories(KF6Pty PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/..)
+ if(UTEMPTER_FOUND)
+@@ -93,7 +94,7 @@ endif()
+ 
+ ########### next target ###############
+ 
+-if (NOT HAVE_OPENPTY)
++if (NOT HAVE_OPENPTY AND NOT HAIKU)
+    add_executable(kgrantpty kgrantpty.c)
+    ecm_mark_nongui_executable(kgrantpty)
+    install(TARGETS kgrantpty DESTINATION ${KDE_INSTALL_LIBEXECDIR_KF})
+diff --git a/src/kpty_haiku.cpp b/src/kpty_haiku.cpp
+new file mode 100644
+index 0000000..7acd36d
+--- /dev/null
++++ b/src/kpty_haiku.cpp
+@@ -0,0 +1,266 @@
++#include "kpty_p.h"
++
++#include <kpty_debug.h>
++#include <QProcess>
++
++#include <sys/types.h>
++#include <sys/ioctl.h>
++#include <sys/time.h>
++#include <sys/resource.h>
++#include <sys/stat.h>
++#include <sys/param.h>
++
++#include <errno.h>
++#include <fcntl.h>
++#include <time.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++#include <grp.h>
++
++#if HAVE_PTY_H
++# include <pty.h>
++#endif
++
++#if HAVE_LIBUTIL_H
++# include <libutil.h>
++#elif HAVE_UTIL_H
++# include <util.h>
++#endif
++
++extern "C" {
++#include <termios.h>
++#if HAVE_TERMIO_H
++# include <termio.h>
++#endif
++}
++
++#if HAVE_TCGETATTR
++# define _tcgetattr(fd, ttmode) tcgetattr(fd, ttmode)
++#endif
++
++#if HAVE_TCSETATTR
++# define _tcsetattr(fd, ttmode) tcsetattr(fd, TCSANOW, ttmode)
++#endif
++
++#include <qplatformdefs.h>
++
++#include <Q_PID>
++
++#ifndef PATH_MAX
++# ifdef MAXPATHLEN
++#  define PATH_MAX MAXPATHLEN
++# else
++#  define PATH_MAX 1024
++# endif
++#endif
++
++KPtyPrivate::KPtyPrivate(KPty *parent) :
++    masterFd(-1), slaveFd(-1), ownMaster(true), q_ptr(parent)
++{
++}
++
++KPtyPrivate::~KPtyPrivate()
++{
++}
++
++KPty::KPty() :
++    d_ptr(new KPtyPrivate(this))
++{
++}
++
++KPty::KPty(KPtyPrivate *d) :
++    d_ptr(d)
++{
++    d_ptr->q_ptr = this;
++}
++
++KPty::~KPty()
++{
++    close();
++}
++
++bool KPty::open()
++{
++    Q_D(KPty);
++
++    if (d->masterFd >= 0) {
++        return true;
++    }
++
++    d->ownMaster = true;
++
++    QByteArray ptyName;
++
++    char ptsn[PATH_MAX];
++    if (::openpty(&d->masterFd, &d->slaveFd, ptsn, nullptr, nullptr)) {
++        d->masterFd = -1;
++        d->slaveFd = -1;
++        qCWarning(KPTY_LOG) << "Can't open a pseudo teletype";
++        return false;
++    }
++    d->ttyName = ptsn;
++
++    fcntl(d->masterFd, F_SETFD, FD_CLOEXEC);
++    fcntl(d->slaveFd, F_SETFD, FD_CLOEXEC);
++
++	setEcho(true);
++
++    return true;
++}
++
++bool KPty::open(int fd)
++{
++    Q_D(KPty);
++
++    if (d->masterFd >= 0) {
++        qCWarning(KPTY_LOG) << "Attempting to open an already open pty";
++        return false;
++    }
++
++    d->ownMaster = false;
++
++    char *ptsn = ptsname(fd);
++    if (ptsn) {
++        d->ttyName = ptsn;
++    } else {
++        qCWarning(KPTY_LOG) << "Failed to determine pty slave device for fd" << fd;
++        return false;
++    }
++
++    d->masterFd = fd;
++    if (!openSlave()) {
++        d->masterFd = -1;
++        return false;
++    }
++
++	setEcho(true);
++
++    return true;
++}
++
++void KPty::closeSlave()
++{
++    Q_D(KPty);
++
++    if (d->slaveFd < 0) {
++        return;
++    }
++    ::close(d->slaveFd);
++    d->slaveFd = -1;
++}
++
++bool KPty::openSlave()
++{
++    Q_D(KPty);
++
++    if (d->slaveFd >= 0) {
++        return true;
++    }
++    if (d->masterFd < 0) {
++        qCWarning(KPTY_LOG) << "Attempting to open pty slave while master is closed";
++        return false;
++    }
++    d->slaveFd = QT_OPEN(d->ttyName.data(), QT_OPEN_RDWR | O_NOCTTY);
++    if (d->slaveFd < 0) {
++        qCWarning(KPTY_LOG) << "Can't open slave pseudo teletype";
++        return false;
++    }
++    fcntl(d->slaveFd, F_SETFD, FD_CLOEXEC);
++    return true;
++}
++
++void KPty::close()
++{
++    Q_D(KPty);
++
++    if (d->masterFd < 0) {
++        return;
++    }
++    closeSlave();
++    if (d->ownMaster) {
++      ::close(d->masterFd);
++    }
++    d->masterFd = -1;
++}
++
++void KPty::setCTty()
++{
++    Q_D(KPty);
++
++    setsid();
++
++    ioctl(d->slaveFd, TIOCSCTTY, 0);
++
++    int pgrp = getpid();
++    tcsetpgrp(d->slaveFd, pgrp);
++}
++
++void KPty::login(const char *user, const char *remotehost)
++{
++}
++
++void KPty::logout()
++{
++}
++
++bool KPty::tcGetAttr(struct ::termios *ttmode) const
++{
++    Q_D(const KPty);
++
++    return _tcgetattr(d->masterFd, ttmode) == 0;
++}
++
++bool KPty::tcSetAttr(struct ::termios *ttmode)
++{
++    Q_D(KPty);
++
++    return _tcsetattr(d->masterFd, ttmode) == 0;
++}
++
++bool KPty::setWinSize(int lines, int columns)
++{
++    Q_D(KPty);
++
++    struct winsize winSize;
++    memset(&winSize, 0, sizeof(winSize));
++    winSize.ws_row = (unsigned short)lines;
++    winSize.ws_col = (unsigned short)columns;
++    return ioctl(d->masterFd, TIOCSWINSZ, (char *)&winSize) == 0;
++}
++
++bool KPty::setEcho(bool echo)
++{
++    struct ::termios ttmode;
++    if (!tcGetAttr(&ttmode)) {
++        return false;
++    }
++    if (!echo) {
++        ttmode.c_lflag &= ~ECHO;
++    } else {
++        ttmode.c_lflag |= ECHO;
++    }
++    return tcSetAttr(&ttmode);
++}
++
++const char *KPty::ttyName() const
++{
++    Q_D(const KPty);
++
++    return d->ttyName.data();
++}
++
++int KPty::masterFd() const
++{
++    Q_D(const KPty);
++
++    return d->masterFd;
++}
++
++int KPty::slaveFd() const
++{
++    Q_D(const KPty);
++
++    return d->slaveFd;
++}
+-- 
+2.45.2
+
+
+From cb80c38b3d2323bdd6519d786a32ad26243f5641 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 3 Mar 2024 22:25:16 +1000
+Subject: Add missing functions
+
+
+diff --git a/src/kpty_haiku.cpp b/src/kpty_haiku.cpp
+index 7acd36d..79422e0 100644
+--- a/src/kpty_haiku.cpp
++++ b/src/kpty_haiku.cpp
+@@ -219,17 +219,23 @@ bool KPty::tcSetAttr(struct ::termios *ttmode)
+     return _tcsetattr(d->masterFd, ttmode) == 0;
+ }
+ 
+-bool KPty::setWinSize(int lines, int columns)
++bool KPty::setWinSize(int lines, int columns, int height, int width)
+ {
+     Q_D(KPty);
+ 
+     struct winsize winSize;
+-    memset(&winSize, 0, sizeof(winSize));
+     winSize.ws_row = (unsigned short)lines;
+     winSize.ws_col = (unsigned short)columns;
++    winSize.ws_ypixel = (unsigned short)height;
++    winSize.ws_xpixel = (unsigned short)width;
+     return ioctl(d->masterFd, TIOCSWINSZ, (char *)&winSize) == 0;
+ }
+ 
++bool KPty::setWinSize(int lines, int columns)
++{
++    return setWinSize(lines, columns, 0, 0);
++}
++
+ bool KPty::setEcho(bool echo)
+ {
+     struct ::termios ttmode;
+@@ -264,3 +270,11 @@ int KPty::slaveFd() const
+ 
+     return d->slaveFd;
+ }
++
++void KPty::setCTtyEnabled(bool enable)
++{
++    Q_D(KPty);
++
++    d->withCTty = enable;
++}
++
+-- 
+2.45.2
+
+
+From 388f30b029fd3c67fbddde845811a2c5d3c606ab Mon Sep 17 00:00:00 2001
+From: Schrijvers Luc <begasus@gmail.com>
+Date: Wed, 6 Mar 2024 20:33:13 +0100
+Subject: Q_PID is deprecated in Qt6
+
+
+diff --git a/src/kpty_haiku.cpp b/src/kpty_haiku.cpp
+index 79422e0..1e2b731 100644
+--- a/src/kpty_haiku.cpp
++++ b/src/kpty_haiku.cpp
+@@ -46,7 +46,7 @@ extern "C" {
+ 
+ #include <qplatformdefs.h>
+ 
+-#include <Q_PID>
++// #include <Q_PID>
+ 
+ #ifndef PATH_MAX
+ # ifdef MAXPATHLEN
+-- 
+2.45.2
+
+
+From 8c03a8a02e57a1816e62c2aa489537e40526a1f9 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Tue, 5 Jan 2021 13:36:16 +1000
+Subject: Fixes for haiku
+
+
+diff --git a/src/kpty.cpp b/src/kpty.cpp
+index c0d3905..751f536 100644
+--- a/src/kpty.cpp
++++ b/src/kpty.cpp
+@@ -320,6 +320,10 @@ grantedpt:
+     fcntl(d->masterFd, F_SETFD, FD_CLOEXEC);
+     fcntl(d->slaveFd, F_SETFD, FD_CLOEXEC);
+ 
++#ifdef __HAIKU__
++    setEcho(true);
++#endif
++
+     return true;
+ }
+ 
+diff --git a/src/kpty_p.h b/src/kpty_p.h
+index 3f3e711..e7800cb 100644
+--- a/src/kpty_p.h
++++ b/src/kpty_p.h
+@@ -13,6 +13,19 @@
+ 
+ #include <config-pty.h>
+ 
++#ifdef __HAIKU__
++#undef HAVE_OPENPTY
++#define HAVE_OPENPTY 1
++#undef HAVE_UTMP
++#define HAVE_UTMP 0
++#define ut_name ut_user
++#define ut_host ut_line
++#define _PATH_UTMPX ""
++#define _PATH_WTMPX ""
++#define utmpxname(a)
++#define updwtmpx(a, b)
++#endif
++
+ #include <QByteArray>
+ #include <QString>
+ 
+-- 
+2.45.2
+

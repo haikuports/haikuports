@@ -1,0 +1,129 @@
+From c1f80629d151a63d6e24d2ba7840c3e630580039 Mon Sep 17 00:00:00 2001
+From: Adrien Destugues <pulkomandy@pulkomandy.tk>
+Date: Mon, 3 Aug 2020 11:56:45 +0200
+Subject: Fix include path for boost
+
+
+diff --git a/mesonbuild/dependencies/boost.py b/mesonbuild/dependencies/boost.py
+index 870c0b1..a4ce80b 100644
+--- a/mesonbuild/dependencies/boost.py
++++ b/mesonbuild/dependencies/boost.py
+@@ -516,10 +516,11 @@ class BoostDependency(SystemDependency):
+ 
+     def detect_inc_dirs(self, root: Path) -> T.List[BoostIncludeDir]:
+         candidates: T.List[Path] = []
+-        inc_root = root / 'include'
++        inc_root = root / 'headers'
+ 
+         candidates += [root / 'boost']
+         candidates += [inc_root / 'boost']
++        candidates += [inc_root / 'x86' / 'boost']
+         if inc_root.is_dir():
+             for i in inc_root.iterdir():
+                 if not i.is_dir() or not i.name.startswith('boost-'):
+-- 
+2.45.2
+
+
+From af13ba200399e8efbed29d74dcb141a744bdffb6 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Fri, 26 Nov 2021 11:39:48 +0100
+Subject: add support for gcc 2.95.3
+
+
+diff --git a/mesonbuild/compilers/detect.py b/mesonbuild/compilers/detect.py
+index 7542fb6..84a9a60 100644
+--- a/mesonbuild/compilers/detect.py
++++ b/mesonbuild/compilers/detect.py
+@@ -333,7 +333,7 @@ def _detect_c_or_cpp_compiler(env: 'Environment', lang: str, for_machine: Machin
+         version = search_version(out)
+ 
+         guess_gcc_or_lcc: T.Optional[str] = None
+-        if 'Free Software Foundation' in out or out.startswith('xt-'):
++        if 'Free Software Foundation' in out or out.startswith('xt-') or '2.95.3' in out:
+             guess_gcc_or_lcc = 'gcc'
+         if 'e2k' in out and 'lcc' in out:
+             guess_gcc_or_lcc = 'lcc'
+diff --git a/mesonbuild/compilers/mixins/gnu.py b/mesonbuild/compilers/mixins/gnu.py
+index 62f5554..2425f0d 100644
+--- a/mesonbuild/compilers/mixins/gnu.py
++++ b/mesonbuild/compilers/mixins/gnu.py
+@@ -489,7 +489,7 @@ class GnuLikeCompiler(Compiler, metaclass=abc.ABCMeta):
+         stdo = self._get_search_dirs(env)
+         for line in stdo.split('\n'):
+             if line.startswith(name + ':'):
+-                return self._split_fetch_real_dirs(line.split('=', 1)[1])
++                return self._split_fetch_real_dirs(line.split('=', 1)[1] if '=' in line else line)
+         return []
+ 
+     def get_lto_compile_args(self, *, threads: int = 0, mode: str = 'default') -> T.List[str]:
+@@ -628,3 +628,13 @@ class GnuCompiler(GnuLikeCompiler):
+ 
+     def get_profile_use_args(self) -> T.List[str]:
+         return super().get_profile_use_args() + ['-fprofile-correction']
++
++    def gnu_symbol_visibility_args(self, vistype: str) -> T.List[str]:
++        if mesonlib.version_compare(self.version, '< 4'):
++            vistype = ''
++        return super().gnu_symbol_visibility_args(vistype)
++
++    def get_dependency_gen_args(self, outtarget: str, outfile: str) -> T.List[str]:
++        if mesonlib.version_compare(self.version, '< 4'):
++            return []
++        return super().get_dependency_gen_args(outtarget, outfile)
+-- 
+2.45.2
+
+
+From 47569bdcc9bb2dfb2ed94308c836644e586ac731 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Wed, 12 Apr 2023 17:58:48 +0200
+Subject: Revert b1384b9c9f64ff909d5431176503a7dcdadd426c
+
+
+diff --git a/mesonbuild/modules/pkgconfig.py b/mesonbuild/modules/pkgconfig.py
+index 1bdf829..afe2770 100644
+--- a/mesonbuild/modules/pkgconfig.py
++++ b/mesonbuild/modules/pkgconfig.py
+@@ -704,9 +704,6 @@ class PkgConfigModule(NewExtensionModule):
+             if mesonlib.is_freebsd():
+                 pkgroot = os.path.join(_as_str(state.environment.coredata.get_option(OptionKey('prefix'))), 'libdata', 'pkgconfig')
+                 pkgroot_name = os.path.join('{prefix}', 'libdata', 'pkgconfig')
+-            elif mesonlib.is_haiku():
+-                pkgroot = os.path.join(_as_str(state.environment.coredata.get_option(OptionKey('prefix'))), 'develop', 'lib', 'pkgconfig')
+-                pkgroot_name = os.path.join('{prefix}', 'develop', 'lib', 'pkgconfig')
+             else:
+                 pkgroot = os.path.join(_as_str(state.environment.coredata.get_option(OptionKey('libdir'))), 'pkgconfig')
+                 pkgroot_name = os.path.join('{libdir}', 'pkgconfig')
+-- 
+2.45.2
+
+
+From 86a4f5f5c529e71ba4a1efcf0fea170a96f983e8 Mon Sep 17 00:00:00 2001
+From: James Le Cuirot <chewi@gentoo.org>
+Date: Sat, 12 Aug 2023 09:56:44 +0100
+Subject: python module: Respect PATH when python is not given in machine file
+
+We should only fall back to the Python interpreter running Meson itself
+if `python3` is not found in the PATH.
+
+https://github.com/mesonbuild/meson/pull/12116
+
+diff --git a/mesonbuild/modules/python.py b/mesonbuild/modules/python.py
+index 1b7a056..3d87c58 100644
+--- a/mesonbuild/modules/python.py
++++ b/mesonbuild/modules/python.py
+@@ -442,7 +442,9 @@ class PythonModule(ExtensionModule):
+ 
+     def _find_installation_impl(self, state: 'ModuleState', display_name: str, name_or_path: str, required: bool) -> MaybePythonProg:
+         if not name_or_path:
+-            python = PythonExternalProgram('python3', mesonlib.python_command)
++            python = PythonExternalProgram('python3')
++            if not python.found():
++                python = PythonExternalProgram('python3', mesonlib.python_command)
+         else:
+             tmp_python = ExternalProgram.from_entry(display_name, name_or_path)
+             python = PythonExternalProgram(display_name, ext_prog=tmp_python)
+-- 
+2.45.2
+

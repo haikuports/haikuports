@@ -1,0 +1,940 @@
+From f8949dbbebbe12300de6dea265f1f9bd74e7bb5c Mon Sep 17 00:00:00 2001
+From: PulkoMandy <pulkomandy@pulkomandy.tk>
+Date: Mon, 14 Aug 2023 17:10:50 +0200
+Subject: Kevin Thacker's patch for generating relocatable executables
+
+
+diff --git a/sdas/linksrc/Makefile.in b/sdas/linksrc/Makefile.in
+index b7eb8fc..e392266 100644
+--- a/sdas/linksrc/Makefile.in
++++ b/sdas/linksrc/Makefile.in
+@@ -47,7 +47,7 @@ ASXXLIBSRC = strcmpi.c
+ SRC = lk_readnl.c lkaomf51.c lkar.c lkarea.c lkdata.c lkelf.c lkeval.c \
+         lkhead.c lklex.c lklib.c lklibr.c lklist.c lkmain.c lkmem.c \
+         lknoice.c lkout.c lkrel.c lkrloc.c lkrloc3.c lksdcclib.c \
+-        lksym.c sdld.c lksdcdb.c lkbank.c
++        lksym.c sdld.c lksdcdb.c lkbank.c lkrrel.c
+ 
+ LKSOURCES = $(SRC) $(ASXXLIBSRC:%.c=$(ASXXLIB)/%.c)
+ 
+@@ -87,28 +87,22 @@ $(ASLINK): $(LKOBJECTS)
+ # ----------------------------------------------------
+ install: all installdirs
+ 	$(INSTALL) $(top_builddir)/bin/sdld$(EXEEXT) $(DESTDIR)$(bindir)/`echo 'sdld' | sed '$(transform)'`$(EXEEXT)
+-	$(STRIP) $(DESTDIR)$(bindir)/`echo 'sdld' | sed '$(transform)'`$(EXEEXT)
+ 	if [ "`grep stm8 $(top_builddir)/ports.build`" = "stm8" ]; \
+ 	then \
+ 	  $(INSTALL) $(top_builddir)/bin/sdldstm8$(EXEEXT) $(DESTDIR)$(bindir)/`echo 'sdldstm8' | sed '$(transform)'`$(EXEEXT); \
+-	  $(STRIP) $(DESTDIR)$(bindir)/`echo 'sdldstm8' | sed '$(transform)'`$(EXEEXT); \
+ 	fi
+ 	if [ "`grep hc08 $(top_builddir)/ports.build`" = "hc08" ]; \
+ 	then \
+ 	  $(INSTALL) $(top_builddir)/bin/sdld6808$(EXEEXT) $(DESTDIR)$(bindir)/`echo 'sdld6808' | sed '$(transform)'`$(EXEEXT); \
+-	  $(STRIP) $(DESTDIR)$(bindir)/`echo 'sdld6808' | sed '$(transform)'`$(EXEEXT); \
+ 	fi
+ 	if [ "`grep z80 $(top_builddir)/ports.build`" = "z80" ]; \
+ 	then \
+ 	  $(INSTALL) $(top_builddir)/bin/sdldz80$(EXEEXT) $(DESTDIR)$(bindir)/`echo 'sdldz80' | sed '$(transform)'`$(EXEEXT); \
+-	  $(STRIP) $(DESTDIR)$(bindir)/`echo 'sdldz80' | sed '$(transform)'`$(EXEEXT); \
+ 	  $(INSTALL) $(top_builddir)/bin/sdldgb$(EXEEXT) $(DESTDIR)$(bindir)/`echo 'sdldgb' | sed '$(transform)'`$(EXEEXT); \
+-	  $(STRIP) $(DESTDIR)$(bindir)/`echo 'sdldgb' | sed '$(transform)'`$(EXEEXT); \
+ 	fi
+ 	if [ "`grep pdk $(top_builddir)/ports.build`" = "pdk" ]; \
+ 	then \
+ 	  $(INSTALL) $(top_builddir)/bin/sdldpdk$(EXEEXT) $(DESTDIR)$(bindir)/`echo 'sdldpdk' | sed '$(transform)'`$(EXEEXT); \
+-	  $(STRIP) $(DESTDIR)$(bindir)/`echo 'sdldpdk' | sed '$(transform)'`$(EXEEXT); \
+ 	fi
+ 
+ # Deleting all the installed files
+diff --git a/sdas/linksrc/aslink.h b/sdas/linksrc/aslink.h
+index 4033cfa..f2d944c 100644
+--- a/sdas/linksrc/aslink.h
++++ b/sdas/linksrc/aslink.h
+@@ -1036,6 +1036,8 @@ extern  int     yflag;          /*      -y, enable SDCC Debug output
+                                  */
+ #endif
+ 
++extern  int     hflag;          /*      Generate relocatable executables
++                                 */
+ extern  int     pflag;          /*      print linker command file flag
+                                  */
+ extern  int     uflag;          /*      Listing relocation flag
+diff --git a/sdas/linksrc/lkdata.c b/sdas/linksrc/lkdata.c
+index 169e8c1..015e727 100644
+--- a/sdas/linksrc/lkdata.c
++++ b/sdas/linksrc/lkdata.c
+@@ -66,6 +66,9 @@ int     oflag;          /*      Output file type flag
+ int     objflg;         /*      Linked file/library object output flag
+                          */
+ 
++int     hflag;          /*      Generate relocatable executables
++                         */
++
+ #if NOICE
+ int     jflag;          /*      NoICE output flag
+                          */
+diff --git a/sdas/linksrc/lkmain.c b/sdas/linksrc/lkmain.c
+index 0f00244..8cddab5 100644
+--- a/sdas/linksrc/lkmain.c
++++ b/sdas/linksrc/lkmain.c
+@@ -212,6 +212,7 @@ main(int argc, char *argv[])
+         startp->f_idp = "";
+ 
+         pflag = 1;
++        hflag = 0;
+ 
+         for(i=1; i<argc; i++) {
+                 ip = ib;
+@@ -981,6 +982,11 @@ parse()
+                                         }
+                                         return(0);
+ 
++                                case 'h':
++                                case 'H':
++                                        hflag = 1;
++                                        break;
++
+                                 case 'I':
+                                         if (is_sdld() && !(TARGET_IS_Z80 || TARGET_IS_GB)) {
+                                                 iramsav();
+diff --git a/sdas/linksrc/lkrloc3.c b/sdas/linksrc/lkrloc3.c
+index 8c37943..71386fe 100644
+--- a/sdas/linksrc/lkrloc3.c
++++ b/sdas/linksrc/lkrloc3.c
+@@ -31,6 +31,7 @@
+  */
+ 
+ #include "aslink.h"
++#include "lkrrel.h"
+ 
+ /*)Module       lkrloc3.c
+  *
+@@ -332,6 +333,9 @@ relr3(void)
+          * Do remaining relocations
+          */
+         while (more()) {
++                int output_relocation_record;
++                int raddr;
++
+                 error = 0;
+                 mode = (int) eval();
+ 
+@@ -391,20 +395,106 @@ relr3(void)
+                 }
+ 
+ 
++                /* KevT 28-05-2005 */
++
++                if (hflag)
++                {
++                    output_relocation_record = 0;
++                    if (mode & R3_SYM)
++                    {
++                        /* If the symbol is defined in a absolute area, then we do not
++                           output a record. This allows us to reference absolute addresses
++                           in our code, but it can still be relocated */
++
++                        /* If the symbol is relative, it is within our relocatable program */
++
++                        /* printf("Symbol: %s\n",s[rindex]->s_id); */
++                        if ((s[rindex]->s_axp->a_bap->a_flag & A4_ABS)==0)
++                        {
++                            output_relocation_record=1;
++                        }
++                    }
++                    else
++                    {
++                        /* If the area is absolute then we do not output a record.
++                           This allows us to reference absolute memory, but still the code
++                           can be relocated. */
++                        /* If the area is relative, it refers to data that is part of the 
++                           relocatable program */
++
++                        /* printf("Area: %s\n",a[rindex]->a_bap->a_id); */
++                        if ((a[rindex]->a_bap->a_flag & A4_ABS)==0)
++                        {
++                            output_relocation_record=1;
++                        }
++                    }
++
++                    if (output_relocation_record)
++                    {
++                        a_uint relocate_address = pc+(rtp-rtofst);
++                        if (hilo)
++                        {
++                            raddr = reli + ((rtval[rtp]&0x0ff)<<8) + (rtval[rtp+1]&0x0ff);
++                        }
++                        else
++                        {
++                            raddr = reli + ((rtval[rtp+1]&0x0ff)<<8) + (rtval[rtp]&0x0ff);
++                        }
++                        /*printf("Relocation modify address: %04x\n",relocate_address); */
++                        /*printf("Relocation address: %04x\n",raddr); */
++                        if (mode & R3_BYTE)
++                        {
++                            if (mode & R3_BYTX)
++                            {
++                                if (mode & R3_MSB)
++                                {
++                                    relrec8hi(relocate_address,raddr);
++                                }
++                                else
++                                {
++                                    relrec8lo(relocate_address,raddr);
++                                }
++                            }
++                            else
++                            {
++                                printf("not supported");
++                            }
++                        }
++                        else
++                        {
++                            if (mode & R3_BYTX) 
++                            {
++                                if (mode & R3_MSB) 
++                                {
++                                    printf("not supported");
++                                }
++                                else
++                                {
++                                    printf("not supported");
++                                }
++                            }	
++                            else
++                            {
++                                relrec16(relocate_address);
++                            }
++                        }
++                    }
++                }
++
+                 /* pdk instruction fusion */
+                 if (TARGET_IS_PDK) {
+-                        relv = adb_3b(reli, rtp);
+-
+-                        /* pdk addresses in words, not in bytes,
+-                         * for goto/call instructions and byte selections.
+-                         */
+-                        int jump = 1, mask = 0;
+-                        if (rtval[rtp + 4] == 15) {
+-                                jump = rtval[rtp + 3] & 0x70;
+-                                mask = 0x40;
+-                                if (get_sdld_target() == TARGET_ID_PDK) {
+-                                        set_sdld_target(TARGET_ID_PDK15);
+-                                } else if (get_sdld_target() != TARGET_ID_PDK15) {
++                    relv = adb_3b(reli, rtp);
++
++                    /* pdk addresses in words, not in bytes,
++                     * for goto/call instructions and byte selections.
++                     */
++                    int jump = 1, mask = 0;
++                    if (rtval[rtp + 4] == 15) {
++                        jump = rtval[rtp + 3] & 0x70;
++                        mask = 0x40;
++                        if (get_sdld_target() == TARGET_ID_PDK) {
++                            set_sdld_target(TARGET_ID_PDK15);
++                        } else if (get_sdld_target() != TARGET_ID_PDK15) {
+                                         error = 12;
+                                 }
+                         } else if (rtval[rtp + 4] == 14) {
+@@ -856,6 +946,12 @@ rele3()
+         if (uflag != 0) {
+                 lkulist(0);
+         }
++
++        /* output relocation data */
++        if (hflag != 0) {
++            relrecwrite();
++        }
++
+         if (oflag != 0) {
+                 lkflush();
+                 lkfclose();
+diff --git a/sdas/linksrc/lkrrel.c b/sdas/linksrc/lkrrel.c
+new file mode 100644
+index 0000000..0d9f943
+--- /dev/null
++++ b/sdas/linksrc/lkrrel.c
+@@ -0,0 +1,256 @@
++/* (c) Kevin Thacker, May 2005 */
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++#include "aslink.h"
++#include "lkrrel.h"
++
++struct relrechead
++{
++	int count;
++	struct relrec *head;
++};
++
++/* 16-bit values, add full 16-bit base address */
++
++static struct relrechead head16= {0,NULL};
++/* 8-bit, but add high byte of 16-bit base address */
++static struct relrechead head8hi = {0,NULL};
++/* 8-bit, but add low byte of 16-bit base address */
++static struct relrechead head8lo = {0,NULL};
++
++/* internal; free's list */
++static void relrecfree(struct relrechead *head)
++{
++	struct relrec *cur = head->head;
++	
++	while (cur!=NULL)
++	{
++		struct relrec *next = cur->next;
++		free(cur);
++
++		cur = next;
++	}
++}
++
++/* free relocation record list; e.g. on exit */
++void freerelrec()
++{
++	relrecfree(&head16);
++	relrecfree(&head8hi);
++	relrecfree(&head8lo);
++}
++
++/* internal; allocate a relocation record */
++static void newrelrec(struct relrechead *head, a_uint addr, a_uint symaddr)
++{
++	struct relrec *rec;
++	
++	rec  = (struct relrec *) malloc(sizeof(struct relrec));
++	
++	/* error if allocation failed */
++	if (rec==NULL)
++		return;
++
++	rec->addr = addr;
++	rec->symaddr = symaddr;
++	
++	/* add to start of list */
++	rec->next = head->head;
++	head->head = rec;
++	head->count++;
++}
++	
++/* add item to 16-bit relocation record list */
++void relrec16(a_uint addr)
++{
++	newrelrec(&head16, addr,0);
++}
++
++/* add item to 8-bit (high) relocation record list */
++void relrec8hi(a_uint addr, a_uint symaddr)
++{
++	newrelrec(&head8hi, addr,symaddr);
++}
++
++/* add address to 8-bit (low) relocation list */
++void relrec8lo(a_uint addr, a_uint symaddr)
++{
++	newrelrec(&head8lo, addr,symaddr);
++}
++
++/* internal; compare two addresses within two relocate records */ 
++static int relreccompare(const void *a, const void *b)
++{
++	const struct relrec *relreca = (const struct relrec *)a;
++	const struct relrec *relrecb = (const struct relrec *)b;
++
++	return (relreca->addr-relrecb->addr);
++}
++
++/* sort a list of relocate records and return an array of the records */
++static struct relrec *relrecsort(struct relrechead *head)
++{
++	int count;
++	struct relrec *reclist;
++	struct relrec *cur;
++
++	if (head->count==0)
++		return NULL;
++
++	/* allocate list to hold all items */
++	reclist = (struct relrec *)malloc(sizeof(struct relrec)*head->count);	
++
++	if (reclist==NULL)
++		return NULL;
++
++	/* fill list */
++	count = 0;
++	cur = head->head;
++	while (cur!=NULL)
++	{
++		memcpy(&reclist[count],cur,sizeof(struct relrec));
++		count++;
++		cur = cur->next;
++	}
++
++	/* sort into ascending address order */
++	qsort(reclist, count, sizeof(struct relrec),relreccompare);
++
++	return reclist;
++}
++
++int outbyte(int addr, char byte)
++{
++	rtval[0] = addr&0x0ff;
++	rtval[1] = (addr>>8)&0x0ff;
++	rtval[2] = (addr>>16)&0x0ff;
++
++	rtval[3] = byte&0x0ff;
++	addr+=1;
++	rtflg[0] = 1;
++	rtflg[1] = 1;
++	rtflg[2] = 1;
++	rtflg[3] = 1;
++	rtcnt = 4;
++	ixx(1);
++	return addr;
++}
++
++void relrecwritelist1(struct relrechead *list,int *addrptr)
++{
++	int i;
++	struct relrec *relreclist;
++	int addr;
++
++	addr = *addrptr;
++
++	relreclist = relrecsort(list);
++
++	if (relreclist!=NULL)
++	{
++		int prevaddr = 0;
++		for (i=0; i<list->count; i++)
++		{
++			struct relrec *cur = &relreclist[i];
++
++			int delta = cur->addr-prevaddr;
++			
++			if (delta>254)
++			{
++				int largedelta = delta-1;
++				addr = outbyte(addr,0x0ff);
++				addr = outbyte(addr,largedelta&0x0ff);
++				addr = outbyte(addr,(largedelta>>8)&0x0ff);
++				delta = 1;
++			}
++			prevaddr = cur->addr;
++			addr = outbyte(addr,delta&0x0ff);
++		}	
++	
++		free(relreclist);
++	}
++	
++	addr = outbyte(addr, 0);
++	
++	*addrptr = addr;
++
++}
++
++void relrecwritelist2(struct relrechead *list,int *addrptr)
++{
++	int i;
++	struct relrec *relreclist;
++	int addr;
++
++	addr = *addrptr;
++
++	relreclist = relrecsort(list);
++
++	if (relreclist!=NULL)
++	{
++		int prevaddr = 0;
++		for (i=0; i<list->count; i++)
++		{
++			struct relrec *cur = &relreclist[i];
++			int delta = cur->addr-prevaddr;
++			prevaddr = cur->addr;
++			
++			if (delta>254)
++			{
++				int largedelta = delta-1;
++				addr = outbyte(addr,0x0ff);
++				addr = outbyte(addr,largedelta&0x0ff);
++				addr = outbyte(addr,(largedelta>>8)&0x0ff);
++				delta = 1;
++			}
++
++			addr = outbyte(addr,delta&0x0ff);
++			addr = outbyte(addr,cur->symaddr&0x0ff);
++		}	
++	
++		free(relreclist);
++	}
++
++	addr = outbyte(addr,0);
++	
++	*addrptr = addr;
++
++}
++
++
++void relrecwrite()
++{
++	int areasize = 0;
++
++	struct area *cur = areap;
++	while (cur!=NULL)
++	{
++		areasize+=cur->a_size;
++		cur=cur->a_ap;
++	}
++
++	//printf("total length before relocation records: %04x\n",areasize);
++
++	/* re-write offset to relocation records */
++	rtval[0] = 0;
++	rtval[1] = 0;
++	rtval[2] = 0;
++	rtval[3] = areasize&0x0ff;
++	rtval[4] = (areasize>>8)&0x0ff;
++	rtflg[0] = 1;
++	rtflg[1] = 1;
++	rtflg[2] = 1;
++	rtflg[3] = 1;
++	rtflg[4] = 1;
++	rtcnt = 5;
++	ixx(1);
++	
++
++	int addr = areasize;
++
++
++	relrecwritelist1(&head16,&addr);
++	relrecwritelist1(&head8lo,&addr);
++	relrecwritelist2(&head8hi,&addr);
++}
+diff --git a/sdas/linksrc/lkrrel.h b/sdas/linksrc/lkrrel.h
+new file mode 100644
+index 0000000..ca1cfd4
+--- /dev/null
++++ b/sdas/linksrc/lkrrel.h
+@@ -0,0 +1,17 @@
++/* relocation record */
++struct relrec
++{
++	/* next item */
++	struct relrec *next;
++
++	/* address of relocate */
++	a_uint addr;
++
++	a_uint symaddr;
++};
++
++void relrec16(a_uint addr);
++void relrec8lo(a_uint addr, a_uint symaddr);
++void relrec8hi(a_uint addr, a_uint symaddr);
++void freerelrec();
++void relrecwrite();
+-- 
+2.45.2
+
+
+From b53a9d88ff501567af124bf82dd5ccbb1aa02cae Mon Sep 17 00:00:00 2001
+From: PulkoMandy <pulkomandy@pulkomandy.tk>
+Date: Mon, 14 Aug 2023 17:11:04 +0200
+Subject: Port changes from SDCC 4.2.0 patchset
+
+A lot of them are not needed anymore becasue SDCC 4.3.0 got them from
+upstream binutils, but some remain in the toplevel directories which are
+not shared with binutils.
+
+diff --git a/configure.ac b/configure.ac
+index adf5060..1d3878d 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -390,10 +390,10 @@ if test "$ac_cv_c_compiler_gnu" = "yes"; then
+   rm -f _test_.*)
+ 
+   # This is the first time when CFLAGS are set/modified!!
+-  sdcc_IS_VALID_OPTION(-ggdb)
+-  if test "$sdcc_cv_c_ggdb" = "yes"; then
+-    CFLAGS="-ggdb ${CFLAGS}"
+-    CXXFLAGS="-ggdb ${CXXFLAGS}"
++  sdcc_IS_VALID_OPTION(-gdwarf-3)
++  if test "$sdcc_cv_c_gdwarf-3" = "yes"; then
++    CFLAGS="-gdwarf-3 ${CFLAGS}"
++    CXXFLAGS="-gdwarf-3 ${CXXFLAGS}"
+   fi
+ 
+   sdcc_IS_VALID_OPTION(-pipe)
+diff --git a/src/Makefile.in b/src/Makefile.in
+index 84840bf..f7fe2e6 100644
+--- a/src/Makefile.in
++++ b/src/Makefile.in
+@@ -65,7 +65,6 @@ $(top_builddir)/support/gc/libgc.a:
+ # ---------------------------------------------------
+ install: all installdirs
+ 	$(INSTALL) $(TARGET) $(DESTDIR)$(bindir)/`echo sdcc|sed '$(transform)'`$(EXEEXT)
+-	$(STRIP) $(DESTDIR)$(bindir)/`echo sdcc|sed '$(transform)'`$(EXEEXT)
+ 
+ 
+ # Deleting all the installed files
+-- 
+2.45.2
+
+
+From 3e807960998c6fa19b65bd8ef2285c36f5c0a059 Mon Sep 17 00:00:00 2001
+From: PulkoMandy <pulkomandy@pulkomandy.tk>
+Date: Mon, 14 Aug 2023 23:12:39 +0200
+Subject: Remove no-PIE options
+
+They break the build on Haiku
+
+diff --git a/support/cpp/gcc/Makefile.in b/support/cpp/gcc/Makefile.in
+index a66839a..6eef446 100644
+--- a/support/cpp/gcc/Makefile.in
++++ b/support/cpp/gcc/Makefile.in
+@@ -1773,11 +1773,7 @@ libgcc.mvars: config.status Makefile specs xgcc$(exeext)
+ 	echo GCC_CFLAGS = '$(GCC_CFLAGS)' >> tmp-libgcc.mvars
+ 	echo INHIBIT_LIBC_CFLAGS = '$(INHIBIT_LIBC_CFLAGS)' >> tmp-libgcc.mvars
+ 	echo TARGET_SYSTEM_ROOT = '$(TARGET_SYSTEM_ROOT)' >> tmp-libgcc.mvars
+-	if test @enable_default_pie@ = yes; then \
+-	  NO_PIE_CFLAGS="-fno-PIE"; \
+-	else \
+-	  NO_PIE_CFLAGS=; \
+-	fi; \
++	NO_PIE_CFLAGS=; \
+ 	echo NO_PIE_CFLAGS = "$$NO_PIE_CFLAGS" >> tmp-libgcc.mvars
+ 
+ 	mv tmp-libgcc.mvars libgcc.mvars
+diff --git a/support/cpp/gcc/configure b/support/cpp/gcc/configure
+index c1dbf50..8896b08 100755
+--- a/support/cpp/gcc/configure
++++ b/support/cpp/gcc/configure
+@@ -28753,61 +28753,6 @@ $as_echo "#define ENABLE_DEFAULT_PIE 1" >>confdefs.h
+ fi
+ 
+ 
+-# Check if -fno-PIE works.
+-{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for -fno-PIE option" >&5
+-$as_echo_n "checking for -fno-PIE option... " >&6; }
+-if ${gcc_cv_c_no_fpie+:} false; then :
+-  $as_echo_n "(cached) " >&6
+-else
+-  saved_CXXFLAGS="$CXXFLAGS"
+-   CXXFLAGS="$CXXFLAGS -fno-PIE"
+-   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+-/* end confdefs.h.  */
+-int main(void) {return 0;}
+-_ACEOF
+-if ac_fn_cxx_try_compile "$LINENO"; then :
+-  gcc_cv_c_no_fpie=yes
+-else
+-  gcc_cv_c_no_fpie=no
+-fi
+-rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
+-   CXXFLAGS="$saved_CXXFLAGS"
+-fi
+-{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $gcc_cv_c_no_fpie" >&5
+-$as_echo "$gcc_cv_c_no_fpie" >&6; }
+-if test "$gcc_cv_c_no_fpie" = "yes"; then
+-  NO_PIE_CFLAGS="-fno-PIE"
+-fi
+-
+-
+-# Check if -no-pie works.
+-{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for -no-pie option" >&5
+-$as_echo_n "checking for -no-pie option... " >&6; }
+-if ${gcc_cv_no_pie+:} false; then :
+-  $as_echo_n "(cached) " >&6
+-else
+-  saved_LDFLAGS="$LDFLAGS"
+-   LDFLAGS="$LDFLAGS -no-pie"
+-   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+-/* end confdefs.h.  */
+-int main(void) {return 0;}
+-_ACEOF
+-if ac_fn_cxx_try_link "$LINENO"; then :
+-  gcc_cv_no_pie=yes
+-else
+-  gcc_cv_no_pie=no
+-fi
+-rm -f core conftest.err conftest.$ac_objext \
+-    conftest$ac_exeext conftest.$ac_ext
+-   LDFLAGS="$saved_LDFLAGS"
+-fi
+-{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $gcc_cv_no_pie" >&5
+-$as_echo "$gcc_cv_no_pie" >&6; }
+-if test "$gcc_cv_no_pie" = "yes"; then
+-  NO_PIE_FLAG="-no-pie"
+-fi
+-
+-
+ # Enable Intel CET on Intel CET enabled host if jit is enabled.
+  # Check whether --enable-cet was given.
+ if test "${enable_cet+set}" = set; then :
+diff --git a/support/cpp/gcc/configure.ac b/support/cpp/gcc/configure.ac
+index e5aad31..275e1c1 100644
+--- a/support/cpp/gcc/configure.ac
++++ b/support/cpp/gcc/configure.ac
+@@ -7648,34 +7648,6 @@ if test x$enable_default_pie = xyes ; then
+ fi
+ AC_SUBST([enable_default_pie])
+ 
+-# Check if -fno-PIE works.
+-AC_CACHE_CHECK([for -fno-PIE option],
+-  [gcc_cv_c_no_fpie],
+-  [saved_CXXFLAGS="$CXXFLAGS"
+-   CXXFLAGS="$CXXFLAGS -fno-PIE"
+-   AC_COMPILE_IFELSE([AC_LANG_SOURCE([int main(void) {return 0;}])],
+-     [gcc_cv_c_no_fpie=yes],
+-     [gcc_cv_c_no_fpie=no])
+-   CXXFLAGS="$saved_CXXFLAGS"])
+-if test "$gcc_cv_c_no_fpie" = "yes"; then
+-  NO_PIE_CFLAGS="-fno-PIE"
+-fi
+-AC_SUBST([NO_PIE_CFLAGS])
+-
+-# Check if -no-pie works.
+-AC_CACHE_CHECK([for -no-pie option],
+-  [gcc_cv_no_pie],
+-  [saved_LDFLAGS="$LDFLAGS"
+-   LDFLAGS="$LDFLAGS -no-pie"
+-   AC_LINK_IFELSE([AC_LANG_SOURCE([int main(void) {return 0;}])],
+-     [gcc_cv_no_pie=yes],
+-     [gcc_cv_no_pie=no])
+-   LDFLAGS="$saved_LDFLAGS"])
+-if test "$gcc_cv_no_pie" = "yes"; then
+-  NO_PIE_FLAG="-no-pie"
+-fi
+-AC_SUBST([NO_PIE_FLAG])
+-
+ # Enable Intel CET on Intel CET enabled host if jit is enabled.
+ GCC_CET_HOST_FLAGS(CET_HOST_FLAGS)
+ case x$enable_languages in
+-- 
+2.45.2
+
+
+From f8c5010ba6564651fe121321ac4dacea8a769ba9 Mon Sep 17 00:00:00 2001
+From: PulkoMandy <pulkomandy@pulkomandy.tk>
+Date: Wed, 16 Aug 2023 12:14:44 +0200
+Subject: More Haiku support patches
+
+Imported from GCC 13, as the C preprocessor in SDCC is actually from
+GCC.
+
+diff --git a/support/cpp/gcc/config.gcc b/support/cpp/gcc/config.gcc
+index bec4c7d..c0d4b25 100644
+--- a/support/cpp/gcc/config.gcc
++++ b/support/cpp/gcc/config.gcc
+@@ -828,6 +828,22 @@ case ${target} in
+ *-*-fuchsia*)
+   native_system_header_dir=/include
+   ;;
++*-*-haiku*)
++  # This is the generic ELF configuration of Haiku.  Later
++  # machine-specific sections may refine and add to this
++  # configuration.
++  #
++  gas=yes
++  gnu_ld=yes
++  tmake_file="t-slibgcc"
++  case ${enable_threads} in
++    "" | yes | posix) thread_file='posix' ;;
++  esac
++  default_use_cxa_atexit=yes
++  tm_p_file="${tm_p_file} haiku-protos.h"
++  extra_objs="${extra_objs} haiku.o"
++  extra_options="${extra_options} haiku.opt"
++  ;;
+ *-*-linux* | frv-*-*linux* | *-*-kfreebsd*-gnu | *-*-gnu* | *-*-kopensolaris*-gnu | *-*-uclinuxfdpiceabi)
+   extra_options="$extra_options gnu-user.opt"
+   gas=yes
+@@ -1137,6 +1153,12 @@ aarch64*-*-netbsd*)
+ 	tmake_file="${tmake_file} aarch64/t-aarch64 aarch64/t-aarch64-netbsd"
+ 	extra_options="${extra_options} netbsd.opt netbsd-elf.opt"
+ 	;;
++aarch64*-*-haiku*)
++	gcc_cv_initfini_array=yes
++	tm_file="${tm_file} elfos.h haiku.h haiku-stdint.h"
++	tm_file="${tm_file} aarch64/aarch64-elf.h aarch64/aarch64-haiku.h"
++	tmake_file="${tmake_file} t-haiku aarch64/t-aarch64 aarch64/t-aarch64-haiku"
++	;;
+ aarch64*-*-linux*)
+ 	tm_file="${tm_file} dbxelf.h elfos.h gnu-user.h linux.h glibc-stdint.h"
+ 	tm_file="${tm_file} aarch64/aarch64-elf.h aarch64/aarch64-errata.h aarch64/aarch64-linux.h"
+@@ -1307,6 +1329,16 @@ arm*-*-netbsdelf*)
+ 	armv7*) target_cpu_cname="generic-armv7-a";;
+ 	esac
+ 	;;
++arm*-*-haiku*)
++	tmake_file="${tmake_file} t-haiku arm/t-arm arm/t-arm-elf arm/t-bpabi arm/t-haiku"
++	tm_file="elfos.h haiku.h arm/elf.h arm/bpabi.h arm/haiku.h haiku-stdint.h"
++	# The BPABI long long divmod functions return a 128-bit value in
++	# registers r0-r3.  Correctly modeling that requires the use of
++	# TImode.
++	need_64bit_hwint=yes
++	default_use_cxa_atexit=yes
++	tm_file="${tm_file} arm/aout.h arm/arm.h"
++	;;
+ arm*-*-linux-* | arm*-*-uclinuxfdpiceabi)
+ 	tm_file="dbxelf.h elfos.h gnu-user.h linux.h linux-android.h glibc-stdint.h arm/elf.h arm/linux-gas.h arm/linux-elf.h"
+ 	extra_options="${extra_options} linux-android.opt"
+@@ -1926,6 +1958,14 @@ i[34567]86-*-freebsd*)
+ x86_64-*-freebsd*)
+ 	tm_file="${tm_file} i386/unix.h i386/att.h dbxelf.h elfos.h ${fbsd_tm_file} i386/x86-64.h i386/freebsd.h i386/freebsd64.h"
+ 	;;
++i[34567]86-*-haiku*)
++	tmake_file="${tmake_file} t-haiku i386/t-crtpic"
++	tm_file="${tm_file} i386/unix.h i386/att.h elfos.h haiku.h i386/haiku.h haiku-stdint.h"
++	;;
++x86_64-*-haiku*)
++	tmake_file="${tmake_file} t-haiku i386/t-haiku64"
++	tm_file="${tm_file} i386/unix.h i386/att.h elfos.h haiku.h i386/haiku64.h haiku-stdint.h"
++	;;
+ i[34567]86-*-netbsdelf*)
+ 	tm_file="${tm_file} i386/unix.h i386/att.h dbxelf.h elfos.h ${nbsd_tm_file} i386/netbsd-elf.h"
+ 	extra_options="${extra_options} netbsd.opt netbsd-elf.opt"
+@@ -2391,6 +2431,13 @@ m68k-*-rtems*)
+ 	tm_file="${tm_file} m68k/m68k-none.h m68k/m68kelf.h dbxelf.h elfos.h m68k/m68kemb.h m68k/m68020-elf.h m68k/rtemself.h rtems.h newlib-stdint.h"
+ 	tm_defines="${tm_defines} MOTOROLA=1"
+ 	;;
++m68k-*-haiku*)
++	default_m68k_cpu=68020
++	default_cf_cpu=5206
++	tmake_file="${tmake_file} m68k/t-m68kbare m68k/t-crtstuff t-haiku" #??
++	tm_file="${tm_file} elfos.h haiku.h m68k/haiku.h haiku-stdint.h"
++	tm_defines="${tm_defines} MOTOROLA=1"
++	;;
+ mcore-*-elf)
+ 	tm_file="dbxelf.h elfos.h newlib-stdint.h ${tm_file} mcore/mcore-elf.h"
+ 	tmake_file=mcore/t-mcore
+@@ -2442,6 +2489,13 @@ microblaze*-*-elf)
+ 	cxx_target_objs="${cxx_target_objs} microblaze-c.o"
+ 	tmake_file="${tmake_file} microblaze/t-microblaze"
+         ;;
++riscv*-*-haiku*)
++	gcc_cv_initfini_array=yes
++	tm_file="elfos.h haiku.h ${tm_file} riscv/haiku.h haiku-stdint.h"
++	tmake_file="${tmake_file} t-haiku riscv/t-riscv riscv/t-haiku"
++	gnu_ld=yes
++	gas=yes
++	;;
+ riscv*-*-linux*)
+ 	tm_file="elfos.h gnu-user.h linux.h glibc-stdint.h ${tm_file} riscv/linux.h"
+ 	case "x${enable_multilib}" in
+@@ -2542,6 +2596,11 @@ mips*-mti-linux*)
+ 	gnu_ld=yes
+ 	gas=yes
+ 	;;
++mipsel-*-haiku*)
++	target_cpu_default="MASK_ABICALLS"
++	tm_file="elfos.h ${tm_file} haiku.h mips/haiku.h haiku-stdint.h"
++	tmake_file="${tmake_file} mips/t-elf t-haiku"
++	;;
+ mips*-*-linux*)				# Linux MIPS, either endian.
+ 	tm_file="dbxelf.h elfos.h gnu-user.h linux.h linux-android.h glibc-stdint.h ${tm_file} mips/gnu-user.h mips/linux.h mips/linux-common.h"
+ 	extra_options="${extra_options} linux-android.opt"
+@@ -2977,6 +3036,11 @@ powerpc-*-eabi*)
+ 	tmake_file="rs6000/t-fprules rs6000/t-ppcgas rs6000/t-ppccomm"
+ 	use_gcc_stdint=wrap
+ 	;;
++powerpc-*-haiku*)
++	tmake_file="${tmake_file} rs6000/t-fprules rs6000/t-ppcos rs6000/t-ppccomm t-haiku"
++	tm_file="${tm_file} elfos.h freebsd-spec.h rs6000/sysv4.h haiku.h rs6000/haiku.h haiku-stdint.h"
++	extra_options="${extra_options} rs6000/sysv4.opt"
++	;;
+ powerpc-*-rtems*)
+ 	tm_file="rs6000/biarch64.h ${tm_file} dbxelf.h elfos.h gnu-user.h freebsd-spec.h newlib-stdint.h rs6000/sysv4.h rs6000/rtems.h rtems.h"
+ 	extra_options="${extra_options} rs6000/sysv4.opt rs6000/linux64.opt"
+@@ -3433,6 +3497,11 @@ sparc64-*-rtems*)
+ 	extra_options="${extra_options}"
+ 	tmake_file="${tmake_file} sparc/t-sparc sparc/t-rtems-64"
+ 	;;
++sparc64-*-haiku*)
++	tm_file="${tm_file} elfos.h sparc/sysv4.h sparc/sp64-elf.h haiku.h sparc/haiku.h haiku-stdint.h"
++	extra_options="${extra_options}"
++	tmake_file="${tmake_file} t-haiku sparc/t-sparc sparc/t-haiku"
++	;;
+ sparc64-*-linux*)
+ 	tm_file="sparc/biarch64.h ${tm_file} dbxelf.h elfos.h sparc/sysv4.h gnu-user.h linux.h glibc-stdint.h sparc/default64.h sparc/linux64.h sparc/tso.h"
+ 	extra_options="${extra_options} sparc/long-double-switch.opt"
+diff --git a/support/cpp/gcc/config/haiku.opt b/support/cpp/gcc/config/haiku.opt
+new file mode 100644
+index 0000000..5b22f3b
+--- /dev/null
++++ b/support/cpp/gcc/config/haiku.opt
+@@ -0,0 +1,32 @@
++; Haiku options.
++
++; Copyright (C) 2010-2022 Free Software Foundation, Inc.
++;
++; This file is part of GCC.
++;
++; GCC is free software; you can redistribute it and/or modify it under
++; the terms of the GNU General Public License as published by the Free
++; Software Foundation; either version 3, or (at your option) any later
++; version.
++;
++; GCC is distributed in the hope that it will be useful, but WITHOUT ANY
++; WARRANTY; without even the implied warranty of MERCHANTABILITY or
++; FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++; for more details.
++;
++; You should have received a copy of the GNU General Public License
++; along with GCC; see the file COPYING3.  If not see
++; <http://www.gnu.org/licenses/>.
++
++; See the GCC internals manual (options.texi) for a description of
++; this file's format.
++
++; Please try to keep this file in ASCII collating order.
++
++pthread
++Driver
++
++rdynamic
++Driver
++
++; This comment is to ensure we retain the blank line above.
+-- 
+2.45.2
+
+
+From 3916bb42cdd25ac3ac9ce09214bdac2b18e5eb42 Mon Sep 17 00:00:00 2001
+From: PulkoMandy <pulkomandy@pulkomandy.tk>
+Date: Mon, 30 Sep 2024 08:18:33 +0200
+Subject: Backport fix from https://sourceforge.net/p/sdcc/code/14821/
+
+
+diff --git a/src/z80/gen.c b/src/z80/gen.c
+index 63ba67a..7e6166c 100644
+--- a/src/z80/gen.c
++++ b/src/z80/gen.c
+@@ -4744,7 +4744,11 @@ genMove_o (asmop *result, int roffset, asmop *source, int soffset, int size, boo
+         }
+       else if (source->type == AOP_STL)
+         {
+-          if (i || soffset || !hl_dead)
++          if (!hl_dead && (result->regs[L_IDX] > roffset || result->regs[H_IDX] > roffset))
++            UNIMPLEMENTED;
++          if (!hl_dead)
++            _push (PAIR_HL);
++          if (i || soffset)
+             UNIMPLEMENTED;
+           if (!f_dead)
+             _push (PAIR_AF);
+@@ -4756,6 +4760,8 @@ genMove_o (asmop *result, int roffset, asmop *source, int soffset, int size, boo
+             _pop (PAIR_AF);
+           spillPair (PAIR_HL);
+           genMove_o (result, roffset, ASMOP_HL, 0, size, a_dead, true, de_dead_global, iy_dead, f_dead);
++          if (!hl_dead)
++            _pop (PAIR_HL);
+           i += 2;
+           continue;
+         }
+-- 
+2.45.2
+
