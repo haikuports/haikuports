@@ -1,0 +1,350 @@
+From 0a57a6529a38de9b419b2da3caac4d9bb9b87824 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=B4me=20Duval?= <jerome.duval@gmail.com>
+Date: Tue, 17 Dec 2024 21:27:39 +0100
+Subject: Support Haiku in the CMake build
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b05e3da..76e0546 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -155,6 +155,10 @@ elseif(WIN32)
+     # Windows MIDI support requires no external libraries
+     message(STATUS "Enabled MIDI support (WinMM)")
+     add_subdirectory(src/midi)
++elseif(HAIKU)
++    # Haiku MIDI support requires no external libraries
++    message(STATUS "Enabled MIDI support (Haiku)")
++    add_subdirectory(src/midi)
+ else()
+     # Workaround for SDL bug #3295, which occurs in SDL2 <2.0.5
+     # https://bugzilla.libsdl.org/show_bug.cgi?id=3295
+diff --git a/src/midi/CMakeLists.txt b/src/midi/CMakeLists.txt
+index 8481d15..ceb850e 100644
+--- a/src/midi/CMakeLists.txt
++++ b/src/midi/CMakeLists.txt
+@@ -80,6 +80,25 @@ elseif(WIN32)
+     )
+ 
+     target_link_libraries(midi PUBLIC winmm)
++elseif(HAIKU)
++    target_sources(midi PRIVATE
++        # Sources
++        haiku/MidiSetup.cpp
++        haiku/MilkyMidiConsumer.cpp
++
++        # Headers
++        haiku/MidiSetup.h
++        haiku/MilkyMidiConsumer.h
++    )
++
++    target_include_directories(midi
++        PUBLIC
++            ${CMAKE_CURRENT_SOURCE_DIR}/haiku
++        PRIVATE
++            ${CMAKE_CURRENT_SOURCE_DIR}/../ppui/osinterface/posix
++    )
++
++    target_link_libraries(midi PUBLIC midi2)
+ else()
+     target_sources(midi PRIVATE
+         # Sources
+diff --git a/src/milkyplay/CMakeLists.txt b/src/milkyplay/CMakeLists.txt
+index 81f70c4..9c3f886 100644
+--- a/src/milkyplay/CMakeLists.txt
++++ b/src/milkyplay/CMakeLists.txt
+@@ -198,6 +198,24 @@ elseif(WIN32)
+         message("RtAudio support disabled (RtAudio unavailable)")
+     endif()
+     target_link_libraries(milkyplay PRIVATE winmm dsound)
++elseif(HAIKU)
++    target_sources(milkyplay
++        PRIVATE
++            # Sources
++            drivers/haiku/AudioDriver_Haiku.cpp
++
++            # Headers
++            drivers/haiku/AudioDriver_Haiku.h
++    )
++    target_include_directories(milkyplay
++        PRIVATE
++            drivers/haiku
++    )
++    target_link_libraries(milkyplay
++        PRIVATE
++            media
++    )
++    message(STATUS "Enabled Haiku Audio support")
+ else()
+     target_compile_definitions(milkyplay PRIVATE -DDRIVER_UNIX)
+ 
+diff --git a/src/ppui/CMakeLists.txt b/src/ppui/CMakeLists.txt
+index df80970..899b545 100644
+--- a/src/ppui/CMakeLists.txt
++++ b/src/ppui/CMakeLists.txt
+@@ -102,12 +102,19 @@ add_library(ppui STATIC
+     VirtualKeys.h
+ )
+ 
+-target_include_directories(ppui
+-    PUBLIC
+-        .
+-    PRIVATE
+-        osinterface
+-)
++if (HAIKU)
++    target_include_directories(ppui
++        PRIVATE
++            osinterface
++    )
++else()
++    target_include_directories(ppui
++        PUBLIC
++            .
++        PRIVATE
++            osinterface
++    )
++endif()
+ 
+ target_link_libraries(ppui PRIVATE osinterface)
+ 
+@@ -136,6 +143,32 @@ elseif(WIN32)
+         PUBLIC
+             win32
+     )
++elseif(HAIKU)
++    target_sources(ppui
++        PRIVATE
++            haiku/DisplayDevice_Haiku.cpp
++            haiku/DisplayDevice_Haiku.h
++            haiku/MilkyView.cpp
++            haiku/MilkyView.h
++            haiku/MilkyWindow.cpp
++            haiku/MilkyWindow.h
++            haiku/KeyCodeMap.cpp
++            haiku/KeyCodeMap.h
++    )
++    target_include_directories(ppui
++        PRIVATE
++            ${PROJECT_SOURCE_DIR}/src/milkyplay
++            ${PROJECT_SOURCE_DIR}/src/ppui/osinterface
++            ${PROJECT_SOURCE_DIR}/src/ppui/osinterface/haiku
++            ${PROJECT_SOURCE_DIR}/src/ppui/osinterface/posix
++            ${PROJECT_SOURCE_DIR}/src/ppui/haiku
++            ${PROJECT_SOURCE_DIR}/src/tracker
++            ${PROJECT_SOURCE_DIR}/src/tracker/haiku
++        PUBLIC
++            haiku
++            osinterface/posix
++    )
++    target_compile_options(ppui PRIVATE -iquote ${PROJECT_SOURCE_DIR}/src/ppui)
+ else()
+     target_sources(ppui
+         PRIVATE
+diff --git a/src/ppui/haiku/MilkyWindow.h b/src/ppui/haiku/MilkyWindow.h
+index fd1891b..78e9156 100644
+--- a/src/ppui/haiku/MilkyWindow.h
++++ b/src/ppui/haiku/MilkyWindow.h
+@@ -58,7 +58,7 @@ public:
+ 								BHandler* target);
+ 
+ 			void			ForwardEvents();
+-			status_t		RaiseEvent(PPEvent* event);
++			void			RaiseEvent(PPEvent* event);
+ private:
+ 	static	status_t		_EventThread(void* data);
+ 
+@@ -79,7 +79,7 @@ private:
+ };
+ 
+ 
+-inline status_t
++inline void
+ MilkyWindow::RaiseEvent(PPEvent* event)
+ {
+ 	status_t status = write_port_etc(fEventPort, 0, event, sizeof(PPEvent),
+diff --git a/src/ppui/osinterface/CMakeLists.txt b/src/ppui/osinterface/CMakeLists.txt
+index 6452f51..de18ac6 100644
+--- a/src/ppui/osinterface/CMakeLists.txt
++++ b/src/ppui/osinterface/CMakeLists.txt
+@@ -33,12 +33,19 @@ add_library(osinterface STATIC
+     PPSystem.h
+ )
+ 
+-target_include_directories(osinterface
+-    PUBLIC
+-        ${CMAKE_CURRENT_SOURCE_DIR}
+-    PRIVATE
+-        ${CMAKE_CURRENT_SOURCE_DIR}/..
+-)
++if (HAIKU)
++    target_include_directories(osinterface
++        PUBLIC
++            ${CMAKE_CURRENT_SOURCE_DIR}
++    )
++else()
++    target_include_directories(osinterface
++        PUBLIC
++            ${CMAKE_CURRENT_SOURCE_DIR}
++        PRIVATE
++            ${CMAKE_CURRENT_SOURCE_DIR}/..
++    )
++endif()
+ 
+ # Add platform-specific sources and include paths
+ if(APPLE)
+@@ -86,6 +93,35 @@ elseif(WIN32)
+         PUBLIC
+             win32
+     )
++elseif(HAIKU)
++    target_sources(osinterface
++        PRIVATE
++            # Sources
++            PPPathFactory.cpp
++            posix/PPMutex.cpp
++            posix/PPPath_POSIX.cpp
++            posix/PPSystem_POSIX.cpp
++            haiku/SynchronousFilePanel.cpp
++            haiku/PPMessageBox_Haiku.cpp
++            haiku/PPOpenPanel_Haiku.cpp
++            haiku/PPQuitSaveAlert_Haiku.cpp
++            haiku/PPSavePanel_Haiku.cpp
++            haiku/WaitView.cpp
++            haiku/WaitWindow.cpp
++
++            # Headers
++            posix/PPMutex.h
++            posix/PPPath_POSIX.h
++            posix/PPSystemString_POSIX.h
++            posix/PPSystem_POSIX.h
++    )
++    target_include_directories(osinterface
++        PRIVATE
++            ${PROJECT_SOURCE_DIR}/src/ppui/haiku
++            ${PROJECT_SOURCE_DIR}/src/tracker/haiku
++            posix
++    )
++    target_compile_options(osinterface PRIVATE -iquote ${PROJECT_SOURCE_DIR}/src/ppui)
+ else()
+     target_sources(osinterface
+         PRIVATE
+diff --git a/src/tracker/CMakeLists.txt b/src/tracker/CMakeLists.txt
+index 6f3c0ab..621e87a 100644
+--- a/src/tracker/CMakeLists.txt
++++ b/src/tracker/CMakeLists.txt
+@@ -291,6 +291,29 @@ elseif(WIN32)
+         win32/ThreadTimer.h
+         win32/Win32_resource.h
+     )
++elseif(HAIKU)
++    target_sources(tracker PRIVATE
++        haiku/Haiku_main.cpp
++        haiku/Tools.cpp
++        haiku/MilkyApplication.cpp
++    )
++
++    target_include_directories(tracker
++        PRIVATE
++        ${PROJECT_SOURCE_DIR}/src/midi/haiku
++    )
++    target_compile_options(tracker PRIVATE -iquote ${PROJECT_SOURCE_DIR}/src/ppui)
++
++
++    add_executable(settings
++        haiku/MilkySettings/main.cpp
++        haiku/MilkySettings/InterfaceSettingsView.cpp
++        haiku/MilkySettings/MidiSettingsView.cpp
++        haiku/MilkySettings/MilkySettingsApplication.cpp
++        haiku/MilkySettings/SettingsWindow.cpp
++    )
++
++    set_target_properties(settings PROPERTIES OUTPUT_NAME MilkySettings)
+ else()
+     target_sources(tracker PRIVATE
+         # Sources
+@@ -358,6 +381,10 @@ elseif(WIN32)
+     set_target_properties(tracker PROPERTIES WIN32_EXECUTABLE TRUE)
+ 
+     target_link_libraries(tracker midi)
++elseif(HAIKU)
++    target_link_libraries(tracker midi be libtracker.so)
++
++    target_link_libraries(settings midi2 be)
+ else()
+     if(ALSA_FOUND AND RTMIDI_FOUND)
+         target_compile_definitions(tracker PRIVATE -DHAVE_LIBRTMIDI)
+diff --git a/src/tracker/Tracker.h b/src/tracker/Tracker.h
+index 1155df2..9cd10d4 100644
+--- a/src/tracker/Tracker.h
++++ b/src/tracker/Tracker.h
+@@ -98,7 +98,7 @@ private:
+ 		PanelTop_Sample,
+ 		PanelTop_Instrument
+ 	};
+-	PanelRotate panelrotate = PanelRotate::PanelTop;
++	PanelRotate panelrotate = PanelTop;
+ 
+ 	// I've replaced some constants
+ #ifndef __LOWRES__
+diff --git a/src/tracker/TrackerKeyboard.cpp b/src/tracker/TrackerKeyboard.cpp
+index 82b1bbe..340fa3d 100644
+--- a/src/tracker/TrackerKeyboard.cpp
++++ b/src/tracker/TrackerKeyboard.cpp
+@@ -451,18 +451,18 @@ void Tracker::eventKeyDownBinding_RotatePanels()
+ 		return;
+ 
+ 	switch( panelrotate ){
+-		case PanelRotate::PanelTop:{
+-			panelrotate = PanelRotate::PanelTop_Sample;
++		case PanelTop:{
++			panelrotate = PanelTop_Sample;
+ 			eventKeyDownBinding_InvokeSectionSamples();
+ 			break;
+ 		}
+-		case PanelRotate::PanelTop_Sample:{
+-			panelrotate = PanelRotate::PanelTop_Instrument;
++		case PanelTop_Sample:{
++			panelrotate = PanelTop_Instrument;
+ 			eventKeyDownBinding_InvokeSectionInstruments();
+ 			break;
+ 		}
+-		case PanelRotate::PanelTop_Instrument:{
+-			panelrotate = PanelRotate::PanelTop;
++		case PanelTop_Instrument:{
++			panelrotate = PanelTop;
+ 			sectionSwitcher->showBottomSection(SectionSwitcher::ActiveBottomSectionNone);
+ 			break;
+ 		}
+-- 
+2.45.2
+
+
+From fca98f4eb977ab87dec1423a939839744e355f1f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=B4me=20Duval?= <jerome.duval@gmail.com>
+Date: Tue, 17 Dec 2024 22:03:52 +0100
+Subject: rdef version variable
+
+
+diff --git a/src/tracker/haiku/MilkyTracker.rdef b/src/tracker/haiku/MilkyTracker.rdef
+index 7544e36..0f99554 100644
+--- a/src/tracker/haiku/MilkyTracker.rdef
++++ b/src/tracker/haiku/MilkyTracker.rdef
+@@ -4,10 +4,10 @@ resource app_flags B_MULTIPLE_LAUNCH;
+ 
+ resource app_version
+ {
+-	major = 0,
+-	middle = 90,
+-	minor = 85,
+-	variety = B_APPV_DEVELOPMENT,
++	major  = @MAJOR@,
++	middle = @MIDDLE@,
++	minor  = @MINOR@,
++	variety = B_APPV_FINAL,
+ 	internal = 0,
+ 	short_info = "MilkyTracker",
+ 	long_info = "MilkyTracker"
+-- 
+2.45.2
+
