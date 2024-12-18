@@ -1,0 +1,131 @@
+From: Chris Novakovic <chris@chrisn.me.uk>
+Date: Fri, 22 Apr 2022 22:10:13 +0100
+Subject: jobs: Implement pipefail option
+
+With the pipefail option set, a pipeline's exit status is the exit
+status of the rightmost command that failed, or zero if all commands
+succeeded.
+
+This is planned for inclusion in the next revision of POSIX [1],
+although the details are yet to be finalised. The semantics of this
+implementation are the same as those proposed in [2], which have also
+been adopted by the BSD shells.
+
+[1] https://www.austingroupbugs.net/view.php?id=789
+[2] https://www.austingroupbugs.net/view.php?id=789#c4115
+
+Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+---
+ src/dash.1    | 31 ++++++++++++++++++++++++-------
+ src/jobs.c    |  9 ++++++++-
+ src/options.c |  2 ++
+ src/options.h |  5 +++--
+ 4 files changed, 37 insertions(+), 10 deletions(-)
+
+diff --git a/src/dash.1 b/src/dash.1
+index 39cec2f..bfdba70 100644
+--- a/src/dash.1
++++ b/src/dash.1
+@@ -553,13 +553,17 @@ by redirection operators that are part of the command.
+ If the pipeline is not in the background (discussed later), the shell
+ waits for all commands to complete.
+ .Pp
+-If the reserved word ! does not precede the pipeline, the exit status is
+-the exit status of the last command specified in the pipeline.
+-Otherwise, the exit status is the logical NOT of the exit status of the
+-last command.
+-That is, if the last command returns zero, the exit status
+-is 1; if the last command returns greater than zero, the exit status is
+-zero.
++If the
++.Em pipefail
++option was enabled when the shell began execution of the pipeline, the
++pipeline's exit status is the exit status of the last command specified in
++the pipeline that exited with non-zero status, or zero if all commands in
++the pipeline exited with a status of zero. If the
++.Em pipefail
++option was not enabled, the pipeline's exit status is the exit status of
++the last command specified in the pipeline; the exit statuses of any other
++commands are not used. If the reserved word ! precedes the pipeline, its
++exit status is the logical NOT of the exit status described above.
+ .Pp
+ Because pipeline assignment of standard input or standard output or both
+ takes place before redirection, it can be modified by redirection.
+@@ -1836,6 +1840,19 @@ if the option is +o,
+ the settings are printed in a format suitable for
+ reinput to the shell to affect the same option settings.
+ .Pp
++In addition to the option names listed in the
++.Sx Argument List Processing
++section, the following options may be specified as arguments
++to -o or +o:
++.Bl -tag -width pipefail
++.It Em pipefail
++Derive the exit status of a pipeline from the exit statuses of all
++of the commands in the pipeline, not just the last command, as
++described in the
++.Sx Pipelines
++section.
++.El
++.Pp
+ The third use of the set command is to set the values of the shell's
+ positional parameters to the specified args.
+ To change the positional
+diff --git a/src/jobs.c b/src/jobs.c
+index f3b9ffc..78c7bc6 100644
+--- a/src/jobs.c
++++ b/src/jobs.c
+@@ -1526,8 +1526,15 @@ STATIC int
+ getstatus(struct job *job) {
+ 	int status;
+ 	int retval;
++	struct procstat *ps;
++
++	ps = job->ps + job->nprocs - 1;
++	status = ps->status;
++	if (pipefail) {
++		while (status == 0 && --ps >= job->ps)
++			status = ps->status;
++	}
+ 
+-	status = job->ps[job->nprocs - 1].status;
+ 	retval = WEXITSTATUS(status);
+ 	if (!WIFEXITED(status)) {
+ #if JOBS
+diff --git a/src/options.c b/src/options.c
+index 3158498..93ad9d6 100644
+--- a/src/options.c
++++ b/src/options.c
+@@ -80,6 +80,7 @@ static const char *const optnames[NOPTS] = {
+ 	"notify",
+ 	"nounset",
+ 	"nolog",
++	"pipefail",
+ 	"debug",
+ };
+ 
+@@ -101,6 +102,7 @@ const char optletters[NOPTS] = {
+ 	'u',
+ 	0,
+ 	0,
++	0,
+ };
+ 
+ char optlist[NOPTS];
+diff --git a/src/options.h b/src/options.h
+index 975fe33..f421316 100644
+--- a/src/options.h
++++ b/src/options.h
+@@ -60,9 +60,10 @@ struct shparam {
+ #define	bflag optlist[13]
+ #define	uflag optlist[14]
+ #define	nolog optlist[15]
+-#define	debug optlist[16]
++#define	pipefail optlist[16]
++#define	debug optlist[17]
+ 
+-#define NOPTS	17
++#define NOPTS	18
+ 
+ extern const char optletters[NOPTS];
+ extern char optlist[NOPTS];
