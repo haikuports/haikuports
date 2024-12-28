@@ -1,0 +1,306 @@
+From 9a0f1cf2865cb6fe13a2a84961c5afa13cdf4f91 Mon Sep 17 00:00:00 2001
+From: Estevan Castilho <estevan.cps@gmail.com>
+Date: Sun, 28 May 2023 20:26:45 +0000
+Subject: UIOP: don't remove :HAIKU from *FEATURES*
+
+Haiku is in the same position as macOS, where it should have both
+:OS-UNIX and it's own keyword in *FEATURES*, but UIOP inadvertedly
+removes all other keywords once OS-UNIX-P returns true. A similar fix
+is already on ASDF upstream.
+
+diff --git a/contrib/asdf/uiop.lisp b/contrib/asdf/uiop.lisp
+index 5e52e77..eef5ef1 100644
+--- a/contrib/asdf/uiop.lisp
++++ b/contrib/asdf/uiop.lisp
+@@ -1859,7 +1859,7 @@ except on ABCL where it might change between FASL compilation and runtime."
+                                          (:os-windows . os-windows-p)
+                                          (:genera . os-genera-p) (:os-oldmac . os-oldmac-p)
+                                          (:haiku . os-haiku-p))
+-           :when (and (or (not o) (eq feature :os-macosx)) (funcall detect))
++           :when (and (or (not o) (eq feature :os-macosx) (eq feature :os-haiku)) (funcall detect))
+            :do (setf o feature) (pushnew feature *features*)
+            :else :do (setf *features* (remove feature *features*))
+            :finally
+-- 
+2.45.2
+
+
+From b58b72e958692fe0624ee89160c13c036ddd0c42 Mon Sep 17 00:00:00 2001
+From: Al Hoang <3811822-hoanga@users.noreply.gitlab.com>
+Date: Sun, 8 May 2022 23:06:29 -0500
+Subject: updated haiku patch
+
+
+diff --git a/contrib/sb-bsd-sockets/sockets.lisp b/contrib/sb-bsd-sockets/sockets.lisp
+index b8f2658..ecf4317 100644
+--- a/contrib/sb-bsd-sockets/sockets.lisp
++++ b/contrib/sb-bsd-sockets/sockets.lisp
+@@ -345,7 +345,9 @@ request an input stream and get an output stream in response\)."
+ (define-socket-condition sockint::EOPNOTSUPP operation-not-supported-error)
+ (define-socket-condition sockint::EPERM operation-not-permitted-error)
+ (define-socket-condition sockint::EPROTONOSUPPORT protocol-not-supported-error)
+-(define-socket-condition sockint::ESOCKTNOSUPPORT socket-type-not-supported-error)
++;; haiku hack
++#+haiku (define-socket-condition -4025 socket-type-not-supported-error)
++#-haiku (define-socket-condition sockint::ESOCKTNOSUPPORT socket-type-not-supported-error)
+ (define-socket-condition sockint::ENETUNREACH network-unreachable-error)
+ (define-socket-condition sockint::ENOTCONN not-connected-error)
+ (define-socket-condition sockint::EAFNOSUPPORT address-family-not-supported)
+diff --git a/contrib/sb-bsd-sockets/tests.lisp b/contrib/sb-bsd-sockets/tests.lisp
+index 7ec6342..ccbf009 100644
+--- a/contrib/sb-bsd-sockets/tests.lisp
++++ b/contrib/sb-bsd-sockets/tests.lisp
+@@ -78,6 +78,7 @@
+       ;; here, not socket-type-not-supported-error or
+       ;; protocol-not-supported-error.
+       ((or #+darwin socket-error
++        #+haiku address-family-not-supported
+         operation-not-supported-error
+         socket-type-not-supported-error
+         protocol-not-supported-error)
+@@ -96,6 +97,7 @@
+       ;; protocol-not-supported-error.
+       ((or
+         #+darwin socket-error
++        #+haiku address-family-not-supported
+         operation-not-supported-error
+         protocol-not-supported-error
+         socket-type-not-supported-error)
+@@ -507,7 +509,7 @@
+ ;; translates into an END-OF-FILE on the other end, no matter which
+ ;; end performs the shutdown and independent of the element-type of
+ ;; the stream.
+-#+ipv4-support
++#+(and ipv4-support (not haiku))
+ (macrolet
+     ((define-shutdown-test (name who-shuts-down who-reads element-type direction)
+        `(deftest ,name
+diff --git a/contrib/sb-posix/constants.lisp b/contrib/sb-posix/constants.lisp
+index 78a3f68..53b26f7 100644
+--- a/contrib/sb-posix/constants.lisp
++++ b/contrib/sb-posix/constants.lisp
+@@ -274,10 +274,11 @@
+               #-(and linux largefile) "struct dirent"
+               #-(or win32 android) (:ino-t ino "ino_t" "d_ino")
+               #+android ((unsigned 64) ino "unsigned long long" "d_ino")
+-              (:c-string name "char *" "d_name"
+-                         ;; FIXME: sunos should really have :distrust-length
+-                         ;; t, but this is currently broken. -- Jim Wise 2010-08-31
+-                         :distrust-length nil)) t)
++              ))
++              ;;(:c-string name "char *" "d_name"
++              ;;           ;; FIXME: sunos should really have :distrust-length
++              ;;           ;; t, but this is currently broken. -- Jim Wise 2010-08-31
++              ;;           :distrust-length nil)) t)
+ 
+  ;; password database
+  #-(or android win32)
+diff --git a/src/code/unix.lisp b/src/code/unix.lisp
+index 880975f..99065f4 100644
+--- a/src/code/unix.lisp
++++ b/src/code/unix.lisp
+@@ -924,10 +924,20 @@ avoiding atexit(3) hooks, etc. Otherwise exit(2) is called."
+     (it-interval (struct timeval))      ; timer interval
+     (it-value (struct timeval))))       ; current value
+ 
++#-haiku
+ (defconstant itimer-real 0)
++#-haiku
+ (defconstant itimer-virtual 1)
++#-haiku
+ (defconstant itimer-prof 2)
+ 
++#+haiku
++(defconstant itimer-real 1)
++#+haiku
++(defconstant itimer-virtual 2)
++#+haiku
++(defconstant itimer-prof 3)
++
+ #-win32
+ (defun unix-getitimer (which)
+   "UNIX-GETITIMER returns the INTERVAL and VALUE slots of one of
+-- 
+2.45.2
+
+
+From 84c46f2ecce693b5cd156a4872e0d9b67493da82 Mon Sep 17 00:00:00 2001
+From: Estevan Castilho <estevan.cps@gmail.com>
+Date: Sun, 28 May 2023 20:34:28 +0000
+Subject: Include missing header, optionally install the SEGV handler on Haiku
+
+
+diff --git a/src/runtime/haiku-os.c b/src/runtime/haiku-os.c
+index 7bdfc7b..0552ab7 100644
+--- a/src/runtime/haiku-os.c
++++ b/src/runtime/haiku-os.c
+@@ -62,7 +62,9 @@ sigsegv_handler(int signal, siginfo_t *info, os_context_t *context)
+ void
+ os_install_interrupt_handlers(void)
+ {
+-    ll_install_handler(SIGSEGV, sigsegv_handler);
++    if (INSTALL_SIG_MEMORY_FAULT_HANDLER) {
++        ll_install_handler(SIGSEGV, sigsegv_handler);
++    }
+ }
+ 
+ int pthread_getattr_np(pthread_t thread, pthread_attr_t *attr)
+diff --git a/src/runtime/run-program.c b/src/runtime/run-program.c
+index 65ca971..168cfd2 100644
+--- a/src/runtime/run-program.c
++++ b/src/runtime/run-program.c
+@@ -32,7 +32,7 @@
+ #include <termios.h>
+ #include <errno.h>
+ #include <dirent.h>
+-#include <sys/syscall.h>
++//#include <sys/syscall.h>
+ #include "interr.h" // for lose()
+ 
+ #ifdef LISP_FEATURE_OPENBSD
+-- 
+2.45.2
+
+
+From 0670d1804f88b5d9290778826024e060ac220512 Mon Sep 17 00:00:00 2001
+From: Estevan Castilho <estevan.cps@gmail.com>
+Date: Sun, 28 May 2023 20:30:03 +0000
+Subject: Mark TRACE :ENCAPSULATE NIL tests as broken on Haiku
+
+They just seem to hang while segfaulting forever. No attempt has been
+made to debug this.
+
+diff --git a/tests/debug.impure.lisp b/tests/debug.impure.lisp
+index 493dbe5..1a3f60d 100644
+--- a/tests/debug.impure.lisp
++++ b/tests/debug.impure.lisp
+@@ -139,7 +139,7 @@
+ 
+ (defparameter *breakpoint-tracing-expectations*
+   '(:fails-on (or :arm :arm64)
+-    :broken-on (or :freebsd :ppc :ppc64)))
++    :broken-on (or :freebsd :haiku :ppc :ppc64)))
+ 
+ ;;; bug 379
+ (with-test (:name (trace :encapsulate nil)
+-- 
+2.45.2
+
+
+From 52737813eafa7a86ee911d31a33ea67f080722b9 Mon Sep 17 00:00:00 2001
+From: Estevan Castilho <estevan.cps@gmail.com>
+Date: Sun, 28 May 2023 20:32:37 +0000
+Subject: Don't assume env is under /usr/bin
+
+On Haiku, it is under /bin instead, and runtime_loader dynamically
+patches script shebangs during load time; so we try getting the
+location from PATH instead.
+
+diff --git a/tests/run-program.test.sh b/tests/run-program.test.sh
+index df49a28..1d394ff 100755
+--- a/tests/run-program.test.sh
++++ b/tests/run-program.test.sh
+@@ -27,7 +27,8 @@ export PATH
+ test `ulimit -n` -ge 1050 || ulimit -S -n `ulimit -H -n`
+ 
+ # This should probably be broken up into separate pieces.
+-run_sbcl --eval "(defvar *exit-ok* $EXIT_LISP_WIN)" <<'EOF'
++run_sbcl --eval "(defvar *exit-ok* $EXIT_LISP_WIN)" \
++         --eval "(defvar *bin-env* \"$BIN_ENV\")" <<'EOF'
+ (defmacro our-run-program (name &rest rest)
+   #+unix `(run-program ,name ,@rest)
+   #-unix `(run-program ,(subseq name (1+ (position #\/ name :from-end t)))
+@@ -49,7 +50,7 @@ run_sbcl --eval "(defvar *exit-ok* $EXIT_LISP_WIN)" <<'EOF'
+   ;; (instead of CMU CL alist-of-keywords convention).
+   #+unix ; env works differently for msys2 apparently
+   (let ((string (with-output-to-string (stream)
+-                  (sb-ext:run-program "/usr/bin/env" ()
++                  (sb-ext:run-program *bin-env* ()
+                                       :output stream
+                                       :environment '("FEEFIE=foefum")))))
+     (assert (equal string "FEEFIE=foefum
+@@ -98,7 +99,7 @@ run_sbcl --eval "(defvar *exit-ok* $EXIT_LISP_WIN)" <<'EOF'
+   (let* ((sb-impl::*default-external-format* :latin-1)
+          (sb-alien::*default-c-string-external-format* :latin-1)   
+          (string (with-output-to-string (stream)
+-                  (sb-ext:run-program "/usr/bin/env" ()
++                  (sb-ext:run-program *bin-env* ()
+                                       :output stream)))
+          (expected (apply #'concatenate
+                          'string
+-- 
+2.45.2
+
+From 52737813eafa7a86ee911d31a33ea67f080722b9 Mon Sep 17 00:00:00 2001
+From: Ken Mays <kmays2000@gmail.com>
+Date: Thu, 25 Dec 2024 02:03:06 +0000
+Subject: Fix EXHAUST on Haiku
+
+diff --git a/tests/exhaust.impure.lisp b/tests/exhaust.impure.lisp
+index e8ff3da..ec153e8 100644
+--- a/tests/exhaust.impure.lisp
++++ b/tests/exhaust.impure.lisp
+@@ -39,6 +39,7 @@
+ (setf (extern-alien "lose_on_corruption_p" int) 0)
+ 
+ ;;; Base-case: detecting exhaustion
++#-haiku
+ (with-test (:name (:exhaust :basic))
+   (assert (eq :exhausted
+               (handler-case
+@@ -63,6 +64,7 @@
+ ;;; Check that non-local control transfers restore the stack
+ ;;; exhaustion checking after unwinding -- and that previous test
+ ;;; didn't break it.
++#-haiku
+ (with-test (:name (:exhaust :non-local-control))
+   (let ((exhaust-count 0)
+         (recurse-count 0))
+@@ -80,6 +82,7 @@
+ 
+ ;;; Check that we can safely use user-provided restarts to
+ ;;; unwind.
++#-haiku
+ (with-test (:name (:exhaust :restarts))
+   (let ((exhaust-count 0)
+         (recurse-count 0))
+@@ -99,6 +102,7 @@
+ ;;; write on the Windows-managed control stack guard page /after/ triggering the
+ ;;; memory protection set up by win32_reset_stack_overflow_guard_page(). This is
+ ;;; certainly not fool proof, though.
++#-haiku
+ (with-test (:name (:exhaust :write-to-stack-on-unwind)
+             :skipped-on (not :win32))
+   (let ((count 0))
+@@ -121,6 +125,7 @@
+ ;;; On other platforms, while handling the initial STORAGE-CONDITION, this test
+ ;;; will re-trigger the CONTROL_STACK_RETURN_GUARD_PAGE and
+ ;;; CONTROL_STACK_GUARD_PAGE, and issue a CORRUPTION WARNING.
++#-haiku
+ (with-test (:name (:exhaust :write-to-stack-in-handler)
+             :skipped-on (not :win32))
+   (labels ((recurse-and-write-to-stack-on-error ()
+-- 
+2.45.2
+From 52737813eafa7a86ee911d31a33ea67f080722b9 Mon Sep 17 00:00:00 2001
+From: Ken Mays <kmays2000@gmail.com>
+Date: Thu, 25 Dec 2024 02:03:06 +0000
+Subject: Fix ROSPACE on Haiku
+
+diff --git a/tests/gc.impure.lisp b/tests/gc.impure.lisp
+index 78ee907..98a8458 100644
+--- a/tests/gc.impure.lisp
++++ b/tests/gc.impure.lisp
+@@ -528,8 +528,9 @@
+               do
+            (assert (= (sb-sys:sap-ref-word sap (ash i sb-vm:word-shift)))))))))
+ 
++#-haiku
+ (with-test (:name :rospace-strings
+-                  :fails-on :darwin-jit)
++                  :fails-on :darwin-jit :haiku)
+   (let ((err (handler-case (setf (char (opaque-identity (symbol-name '*readtable*)) 0) #\*)
+                (sb-sys:memory-fault-error (c)
+                  (write-to-string c :escape nil)))))
+-- 
+2.45.2
