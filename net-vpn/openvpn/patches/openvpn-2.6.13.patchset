@@ -1,0 +1,354 @@
+From 6a338862ef429d3eb9189db92c89bba78660f87f Mon Sep 17 00:00:00 2001
+From: Alexander von Gluck <alex@terarocket.io>
+Date: Thu, 28 Nov 2024 11:15:38 +0100
+Subject: [PATCH 1/2] Haiku: Introduce basic platform / tun support
+
+* Special thanks to Sean Brady's hard work in GSoC 2023 towards creating
+  a TUN/TAP driver for Haiku!
+* More kudos to Augustin Cavalier for making it functional :-)
+
+Signed-off-by: Alexander von Gluck <alex@terarocket.io>
+Acked-by: Gert Doering <gert@greenie.muc.de>
+Change-Id: I9a278374f492a538f0c174ced1746c3b1f82b8c9
+Message-Id: <20241128101538.12810-1-gert@greenie.muc.de>
+URL: https://www.mail-archive.com/openvpn-devel@lists.sourceforge.net/msg29947.html
+Signed-off-by: Gert Doering <gert@greenie.muc.de>
+---
+ INSTALL           | 10 ++++++++++
+ configure.ac      |  5 +++++
+ src/openvpn/tun.c | 20 ++++++++++++++++----
+ 3 files changed, 31 insertions(+), 4 deletions(-)
+
+diff --git a/INSTALL b/INSTALL
+index a63bab6a..46bf8795 100644
+--- a/INSTALL
++++ b/INSTALL
+@@ -263,6 +263,16 @@ TUN/TAP Driver References:
+ 
+     http://www.whiteboard.ne.jp/~admin2/tuntap/
+ 
++* Haiku:
++
++   Haiku can't yet dynamically create TUN/TAP devices, so you need to manually
++   create one before running openvpn:
++
++     # ifconfig tun/0 up
++
++   A standard reference the dev as "tun" in your config is all that's needed
++   to use the tunnel device.
++
+ * Windows
+ 
+   OpenVPN on Windows needs a TUN/TAP kernel driver to work. OpenVPN installers
+diff --git a/configure.ac b/configure.ac
+index df16c439..27a1b9b3 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -374,6 +374,11 @@ case "$host" in
+ 		have_tap_header="yes"
+ 		ac_cv_header_net_if_h="no"	# exists, but breaks things
+ 		;;
++	*-*-haiku*)
++		AC_DEFINE([TARGET_HAIKU], [1], [Are we running Haiku?])
++		AC_DEFINE_UNQUOTED([TARGET_PREFIX], ["H"], [Target prefix])
++		LIBS="${LIBS} -lnetwork"
++		;;
+ 	*)
+ 		AC_DEFINE_UNQUOTED([TARGET_PREFIX], ["X"], [Target prefix])
+ 		have_tap_header="yes"
+diff --git a/src/openvpn/tun.c b/src/openvpn/tun.c
+index 92e71a39..9a948cd0 100644
+--- a/src/openvpn/tun.c
++++ b/src/openvpn/tun.c
+@@ -1637,6 +1637,13 @@ do_ifconfig_ipv4(struct tuntap *tt, const char *ifname, int tun_mtu,
+     {
+         windows_set_mtu(tt->adapter_index, AF_INET, tun_mtu);
+     }
++#elif defined(TARGET_HAIKU)
++    /* example: ifconfig tun/0 inet 1.1.1.1 255.255.255.0 mtu 1450 up */
++    argv_printf(&argv, "%s %s inet %s %s mtu %d up", IFCONFIG_PATH,
++                ifname, ifconfig_local, ifconfig_remote_netmask, tun_mtu);
++
++    argv_msg(M_INFO, &argv);
++    openvpn_execve_check(&argv, es, S_FATAL, "Haiku ifconfig failed");
+ #else  /* if defined(TARGET_LINUX) */
+     msg(M_FATAL, "Sorry, but I don't know how to do 'ifconfig' commands on this operating system.  You should ifconfig your TUN/TAP device manually or use an --up script.");
+ #endif /* if defined(TARGET_LINUX) */
+@@ -1928,10 +1935,15 @@ open_tun_generic(const char *dev, const char *dev_type, const char *dev_node,
+             {
+                 for (int i = 0; i < 256; ++i)
+                 {
+-                    openvpn_snprintf(tunname, sizeof(tunname),
+-                                     "/dev/%s%d", dev, i);
+-                    openvpn_snprintf(dynamic_name, sizeof(dynamic_name),
+-                                     "%s%d", dev, i);
++                    /* some platforms have a dedicated directory per driver */
++                    char *sep = "";
++#if defined(TARGET_HAIKU)
++                    sep = "/";
++#endif
++                    snprintf(tunname, sizeof(tunname),
++                         "/dev/%s%s%d", dev, sep, i);
++                    snprintf(dynamic_name, sizeof(dynamic_name),
++                         "%s%s%d", dev, sep, i);
+                     if ((tt->fd = open(tunname, O_RDWR)) > 0)
+                     {
+                         dynamic_opened = true;
+-- 
+2.45.2
+
+From 172d984ae344d9a150fb343ebda2c58618c4c29b Mon Sep 17 00:00:00 2001
+From: Alexander von Gluck <alex@terarocket.io>
+Date: Thu, 5 Dec 2024 18:24:59 +0100
+Subject: [PATCH 2/2] Haiku: Add calls to manage routing table
+
+Note: the full functionality of these changes depends on
+      https://review.haiku-os.org/c/haiku/+/8592
+
+Signed-off-by: Alexander von Gluck <alex@terarocket.io>
+Acked-by: Gert Doering <gert@greenie.muc.de>
+Change-Id: I1a22724f28c5cd47f6df178b49f44087d7c2b6fd
+Message-Id: <20241205172459.4783-1-gert@greenie.muc.de>
+URL: https://www.mail-archive.com/openvpn-devel@lists.sourceforge.net/msg30023.html
+Signed-off-by: Gert Doering <gert@greenie.muc.de>
+---
+ src/openvpn/route.c   | 135 +++++++++++++++++++++++++++++++++++++++++-
+ src/openvpn/syshead.h |   6 ++
+ 2 files changed, 140 insertions(+), 1 deletion(-)
+
+diff --git a/src/openvpn/route.c b/src/openvpn/route.c
+index 66540dbd..ab9591ba 100644
+--- a/src/openvpn/route.c
++++ b/src/openvpn/route.c
+@@ -1845,7 +1845,21 @@ add_route(struct route_ipv4 *r,
+         status = ret ? RTA_SUCCESS : RTA_ERROR;
+     }
+ 
+-#else  /* if defined(TARGET_LINUX) */
++#elif defined(TARGET_HAIKU)
++
++    /* ex: route add /dev/net/ipro1000/0 0.0.0.0 gw 192.168.1.1 netmask 128.0.0.0 */
++    argv_printf(&argv, "%s add %s inet %s gw %s netmask %s",
++                ROUTE_PATH,
++                rgi->iface,
++                network,
++                gateway,
++                netmask);
++    argv_msg(D_ROUTE, &argv);
++    bool ret = openvpn_execve_check(&argv, es, 0,
++                                    "ERROR: Haiku inet route add command failed");
++    status = ret ? RTA_SUCCESS : RTA_ERROR;
++
++#else /* if defined(TARGET_LINUX) */
+     msg(M_FATAL, "Sorry, but I don't know how to do 'route' commands on this operating system.  Try putting your routes in a --route-up script");
+ #endif /* if defined(TARGET_LINUX) */
+ 
+@@ -2118,6 +2132,20 @@ add_route_ipv6(struct route_ipv6 *r6, const struct tuntap *tt,
+                                     "ERROR: AIX route add command failed");
+     status = ret ? RTA_SUCCESS : RTA_ERROR;
+ 
++#elif defined(TARGET_HAIKU)
++
++    /* ex: route add /dev/net/ipro1000/0 inet6 :: gw beef::cafe prefixlen 64 */
++    argv_printf(&argv, "%s add %s inet6 %s gw %s prefixlen %d",
++                ROUTE_PATH,
++                r6->iface,
++                network,
++                gateway,
++                r6->netbits);
++    argv_msg(D_ROUTE, &argv);
++    bool ret = openvpn_execve_check(&argv, es, 0,
++                                    "ERROR: Haiku inet6 route add command failed");
++    status = ret ? RTA_SUCCESS : RTA_ERROR;
++
+ #else  /* if defined(TARGET_LINUX) */
+     msg(M_FATAL, "Sorry, but I don't know how to do 'route ipv6' commands on this operating system.  Try putting your routes in a --route-up script");
+ #endif /* if defined(TARGET_LINUX) */
+@@ -2321,6 +2349,18 @@ delete_route(struct route_ipv4 *r,
+         openvpn_execve_check(&argv, es, 0, "ERROR: AIX route delete command failed");
+     }
+ 
++#elif defined(TARGET_HAIKU)
++
++    /* ex: route del /dev/net/ipro1000/0 inet 192.168.0.0 gw 192.168.1.1 netmask 255.255.0.0 */
++    argv_printf(&argv, "%s del %s inet %s gw %s netmask %s",
++                ROUTE_PATH,
++                rgi->iface,
++                network,
++                gateway,
++                netmask);
++    argv_msg(D_ROUTE, &argv);
++    openvpn_execve_check(&argv, es, 0, "ERROR: Haiku inet route delete command failed");
++
+ #else  /* if defined(TARGET_LINUX) */
+     msg(M_FATAL, "Sorry, but I don't know how to do 'route' commands on this operating system.  Try putting your routes in a --route-up script");
+ #endif /* if defined(TARGET_LINUX) */
+@@ -2496,10 +2536,23 @@ delete_route_ipv6(const struct route_ipv6 *r6, const struct tuntap *tt,
+                 network, r6->netbits, gateway);
+     argv_msg(D_ROUTE, &argv);
+     openvpn_execve_check(&argv, es, 0, "ERROR: AIX route add command failed");
++
+ #elif defined(TARGET_ANDROID)
+     msg(D_ROUTE_DEBUG, "Deleting routes on Android is not possible/not "
+         "needed. The VpnService API allows routes to be set "
+         "on connect only and will clean up automatically.");
++#elif defined(TARGET_HAIKU)
++
++    /* ex: route del /dev/net/ipro1000/0 inet6 :: gw beef::cafe prefixlen 64 */
++    argv_printf(&argv, "%s del %s inet6 %s gw %s prefixlen %d",
++                ROUTE_PATH,
++                r6->iface,
++                network,
++                gateway,
++                r6->netbits);
++    argv_msg(D_ROUTE, &argv);
++    openvpn_execve_check(&argv, es, 0, "ERROR: Haiku inet6 route delete command failed");
++
+ #else  /* if defined(TARGET_LINUX) */
+     msg(M_FATAL, "Sorry, but I don't know how to do 'route ipv6' commands on this operating system.  Try putting your routes in a --route-down script");
+ #endif /* if defined(TARGET_LINUX) */
+@@ -3878,6 +3931,86 @@ done:
+ 
+ #undef max
+ 
++#elif defined(TARGET_HAIKU)
++
++void
++get_default_gateway(struct route_gateway_info *rgi, openvpn_net_ctx_t *ctx)
++{
++    CLEAR(*rgi);
++
++    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
++    if (sockfd < 0)
++    {
++        msg(M_ERRNO, "%s: Error opening socket for AF_INET", __func__);
++        return;
++    }
++
++    struct ifconf config;
++    config.ifc_len = sizeof(config.ifc_value);
++    if (ioctl(sockfd, SIOCGRTSIZE, &config, sizeof(struct ifconf)) < 0)
++    {
++        msg(M_ERRNO, "%s: Error getting routing table size", __func__);
++        return;
++    }
++
++    uint32 size = (uint32)config.ifc_value;
++    if (size == 0)
++    {
++        return;
++    }
++
++    void *buffer = malloc(size);
++    check_malloc_return(buffer);
++
++    config.ifc_len = size;
++    config.ifc_buf = buffer;
++    if (ioctl(sockfd, SIOCGRTTABLE, &config, sizeof(struct ifconf)) < 0)
++    {
++        free(buffer);
++        return;
++    }
++
++    struct ifreq *interface = (struct ifreq *)buffer;
++    struct ifreq *end = (struct ifreq *)((uint8 *)buffer + size);
++
++    while (interface < end)
++    {
++        struct route_entry route = interface->ifr_route;
++        if ((route.flags & RTF_GATEWAY) != 0 && (route.flags & RTF_DEFAULT) != 0)
++        {
++            rgi->gateway.addr = ntohl(((struct sockaddr_in *)route.gateway)->sin_addr.s_addr);
++            rgi->flags = RGI_ADDR_DEFINED | RGI_IFACE_DEFINED;
++            strncpy(rgi->iface, interface->ifr_name, sizeof(rgi->iface));
++        }
++
++        int32 address_size = 0;
++        if (route.destination != NULL)
++        {
++            address_size += route.destination->sa_len;
++        }
++        if (route.mask != NULL)
++        {
++            address_size += route.mask->sa_len;
++        }
++        if (route.gateway != NULL)
++        {
++            address_size += route.gateway->sa_len;
++        }
++
++        interface = (struct ifreq *)((addr_t)interface + IF_NAMESIZE
++                                     + sizeof(struct route_entry) + address_size);
++    }
++    free(buffer);
++}
++
++void
++get_default_gateway_ipv6(struct route_ipv6_gateway_info *rgi6,
++                         const struct in6_addr *dest, openvpn_net_ctx_t *ctx)
++{
++    /* TODO: Same for ipv6 with AF_INET6 */
++    CLEAR(*rgi6);
++}
++
+ #else  /* if defined(_WIN32) */
+ 
+ /*
+diff --git a/src/openvpn/syshead.h b/src/openvpn/syshead.h
+index 3e0f31a0..b0e19ff0 100644
+--- a/src/openvpn/syshead.h
++++ b/src/openvpn/syshead.h
+@@ -166,6 +166,12 @@
+ #include <string.h>
+ #endif
+ 
++#if defined(TARGET_HAIKU)
++#include <SupportDefs.h>   /* uint32, etc */
++#include <net/if.h>        /* ifconf etc */
++#include <sys/sockio.h>    /* SIOCGRTTABLE, etc */
++#endif /* TARGET_HAIKU */
++
+ #ifdef HAVE_ARPA_INET_H
+ #include <arpa/inet.h>
+ #endif
+-- 
+2.45.2
+
+From 1aca234b6ad57dd066c08c085bca6710d27e473c Mon Sep 17 00:00:00 2001
+From: Alexander von Gluck <alex@terarocket.io>
+Date: Mon, 27 Jan 2025 19:34:01 -0600
+Subject: [PATCH] Haiku: Fix short interface path length
+
+---
+ src/openvpn/route.h | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/openvpn/route.h b/src/openvpn/route.h
+index eb98c71e..523cfc74 100644
+--- a/src/openvpn/route.h
++++ b/src/openvpn/route.h
+@@ -155,6 +155,8 @@ struct route_gateway_info {
+     /* gateway interface */
+ #ifdef _WIN32
+     DWORD adapter_index; /* interface or ~0 if undefined */
++#elif defined(TARGET_HAIKU)
++    char iface[PATH_MAX]; /* iface names are full /dev path with driver name */
+ #else
+     char iface[16]; /* interface name (null terminated), may be empty */
+ #endif
+@@ -186,7 +188,12 @@ struct route_ipv6_gateway_info {
+ #else
+     /* non linux platform don't have this constant defined */
+ #ifndef IFNAMSIZ
++#if defined(TARGET_HAIKU)
++/* iface names are full /dev path with driver name */
++#define IFNAMSIZ PATH_MAX
++#else
+ #define IFNAMSIZ 16
++#endif
+ #endif
+     char iface[IFNAMSIZ]; /* interface name (null terminated), may be empty */
+ #endif
+-- 
+2.45.2
+
