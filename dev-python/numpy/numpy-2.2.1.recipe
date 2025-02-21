@@ -9,7 +9,7 @@ general-purpose data-base applications."
 HOMEPAGE="https://www.numpy.org/"
 COPYRIGHT="2005-2024, NumPy Developers."
 LICENSE="BSD (3-clause)"
-REVISION="1"
+REVISION="2"
 SOURCE_URI="https://files.pythonhosted.org/packages/source/n/numpy/numpy-$portVersion.tar.gz"
 CHECKSUM_SHA256="45681fd7128c8ad1c379f0ca0776a8b0c6583d2f69889ddac01559dfe4390918"
 SOURCE_DIR="numpy-$portVersion"
@@ -63,7 +63,6 @@ for i in "${!PYTHON_VERSIONS[@]}"; do
 
 	eval "REQUIRES_$pythonPackage=\"
 		$REQUIRES
-		cmd:cython$pythonVersion
 		cmd:python$pythonVersion
 		\""
 
@@ -74,6 +73,7 @@ for i in "${!PYTHON_VERSIONS[@]}"; do
 		wheel_$pythonPackage
 		"
 	BUILD_PREREQUIRES+="
+		# cmd:cython might be enough? ToDo: Try it when adding Python 3.12 support.
 		cmd:cython$pythonVersion
 		cmd:g++$secondaryArchSuffix
 		cmd:python$pythonVersion
@@ -84,10 +84,33 @@ done
 
 BUILD()
 {
+	# this is the default, but if we leave it empty, build fail as "" is taken as "source" dir.
+	cpuOptions='-Csetup-args=-Dcpu-baseline=min'
+
+	if [ $effectiveTargetArchitecture = x86 ]; then
+		# Build on 32 bits fails if AVX is enabled.
+
+		# cpu-baseline defaults to "min" (equals SSE SSE2 on x86-32).
+		# cpu-dispatch defaults to "max -xop -fma4" (equals "SSE3 SSSE3 SSE41 POPCNT SSE42 AVX F16C
+		# FMA3 AVX2 AVX512F AVX512CD AVX512_KNL AVX512_KNM AVX512_SKX AVX512_CLX AVX512_CNL
+		# AVX512_ICL AVX512_SPR" on x86-32).
+
+		# cpuOptions="-Csetup-args=-Dcpu-dispatch=-avx" # this one worked, but disabled everything.
+		# Note: without the last space in the line below, meson gets confused with the arguments,
+		# and build fails (no idea how to make this argument passing less flaky).
+		cpuOptions='-Csetup-args=-Dcpu-dispatch=SSE3 SSSE3 SSE41 POPCNT SSE42 F16C FMA3 '
+	fi
+
 	for i in "${!PYTHON_VERSIONS[@]}"; do
 		pythonVersion=${PYTHON_VERSIONS[$i]}
 		python=python$pythonVersion
-		$python -m build --wheel --skip-dependency-check --no-isolation
+		$python -m build --wheel --skip-dependency-check --no-isolation \
+			-Cbuilddir="build-$pythonVersion" \
+			"$cpuOptions"
+			# Other options that might be useful:
+			# -Csetup-args="-Dlapack=lapack"
+			# -Csetup-args="-Dblas=openblas"
+			# -Ccompile-args="-j6" # reducing the number of jobs lowers the RAM usage.
 	done
 }
 
@@ -99,17 +122,17 @@ INSTALL()
 
 		python=python$pythonVersion
 
-		# Wheel's name is in the form: "numpy-2.2.1-cp310-cp310-haiku_1_x86_64.whl"
+		# Wheel's name is in the form: "numpy-2.2.1-cp310-cp310-haiku_1_{x86_64,bepc}.whl"
 		$python -m installer -p $prefix dist/*-cp${pythonVersion//.}-*.whl
 
 		# Version suffix all the scripts
-		for f in $binDir/*; do
+		for f in $prefix/bin/*; do
 			mv $f $f-$pythonVersion
 		done
 
 		# And provide suffix-less symlinks for the default version
 		if [ $pythonVersion = $defaultVersion ]; then
-			for f in $binDir/*; do
+			for f in $prefix/bin/*; do
 				ln -sr $f ${f%-$pythonVersion}
 			done
 		fi
