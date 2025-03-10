@@ -1,0 +1,371 @@
+From 920df4d90d7b5b1ecdfb6033bf39fd9619d13421 Mon Sep 17 00:00:00 2001
+From: Calvin Hill <calvin@hakobaito.co.uk>
+Date: Sun, 9 Sep 2018 16:11:42 +0100
+Subject: llvm: import header dir suffix patch from 3dEyes
+
+
+diff --git a/llvm/tools/llvm-config/llvm-config.cpp b/llvm/tools/llvm-config/llvm-config.cpp
+index d5b76b1..df3fb59 100644
+--- a/llvm/tools/llvm-config/llvm-config.cpp
++++ b/llvm/tools/llvm-config/llvm-config.cpp
+@@ -366,7 +366,11 @@ int main(int argc, char **argv) {
+       sys::fs::make_absolute(ActivePrefix, Path);
+       ActiveBinDir = std::string(Path);
+     }
++#ifdef __HAIKU__
++    ActiveLibDir = ActivePrefix + "/develop/lib" + LLVM_LIBDIR_SUFFIX;
++#else
+     ActiveLibDir = ActivePrefix + "/lib" + LLVM_LIBDIR_SUFFIX;
++#endif
+     {
+       SmallString<256> Path(LLVM_INSTALL_PACKAGE_DIR);
+       sys::fs::make_absolute(ActivePrefix, Path);
+-- 
+2.45.2
+
+
+From ed3025a659d54efbb542f9a3d8efe8bc331d1a8c Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 3 Apr 2021 23:23:24 +0200
+Subject: lld: MachO needs libunwind somehow, disable
+
+
+diff --git a/lld/CMakeLists.txt b/lld/CMakeLists.txt
+index 64c9f23..38168f3 100644
+--- a/lld/CMakeLists.txt
++++ b/lld/CMakeLists.txt
+@@ -203,7 +203,9 @@ endif()
+ add_subdirectory(docs)
+ add_subdirectory(COFF)
+ add_subdirectory(ELF)
++if (NOT HAIKU)
+ add_subdirectory(MachO)
++endif()
+ add_subdirectory(MinGW)
+ add_subdirectory(wasm)
+ 
+diff --git a/lld/include/lld/Common/Driver.h b/lld/include/lld/Common/Driver.h
+index 8520e6e..9562ab7 100644
+--- a/lld/include/lld/Common/Driver.h
++++ b/lld/include/lld/Common/Driver.h
+@@ -58,6 +58,15 @@ Result lldMain(llvm::ArrayRef<const char *> args, llvm::raw_ostream &stdoutOS,
+ 
+ // An array which declares that all LLD drivers are linked in your executable.
+ // Must be used along with LLD_HAS_DRIVERS. See examples in LLD unittests.
++#ifdef __HAIKU__
++#define LLD_ALL_DRIVERS                                                        \
++  {                                                                            \
++    {lld::WinLink, &lld::coff::link}, {lld::Gnu, &lld::elf::link},             \
++        {lld::MinGW, &lld::mingw::link}, {                                     \
++      lld::Wasm, &lld::wasm::link                                              \
++    }                                                                          \
++  }
++#else
+ #define LLD_ALL_DRIVERS                                                        \
+   {                                                                            \
+     {lld::WinLink, &lld::coff::link}, {lld::Gnu, &lld::elf::link},             \
+@@ -65,5 +74,6 @@ Result lldMain(llvm::ArrayRef<const char *> args, llvm::raw_ostream &stdoutOS,
+       lld::Wasm, &lld::wasm::link                                              \
+     }                                                                          \
+   }
++#endif
+ 
+ #endif
+diff --git a/lld/tools/lld/CMakeLists.txt b/lld/tools/lld/CMakeLists.txt
+index 8498a91..bbbfe80 100644
+--- a/lld/tools/lld/CMakeLists.txt
++++ b/lld/tools/lld/CMakeLists.txt
+@@ -24,6 +24,16 @@ function(lld_target_link_libraries target type)
+   target_link_libraries(${target} ${type} ${ARGN})
+ endfunction()
+ 
++if (HAIKU)
++lld_target_link_libraries(lld
++  PRIVATE
++  lldCommon
++  lldCOFF
++  lldELF
++  lldMinGW
++  lldWasm
++  )
++else()
+ lld_target_link_libraries(lld
+   PRIVATE
+   lldCommon
+@@ -33,6 +43,7 @@ lld_target_link_libraries(lld
+   lldMinGW
+   lldWasm
+   )
++endif()
+ 
+ if(NOT LLD_SYMLINKS_TO_CREATE)
+   set(LLD_SYMLINKS_TO_CREATE
+diff --git a/lld/tools/lld/lld.cpp b/lld/tools/lld/lld.cpp
+index d6800fa..d2bac9f 100644
+--- a/lld/tools/lld/lld.cpp
++++ b/lld/tools/lld/lld.cpp
+@@ -69,7 +69,9 @@ static unsigned inTestVerbosity() {
+ LLD_HAS_DRIVER(coff)
+ LLD_HAS_DRIVER(elf)
+ LLD_HAS_DRIVER(mingw)
++#ifndef __HAIKU__
+ LLD_HAS_DRIVER(macho)
++#endif
+ LLD_HAS_DRIVER(wasm)
+ 
+ int lld_main(int argc, char **argv, const llvm::ToolContext &) {
+-- 
+2.45.2
+
+
+From 81a00ba4632a38984abc8bf5400d14e1da394b35 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=B4me=20Duval?= <jerome.duval@gmail.com>
+Date: Mon, 18 Jul 2016 14:13:19 +0200
+Subject: clang: support for secondary arch.
+
+
+diff --git a/clang/CMakeLists.txt b/clang/CMakeLists.txt
+index 24e656e..ea63eaf 100644
+--- a/clang/CMakeLists.txt
++++ b/clang/CMakeLists.txt
+@@ -362,6 +362,10 @@ if (APPLE AND NOT CMAKE_LINKER MATCHES ".*lld.*")
+   get_darwin_linker_version(HOST_LINK_VERSION)
+   message(STATUS "Host linker version: ${HOST_LINK_VERSION}")
+ endif()
++if(DEFINED HAIKU_HYBRID_SECONDARY)
++  add_definitions(-DHAIKU_HYBRID_SECONDARY=${HAIKU_HYBRID_SECONDARY})
++endif()
++
+ 
+ include(AddClang)
+ 
+diff --git a/clang/lib/Driver/ToolChains/Gnu.cpp b/clang/lib/Driver/ToolChains/Gnu.cpp
+index f56eeda..dd55d89 100644
+--- a/clang/lib/Driver/ToolChains/Gnu.cpp
++++ b/clang/lib/Driver/ToolChains/Gnu.cpp
+@@ -2336,7 +2336,11 @@ void Generic_GCC::GCCInstallationDetector::AddDefaultGCCPrefixes(
+     StringRef SysRoot) {
+ 
+   if (TargetTriple.isOSHaiku()) {
++#ifdef HAIKU_HYBRID_SECONDARY
++    Prefixes.push_back(concat(SysRoot, "/boot/system/develop/tools/" HAIKU_HYBRID_SECONDARY));
++#else
+     Prefixes.push_back(concat(SysRoot, "/boot/system/develop/tools"));
++#endif
+     return;
+   }
+ 
+diff --git a/clang/lib/Driver/ToolChains/Haiku.cpp b/clang/lib/Driver/ToolChains/Haiku.cpp
+index af74f43..fa3f8cb 100644
+--- a/clang/lib/Driver/ToolChains/Haiku.cpp
++++ b/clang/lib/Driver/ToolChains/Haiku.cpp
+@@ -168,8 +168,16 @@ Haiku::Haiku(const Driver &D, const llvm::Triple& Triple, const ArgList &Args)
+ 
+   GCCInstallation.init(Triple, Args);
+ 
++#ifdef HAIKU_HYBRID_SECONDARY
++  getProgramPaths().insert(getProgramPaths().begin(), getDriver().SysRoot
++                           + "/boot/system/bin/" HAIKU_HYBRID_SECONDARY);
++  getFilePaths().clear();
++  getFilePaths().push_back(getDriver().SysRoot + "/boot/system/lib/" HAIKU_HYBRID_SECONDARY);
++  getFilePaths().push_back(getDriver().SysRoot + "/boot/system/develop/lib/" HAIKU_HYBRID_SECONDARY);
++#else
+   getFilePaths().push_back(concat(getDriver().SysRoot, "/boot/system/lib"));
+   getFilePaths().push_back(concat(getDriver().SysRoot, "/boot/system/develop/lib"));
++#endif
+ 
+   if (GCCInstallation.isValid())
+     getFilePaths().push_back(GCCInstallation.getInstallPath().str());
+@@ -204,8 +212,14 @@ void Haiku::AddClangSystemIncludeArgs(const llvm::opt::ArgList &DriverArgs,
+     return;
+   }
+ 
++#ifdef HAIKU_HYBRID_SECONDARY
++  addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
++                   "/boot/system/non-packaged/develop/headers/"
++                   HAIKU_HYBRID_SECONDARY));
++#else
+   addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
+                    "/boot/system/non-packaged/develop/headers"));
++#endif
+   addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
+                    "/boot/system/develop/headers/os"));
+   addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
+@@ -268,6 +282,17 @@ void Haiku::AddClangSystemIncludeArgs(const llvm::opt::ArgList &DriverArgs,
+                    "/boot/system/develop/headers/gnu"));
+   addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
+                    "/boot/system/develop/headers/posix"));
++#ifdef HAIKU_HYBRID_SECONDARY
++  addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
++                   "/boot/system/develop/headers/"
++                   HAIKU_HYBRID_SECONDARY));
++  addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
++                   "/boot/system/develop/headers/"
++                   HAIKU_HYBRID_SECONDARY "/os"));
++  addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
++                   "/boot/system/develop/headers/"
++                   HAIKU_HYBRID_SECONDARY "/os/opengl"));
++#endif
+   addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot,
+                    "/boot/system/develop/headers"));
+ }
+-- 
+2.45.2
+
+
+From b1640acf15be9cb605135329e734f9ee07b2b5bd Mon Sep 17 00:00:00 2001
+From: David Karoly <karolyd577@gmail.com>
+Date: Thu, 21 Sep 2023 17:44:12 +0000
+Subject: fix build on x86 secondary arch
+
+
+diff --git a/clang/lib/Headers/CMakeLists.txt b/clang/lib/Headers/CMakeLists.txt
+index 4312411..04db3fb 100644
+--- a/clang/lib/Headers/CMakeLists.txt
++++ b/clang/lib/Headers/CMakeLists.txt
+@@ -384,7 +384,7 @@ set(zos_wrapper_files
+ )
+ 
+ include(GetClangResourceDir)
+-get_clang_resource_dir(output_dir PREFIX ${LLVM_LIBRARY_OUTPUT_INTDIR}/.. SUBDIR include)
++get_clang_resource_dir(output_dir PREFIX ${CMAKE_BINARY_DIR}/${CMAKE_CFG_INTDIR} SUBDIR include)
+ set(out_files)
+ set(generated_files)
+ 
+-- 
+2.45.2
+
+
+From d58666b39f5bde76bb6decb8ee36a7f3b6ac714a Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Mon, 6 Nov 2023 14:24:21 +0100
+Subject: clang: Haiku: patch for analyzer scripts
+
+
+diff --git a/clang/tools/scan-build/bin/scan-build b/clang/tools/scan-build/bin/scan-build
+index b90e635..09105ca 100755
+--- a/clang/tools/scan-build/bin/scan-build
++++ b/clang/tools/scan-build/bin/scan-build
+@@ -447,7 +447,7 @@ sub CopyFiles {
+ 
+   my $Dir = shift;
+ 
+-  my $JS = Cwd::realpath("$RealBin/../share/scan-build/sorttable.js");
++  my $JS = Cwd::realpath("$RealBin/../data/scan-build/sorttable.js");
+ 
+   DieDiag("Cannot find 'sorttable.js'.\n")
+     if (! -r $JS);
+@@ -457,7 +457,7 @@ sub CopyFiles {
+   DieDiag("Could not copy 'sorttable.js' to '$Dir'.\n")
+     if (! -r "$Dir/sorttable.js");
+ 
+-  my $CSS = Cwd::realpath("$RealBin/../share/scan-build/scanview.css");
++  my $CSS = Cwd::realpath("$RealBin/../data/scan-build/scanview.css");
+ 
+   DieDiag("Cannot find 'scanview.css'.\n")
+     if (! -r $CSS);
+@@ -1908,8 +1908,8 @@ if ($Clang !~ /\+\+(\.exe)?$/) {
+ 
+ # Determine the location of ccc-analyzer.
+ my $AbsRealBin = Cwd::realpath($RealBin);
+-my $Cmd = "$AbsRealBin/../libexec/ccc-analyzer";
+-my $CmdCXX = "$AbsRealBin/../libexec/c++-analyzer";
++my $Cmd = "$AbsRealBin/../lib/ccc-analyzer";
++my $CmdCXX = "$AbsRealBin/../lib/c++-analyzer";
+ 
+ # Portability: use less strict but portable check -e (file exists) instead of
+ # non-portable -x (file is executable). On some windows ports -x just checks
+diff --git a/clang/tools/scan-view/bin/scan-view b/clang/tools/scan-view/bin/scan-view
+index d01aebb..43ba8c3 100755
+--- a/clang/tools/scan-view/bin/scan-view
++++ b/clang/tools/scan-view/bin/scan-view
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python
++#!/usr/bin/env python3
+ 
+ from __future__ import print_function
+ 
+@@ -64,7 +64,7 @@ def start_browser(port, options):
+ 
+ def run(port, options, root):
+     # Prefer to look relative to the installed binary
+-    share = os.path.dirname(__file__) + "/../share/scan-view"
++    share = os.path.dirname(__file__) + "/../data/scan-view"
+     if not os.path.isdir(share):
+         # Otherwise look relative to the source
+         share = os.path.dirname(__file__) + "/../../scan-view/share"
+-- 
+2.45.2
+
+
+From 663b4882ccb14afa66202cf7337ac5d7acebc0db Mon Sep 17 00:00:00 2001
+From: Brad Smith <brad@comstyle.com>
+Date: Mon, 10 Jun 2024 11:13:29 +0200
+Subject: A slightly better llvm-config diff that doesn't use #ifdef.
+
+
+diff --git a/llvm/tools/llvm-config/llvm-config.cpp b/llvm/tools/llvm-config/llvm-config.cpp
+index df3fb59..30cb748 100644
+--- a/llvm/tools/llvm-config/llvm-config.cpp
++++ b/llvm/tools/llvm-config/llvm-config.cpp
+@@ -327,6 +327,7 @@ int main(int argc, char **argv) {
+   std::string ActivePrefix, ActiveBinDir, ActiveIncludeDir, ActiveLibDir,
+               ActiveCMakeDir;
+   std::string ActiveIncludeOption;
++  const Triple HostTriple(Triple::normalize(LLVM_HOST_TRIPLE));
+   if (IsInDevelopmentTree) {
+     ActiveIncludeDir = std::string(LLVM_SRC_ROOT) + "/include";
+     ActivePrefix = CurrentExecPrefix;
+@@ -366,11 +367,10 @@ int main(int argc, char **argv) {
+       sys::fs::make_absolute(ActivePrefix, Path);
+       ActiveBinDir = std::string(Path);
+     }
+-#ifdef __HAIKU__
+-    ActiveLibDir = ActivePrefix + "/develop/lib" + LLVM_LIBDIR_SUFFIX;
+-#else
+-    ActiveLibDir = ActivePrefix + "/lib" + LLVM_LIBDIR_SUFFIX;
+-#endif
++    if (HostTriple.isOSHaiku())
++      ActiveLibDir = ActivePrefix + "/develop/lib" + LLVM_LIBDIR_SUFFIX;
++    else
++      ActiveLibDir = ActivePrefix + "/lib" + LLVM_LIBDIR_SUFFIX;
+     {
+       SmallString<256> Path(LLVM_INSTALL_PACKAGE_DIR);
+       sys::fs::make_absolute(ActivePrefix, Path);
+@@ -389,7 +389,6 @@ int main(int argc, char **argv) {
+   StringRef SharedExt, SharedVersionedExt, SharedDir, SharedPrefix, StaticExt,
+       StaticPrefix, StaticDir = "lib";
+   std::string DirSep = "/";
+-  const Triple HostTriple(Triple::normalize(LLVM_HOST_TRIPLE));
+   if (HostTriple.isOSWindows()) {
+     SharedExt = "dll";
+     SharedVersionedExt = LLVM_DYLIB_VERSION ".dll";
+-- 
+2.45.2
+
+
+From 09b123858f988a81b865efbaa682d030cad10512 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 19 May 2024 10:31:55 +0200
+Subject: Allow linking gcc compiled code with lld
+
+https://github.com/haikuports/haikuports/issues/10445
+
+diff --git a/lld/ELF/Driver.cpp b/lld/ELF/Driver.cpp
+index a1e9eca..cc563d7 100644
+--- a/lld/ELF/Driver.cpp
++++ b/lld/ELF/Driver.cpp
+@@ -174,8 +174,8 @@ static std::tuple<ELFKind, uint16_t, uint8_t> parseEmulation(Ctx &ctx,
+           .Case("elf64lriscv", {ELF64LEKind, EM_RISCV})
+           .Case("elf64ppc", {ELF64BEKind, EM_PPC64})
+           .Case("elf64lppc", {ELF64LEKind, EM_PPC64})
+-          .Cases("elf_amd64", "elf_x86_64", {ELF64LEKind, EM_X86_64})
+-          .Case("elf_i386", {ELF32LEKind, EM_386})
++          .Cases("elf_amd64", "elf_x86_64", "elf_x86_64_haiku", {ELF64LEKind, EM_X86_64})
++          .Cases("elf_i386", "elf_i386_haiku", {ELF32LEKind, EM_386})
+           .Case("elf_iamcu", {ELF32LEKind, EM_IAMCU})
+           .Case("elf64_sparc", {ELF64BEKind, EM_SPARCV9})
+           .Case("msp430elf", {ELF32LEKind, EM_MSP430})
+-- 
+2.45.2
+
