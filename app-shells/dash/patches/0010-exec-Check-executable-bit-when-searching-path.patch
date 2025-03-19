@@ -1,0 +1,116 @@
+From: Herbert Xu <herbert@gondor.apana.org.au>
+Date: Wed, 10 Nov 2021 07:53:03 +0100
+Subject: exec: Check executable bit when searching path
+
+This is inherited from NetBSD.  There is even a commented-out
+block of code that tried to fix this.
+
+Anyway, we now have faccessat so we can simply use it.
+
+Reported-by: Norman Ramsey <nr@cs.tufts.edu>
+Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+Bug-Debian: https://bugs.debian.org/874264
+---
+ src/bltin/test.c | 10 +++-------
+ src/exec.c       | 20 +++++++-------------
+ src/exec.h       |  5 +++++
+ 3 files changed, 15 insertions(+), 20 deletions(-)
+
+diff --git a/src/bltin/test.c b/src/bltin/test.c
+index c7fc479..fd8a43b 100644
+--- a/src/bltin/test.c
++++ b/src/bltin/test.c
+@@ -18,6 +18,7 @@
+ #include <unistd.h>
+ #include <stdarg.h>
+ #include "bltin.h"
++#include "../exec.h"
+ 
+ /* test(1) accepts the following grammar:
+ 	oexpr	::= aexpr | aexpr "-o" oexpr ;
+@@ -148,11 +149,6 @@ static int isoperand(char **);
+ static int newerf(const char *, const char *);
+ static int olderf(const char *, const char *);
+ static int equalf(const char *, const char *);
+-#ifdef HAVE_FACCESSAT
+-static int test_file_access(const char *, int);
+-#else
+-static int test_access(const struct stat64 *, int);
+-#endif
+ 
+ #ifdef HAVE_FACCESSAT
+ # ifdef HAVE_TRADITIONAL_FACCESSAT
+@@ -527,7 +523,7 @@ static int has_exec_bit_set(const char *path)
+ 	return st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH);
+ }
+ 
+-static int test_file_access(const char *path, int mode)
++int test_file_access(const char *path, int mode)
+ {
+ 	if (faccessat_confused_about_superuser() &&
+ 	    mode == X_OK && geteuid() == 0 && !has_exec_bit_set(path))
+@@ -657,7 +653,7 @@ static int test_file_access(const char *path, int mode)
+  * (euid==uid&&egid==gid), but uses st_mode for '-x' iff running as root.
+  * i.e. it does strictly conform to 1003.1-2001 (and presumably 1003.2b).
+  */
+-static int test_access(const struct stat64 *sp, int stmode)
++int test_access(const struct stat64 *sp, int stmode)
+ {
+ 	gid_t *groups;
+ 	register int n;
+diff --git a/src/exec.c b/src/exec.c
+index b0c1d0f..93424b2 100644
+--- a/src/exec.c
++++ b/src/exec.c
+@@ -490,20 +490,14 @@ loop:
+ 			stunalloc(fullname);
+ 			goto success;
+ 		}
+-#ifdef notdef
+-		/* XXX this code stops root executing stuff, and is buggy
+-		   if you need a group from the group list. */
+-		if (statb.st_uid == geteuid()) {
+-			if ((statb.st_mode & 0100) == 0)
+-				goto loop;
+-		} else if (statb.st_gid == getegid()) {
+-			if ((statb.st_mode & 010) == 0)
+-				goto loop;
+-		} else {
+-			if ((statb.st_mode & 01) == 0)
+-				goto loop;
+-		}
++		if ((statb.st_mode & 0111) != 0111 &&
++#ifdef HAVE_FACCESSAT
++		    !test_file_access(fullname, X_OK)
++#else
++		    !test_access(&statb, X_OK)
+ #endif
++		   )
++			continue;
+ 		TRACE(("searchexec \"%s\" returns \"%s\"\n", name, fullname));
+ 		if (!updatetbl) {
+ 			entry->cmdtype = CMDNORMAL;
+diff --git a/src/exec.h b/src/exec.h
+index 423b07e..8707d36 100644
+--- a/src/exec.h
++++ b/src/exec.h
+@@ -62,6 +62,8 @@ union node;
+ 
+ extern const char *pathopt;	/* set by padvance */
+ 
++struct stat64;
++
+ void shellexec(char **, const char *, int)
+     __attribute__((__noreturn__));
+ int padvance_magic(const char **path, const char *name, int magic);
+@@ -78,6 +80,9 @@ void unsetfunc(const char *);
+ int typecmd(int, char **);
+ int commandcmd(int, char **);
+ 
++int test_file_access(const char *path, int mode);
++int test_access(const struct stat64 *sp, int stmode);
++
+ static inline int padvance(const char **path, const char *name)
+ {
+ 	return padvance_magic(path, name, 1);

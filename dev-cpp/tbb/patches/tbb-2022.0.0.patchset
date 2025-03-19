@@ -1,0 +1,230 @@
+From 53cc4fc65dac5437f6d6197e278b3434e43ab594 Mon Sep 17 00:00:00 2001
+From: Schrijvers Luc <begasus@gmail.com>
+Date: Mon, 25 Nov 2024 17:46:22 +0100
+Subject: Haiku patches
+
+
+diff --git a/cmake/compilers/Clang.cmake b/cmake/compilers/Clang.cmake
+index dcd6663..98812d6 100644
+--- a/cmake/compilers/Clang.cmake
++++ b/cmake/compilers/Clang.cmake
+@@ -70,10 +70,12 @@ if (NOT APPLE)
+     set(TBB_LIB_LINK_FLAGS ${TBB_LIB_LINK_FLAGS} -Wl,-z,relro,-z,now)
+ endif()
+ 
+-set(TBB_COMMON_LINK_LIBS ${CMAKE_DL_LIBS})
++if (NOT HAIKU)
++    set(TBB_COMMON_LINK_LIBS ${CMAKE_DL_LIBS})
++endif ()
+ 
+ if (NOT CMAKE_CXX_FLAGS MATCHES "_FORTIFY_SOURCE")
+-  set(TBB_COMMON_COMPILE_FLAGS ${TBB_COMMON_COMPILE_FLAGS} $<$<NOT:$<CONFIG:Debug>>:-D_FORTIFY_SOURCE=2>)
++    set(TBB_COMMON_COMPILE_FLAGS ${TBB_COMMON_COMPILE_FLAGS} $<$<NOT:$<CONFIG:Debug>>:-D_FORTIFY_SOURCE=2>)
+ endif ()
+ 
+ if (MINGW)
+diff --git a/cmake/compilers/GNU.cmake b/cmake/compilers/GNU.cmake
+index cf6d8bd..12282cb 100644
+--- a/cmake/compilers/GNU.cmake
++++ b/cmake/compilers/GNU.cmake
+@@ -71,7 +71,9 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|amd64|i.86|x86)" AND NOT EMSCRIPTEN)
+     set(TBB_COMMON_COMPILE_FLAGS ${TBB_COMMON_COMPILE_FLAGS} -mrtm $<$<AND:$<NOT:$<CXX_COMPILER_ID:Intel>>,$<NOT:$<VERSION_LESS:${CMAKE_CXX_COMPILER_VERSION},11.0>>>:-mwaitpkg>)
+ endif()
+ 
+-set(TBB_COMMON_LINK_LIBS ${CMAKE_DL_LIBS})
++if (NOT HAIKU)
++    set(TBB_COMMON_LINK_LIBS ${CMAKE_DL_LIBS})
++endif ()
+ 
+ # Ignore -Werror set through add_compile_options() or added to CMAKE_CXX_FLAGS if TBB_STRICT is disabled.
+ if (NOT TBB_STRICT AND COMMAND tbb_remove_compile_flag)
+diff --git a/include/oneapi/tbb/detail/_config.h b/include/oneapi/tbb/detail/_config.h
+index e676b15..f1f34ab 100644
+--- a/include/oneapi/tbb/detail/_config.h
++++ b/include/oneapi/tbb/detail/_config.h
+@@ -274,7 +274,7 @@
+     #define __TBB_CPP20_COMPARISONS_PRESENT 0
+ #endif
+ 
+-#define __TBB_RESUMABLE_TASKS                           (!__TBB_WIN8UI_SUPPORT && !__ANDROID__ && !__QNXNTO__ && (!__linux__ || __GLIBC__))
++#define __TBB_RESUMABLE_TASKS                           (!__TBB_WIN8UI_SUPPORT && !__ANDROID__ && !__HAIKU__ && !__QNXNTO__ && (!__linux__ || __GLIBC__))
+ 
+ /* This macro marks incomplete code or comments describing ideas which are considered for the future.
+  * See also for plain comment with TODO and FIXME marks for small improvement opportunities.
+@@ -493,6 +493,11 @@
+     #define TBB_ALLOCATOR_TRAITS_BROKEN 1
+ #endif
+ 
++// HAIKU build fix
++#if defined(__HAIKU__)
++    #define TBB_ALLOCATOR_TRAITS_BROKEN 1
++#endif
++
+ // GCC 4.8 C++ standard library implements std::this_thread::yield as no-op.
+ #if __TBB_GLIBCXX_VERSION >= 40800 && __TBB_GLIBCXX_VERSION < 40900
+     #define __TBB_GLIBCXX_THIS_THREAD_YIELD_BROKEN 1
+diff --git a/src/tbb/allocator.cpp b/src/tbb/allocator.cpp
+index 689c512..559ddf7 100644
+--- a/src/tbb/allocator.cpp
++++ b/src/tbb/allocator.cpp
+@@ -40,7 +40,7 @@
+ // memalign() and it offers nothing but overhead due to inconvenient interface. This is likely the case with other
+ // standard libraries as well, and more libraries can be added to the preprocessor check below. Unfortunately, we
+ // can't detect musl, so we simply enable memalign() on Linux and Android in general.
+-#if defined(linux) || defined(__linux) || defined(__linux__) || defined(__ANDROID__)
++#if defined(linux) || defined(__linux) || defined(__linux__) || defined(__ANDROID__) || defined(__HAIKU__)
+ #include <malloc.h> // memalign
+ #define __TBB_USE_MEMALIGN
+ #else
+@@ -119,7 +119,7 @@ static const dynamic_link_descriptor MallocLinkTable[] = {
+ #define MALLOCLIB_NAME "tbbmalloc" DEBUG_SUFFIX ".dll"
+ #elif __APPLE__
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX ".2.dylib"
+-#elif __FreeBSD__ || __NetBSD__ || __OpenBSD__ || __sun || _AIX || __ANDROID__
++#elif __FreeBSD__ || __NetBSD__ || __OpenBSD__ || __sun || _AIX || __ANDROID__ || __HAIKU__
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX ".so"
+ #elif __unix__  // Note that order of these #elif's is important!
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX ".so.2"
+diff --git a/src/tbb/dynamic_link.cpp b/src/tbb/dynamic_link.cpp
+index a21beb5..dc6824a 100644
+--- a/src/tbb/dynamic_link.cpp
++++ b/src/tbb/dynamic_link.cpp
+@@ -389,7 +389,11 @@ namespace r1 {
+     #endif /* !__TBB_DYNAMIC_LOAD_ENABLED */
+         // RTLD_GLOBAL - to guarantee that old TBB will find the loaded library
+         // RTLD_NOLOAD - not to load the library without the full path
+-        library_handle = dlopen(library, RTLD_LAZY | RTLD_GLOBAL | RTLD_NOLOAD);
++        #ifndef __HAIKU__
++            library_handle = dlopen(library, RTLD_LAZY | RTLD_GLOBAL | RTLD_NOLOAD);
++        #else
++            library_handle = dlopen(library, RTLD_LAZY | RTLD_GLOBAL);
++        #endif
+ #endif /* _WIN32 */
+         if (library_handle) {
+             if (!resolve_symbols(library_handle, descriptors, required)) {
+diff --git a/src/tbb/rml_tbb.cpp b/src/tbb/rml_tbb.cpp
+index d1cd285..db61654 100644
+--- a/src/tbb/rml_tbb.cpp
++++ b/src/tbb/rml_tbb.cpp
+@@ -50,7 +50,7 @@ namespace rml {
+ #define RML_SERVER_NAME "irml" DEBUG_SUFFIX ".dll"
+ #elif __APPLE__
+ #define RML_SERVER_NAME "libirml" DEBUG_SUFFIX ".1.dylib"
+-#elif __FreeBSD__ || __NetBSD__ || __OpenBSD__ || __sun || _AIX
++#elif __FreeBSD__ || __NetBSD__ || __OpenBSD__ || __sun || _AIX || __HAIKU__
+ #define RML_SERVER_NAME "libirml" DEBUG_SUFFIX ".so"
+ #elif __unix__
+ #define RML_SERVER_NAME "libirml" DEBUG_SUFFIX ".so.1"
+diff --git a/src/tbbmalloc/frontend.cpp b/src/tbbmalloc/frontend.cpp
+index c9aaf46..555af70 100644
+--- a/src/tbbmalloc/frontend.cpp
++++ b/src/tbbmalloc/frontend.cpp
+@@ -776,7 +776,7 @@ static inline unsigned int highestBitPos(unsigned int n)
+     unsigned int pos;
+ #if __ARCH_x86_32||__ARCH_x86_64
+ 
+-# if __unix__||__APPLE__||__MINGW32__
++# if __unix__||__APPLE__||__MINGW32__||__HAIKU__
+     __asm__ ("bsr %1,%0" : "=r"(pos) : "r"(n));
+ # elif (_WIN32 && (!_WIN64 || __INTEL_COMPILER))
+     __asm
+diff --git a/src/tbbmalloc/tbbmalloc.cpp b/src/tbbmalloc/tbbmalloc.cpp
+index b72e03a..938f1fe 100644
+--- a/src/tbbmalloc/tbbmalloc.cpp
++++ b/src/tbbmalloc/tbbmalloc.cpp
+@@ -43,7 +43,7 @@ namespace internal {
+ #define MALLOCLIB_NAME "tbbmalloc" DEBUG_SUFFIX ".dll"
+ #elif __APPLE__
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX ".2.dylib"
+-#elif __FreeBSD__ || __NetBSD__ || __OpenBSD__ || __sun || _AIX || __ANDROID__
++#elif __FreeBSD__ || __NetBSD__ || __OpenBSD__ || __sun || _AIX || __ANDROID__ || __HAIKU__
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX ".so"
+ #elif __unix__
+ #define MALLOCLIB_NAME "libtbbmalloc" DEBUG_SUFFIX  __TBB_STRING(.so.2)
+diff --git a/test/common/memory_usage.h b/test/common/memory_usage.h
+index cf8b418..1153f81 100644
+--- a/test/common/memory_usage.h
++++ b/test/common/memory_usage.h
+@@ -122,6 +122,7 @@ namespace utils {
+         ASSERT(status == KERN_SUCCESS, nullptr);
+         return info.virtual_size - shared_size;
+ #else
++        utils::suppress_unused_warning(stat);
+         return 0;
+ #endif
+     }
+diff --git a/test/common/utils_dynamic_libs.h b/test/common/utils_dynamic_libs.h
+index 99afca3..e641c8b 100644
+--- a/test/common/utils_dynamic_libs.h
++++ b/test/common/utils_dynamic_libs.h
+@@ -58,7 +58,7 @@ namespace utils {
+ #define EXT ".dylib"
+ #endif
+ // Android SDK build system does not support .so file name versioning
+-#elif __FreeBSD__ || __NetBSD__ || __OpenBSD__ || __sun || _AIX || __ANDROID__
++#elif __FreeBSD__ || __NetBSD__ || __OpenBSD__ || __sun || _AIX || __ANDROID__ || __HAIKU__
+ #define EXT ".so"
+ #elif __unix__  // Order of these elif's matters!
+ #define EXT __TBB_STRING(.so.2)
+diff --git a/test/conformance/conformance_resumable_tasks.cpp b/test/conformance/conformance_resumable_tasks.cpp
+index 70fd878..4b8bfbe 100644
+--- a/test/conformance/conformance_resumable_tasks.cpp
++++ b/test/conformance/conformance_resumable_tasks.cpp
+@@ -16,7 +16,7 @@
+ 
+ #include "common/test.h"
+ 
+-#if (!__TBB_WIN8UI_SUPPORT && !defined(WINAPI_FAMILY) && !__ANDROID__)
++#if (!__TBB_WIN8UI_SUPPORT && !defined(WINAPI_FAMILY) && !__ANDROID__ && !__HAIKU__)
+ 
+ #include "oneapi/tbb/task.h"
+ #include "oneapi/tbb/task_group.h"
+-- 
+2.45.2
+
+
+From af873242898a84981b41922b67100f4de988e981 Mon Sep 17 00:00:00 2001
+From: Schrijvers Luc <begasus@gmail.com>
+Date: Mon, 25 Nov 2024 17:48:00 +0100
+Subject: Disable warning turning into errors
+
+
+diff --git a/cmake/compilers/GNU.cmake b/cmake/compilers/GNU.cmake
+index 12282cb..b7f9d4c 100644
+--- a/cmake/compilers/GNU.cmake
++++ b/cmake/compilers/GNU.cmake
+@@ -26,7 +26,7 @@ else()
+     set(TBB_DEF_FILE_PREFIX lin${TBB_ARCH})
+ endif()
+ 
+-set(TBB_WARNING_LEVEL -Wall -Wextra $<$<BOOL:${TBB_STRICT}>:-Werror> -Wfatal-errors)
++set(TBB_WARNING_LEVEL -Wall -Wextra $<$<BOOL:${TBB_STRICT}>:-Werror> -Wfatal-errors -Wno-error=uninitialized -Wno-error=array-bounds -Wno-error=use-after-free -Wno-error=address -Wno-error=sizeof-array-div)
+ set(TBB_TEST_WARNING_FLAGS -Wshadow -Wcast-qual -Woverloaded-virtual -Wnon-virtual-dtor)
+ 
+ # Depfile options (e.g. -MD) are inserted automatically in some cases.
+-- 
+2.45.2
+
+
+From 8807ed150dcbd942c9c0b2837c8806685861e5e2 Mon Sep 17 00:00:00 2001
+From: Schrijvers Luc <begasus@gmail.com>
+Date: Mon, 25 Nov 2024 17:49:32 +0100
+Subject: Build fix?
+
+
+diff --git a/include/oneapi/tbb/detail/_export.h b/include/oneapi/tbb/detail/_export.h
+index 4c01522..8094254 100644
+--- a/include/oneapi/tbb/detail/_export.h
++++ b/include/oneapi/tbb/detail/_export.h
+@@ -19,7 +19,7 @@
+ 
+ #if defined(__MINGW32__)
+     #define _EXPORT __declspec(dllexport)
+-#elif defined(_WIN32) || defined(__unix__) || defined(__APPLE__) // Use .def files for these
++#elif defined(_WIN32) || defined(__unix__) || defined(__APPLE__) || defined(__HAIKU__) // Use .def files for these
+     #define _EXPORT
+ #else
+     #error "Unknown platform/compiler"
+-- 
+2.45.2
+

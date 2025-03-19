@@ -1,0 +1,144 @@
+SUMMARY="Array processing for numbers, strings, records, and objects"
+DESCRIPTION="NumPy is a general-purpose array-processing package designed to \
+efficiently manipulate large multi-dimensional arrays of arbitrary records \
+without sacrificing too much speed for small multi-dimensional arrays.
+NumPy is built on the Numeric code base and adds features introduced by \
+numarray as well as an extended C-API and the ability to create arrays of \
+arbitrary type which also makes NumPy suitable for interfacing with \
+general-purpose data-base applications."
+HOMEPAGE="https://www.numpy.org/"
+COPYRIGHT="2005-2024, NumPy Developers."
+LICENSE="BSD (3-clause)"
+REVISION="1"
+SOURCE_URI="https://files.pythonhosted.org/packages/source/n/numpy/numpy-$portVersion.tar.gz"
+CHECKSUM_SHA256="dbdc15f0c81611925f382dfa97b3bd0bc2c1ce19d4fe50482cb0ddc12ba30020"
+SOURCE_DIR="numpy-$portVersion"
+
+PATCHES="numpy-$portVersion.patchset"
+
+ARCHITECTURES="all !x86_gcc2"
+SECONDARY_ARCHITECTURES="x86"
+
+PROVIDES="
+	$portName = $portVersion
+	"
+REQUIRES="
+	haiku$secondaryArchSuffix
+	lib:liblapack$secondaryArchSuffix
+	lib:libopenblas$secondaryArchSuffix
+	"
+
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel
+	devel:liblapack$secondaryArchSuffix
+	devel:libopenblas$secondaryArchSuffix
+	"
+
+PYTHON_VERSIONS=(3.10)
+defaultVersion=3.10
+
+for i in "${!PYTHON_VERSIONS[@]}"; do
+	pythonVersion=${PYTHON_VERSIONS[$i]}
+	pythonPackage=python${pythonVersion//.}
+
+	eval "PROVIDES_${pythonPackage}=\"
+		${portName}_$pythonPackage = $portVersion
+		cmd:f2py_$pythonVersion
+		cmd:numpy_config_$pythonVersion
+		\""
+
+	if [ $targetArchitecture = "x86_gcc2" ]; then
+		eval "PROVIDES_${pythonPackage}+=\"
+			numpy_$pythonPackage = $portVersion
+			\""
+	fi
+
+	# Provide f2py/f2py3 only for the default version
+	if [ $pythonVersion = $defaultVersion ]; then
+		eval "PROVIDES_${pythonPackage}+=\"
+			cmd:f2py
+			cmd:numpy_config
+			\""
+	fi
+
+	eval "REQUIRES_$pythonPackage=\"
+		$REQUIRES
+		cmd:python$pythonVersion
+		\""
+
+	BUILD_REQUIRES+="
+		build_$pythonPackage
+		installer_$pythonPackage
+		meson_python_$pythonPackage
+		wheel_$pythonPackage
+		"
+	BUILD_PREREQUIRES+="
+		# cmd:cython might be enough? ToDo: Try it when adding Python 3.12 support.
+		cmd:cython$pythonVersion
+		cmd:g++$secondaryArchSuffix
+		cmd:python$pythonVersion
+		cmd:pkg_config$secondaryArchSuffix
+		"
+done
+
+
+BUILD()
+{
+	# this is the default, but if we leave it empty, build fail as "" is taken as "source" dir.
+	cpuOptions='-Csetup-args=-Dcpu-baseline=min'
+
+	if [ $effectiveTargetArchitecture = x86 ]; then
+		# Build on 32 bits fails if AVX is enabled.
+
+		# cpu-baseline defaults to "min" (equals SSE SSE2 on x86-32).
+		# cpu-dispatch defaults to "max -xop -fma4" (equals "SSE3 SSSE3 SSE41 POPCNT SSE42 AVX F16C
+		# FMA3 AVX2 AVX512F AVX512CD AVX512_KNL AVX512_KNM AVX512_SKX AVX512_CLX AVX512_CNL
+		# AVX512_ICL AVX512_SPR" on x86-32).
+
+		# cpuOptions="-Csetup-args=-Dcpu-dispatch=-avx" # this one worked, but disabled everything.
+		# Note: without the last space in the line below, meson gets confused with the arguments,
+		# and build fails (no idea how to make this argument passing less flaky).
+		cpuOptions='-Csetup-args=-Dcpu-dispatch=SSE3 SSSE3 SSE41 POPCNT SSE42 F16C FMA3 '
+	fi
+
+	for i in "${!PYTHON_VERSIONS[@]}"; do
+		pythonVersion=${PYTHON_VERSIONS[$i]}
+		python=python$pythonVersion
+		$python -m build --wheel --skip-dependency-check --no-isolation \
+			-Cbuilddir="build-$pythonVersion" \
+			"$cpuOptions"
+			# Other options that might be useful:
+			# -Csetup-args="-Dlapack=lapack"
+			# -Csetup-args="-Dblas=openblas"
+			# -Ccompile-args="-j6" # reducing the number of jobs lowers the RAM usage.
+	done
+}
+
+INSTALL()
+{
+	for i in "${!PYTHON_VERSIONS[@]}"; do
+		pythonVersion=${PYTHON_VERSIONS[$i]}
+		pythonPackage=python${pythonVersion//.}
+
+		python=python$pythonVersion
+
+		# Wheel's name is in the form: "numpy-2.2.3-cp310-cp310-haiku_1_{x86_64,bepc}.whl"
+		$python -m installer -p $prefix dist/*-cp${pythonVersion//.}-*.whl
+
+		# Version suffix all the scripts
+		for f in $prefix/bin/*; do
+			mv $f $f-$pythonVersion
+		done
+
+		# And provide suffix-less symlinks for the default version
+		if [ $pythonVersion = $defaultVersion ]; then
+			for f in $prefix/bin/*; do
+				ln -sr $f ${f%-$pythonVersion}
+			done
+		fi
+
+		packageEntries $pythonPackage \
+			$prefix/lib/python* \
+			$prefix/bin
+	done
+}

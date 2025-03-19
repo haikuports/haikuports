@@ -1,0 +1,35 @@
+#/bin/sh
+
+pkgman install texlive -y
+pkgman install texlive_basic -y
+pkgman install texlive_latex -y
+pkgman install texlive_bibtexextra -y
+pkgman install texlive_binextra -y
+pkgman install texlive_fontsextra -y
+pkgman install texlive_fontsrecommended -y
+pkgman install texlive_formatsextra -y
+pkgman install texlive_games -y
+pkgman install texlive_humanities -y
+pkgman install texlive_latexrecommended -y
+pkgman install texlive_latexextra -y
+pkgman install texlive_pictures -y
+pkgman install texlive_mathscience -y
+pkgman install texlive_music -y
+	# TeXlive language packages
+pkgman install texlive_langarabic -y
+pkgman install texlive_langcjk -y
+pkgman install texlive_langchinese -y
+pkgman install texlive_langcyrillic -y
+pkgman install texlive_langczechslovak -y
+pkgman install texlive_langenglish -y
+pkgman install texlive_langeuropean -y
+pkgman install texlive_langfrench -y
+pkgman install texlive_langgerman -y
+pkgman install texlive_langgreek -y
+pkgman install texlive_langitalian -y
+pkgman install texlive_langjapanese -y
+pkgman install texlive_langkorean -y
+pkgman install texlive_langother -y
+pkgman install texlive_langpolish -y
+pkgman install texlive_langportuguese -y
+pkgman install texlive_langspanish -y

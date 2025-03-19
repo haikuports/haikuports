@@ -1,0 +1,331 @@
+From 879cf9ff45d94065d89e24b71c6b27c7076ac518 Mon Sep 17 00:00:00 2001
+From: Brendan Shanks <bshanks@codeweavers.com>
+Date: Thu, 9 Nov 2023 21:01:07 -0700
+Subject: [PATCH] [PATCH v3] libiberty: Use posix_spawn in pex-unix when
+ available.
+
+Hi,
+
+This patch implements pex_unix_exec_child using posix_spawn when
+available.
+
+This should especially benefit recent macOS (where vfork just calls
+fork), but should have equivalent or faster performance on all
+platforms.
+In addition, the implementation is substantially simpler than the
+vfork+exec code path.
+
+Tested on x86_64-linux.
+
+v2: Fix error handling (previously the function would be run twice in
+case of error), and don't use a macro that changes control flow.
+
+v3: Match file style for error-handling blocks, don't close
+in/out/errdes on error, and check close() for errors.
+
+libiberty/
+	* configure.ac (AC_CHECK_HEADERS): Add spawn.h.
+	(checkfuncs): Add posix_spawn, posix_spawnp.
+	(AC_CHECK_FUNCS): Add posix_spawn, posix_spawnp.
+	* aclocal.m4, configure, config.in: Rebuild.
+	* pex-unix.c [HAVE_POSIX_SPAWN] (pex_unix_exec_child): New function.
+---
+ libiberty/aclocal.m4   |   4 +-
+ libiberty/config.in    |   9 +++
+ libiberty/configure    |   8 +-
+ libiberty/configure.ac |   8 +-
+ libiberty/pex-unix.c   | 168 +++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 189 insertions(+), 8 deletions(-)
+
+diff --git a/libiberty/aclocal.m4 b/libiberty/aclocal.m4
+index 0757688d52a4c..f327865aaf9be 100644
+--- a/libiberty/aclocal.m4
++++ b/libiberty/aclocal.m4
+@@ -1,6 +1,6 @@
+-# generated automatically by aclocal 1.15.1 -*- Autoconf -*-
++# generated automatically by aclocal 1.16.5 -*- Autoconf -*-
+ 
+-# Copyright (C) 1996-2017 Free Software Foundation, Inc.
++# Copyright (C) 1996-2021 Free Software Foundation, Inc.
+ 
+ # This file is free software; the Free Software Foundation
+ # gives unlimited permission to copy and/or distribute it,
+diff --git a/libiberty/config.in b/libiberty/config.in
+index f7052b5d95889..050f6cd196133 100644
+--- a/libiberty/config.in
++++ b/libiberty/config.in
+@@ -198,6 +198,12 @@
+ /* Define to 1 if you have the `pipe2' function. */
+ #undef HAVE_PIPE2
+ 
++/* Define to 1 if you have the `posix_spawn' function. */
++#undef HAVE_POSIX_SPAWN
++
++/* Define to 1 if you have the `posix_spawnp' function. */
++#undef HAVE_POSIX_SPAWNP
++
+ /* Define to 1 if you have the <process.h> header file. */
+ #undef HAVE_PROCESS_H
+ 
+@@ -249,6 +255,9 @@
+ /* Define to 1 if you have the `spawnvpe' function. */
+ #undef HAVE_SPAWNVPE
+ 
++/* Define to 1 if you have the <spawn.h> header file. */
++#undef HAVE_SPAWN_H
++
+ /* Define to 1 if you have the <stdint.h> header file. */
+ #undef HAVE_STDINT_H
+ 
+diff --git a/libiberty/configure b/libiberty/configure
+index dd896270dc63b..dba458f6bc1e0 100755
+--- a/libiberty/configure
++++ b/libiberty/configure
+@@ -5655,7 +5655,7 @@ host_makefile_frag=${frag}
+ # It's OK to check for header files.  Although the compiler may not be
+ # able to link anything, it had better be able to at least compile
+ # something.
+-for ac_header in sys/file.h sys/param.h limits.h stdlib.h malloc.h string.h unistd.h strings.h sys/time.h time.h sys/resource.h sys/stat.h sys/mman.h fcntl.h alloca.h sys/pstat.h sys/sysmp.h sys/sysinfo.h machine/hal_sysinfo.h sys/table.h sys/sysctl.h sys/systemcfg.h stdint.h stdio_ext.h process.h sys/prctl.h
++for ac_header in sys/file.h sys/param.h limits.h stdlib.h malloc.h string.h unistd.h strings.h sys/time.h time.h sys/resource.h sys/stat.h sys/mman.h fcntl.h alloca.h sys/pstat.h sys/sysmp.h sys/sysinfo.h machine/hal_sysinfo.h sys/table.h sys/sysctl.h sys/systemcfg.h stdint.h stdio_ext.h process.h sys/prctl.h spawn.h
+ do :
+   as_ac_Header=`$as_echo "ac_cv_header_$ac_header" | $as_tr_sh`
+ ac_fn_c_check_header_preproc "$LINENO" "$ac_header" "$as_ac_Header"
+@@ -6164,7 +6164,8 @@ funcs="$funcs setproctitle"
+ vars="sys_errlist sys_nerr sys_siglist"
+ 
+ checkfuncs="__fsetlocking canonicalize_file_name dup3 getrlimit getrusage \
+- getsysinfo gettimeofday on_exit pipe2 psignal pstat_getdynamic pstat_getstatic \
++ getsysinfo gettimeofday on_exit pipe2 posix_spawn posix_spawnp psignal \
++ pstat_getdynamic pstat_getstatic \
+  realpath setrlimit spawnve spawnvpe strerror strsignal sysconf sysctl \
+  sysmp table times wait3 wait4"
+ 
+@@ -6187,7 +6188,8 @@ if test "x" = "y"; then
+     index insque \
+     memchr memcmp memcpy memmem memmove memset mkstemps \
+     on_exit \
+-    pipe2 psignal pstat_getdynamic pstat_getstatic putenv \
++    pipe2 posix_spawn posix_spawnp psignal \
++    pstat_getdynamic pstat_getstatic putenv \
+     random realpath rename rindex \
+     sbrk setenv setproctitle setrlimit sigsetmask snprintf spawnve spawnvpe \
+      stpcpy stpncpy strcasecmp strchr strdup \
+diff --git a/libiberty/configure.ac b/libiberty/configure.ac
+index 0748c592704ab..2488b031bc845 100644
+--- a/libiberty/configure.ac
++++ b/libiberty/configure.ac
+@@ -289,7 +289,7 @@ AC_SUBST_FILE(host_makefile_frag)
+ # It's OK to check for header files.  Although the compiler may not be
+ # able to link anything, it had better be able to at least compile
+ # something.
+-AC_CHECK_HEADERS(sys/file.h sys/param.h limits.h stdlib.h malloc.h string.h unistd.h strings.h sys/time.h time.h sys/resource.h sys/stat.h sys/mman.h fcntl.h alloca.h sys/pstat.h sys/sysmp.h sys/sysinfo.h machine/hal_sysinfo.h sys/table.h sys/sysctl.h sys/systemcfg.h stdint.h stdio_ext.h process.h sys/prctl.h)
++AC_CHECK_HEADERS(sys/file.h sys/param.h limits.h stdlib.h malloc.h string.h unistd.h strings.h sys/time.h time.h sys/resource.h sys/stat.h sys/mman.h fcntl.h alloca.h sys/pstat.h sys/sysmp.h sys/sysinfo.h machine/hal_sysinfo.h sys/table.h sys/sysctl.h sys/systemcfg.h stdint.h stdio_ext.h process.h sys/prctl.h spawn.h)
+ AC_HEADER_SYS_WAIT
+ AC_HEADER_TIME
+ 
+@@ -412,7 +412,8 @@ funcs="$funcs setproctitle"
+ vars="sys_errlist sys_nerr sys_siglist"
+ 
+ checkfuncs="__fsetlocking canonicalize_file_name dup3 getrlimit getrusage \
+- getsysinfo gettimeofday on_exit pipe2 psignal pstat_getdynamic pstat_getstatic \
++ getsysinfo gettimeofday on_exit pipe2 posix_spawn posix_spawnp psignal \
++ pstat_getdynamic pstat_getstatic \
+  realpath setrlimit spawnve spawnvpe strerror strsignal sysconf sysctl \
+  sysmp table times wait3 wait4"
+ 
+@@ -435,7 +436,8 @@ if test "x" = "y"; then
+     index insque \
+     memchr memcmp memcpy memmem memmove memset mkstemps \
+     on_exit \
+-    pipe2 psignal pstat_getdynamic pstat_getstatic putenv \
++    pipe2 posix_spawn posix_spawnp psignal \
++    pstat_getdynamic pstat_getstatic putenv \
+     random realpath rename rindex \
+     sbrk setenv setproctitle setrlimit sigsetmask snprintf spawnve spawnvpe \
+      stpcpy stpncpy strcasecmp strchr strdup \
+diff --git a/libiberty/pex-unix.c b/libiberty/pex-unix.c
+index 33b5bce31c26c..ee52789d264c7 100644
+--- a/libiberty/pex-unix.c
++++ b/libiberty/pex-unix.c
+@@ -58,6 +58,9 @@ extern int errno;
+ #ifdef HAVE_PROCESS_H
+ #include <process.h>
+ #endif
++#ifdef HAVE_SPAWN_H
++#include <spawn.h>
++#endif
+ 
+ #ifdef vfork /* Autoconf may define this to fork for us. */
+ # define VFORK_STRING "fork"
+@@ -559,6 +562,171 @@ pex_unix_exec_child (struct pex_obj *obj ATTRIBUTE_UNUSED,
+   return (pid_t) -1;
+ }
+ 
++#elif defined(HAVE_POSIX_SPAWN) && defined(HAVE_POSIX_SPAWNP)
++/* Implementation of pex->exec_child using posix_spawn.            */
++
++static pid_t
++pex_unix_exec_child (struct pex_obj *obj ATTRIBUTE_UNUSED,
++		     int flags, const char *executable,
++		     char * const * argv, char * const * env,
++		     int in, int out, int errdes,
++		     int toclose, const char **errmsg, int *err)
++{
++  int ret;
++  pid_t pid = -1;
++  posix_spawnattr_t attr;
++  posix_spawn_file_actions_t actions;
++  int attr_initialized = 0, actions_initialized = 0;
++
++  *err = 0;
++
++  ret = posix_spawnattr_init (&attr);
++  if (ret)
++    {
++      *err = ret;
++      *errmsg = "posix_spawnattr_init";
++      goto exit;
++    }
++  attr_initialized = 1;
++
++  /* Use vfork() on glibc <=2.24. */
++#ifdef POSIX_SPAWN_USEVFORK
++  ret = posix_spawnattr_setflags (&attr, POSIX_SPAWN_USEVFORK);
++  if (ret)
++    {
++      *err = ret;
++      *errmsg = "posix_spawnattr_setflags";
++      goto exit;
++    }
++#endif
++
++  ret = posix_spawn_file_actions_init (&actions);
++  if (ret)
++    {
++      *err = ret;
++      *errmsg = "posix_spawn_file_actions_init";
++      goto exit;
++    }
++  actions_initialized = 1;
++
++  if (in != STDIN_FILE_NO)
++    {
++      ret = posix_spawn_file_actions_adddup2 (&actions, in, STDIN_FILE_NO);
++      if (ret)
++	{
++	  *err = ret;
++	  *errmsg = "posix_spawn_file_actions_adddup2";
++	  goto exit;
++	}
++
++      ret = posix_spawn_file_actions_addclose (&actions, in);
++      if (ret)
++	{
++	  *err = ret;
++	  *errmsg = "posix_spawn_file_actions_addclose";
++	  goto exit;
++	}
++    }
++
++  if (out != STDOUT_FILE_NO)
++    {
++      ret = posix_spawn_file_actions_adddup2 (&actions, out, STDOUT_FILE_NO);
++      if (ret)
++	{
++	  *err = ret;
++	  *errmsg = "posix_spawn_file_actions_adddup2";
++	  goto exit;
++	}
++
++      ret = posix_spawn_file_actions_addclose (&actions, out);
++      if (ret)
++	{
++	  *err = ret;
++	  *errmsg = "posix_spawn_file_actions_addclose";
++	  goto exit;
++	}
++    }
++
++  if (errdes != STDERR_FILE_NO)
++    {
++      ret = posix_spawn_file_actions_adddup2 (&actions, errdes, STDERR_FILE_NO);
++      if (ret)
++	{
++	  *err = ret;
++	  *errmsg = "posix_spawn_file_actions_adddup2";
++	  goto exit;
++	}
++
++      ret = posix_spawn_file_actions_addclose (&actions, errdes);
++      if (ret)
++	{
++	  *err = ret;
++	  *errmsg = "posix_spawn_file_actions_addclose";
++	  goto exit;
++	}
++    }
++
++  if (toclose >= 0)
++    {
++      ret = posix_spawn_file_actions_addclose (&actions, toclose);
++      if (ret)
++	{
++	  *err = ret;
++	  *errmsg = "posix_spawn_file_actions_addclose";
++	  goto exit;
++	}
++    }
++
++  if ((flags & PEX_STDERR_TO_STDOUT) != 0)
++    {
++      ret = posix_spawn_file_actions_adddup2 (&actions, STDOUT_FILE_NO, STDERR_FILE_NO);
++      if (ret)
++	{
++	  *err = ret;
++	  *errmsg = "posix_spawn_file_actions_adddup2";
++	  goto exit;
++	}
++    }
++
++  if ((flags & PEX_SEARCH) != 0)
++    {
++      ret = posix_spawnp (&pid, executable, &actions, &attr, argv, env ? env : environ);
++      if (ret)
++	{
++	  *err = ret;
++	  *errmsg = "posix_spawnp";
++	  goto exit;
++	}
++    }
++  else
++    {
++      ret = posix_spawn (&pid, executable, &actions, &attr, argv, env ? env : environ);
++      if (ret)
++	{
++	  *err = ret;
++	  *errmsg = "posix_spawn";
++	  goto exit;
++	}
++    }
++
++exit:
++  if (actions_initialized)
++    posix_spawn_file_actions_destroy (&actions);
++  if (attr_initialized)
++    posix_spawnattr_destroy (&attr);
++
++  if (!*err && in != STDIN_FILE_NO)
++    if (close (in))
++      *errmsg = "close", *err = errno, pid = -1;
++  if (!*err && out != STDOUT_FILE_NO)
++    if (close (out))
++      *errmsg = "close", *err = errno, pid = -1;
++  if (!*err && errdes != STDERR_FILE_NO)
++    if (close (errdes))
++      *errmsg = "close", *err = errno, pid = -1;
++
++  return pid;
++}
+ #else
+ /* Implementation of pex->exec_child using standard vfork + exec.  */
+ 

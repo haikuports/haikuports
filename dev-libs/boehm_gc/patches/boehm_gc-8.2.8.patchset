@@ -1,0 +1,190 @@
+From 4f79b220fed9787c7dd47c9b589ac1f475b6b4d5 Mon Sep 17 00:00:00 2001
+From: Augustin Cavalier <waddlesplash@gmail.com>
+Date: Mon, 25 Nov 2024 16:20:27 -0500
+Subject: Revive Haiku support.
+
+
+diff --git a/include/private/gcconfig.h b/include/private/gcconfig.h
+index c1cf80f..135d237 100644
+--- a/include/private/gcconfig.h
++++ b/include/private/gcconfig.h
+@@ -964,9 +964,21 @@ EXTERN_C_BEGIN
+ # endif /* FREEBSD */
+ 
+ # ifdef HAIKU
+-#   define OS_TYPE "HAIKU"
+-#   define DYNAMIC_LOADING
+-#   define MPROTECT_VDB
++#  define OS_TYPE "HAIKU"
++#  define DYNAMIC_LOADING
++#  define USE_GET_STACKBASE_FOR_MAIN
++#  undef MPROTECT_VDB		/* slow */
++#  ifndef HAVE_PTHREAD_GETATTR_NP
++#    define HAVE_PTHREAD_GETATTR_NP 1
++#  endif
++#  ifndef HAVE_CLOCK_GETTIME
++#    define HAVE_CLOCK_GETTIME 1
++#  endif
++#  ifndef USE_MMAP
++#    define USE_MMAP 1
++#  endif
++#  define USE_MMAP_ANON
++#  define USE_SPIN_LOCK
+     EXTERN_C_END
+ #   include <OS.h>
+     EXTERN_C_BEGIN
+@@ -1454,8 +1466,7 @@ EXTERN_C_BEGIN
+ #     define DATAEND ((ptr_t)_end)
+ #   endif
+ #   ifdef HAIKU
+-      extern int etext[];
+-#     define DATASTART ((ptr_t)((((word)(etext)) + 0xfff) & ~(word)0xfff))
++      /* Nothing specific. */
+ #   endif
+ #   ifdef SOLARIS
+ #       define DATASTART GC_SysVGetDataStart(0x1000, (ptr_t)_etext)
+@@ -2436,8 +2447,7 @@ EXTERN_C_BEGIN
+       /* Nothing specific. */
+ #   endif
+ #   ifdef HAIKU
+-#     define HEURISTIC2
+-#     define SEARCH_FOR_DATA_START
++/* Nothing specific. */
+ #   endif
+ #   ifdef SOLARIS
+ #     define ELF_CLASS ELFCLASS64
+@@ -3405,9 +3415,6 @@ EXTERN_C_BEGIN
+ # elif defined(NINTENDO_SWITCH)
+     void *switch_get_mem(size_t bytes);
+ #   define GET_MEM(bytes) (struct hblk*)switch_get_mem(bytes)
+-# elif defined(HAIKU)
+-    ptr_t GC_haiku_get_mem(size_t bytes);
+-#   define GET_MEM(bytes) (struct hblk*)GC_haiku_get_mem(bytes)
+ # elif defined(EMSCRIPTEN_TINY)
+     void *emmalloc_memalign(size_t alignment, size_t size);
+ #   define GET_MEM(bytes) (struct hblk*)emmalloc_memalign(GC_page_size, bytes)
+diff --git a/misc.c b/misc.c
+index 91cb193..b7a92ef 100644
+--- a/misc.c
++++ b/misc.c
+@@ -2004,6 +2004,10 @@ GC_API GC_warn_proc GC_CALL GC_get_warn_proc(void)
+ #   else
+       __android_log_assert("*" /* cond */, GC_ANDROID_LOG_TAG, "%s\n", msg);
+ #   endif
++
++#  if defined(__HAIKU__)
++    debugger(msg);
++#  endif
+     }
+ 
+ #   if !defined(NO_DEBUGGING) && !defined(GC_ANDROID_LOG)
+diff --git a/os_dep.c b/os_dep.c
+index e90c772..8fcc713 100644
+--- a/os_dep.c
++++ b/os_dep.c
+@@ -845,19 +845,6 @@ GC_INNER size_t GC_page_size = 0;
+   }
+ #endif /* !MSWIN32 */
+ 
+-#ifdef HAIKU
+-# include <kernel/OS.h>
+-
+-  GC_API int GC_CALL GC_get_stack_base(struct GC_stack_base *sb)
+-  {
+-    thread_info th;
+-    get_thread_info(find_thread(NULL),&th);
+-    sb->mem_base = th.stack_end;
+-    return GC_SUCCESS;
+-  }
+-# define HAVE_GET_STACK_BASE
+-#endif /* HAIKU */
+-
+ #ifdef OS2
+   GC_API int GC_CALL GC_get_stack_base(struct GC_stack_base *sb)
+   {
+@@ -1269,7 +1256,7 @@ GC_INNER size_t GC_page_size = 0;
+ #   endif
+   }
+ # define GET_MAIN_STACKBASE_SPECIAL
+-#elif !defined(AMIGA) && !defined(HAIKU) && !defined(OS2) \
++#elif !defined(AMIGA) && !defined(OS2) \
+       && !defined(MSWIN32) && !defined(MSWINCE) && !defined(CYGWIN32) \
+       && !defined(GC_OPENBSD_THREADS) \
+       && (!defined(GC_SOLARIS_THREADS) || defined(_STRICT_STDC))
+@@ -1338,6 +1325,8 @@ GC_INNER size_t GC_page_size = 0;
+         result = GC_linux_main_stack_base();
+ #     elif defined(FREEBSD_STACKBOTTOM)
+         result = GC_freebsd_main_stack_base();
++#    elif defined(HAIKU)
++		ABORT("pthread_attr_getstack failed");
+ #     elif defined(HEURISTIC2)
+         {
+           ptr_t sp = GC_approx_sp();
+@@ -1375,7 +1364,7 @@ GC_INNER size_t GC_page_size = 0;
+     return(result);
+   }
+ # define GET_MAIN_STACKBASE_SPECIAL
+-#endif /* !AMIGA, !HAIKU, !OPENBSD, !OS2, !Windows */
++#endif /* !AMIGA, !OPENBSD, !OS2, !Windows */
+ 
+ #if (defined(HAVE_PTHREAD_ATTR_GET_NP) || defined(HAVE_PTHREAD_GETATTR_NP)) \
+     && defined(THREADS) && !defined(HAVE_GET_STACK_BASE)
+@@ -2117,6 +2106,8 @@ void GC_register_data_segments(void)
+       /* Avoid even referencing DATASTART and DATAEND as they are       */
+       /* unnecessary and cause linker errors when bitcode is enabled.   */
+       /* GC_register_data_segments() is not called anyway.              */
++#elif defined(HAIKU)
++/* Nothing to do. */
+ #   elif !defined(PCR) && !defined(MACOS)
+ #     if defined(REDIRECT_MALLOC) && defined(GC_SOLARIS_THREADS)
+         /* As of Solaris 2.3, the Solaris threads implementation        */
+@@ -2578,19 +2569,6 @@ void * os2_alloc(size_t bytes)
+ # undef GC_AMIGA_AM
+ #endif
+ 
+-#if defined(HAIKU)
+-# include <stdlib.h>
+-  ptr_t GC_haiku_get_mem(size_t bytes)
+-  {
+-    void* mem;
+-
+-    GC_ASSERT(GC_page_size != 0);
+-    if (posix_memalign(&mem, GC_page_size, bytes) == 0)
+-      return mem;
+-    return NULL;
+-  }
+-#endif /* HAIKU */
+-
+ #if (defined(USE_MUNMAP) || defined(MPROTECT_VDB)) && !defined(USE_WINALLOC)
+ # define ABORT_ON_REMAP_FAIL(C_msg_prefix, start_addr, len) \
+         ABORT_ARG3(C_msg_prefix " failed", \
+@@ -2666,7 +2644,7 @@ static void block_unmap_inner(ptr_t start_addr, size_t len)
+       if (len != 0) {
+ #       ifdef SN_TARGET_PS3
+           ps3_free_mem(start_addr, len);
+-#       elif defined(AIX) || defined(CYGWIN32) || defined(HAIKU) \
++#       elif defined(AIX) || defined(CYGWIN32) \
+              || (defined(LINUX) && !defined(PREFER_MMAP_PROT_NONE)) \
+              || defined(HPUX)
+           /* On AIX, mmap(PROT_NONE) fails with ENOMEM unless the       */
+diff --git a/pthread_support.c b/pthread_support.c
+index 6075d50..72d1fe5 100644
+--- a/pthread_support.c
++++ b/pthread_support.c
+@@ -1241,12 +1241,7 @@ static void fork_child_proc(void)
+ #   endif
+ #   ifdef PARALLEL_MARK
+       if (GC_parallel) {
+-#       if defined(THREAD_SANITIZER) && defined(GC_ASSERTIONS) \
+-           && defined(CAN_CALL_ATFORK)
+-          (void)pthread_mutex_unlock(&mark_mutex);
+-#       else
+-          GC_release_mark_lock();
+-#       endif
++		pthread_mutex_init(&mark_mutex, NULL);
+         /* Turn off parallel marking in the child, since we are probably  */
+         /* just going to exec, and we would have to restart mark threads. */
+         GC_parallel = FALSE;
+-- 
+2.45.2
+
