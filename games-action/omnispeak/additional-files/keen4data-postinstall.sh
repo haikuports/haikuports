@@ -7,4 +7,4 @@ if [ ! -e $nonpackdatadir ]; then
 	mkdir -p $nonpackdatadir
 fi
 
-ln -s -t $nonpackdatadir $datadir/keen4data/* $datadir/keen4/*
+ln -s -t $nonpackdatadir $datadir/keen4/*
