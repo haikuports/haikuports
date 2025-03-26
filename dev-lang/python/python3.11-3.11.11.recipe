@@ -11,7 +11,7 @@ OSI-approved open source license."
 HOMEPAGE="https://www.python.org"
 LICENSE="Python"
 COPYRIGHT="1990-2024 Python Software Foundation"
-REVISION="1"
+REVISION="2"
 SOURCE_URI="https://www.python.org/ftp/python/$portVersion/Python-$portVersion.tar.xz"
 CHECKSUM_SHA256="2a9920c7a0cd236de33644ed980a13cbbc21058bfdc528febb6081575ed73be3"
 SOURCE_DIR="Python-$portVersion"
@@ -53,6 +53,10 @@ packageTests=false
 # Set to "false" for faster local/test builds. Around 4 to 5 times faster that way.
 optimizedBuild=true
 
+# Often we disable parallel builds if "optimizedBuild == true", as they can fail.
+# Some versions just work either way.
+forceParallelBuild=false
+
 # Run all tests by default. Set to "true" to make "hp --test" only run then known failing tests.
 runOnlyKnownFailingTests=false
 
@@ -69,7 +73,6 @@ PROVIDES="
 	"
 REQUIRES="
 	haiku$secondaryArchSuffix
-	timezone_data
 	cmd:file
 	lib:libbz2$secondaryArchSuffix
 	lib:libedit$secondaryArchSuffix
@@ -108,11 +111,41 @@ BUILD_PREREQUIRES="
 
 if $installAsDefaultPython; then
 	PROVIDES+="
-		cmd:2to3 = $portVersion compat >= $pyShortVer
-		cmd:python3 = $portVersion compat >= $pyShortVer
-		cmd:pydoc3 = $portVersion compat >= $pyShortVer
-		cmd:python3_config = $portVersion compat >= $pyShortVer
+		cmd:2to3 = $pyVersionCompat
+		cmd:python3 = $pyVersionCompat
+		cmd:pydoc3 = $pyVersionCompat
+		cmd:python3_config = $pyVersionCompat
 		"
+else
+	SUMMARY_default="Sets the default Python version to: $portVersion"
+	DESCRIPTION_default="You can choose which Python version is used as \"default\" \
+ (ie: \"/bin/python3\") by simply installing one of the available \"python3.nn_default\" packages."
+
+	PROVIDES_default="
+		${portName}_default = $pyVersionCompat
+		cmd:2to3 = $pyVersionCompat
+		cmd:pydoc3 = $pyVersionCompat
+		cmd:python3 = $pyVersionCompat
+		cmd:python3_config = $pyVersionCompat
+		"
+	if $enableTkinter; then
+		PROVIDES_default+="
+			cmd:idle3 = $pyVersionCompat
+			"
+	fi
+
+	REQUIRES_default="
+		python$pyShortVer$secondaryArchSuffix == $portVersion base
+		haiku$secondaryArchSuffix
+		"
+
+	otherPythonVersions=(3.10 3.12 3.13 3.14)
+	for i in "${!otherPythonVersions[@]}"; do
+		otherVersion=${otherPythonVersions[$i]}
+		CONFLICTS_default+="
+			python$otherVersion${secondaryArchSuffix}_default
+			"
+	done
 fi
 
 if $enableTkinter; then
@@ -178,7 +211,7 @@ BUILD()
 		--with-ensurepip=no \
 		--with-readline=editline \
 		--with-system-expat \
-		--with-tzpath=$dataDir/zoneinfo \
+		--with-tzpath=$(findpaths -c"/zoneinfo:" B_FIND_PATH_DATA_DIRECTORY) \
 		--without-static-libpython
 		# --with-lto # this one makes build times at least 2.5x slower.
 
@@ -197,10 +230,12 @@ BUILD()
 	#
 	# Not using multiple jobs for make solves both the warnings and the possible error.
 
-	if $optimizedBuild; then
-		make -j 1
+	if $optimizedBuild && ! $forceParallelBuild; then
+		echo "Running make with: -j 1"
+		time make -j 1
 	else
-		make $jobArgs
+		echo "Running make with: $jobArgs"
+		time make $jobArgs
 	fi
 }
 
@@ -250,6 +285,26 @@ INSTALL()
 		cd $prefix/lib/python$pyShortVer
 		rm -rf ctypes/test distutils/tests idlelib/idle_test lib2to3/tests test tkinter/test \
 			unittest/test
+	fi
+
+	# default_python3xx package:
+	if ! $installAsDefaultPython; then
+		cd $prefix/bin
+
+		ln -sr 2to3-$pyShortVer 2to3
+		ln -sr pydoc$pyShortVer pydoc3
+		ln -sr python$pyShortVer python3
+		ln -sr python$pyShortVer-config python3-config
+
+		packageEntries default $prefix/bin/2to3
+		packageEntries default $prefix/bin/pydoc3
+		packageEntries default $prefix/bin/python3
+		packageEntries default $prefix/bin/python3-config
+
+		if $enableTkinter; then
+			ln -sr idle$pyShortVer idle3
+			packageEntries default $prefix/bin/idle3
+		fi
 	fi
 }
 
