@@ -1,7 +1,6 @@
 #!/bin/bash
 
 systembin=$(finddir B_SYSTEM_BIN_DIRECTORY)
-systemapps=$(finddir B_SYSTEM_APPS_DIRECTORY)
 waddir="$(finddir B_SYSTEM_DATA_DIRECTORY)/freedoom"
 
 if [ "$1" = "1" ]; then
@@ -20,12 +19,12 @@ if [ -e $systembin/chocolate-doom ]; then
 	echo "Chocolate Doom detected"
 fi
 
-if [ -e $systemapps/GZDoom/GZDoom ]; then
+if [ -e $systembin/gzdoom ]; then
 	if [ "$port1" = "" ]; then
-		port1="$systemapps/GZDoom/GZDoom"
+		port1="gzdoom"
 		port1name="GZDoom"
 	elif [ "$port2" = "" ]; then
-		port2="$systemapps/GZDoom/GZDoom"
+		port2="gzdoom"
 		port2name="GZDoom"
 	fi
 	echo "GZDoom detected"
