@@ -1,12 +1,15 @@
-From 055c3d320459ca0f7ee2bfa06f9aa18d6ef2bdd8 Mon Sep 17 00:00:00 2001
+From 9a4138f5662892112a65d2d1fab4cdc3bd11f156 Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Tue, 11 Mar 2025 23:15:03 +1000
+Date: Sun, 30 Mar 2025 21:46:06 +1000
 Subject: Add Haiku build support
 
 Based on patches sourced from https://github.com/kenz-gelsoft/gecko-dev/
 
--   Enabled building for the Haiku.
--   Implemented the cubeb audio backend for MediaKit.
+-   Enabled building for Haiku.
+-   Implemented the cubeb audio backend for MediaKit (input and output).
+-   Implemented native notifications.
+-   Fixed build with WebRTC enabled.
+-   Implemented WebRTC modules for desktop capture and video capture.
 -   Made additional modifications for Haiku compatibility.
 
 diff --git a/Cargo.lock b/Cargo.lock
@@ -224,6 +227,255 @@ index 84ef7b7..e041636 100644
  }
  
  }  // namespace mozilla
+diff --git a/dom/media/webrtc/transport/common.build b/dom/media/webrtc/transport/common.build
+index b907b57..7d37654 100644
+--- a/dom/media/webrtc/transport/common.build
++++ b/dom/media/webrtc/transport/common.build
+@@ -64,6 +64,11 @@ if CONFIG["OS_TARGET"] in ["Darwin", "DragonFly", "FreeBSD", "NetBSD", "OpenBSD"
+     LOCAL_INCLUDES += [
+         "/dom/media/webrtc/transport/third_party/nrappkit/src/port/darwin/include",
+     ]
++elif CONFIG["OS_TARGET"] == "Haiku":
++    DEFINES["HAIKU"] = True
++    LOCAL_INCLUDES += [
++        "/dom/media/webrtc/transport/third_party/nrappkit/src/port/haiku/include",
++    ]
+ elif CONFIG["OS_TARGET"] == "Linux":
+     DEFINES["LINUX"] = True
+     LOCAL_INCLUDES += [
+diff --git a/dom/media/webrtc/transport/third_party/nICEr/nicer.gyp b/dom/media/webrtc/transport/third_party/nICEr/nicer.gyp
+index 488b9b2..2d8e672 100644
+--- a/dom/media/webrtc/transport/third_party/nICEr/nicer.gyp
++++ b/dom/media/webrtc/transport/third_party/nICEr/nicer.gyp
+@@ -7,7 +7,8 @@
+ #
+ {
+   'variables' : {
+-    'have_ethtool_cmd_speed_hi%': 1
++    'have_ethtool_cmd_speed_hi%': 1,
++    'OS' : 'haiku'
+   },
+   'targets' : [
+       {
+@@ -185,6 +186,38 @@
+                  ],
+               }],
+ 
++              ## Haiku
++              [ 'OS == "haiku"', {
++                'cflags_mozilla': [
++                    '-Wall',
++                    '-Wno-parentheses',
++                    '-Wno-strict-prototypes',
++                    '-Wmissing-prototypes',
++                    '-Wno-format',
++                    '-Wno-format-security',
++                 ],
++                 'defines' : [
++                     'HAIKU',
++                     'HAVE_LIBM=1',
++                     'HAVE_STRDUP=1',
++                     'HAVE_STRLCPY=1',
++                     'HAVE_SYS_TIME_H=1',
++                     'HAVE_VFPRINTF=1',
++                     'NEW_STDIO'
++                     'RETSIGTYPE=void',
++                     'TIME_WITH_SYS_TIME_H=1',
++                     '__UNUSED__=__attribute__((unused))',
++                     'NO_REG_RPC'
++                 ],
++
++                 'include_dirs': [
++                     '../nrappkit/src/port/haiku/include'
++                 ],
++
++                 'sources': [
++                 ],
++              }],
++
+               ## Win
+               [ 'OS == "win"', {
+                 'defines' : [
+diff --git a/dom/media/webrtc/transport/third_party/nICEr/src/stun/addrs.c b/dom/media/webrtc/transport/third_party/nICEr/src/stun/addrs.c
+index 51f72f4..18ad233 100644
+--- a/dom/media/webrtc/transport/third_party/nICEr/src/stun/addrs.c
++++ b/dom/media/webrtc/transport/third_party/nICEr/src/stun/addrs.c
+@@ -204,8 +204,12 @@ nr_stun_get_addrs(nr_local_addr addrs[], int maxaddrs, int *count)
+     if (maxaddrs > 0) {
+        memset(addrs, 0, maxaddrs * sizeof(nr_local_addr));
+     }
+-
++#if defined(HAIKU)
++    count = 0;
++    _status = R_INTERNAL;
++#else
+     _status = stun_getaddrs_filtered(addrs, maxaddrs, count);
++#endif
+ 
+     for (i = 0; i < *count; ++i) {
+       nr_local_addr_fmt_info_string(addrs+i,typestr,sizeof(typestr));
+diff --git a/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h b/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h
+index a32751d..ca054e0 100644
+--- a/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h
++++ b/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h
+@@ -53,9 +53,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #include <net/route.h>
+ #endif
+ #include <netinet/in.h>
++#ifdef HAIKU
++#include <netinet/ip_var.h>
++#else
+ #ifndef LINUX
+ #include <netinet/in_var.h>
+ #endif
++#endif
+ #include <arpa/inet.h>
+ #include <netdb.h>
+ #endif
+diff --git a/dom/media/webrtc/transport/third_party/nrappkit/nrappkit.gyp b/dom/media/webrtc/transport/third_party/nrappkit/nrappkit.gyp
+index c3f88af..987a7e4 100644
+--- a/dom/media/webrtc/transport/third_party/nrappkit/nrappkit.gyp
++++ b/dom/media/webrtc/transport/third_party/nrappkit/nrappkit.gyp
+@@ -6,6 +6,9 @@
+ #
+ #
+ {
++  'variables' : {
++    'OS' : 'haiku'
++  },
+   'targets' : [
+       {
+           'target_name' : 'nrappkit',
+@@ -181,6 +184,39 @@
+                  ],
+               }],
+ 
++              ## Haiku
++              [ 'OS == "haiku"', {
++                'cflags_mozilla': [
++                    '-Wall',
++                    '-Wno-parentheses',
++                    '-Wno-strict-prototypes',
++                    '-Wmissing-prototypes',
++                    '-Wno-format',
++                    '-Wno-format-security',
++                 ],
++                 'defines' : [
++                     'HAIKU',
++                     'HAVE_LIBM=1',
++                     'HAVE_STRDUP=1',
++                     'HAVE_STRLCPY=1',
++                     'HAVE_SYS_TIME_H=1',
++                     'HAVE_VFPRINTF=1',
++                     'NEW_STDIO'
++                     'RETSIGTYPE=void',
++                     'TIME_WITH_SYS_TIME_H=1',
++                     '__UNUSED__=__attribute__((unused))',
++                     'NO_REG_RPC'
++                 ],
++
++                 'include_dirs': [
++                     'src/port/haiku/include'
++                 ],
++
++                 'sources': [
++                      './src/port/haiku/include/csi_platform.h',
++                 ],
++              }],
++
+               ## Win
+               [ 'OS == "win"', {
+                  'defines' : [
+diff --git a/dom/media/webrtc/transport/third_party/nrappkit/src/log/r_log.c b/dom/media/webrtc/transport/third_party/nrappkit/src/log/r_log.c
+index bb47cda..0d92120 100644
+--- a/dom/media/webrtc/transport/third_party/nrappkit/src/log/r_log.c
++++ b/dom/media/webrtc/transport/third_party/nrappkit/src/log/r_log.c
+@@ -36,7 +36,7 @@
+    ekr@rtfm.com  Mon Dec  3 15:24:38 2001
+  */
+ 
+-#ifdef LINUX
++#if defined(LINUX) || defined(HAIKU)
+ #define _BSD_SOURCE
+ #define _DEFAULT_SOURCE
+ #endif
+diff --git a/dom/media/webrtc/transport/third_party/nrappkit/src/port/haiku/include/csi_platform.h b/dom/media/webrtc/transport/third_party/nrappkit/src/port/haiku/include/csi_platform.h
+new file mode 100644
+index 0000000..bc8ad50
+--- /dev/null
++++ b/dom/media/webrtc/transport/third_party/nrappkit/src/port/haiku/include/csi_platform.h
+@@ -0,0 +1,58 @@
++/**
++   platform.h
++
++
++   Copyright (C) 2005, Network Resonance, Inc.
++   Copyright (C) 2006, Network Resonance, Inc.
++   All Rights Reserved
++
++   Redistribution and use in source and binary forms, with or without
++   modification, are permitted provided that the following conditions
++   are met:
++
++   1. Redistributions of source code must retain the above copyright
++      notice, this list of conditions and the following disclaimer.
++   2. Redistributions in binary form must reproduce the above copyright
++      notice, this list of conditions and the following disclaimer in the
++      documentation and/or other materials provided with the distribution.
++   3. Neither the name of Network Resonance, Inc. nor the name of any
++      contributors to this software may be used to endorse or promote
++      products derived from this software without specific prior written
++      permission.
++
++   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS ``AS IS''
++   AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++   IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++   ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
++   LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++   CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++   SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++   INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++   CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++   ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++   POSSIBILITY OF SUCH DAMAGE.
++
++
++   briank@network-resonance.com  Tue Mar 15 14:28:12 PST 2005
++ */
++
++
++#ifndef _platform_h
++#define _platform_h
++
++#include <unistd.h>
++#include <string.h>
++
++#define STDIO_BYTES_BUFFERED(fp) (fp->_r)
++
++#ifdef NR_SOCKET_IS_VOID_PTR
++typedef void* NR_SOCKET;
++#else
++typedef int NR_SOCKET;
++#define NR_SOCKET_READ(sock,buf,count)   read((sock),(buf),(count))
++#define NR_SOCKET_WRITE(sock,buf,count)  write((sock),(buf),(count))
++#define NR_SOCKET_CLOSE(sock)            close(sock)
++#endif
++
++#endif
++
+diff --git a/dom/media/webrtc/transport/third_party/nrappkit/src/share/nr_common.h b/dom/media/webrtc/transport/third_party/nrappkit/src/share/nr_common.h
+index ac3ff44..8356dc2 100644
+--- a/dom/media/webrtc/transport/third_party/nrappkit/src/share/nr_common.h
++++ b/dom/media/webrtc/transport/third_party/nrappkit/src/share/nr_common.h
+@@ -54,6 +54,8 @@
+ #ifdef WIN32
+ #include <winsock2.h>
+ #include <errno.h>
++#elif defined(HAIKU)
++#include <errno.h>
+ #else
+ #include <sys/errno.h>
+ #endif
 diff --git a/gfx/angle/checkout/src/common/system_utils_posix.cpp b/gfx/angle/checkout/src/common/system_utils_posix.cpp
 index ab0faee..f9c9389 100644
 --- a/gfx/angle/checkout/src/common/system_utils_posix.cpp
@@ -265,107 +517,6 @@ index 879bebe..eee6750 100644
  
      void setDataFromBytes(SkSpan<std::byte> allocation) {
          T* data = TCast(allocation.data());
-diff --git a/haiku_mozconfig b/haiku_mozconfig
-new file mode 100644
-index 0000000..41a452e
---- /dev/null
-+++ b/haiku_mozconfig
-@@ -0,0 +1,48 @@
-+export MOZILLA_OFFICIAL=1
-+
-+# Application name
-+ac_add_options --with-app-name=Iceweasel
-+
-+# Backend
-+ac_add_options --enable-default-toolkit=cairo-gtk3-wayland-only
-+ac_add_options --enable-audio-backends=haiku
-+
-+# System library
-+ac_add_options --with-system-ffi
-+ac_add_options --with-system-jpeg
-+ac_add_options --with-system-libevent
-+ac_add_options --with-system-libvpx
-+ac_add_options --with-system-nspr
-+ac_add_options --with-system-nss
-+ac_add_options --with-system-webp
-+ac_add_options --with-system-zlib
-+
-+# Disable
-+ac_add_options --disable-tests
-+ac_add_options --disable-updater
-+ac_add_options --disable-valgrind
-+ac_add_options --disable-crashreporter
-+ac_add_options --without-wasm-sandboxed-libraries
-+mk_add_options MOZ_CRASHREPORTER=0
-+mk_add_options MOZ_DATA_REPORTING=0
-+mk_add_options MOZ_SERVICES_HEALTHREPORT=0
-+mk_add_options MOZ_TELEMETRY_REPORTING=0
-+
-+# Linker
-+export LD="lld"
-+export LDFLAGS="-fuse-ld=lld -Wl,--no-keep-memory -Wl,--undefined-version"
-+
-+# Optimize
-+ac_add_options --enable-jit
-+ac_add_options --enable-optimize=-O3
-+ac_add_options RUSTC_OPT_LEVEL=1
-+export RUSTC_OPT_LEVEL=1
-+
-+# Debug
-+ac_add_options --disable-debug
-+ac_add_options --disable-debug-symbols
-+ac_add_options --disable-debug-js-modules
-+ac_add_options --enable-strip
-+ac_add_options --enable-install-strip
-+export STRIP_FLAGS="--strip-debug --strip-unneeded"
-+
-diff --git a/haiku_mozconfig_dbg b/haiku_mozconfig_dbg
-new file mode 100644
-index 0000000..55aaa1a
---- /dev/null
-+++ b/haiku_mozconfig_dbg
-@@ -0,0 +1,41 @@
-+export MOZILLA_OFFICIAL=1
-+
-+mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-ff-dbg
-+
-+# Application name
-+ac_add_options --with-app-name=Iceweasel
-+
-+# Backend
-+ac_add_options --enable-default-toolkit=cairo-gtk3-wayland-only
-+ac_add_options --enable-audio-backends=haiku
-+
-+# System library
-+ac_add_options --with-system-ffi
-+ac_add_options --with-system-jpeg
-+ac_add_options --with-system-libevent
-+ac_add_options --with-system-libvpx
-+ac_add_options --with-system-nspr
-+ac_add_options --with-system-nss
-+ac_add_options --with-system-webp
-+ac_add_options --with-system-zlib
-+
-+# Disable
-+ac_add_options --disable-tests
-+ac_add_options --disable-updater
-+ac_add_options --disable-valgrind
-+ac_add_options --disable-crashreporter
-+ac_add_options --without-wasm-sandboxed-libraries
-+mk_add_options MOZ_CRASHREPORTER=0
-+mk_add_options MOZ_DATA_REPORTING=0
-+mk_add_options MOZ_SERVICES_HEALTHREPORT=0
-+mk_add_options MOZ_TELEMETRY_REPORTING=0
-+
-+# Linker
-+export LD="lld"
-+export LDFLAGS="-fuse-ld=lld -Wl,--no-keep-memory -Wl,--undefined-version"
-+
-+# Optimize
-+ac_add_options --disable-jit
-+
-+# Debug
-+ac_add_options --enable-debug
 diff --git a/image/SurfaceCache.cpp b/image/SurfaceCache.cpp
 index f97b32d..7857331 100644
 --- a/image/SurfaceCache.cpp
@@ -626,12 +777,12 @@ index b0db033..efe0927 100644
  #endif
 diff --git a/media/libcubeb/src/cubeb_haiku.cpp b/media/libcubeb/src/cubeb_haiku.cpp
 new file mode 100644
-index 0000000..700f826
+index 0000000..4b2c540
 --- /dev/null
 +++ b/media/libcubeb/src/cubeb_haiku.cpp
-@@ -0,0 +1,468 @@
+@@ -0,0 +1,966 @@
 +/*
-+ * Copyright © 2024 Troeglazov Gerasim
++ * Copyright © 2024-2025 Troeglazov Gerasim
 + *
 + * This program is made available under an ISC-style license.  See the
 + * accompanying file LICENSE for details.
@@ -640,24 +791,41 @@ index 0000000..700f826
 +#include "cubeb-internal.h"
 +#include "cubeb/cubeb.h"
 +#include "cubeb_utils.h"
++#include "cubeb_ringbuffer.h"
++
 +#include <stdio.h>
 +#include <stdlib.h>
 +#include <string.h>
++#include <pthread.h>
++#include <unistd.h>
++#include <cmath>
 +
 +// Workaround for gcc_hidden.h hack of libxul.so
 +#pragma GCC visibility push(default)
-+#include <Application.h>
-+#include <Roster.h>
-+#include <SoundPlayer.h>
-+#include <String.h>
-+#include <NodeInfo.h>
-+#include <Path.h>
-+#include <OS.h>
++
++#include <kernel/OS.h>
++#include <app/Application.h>
++#include <app/Roster.h>
++#include <media/SoundPlayer.h>
++#include <storage/NodeInfo.h>
++#include <storage/Path.h>
++#include <support/String.h>
++#include <support/Errors.h>
++
++#include <AudioCapture.h>
++
 +#pragma GCC visibility pop
 +
 +static const int MAX_CHANNELS = 2;
 +static const char DEFAULT_CONTEXT_NAME[] = "Cubeb";
 +
++static const char HAIKU_DEFAULT_IN[] = "Default Input";
++static const char HAIKU_DEFAULT_OUT[] = "Default Output";
++
++#define HAIKU_DEFAULT_IN_ID ((cubeb_devid)(uintptr_t)HAIKU_DEFAULT_IN)
++#define HAIKU_DEFAULT_OUT_ID ((cubeb_devid)(uintptr_t)HAIKU_DEFAULT_OUT)
++
++// Function Declarations
 +extern "C" {
 +int haiku_init(cubeb ** context, char const * context_name);
 +}
@@ -667,16 +835,16 @@ index 0000000..700f826
 +static int haiku_get_min_latency(cubeb* ctx, cubeb_stream_params params, uint32_t* latency_frames);
 +static int haiku_get_preferred_sample_rate(cubeb* ctx, uint32_t* rate);
 +static int haiku_stream_init(cubeb* context,
-+                 cubeb_stream** stream,
-+                 char const* stream_name,
-+                 cubeb_devid input_device,
-+                 cubeb_stream_params* input_stream_params,
-+                 cubeb_devid output_device,
-+                 cubeb_stream_params* output_stream_params,
-+                 unsigned int latency_frames,
-+                 cubeb_data_callback data_callback,
-+                 cubeb_state_callback state_callback,
-+                 void* user_ptr);
++                cubeb_stream** stream,
++                char const* stream_name,
++                cubeb_devid input_device,
++                cubeb_stream_params* input_stream_params,
++                cubeb_devid output_device,
++                cubeb_stream_params* output_stream_params,
++                unsigned int latency_frames,
++                cubeb_data_callback data_callback,
++                cubeb_state_callback state_callback,
++                void* user_ptr);
 +static void haiku_stream_destroy(cubeb_stream* stream);
 +static int haiku_stream_start(cubeb_stream* stream);
 +static int haiku_stream_stop(cubeb_stream* stream);
@@ -684,10 +852,10 @@ index 0000000..700f826
 +static int haiku_stream_get_latency(cubeb_stream* stream, uint32_t* latency_frames);
 +static int haiku_stream_set_volume(cubeb_stream* stream, float volume);
 +static int haiku_stream_get_current_device(cubeb_stream* stream, cubeb_device** const device);
-+static int haiku_stream_device_destroy(cubeb_stream* stream, cubeb_device* device);
 +static int haiku_enumerate_devices(cubeb* context, cubeb_device_type type, cubeb_device_collection* collection);
 +static int haiku_device_collection_destroy(cubeb* context, cubeb_device_collection* collection);
 +
++// Cubeb Ops Table
 +static struct cubeb_ops const cubeb_haiku_ops = {
 +    .init = haiku_init,
 +    .get_backend_id = haiku_get_backend_id,
@@ -704,17 +872,20 @@ index 0000000..700f826
 +    .stream_stop = haiku_stream_stop,
 +    .stream_get_position = haiku_stream_get_position,
 +    .stream_get_latency = haiku_stream_get_latency,
-+    .stream_get_input_latency = NULL,
 +    .stream_set_volume = haiku_stream_set_volume,
 +    .stream_set_name = NULL,
 +    .stream_get_current_device = haiku_stream_get_current_device,
 +    .stream_set_input_mute = NULL,
 +    .stream_set_input_processing_params = NULL,
-+    .stream_device_destroy = haiku_stream_device_destroy,
++    .stream_device_destroy = NULL,
 +    .stream_register_device_changed_callback = NULL,
 +    .register_device_collection_changed = NULL,
 +};
 +
++// Forward declaration for input thread function
++static void* input_thread_func(void* user_data);
++
++// Stream and Context Structs
 +struct cubeb_stream {
 +  /* Note: Must match cubeb_stream layout in cubeb.c. */
 +  cubeb* context;
@@ -725,15 +896,29 @@ index 0000000..700f826
 +
 +  cubeb_data_callback data_callback;
 +  cubeb_state_callback state_callback;
-+  cubeb_stream_params params;
 +
-+  uint64_t position;
-+  bool pause;
-+  
-+  float volume;  
-+
++  // Output related members
++  cubeb_stream_params output_params;
 +  BSoundPlayer* sound_player;
-+  media_raw_audio_format format;
++  media_raw_audio_format output_format_haiku;
++  uint64_t output_position;
++  bool output_pause;
++  float output_volume;
++
++  // Input related members
++  cubeb_stream_params input_params;
++  AudioCapture* audio_capturer;
++  lock_free_audio_ring_buffer<float>* input_ring_buffer;
++  float* input_temp_buffer;
++  size_t input_temp_buffer_frames;
++  bool input_enabled;
++  uint32_t input_channels_cubeb;
++  uint32_t input_channels_capture;
++
++  // Input thread (for input-only streams)
++  pthread_t input_thread;
++  bool input_thread_running;
++  bool input_thread_created;
 +
 +  char stream_name[256];
 +};
@@ -741,109 +926,279 @@ index 0000000..700f826
 +struct cubeb {
 +  struct cubeb_ops const* ops;
 +  pthread_mutex_t mutex;
-+
-+  bool active;
-+  uint32_t sample_rate;
-+  uint32_t latency;
-+  
 +  char context_name[256];
 +};
 +
++// AudioCapture Callback (Input)
 +static void
-+haiku_audio_callback(void* cookie, void* buffer, size_t size, const media_raw_audio_format& format)
++haiku_audio_input_callback(const float* stereoData, size_t frameCount, void* userData)
++{
++  cubeb_stream* stm = static_cast<cubeb_stream*>(userData);
++
++  if (!stm || !stm->input_enabled || !stm->input_ring_buffer) {
++    return;
++  }
++
++  // AudioCapture always provides stereo (2 channels)
++  if (stm->input_channels_cubeb == 1 && stm->input_channels_capture == 2) {
++    float* mono_buffer = (float*)malloc(frameCount * sizeof(float));
++    if (!mono_buffer) {
++      fprintf(stderr, "Cubeb Haiku: Failed to allocate mono buffer in capture callback!\n");
++      return;
++    }
++    for (size_t i = 0; i < frameCount; ++i) {
++      mono_buffer[i] = stereoData[i * 2]; // Take left channel
++    }
++    int written_frames = stm->input_ring_buffer->enqueue(mono_buffer, frameCount);
++    free(mono_buffer);
++    if (written_frames != (int)frameCount) {
++      fprintf(stderr, "Cubeb Haiku: Input ring buffer enqueue failed/partial (%d/%zu frames)\n", written_frames, frameCount);
++    }
++  } else {
++    int written_frames = stm->input_ring_buffer->enqueue(const_cast<float*>(stereoData), frameCount);
++    if (written_frames != (int)frameCount) {
++      fprintf(stderr, "Cubeb Haiku: Input ring buffer enqueue failed/partial (%d/%zu frames)\n", written_frames, frameCount);
++    }
++  }
++}
++
++// BSoundPlayer Callback (Output)
++static void
++haiku_audio_output_callback(void* cookie, void* buffer, size_t size, const media_raw_audio_format& format)
 +{
 +  cubeb_stream* stm = static_cast<cubeb_stream*>(cookie);
-+  
-+  if (buffer == nullptr || cookie == nullptr)
-+  	return;
 +
-+  if (stm->pause) {
++  if (buffer == nullptr || cookie == nullptr) {
++    fprintf(stderr, "Cubeb Haiku: Invalid args in output callback\n");
++    return;
++  }
++
++  long output_frames = 0;
++  uint32_t output_bytes_per_frame = 0;
++  if (format.channel_count > 0) {
++    if (format.format == media_raw_audio_format::B_AUDIO_FLOAT) {
++      output_bytes_per_frame = format.channel_count * sizeof(float);
++    } else {
++      fprintf(stderr, "Cubeb Haiku: Unexpected output format in callback: 0x%x\n", format.format);
++      memset(buffer, 0, size); // Silence on error
++      return;
++    }
++    if (output_bytes_per_frame > 0) {
++      output_frames = size / output_bytes_per_frame;
++    }
++  }
++
++  if (output_frames <= 0) {
++    fprintf(stderr, "Cubeb Haiku: Zero frames requested in output callback\n");
++    return;
++  }
++
++  if (stm->output_pause) {
 +    memset(buffer, 0, size);
 +    return;
 +  }
 +
-+  if (pthread_mutex_trylock(&stm->mutex) != 0) {
++  if (pthread_mutex_lock(&stm->mutex) != 0) {
++    // Failed to lock, mutex error. Output silence
++    fprintf(stderr, "Cubeb Haiku: Mutex lock failed in output callback\n");
 +    memset(buffer, 0, size);
 +    return;
 +  }
 +
-+  long frames = size / format.channel_count;
-+  switch (format.format) {
-+    case media_raw_audio_format::B_AUDIO_FLOAT:
-+      frames /= sizeof(float);
-+      break;
-+    case media_raw_audio_format::B_AUDIO_SHORT:
-+      frames /= sizeof(int16_t);
-+      break;
++  void* input_buffer_ptr = nullptr;
++  long input_frames_read = 0; // Frames read from ring buffer
++
++  // Handle input if enabled
++  if (stm->input_enabled && stm->input_ring_buffer) {
++      // Ensure temporary input buffer is large enough
++      if (stm->input_temp_buffer_frames < (size_t)output_frames) {
++          free(stm->input_temp_buffer);
++          // Allocate based on channels requested by cubeb
++          stm->input_temp_buffer = (float*)malloc(output_frames * stm->input_params.channels * sizeof(float));
++          if (!stm->input_temp_buffer) {
++              fprintf(stderr, "Cubeb Haiku: Failed to allocate input temp buffer\n");
++              stm->input_temp_buffer_frames = 0;
++              memset(buffer, 0, size); // Output silence on error
++              pthread_mutex_unlock(&stm->mutex);
++              stm->state_callback(stm, stm->user_ptr, CUBEB_STATE_ERROR);
++              return;
++          }
++          stm->input_temp_buffer_frames = output_frames;
++      }
++
++      // Dequeue data from the ring buffer into the temp buffer
++      input_frames_read = stm->input_ring_buffer->dequeue(stm->input_temp_buffer, output_frames);
++
++      if (input_frames_read < output_frames) {
++          size_t remaining_frames = output_frames - input_frames_read;
++          size_t offset_samples = input_frames_read * stm->input_params.channels;
++          memset(stm->input_temp_buffer + offset_samples, 0, remaining_frames * stm->input_params.channels * sizeof(float));
++          input_frames_read = output_frames; // We filled the gap with silence
++      }
++      input_buffer_ptr = stm->input_temp_buffer;
 +  }
 +
-+  long got = stm->data_callback(stm, stm->user_ptr, nullptr, buffer, frames);
++  // Call the user's data callback
++  long frames_processed = stm->data_callback(stm, stm->user_ptr,
++                                            input_buffer_ptr,
++                                            buffer,
++                                            output_frames);
 +
-+  if (got < 0) {
++  // Check callback result
++  if (frames_processed < 0 || frames_processed > output_frames) {
 +    memset(buffer, 0, size);
++    stm->output_position += output_frames;
 +    pthread_mutex_unlock(&stm->mutex);
 +    stm->state_callback(stm, stm->user_ptr, CUBEB_STATE_ERROR);
++    fprintf(stderr, "Cubeb Haiku: User callback error (%ld/%ld frames)\n", frames_processed, output_frames);
 +    return;
 +  }
 +
-+  stm->position += got;
++  if (frames_processed < output_frames) {
++    size_t remaining_frames = output_frames - frames_processed;
++    size_t offset_bytes = frames_processed * output_bytes_per_frame;
++    memset((char*)buffer + offset_bytes, 0, remaining_frames * output_bytes_per_frame);
++  }
++
++  stm->output_position += output_frames;
 +  pthread_mutex_unlock(&stm->mutex);
 +}
 +
++// Input Thread Function (for Input-Only streams)
++static void* input_thread_func(void* user_data) {
++    cubeb_stream* stm = static_cast<cubeb_stream*>(user_data);
++    if (!stm || !stm->input_enabled || !stm->input_ring_buffer) {
++        return NULL;
++    }
++
++    // Target chunk size in frames (e.g., ~20ms)
++    unsigned int frames_per_iteration = (stm->input_params.rate * 20) / 1000;
++    if (frames_per_iteration < 128) frames_per_iteration = 128;
++
++    // Allocate buffer for reading data from ring buffer
++    float* read_buffer = (float*)malloc(frames_per_iteration * stm->input_params.channels * sizeof(float));
++    if (!read_buffer) {
++        fprintf(stderr, "Cubeb Haiku: Failed to allocate read buffer for input thread\n");
++        stm->state_callback(stm, stm->user_ptr, CUBEB_STATE_ERROR);
++        stm->input_thread_running = false;
++        return NULL;
++    }
++
++    printf("Cubeb Haiku: Input thread started (chunk size: %u frames)\n", frames_per_iteration);
++
++    while (stm->input_thread_running) {
++        // Check available frames without blocking excessively
++        int frames_available = stm->input_ring_buffer->available_read();
++
++        if (frames_available >= (int)frames_per_iteration) {
++            // Dequeue data
++            int frames_read = stm->input_ring_buffer->dequeue(read_buffer, frames_per_iteration);
++
++            if (frames_read > 0) {
++                // Lock mutex before calling user callback
++                 if (pthread_mutex_lock(&stm->mutex) == 0) {
++                    long frames_processed = stm->data_callback(stm, stm->user_ptr,
++                                                               read_buffer,
++                                                               nullptr,
++                                                               frames_read);
++                    pthread_mutex_unlock(&stm->mutex);
++
++                    if (frames_processed < 0 || frames_processed > frames_read) {
++                        fprintf(stderr, "Cubeb Haiku: User callback error in input thread (%ld/%d frames)\n", frames_processed, frames_read);
++                        stm->state_callback(stm, stm->user_ptr, CUBEB_STATE_ERROR);
++                        // Optional: Stop thread on error?
++                        // stm->input_thread_running = false;
++                    }
++                } else {
++                     fprintf(stderr, "Cubeb Haiku: Mutex lock failed in input thread\n");
++                }
++            }
++        } else {
++            // Not enough data, wait a bit
++            usleep(5 * 1000); // Sleep 5ms
++        }
++    }
++
++    printf("Cubeb Haiku: Input thread stopping.\n");
++    free(read_buffer);
++    return NULL;
++}
++
++
++// Utility Functions
++
++static size_t calculate_haiku_buffer_size(cubeb_stream_params* params, unsigned int latency_frames)
++{
++  if (!params || params->rate == 0 || params->channels == 0)
++    return 2048;
++
++  // Expecting float
++  size_t bytes_per_frame = params->channels * sizeof(float);
++  size_t requested_buffer_size = latency_frames * bytes_per_frame;
++
++  // Align to reasonable boundaries
++  size_t min_buffer_bytes = 512 * bytes_per_frame;
++  size_t max_buffer_bytes = 8192 * bytes_per_frame;
++
++  if (requested_buffer_size < min_buffer_bytes)
++    return min_buffer_bytes;
++
++  if (requested_buffer_size > max_buffer_bytes)
++    return max_buffer_bytes;
++
++  return requested_buffer_size;
++}
++
++
 +static media_raw_audio_format
-+cubeb_format_to_haiku(cubeb_stream_params *params)
++cubeb_format_to_haiku(cubeb_stream_params *params, size_t buffer_size_bytes)
 +{
 +  media_raw_audio_format format;
-+  
++  memset(&format, 0, sizeof(format));
++  if (!params) return format;
++
 +  format.frame_rate = params->rate;
 +  format.channel_count = params->channels;
-+  format.buffer_size = 2048;
++  format.buffer_size = buffer_size_bytes;
 +  format.byte_order = B_MEDIA_HOST_ENDIAN;
-+  
-+  switch (params->format) {
-+    case CUBEB_SAMPLE_FLOAT32NE:
++
++  if (params->format == CUBEB_SAMPLE_FLOAT32NE) {
 +      format.format = media_raw_audio_format::B_AUDIO_FLOAT;
-+      break;
-+    case CUBEB_SAMPLE_S16NE:
-+      format.format = media_raw_audio_format::B_AUDIO_SHORT;
-+      break;
-+    default:
-+      format.format = media_raw_audio_format::B_AUDIO_FLOAT;
-+      break;
++  } else {
++      format.format = 0; // Mark as invalid/unsupported
 +  }
-+  
 +  return format;
 +}
++
++// Cubeb API Implementation
 +
 +int
 +haiku_init(cubeb** context, char const* context_name)
 +{
 +  *context = NULL;
-+
 +  cubeb* ctx = (cubeb*)calloc(1, sizeof(*ctx));
-+  if (!ctx) {
++  if (!ctx)
 +    return CUBEB_ERROR;
-+  }
 +
 +  ctx->ops = &cubeb_haiku_ops;
-+  ctx->mutex = PTHREAD_MUTEX_INITIALIZER;
-+  
-+  ctx->active = true;
-+  ctx->sample_rate = 48000;
-+  ctx->latency = 128;
-+  if (context_name)
-+    snprintf(ctx->context_name, 255, "%s", context_name);
-+  else
-+    snprintf(ctx->context_name, 255, "%s", DEFAULT_CONTEXT_NAME);
++  if (pthread_mutex_init(&ctx->mutex, NULL) != 0) {
++      free(ctx);
++      return CUBEB_ERROR;
++  }
 +
++  snprintf(ctx->context_name, sizeof(ctx->context_name), "%s", context_name ? context_name : DEFAULT_CONTEXT_NAME);
 +  *context = ctx;
++
 +  return CUBEB_OK;
 +}
 +
 +static void
 +haiku_destroy(cubeb* context)
 +{
-+  context->active = false;
++  if (!context)
++    return;
++
++  pthread_mutex_destroy(&context->mutex);
 +  free(context);
 +}
 +
@@ -863,7 +1218,12 @@ index 0000000..700f826
 +static int
 +haiku_get_min_latency(cubeb* ctx, cubeb_stream_params params, uint32_t* latency_frames)
 +{
-+  *latency_frames = 128;
++  if (params.rate == 0)
++    return CUBEB_ERROR_INVALID_PARAMETER;
++
++  *latency_frames = (params.rate * 10) / 1000; // ~10ms
++  if (*latency_frames < 128) *latency_frames = 128;
++
 +  return CUBEB_OK;
 +}
 +
@@ -887,165 +1247,409 @@ index 0000000..700f826
 +                 cubeb_state_callback state_callback,
 +                 void* user_ptr)
 +{
-+  if (!output_stream_params) {
++  if (!context || !stream || !data_callback || !state_callback)
 +    return CUBEB_ERROR_INVALID_PARAMETER;
++
++  if (!input_stream_params && !output_stream_params)
++    return CUBEB_ERROR_INVALID_PARAMETER;
++
++  if (output_stream_params) {
++    if (output_stream_params->format != CUBEB_SAMPLE_FLOAT32NE)
++      return CUBEB_ERROR_INVALID_FORMAT;
++    if (output_stream_params->rate == 0 || output_stream_params->channels == 0 || output_stream_params->channels > MAX_CHANNELS)
++      return CUBEB_ERROR_INVALID_PARAMETER;
++    if (output_device != NULL && output_device != HAIKU_DEFAULT_OUT_ID)
++      return CUBEB_ERROR_DEVICE_UNAVAILABLE;
++    if (output_stream_params->prefs & CUBEB_STREAM_PREF_LOOPBACK)
++      return CUBEB_ERROR_NOT_SUPPORTED;
 +  }
 +
++  if (input_stream_params) {
++    if (input_stream_params->format != CUBEB_SAMPLE_FLOAT32NE)
++      return CUBEB_ERROR_INVALID_FORMAT;
++    if (input_stream_params->rate == 0 || input_stream_params->channels == 0 || input_stream_params->channels > MAX_CHANNELS)
++      return CUBEB_ERROR_INVALID_PARAMETER;
++    if (input_device != NULL && input_device != HAIKU_DEFAULT_IN_ID)
++      return CUBEB_ERROR_DEVICE_UNAVAILABLE;
++    if (input_stream_params->prefs & CUBEB_STREAM_PREF_LOOPBACK)
++      return CUBEB_ERROR_NOT_SUPPORTED;
++  }
++
++  if (input_stream_params && output_stream_params && input_stream_params->rate != output_stream_params->rate) {
++       fprintf(stderr, "Cubeb Haiku: Input/output rate mismatch not supported (%u != %u).\n",
++                        input_stream_params->rate, output_stream_params->rate);
++       return CUBEB_ERROR_INVALID_PARAMETER;
++  }
++
++  // Allocate Stream
 +  *stream = NULL;
-+
-+  pthread_mutex_lock(&context->mutex);
-+  
 +  cubeb_stream* stm = reinterpret_cast<cubeb_stream *>(calloc(1, sizeof(*stm)));
-+
-+  if (!stm) {
-+  	pthread_mutex_unlock(&context->mutex);    
++  if (!stm)
 +    return CUBEB_ERROR;
-+  }
-+
-+  stm->mutex = PTHREAD_MUTEX_INITIALIZER;
-+  if (stream_name) {
-+  	if (strcmp(stream_name, "AudioStream") == 0) {
-+  		snprintf(stm->stream_name, 255, "%s", context->context_name);
-+  	} else {
-+  		snprintf(stm->stream_name, 255, "%s", stream_name);
-+  	}
-+  } else {
-+  	snprintf(stm->stream_name, 255, "%s", context->context_name);
-+  }
-+  
-+  pthread_mutex_unlock(&context->mutex);
-+
-+  pthread_mutex_lock(&stm->mutex);
 +
 +  stm->context = context;
 +  stm->user_ptr = user_ptr;
-+  stm->params = *output_stream_params;
 +  stm->data_callback = data_callback;
 +  stm->state_callback = state_callback;
-+  stm->position = 0;
-+  stm->volume = 1.0f;
-+  stm->format = cubeb_format_to_haiku(output_stream_params);
++  stm->output_volume = 1.0f;
++  stm->output_position = 0;
 +  stm->sound_player = nullptr;
++  stm->audio_capturer = nullptr;
++  stm->input_ring_buffer = nullptr;
++  stm->input_temp_buffer = nullptr;
++  stm->input_temp_buffer_frames = 0;
++  stm->input_thread_created = false;
++  stm->input_thread_running = false;
++
++  pthread_mutex_lock(&context->mutex);
++  if (stream_name && strcmp(stream_name, "AudioStream") != 0) {
++    snprintf(stm->stream_name, sizeof(stm->stream_name), "%s", stream_name);
++  } else {
++    snprintf(stm->stream_name, sizeof(stm->stream_name), "%s", context->context_name);
++  }
++  pthread_mutex_unlock(&context->mutex);
++
++  if (pthread_mutex_init(&stm->mutex, NULL) != 0) {
++    free(stm);
++    return CUBEB_ERROR;
++  }
++
++  pthread_mutex_lock(&stm->mutex);
++
++  // Configure Input
++  if (input_stream_params) {
++    stm->input_enabled = true;
++    stm->input_params = *input_stream_params;
++    stm->input_channels_cubeb = input_stream_params->channels;
++
++    uint32_t rate;
++    haiku_get_preferred_sample_rate(context, &rate);
++
++    stm->audio_capturer = new AudioCapture(haiku_audio_input_callback, stm, rate);
++    if (!stm->audio_capturer || stm->audio_capturer->Status() != B_OK) {
++      fprintf(stderr, "Cubeb Haiku: Failed to initialize AudioCapture: %s\n", stm->audio_capturer ? strerror(stm->audio_capturer->Status()) : "alloc failed");
++      goto init_error;
++    }
++
++    float capture_rate = stm->audio_capturer->TargetSampleRate();
++    if (abs(capture_rate - input_stream_params->rate) > 1.0f) {
++      fprintf(stderr, "Cubeb Haiku: Input sample rate mismatch! Requested: %u, Device: %.1f\n", input_stream_params->rate, capture_rate);
++      goto init_error_format;
++    }
++    stm->input_channels_capture = stm->audio_capturer->InputChannelCount();
++    if (stm->input_channels_cubeb > stm->input_channels_capture) {
++      fprintf(stderr, "Cubeb Haiku: Requested input channels (%u) > available (%u)\n", stm->input_channels_cubeb, stm->input_channels_capture);
++      goto init_error_param;
++    }
++
++    // Initialize Ring Buffer
++    size_t ring_buffer_frames = latency_frames * 8;
++    if (ring_buffer_frames < 2048)
++      ring_buffer_frames = 2048;
++
++    stm->input_ring_buffer = new lock_free_audio_ring_buffer<float>(stm->input_params.channels, ring_buffer_frames);
++    if (!stm->input_ring_buffer) {
++      fprintf(stderr, "Cubeb Haiku: Failed to initialize input ring buffer (alloc)\n");
++      goto init_error_nomem;
++    }
++  } else {
++      stm->input_enabled = false;
++  }
++
++  // Configure Output
++  if (output_stream_params) {
++    stm->output_params = *output_stream_params;
++    size_t buffer_size_bytes = calculate_haiku_buffer_size(&stm->output_params, latency_frames);
++    stm->output_format_haiku = cubeb_format_to_haiku(&stm->output_params, buffer_size_bytes);
++    if (stm->output_format_haiku.format == 0) {
++      fprintf(stderr, "Cubeb Haiku: Output format mapping failed.\n");
++      goto init_error_format;
++    }
++  } else {
++    memset(&stm->output_params, 0, sizeof(stm->output_params));
++  }
 +
 +  *stream = stm;
++
++  pthread_mutex_unlock(&stm->mutex);
++  
++  return CUBEB_OK;
++
++// --- Error Handling ---
++init_error_nomem:
++  if (stm->audio_capturer) delete stm->audio_capturer;
++  pthread_mutex_unlock(&stm->mutex);
++  pthread_mutex_destroy(&stm->mutex);
++  free(stm);
++  return CUBEB_ERROR;
++
++init_error_format:
++  if (stm->audio_capturer) delete stm->audio_capturer;
++  if (stm->input_ring_buffer) delete stm->input_ring_buffer;
++  pthread_mutex_unlock(&stm->mutex);
++  pthread_mutex_destroy(&stm->mutex);
++  free(stm);
++  return CUBEB_ERROR_INVALID_FORMAT;
++
++init_error_param:
++   if (stm->audio_capturer) delete stm->audio_capturer;
++   if (stm->input_ring_buffer) delete stm->input_ring_buffer;
++   pthread_mutex_unlock(&stm->mutex);
++   pthread_mutex_destroy(&stm->mutex);
++   free(stm);
++   return CUBEB_ERROR_INVALID_PARAMETER;
++
++init_error: // Generic error
++  if (stm->audio_capturer) delete stm->audio_capturer;
++  if (stm->input_ring_buffer) delete stm->input_ring_buffer;
++  pthread_mutex_unlock(&stm->mutex);
++  pthread_mutex_destroy(&stm->mutex);
++  free(stm);
++  return CUBEB_ERROR;
++}
++
++static void
++haiku_stream_destroy(cubeb_stream* stm)
++{
++  if (!stm)
++    return;
++
++  haiku_stream_stop(stm);
++
++  pthread_mutex_lock(&stm->mutex);
++
++  free(stm->input_temp_buffer);
++
++  if (stm->audio_capturer)
++    delete stm->audio_capturer;
++
++  if (stm->input_ring_buffer)
++    delete stm->input_ring_buffer;
++
++  pthread_mutex_unlock(&stm->mutex);
++  pthread_mutex_destroy(&stm->mutex);
++
++  free(stm);
++}
++
++static int
++haiku_stream_start(cubeb_stream* stm)
++{
++  if (!stm)
++    return CUBEB_ERROR_INVALID_PARAMETER;
++
++  int rc = CUBEB_OK;
++  bool input_started = false, output_started = false;
++
++  pthread_mutex_lock(&stm->mutex);
++
++  // Start Input
++  if (stm->input_enabled && stm->audio_capturer && !stm->audio_capturer->IsRunning()) {
++    status_t capture_status = stm->audio_capturer->Start();
++    if (capture_status == B_OK) {
++      input_started = true;
++    } else {
++      fprintf(stderr, "Cubeb Haiku: Failed start AudioCapture: %s\n", strerror(capture_status));
++      rc = CUBEB_ERROR;
++    }
++  } else if (stm->input_enabled && stm->audio_capturer && stm->audio_capturer->IsRunning()) {
++    input_started = true;
++  }
++
++  // Start Input Thread
++  if (rc == CUBEB_OK && input_started && !stm->sound_player && stm->output_params.rate == 0 && !stm->input_thread_created) {
++    stm->input_thread_running = true;
++    if (pthread_create(&stm->input_thread, NULL, input_thread_func, stm) == 0) {
++      stm->input_thread_created = true;
++    } else {
++      fprintf(stderr, "Cubeb Haiku: Failed create input thread\n");
++
++      stm->input_thread_running = false;
++      rc = CUBEB_ERROR;
++
++      if (stm->audio_capturer)
++        stm->audio_capturer->Stop();
++
++      input_started = false;
++    }
++  }
++
++  // Start Output
++  if (rc == CUBEB_OK && stm->output_params.rate > 0) {
++    if (!stm->sound_player) {
++      stm->sound_player = new BSoundPlayer(&stm->output_format_haiku, stm->stream_name,
++                        haiku_audio_output_callback, nullptr, stm);
++      if (!stm->sound_player || stm->sound_player->InitCheck() != B_OK) {
++        fprintf(stderr, "Cubeb Haiku: Failed create BSoundPlayer: %s\n",
++                        stm->sound_player ? strerror(stm->sound_player->InitCheck()) : "alloc failed");
++        delete stm->sound_player;
++
++        stm->sound_player = nullptr;
++        rc = CUBEB_ERROR;
++
++        if (input_started && stm->audio_capturer)
++          stm->audio_capturer->Stop();
++
++        if (stm->input_thread_created)
++          stm->input_thread_running = false;
++      } else {
++        stm->output_pause = false;
++        stm->sound_player->SetVolume(stm->output_volume);
++        stm->sound_player->Start();
++        stm->sound_player->SetHasData(true);
++        output_started = true;
++      }
++    } else {
++      stm->output_pause = false;
++      stm->sound_player->SetHasData(true);
++      output_started = true;
++    }
++  }
++
++  pthread_mutex_unlock(&stm->mutex);
++
++  // State Callback
++  if (rc == CUBEB_OK && (input_started || output_started)) {
++    stm->state_callback(stm, stm->user_ptr, CUBEB_STATE_STARTED);
++  } else if (rc != CUBEB_OK) {
++     stm->state_callback(stm, stm->user_ptr, CUBEB_STATE_ERROR);
++  }
++
++  return rc;
++}
++
++static int
++haiku_stream_stop(cubeb_stream* stm)
++{
++  printf("haiku_stream_stop\n");
++  if (!stm)
++    return CUBEB_ERROR_INVALID_PARAMETER;
++
++  bool needs_stopped_cb = false;
++
++  // Stop Input Thread
++  if (stm->input_thread_created) {
++      pthread_mutex_lock(&stm->mutex);
++      bool was_running = stm->input_thread_running;
++      stm->input_thread_running = false;
++      pthread_mutex_unlock(&stm->mutex);
++      if (was_running) {
++          pthread_join(stm->input_thread, NULL);
++          needs_stopped_cb = true;
++      }
++      stm->input_thread_created = false;
++  }
++
++  pthread_mutex_lock(&stm->mutex);
++
++  // Stop Input Device
++  if (stm->input_enabled && stm->audio_capturer && stm->audio_capturer->IsRunning()) {
++      stm->audio_capturer->Stop();
++      needs_stopped_cb = true;
++  }
++
++  // Stop Output Device
++  if (stm->sound_player) {
++    stm->output_pause = true;
++    stm->sound_player->SetHasData(false);
++    stm->sound_player->Stop();
++    delete stm->sound_player;
++    stm->sound_player = nullptr;
++    needs_stopped_cb = true;
++  }
++
++  pthread_mutex_unlock(&stm->mutex);
++
++  // State Callback
++  if (needs_stopped_cb)
++    stm->state_callback(stm, stm->user_ptr, CUBEB_STATE_STOPPED);
++
++  return CUBEB_OK;
++}
++
++static int
++haiku_stream_get_position(cubeb_stream* stm, uint64_t* position)
++{
++  if (!stm || !position)
++    return CUBEB_ERROR_INVALID_PARAMETER;
++
++  pthread_mutex_lock(&stm->mutex);
++  *position = stm->output_position;
 +  pthread_mutex_unlock(&stm->mutex);
 +
 +  return CUBEB_OK;
 +}
 +
-+static void
-+haiku_stream_destroy(cubeb_stream* stream)
++static int
++haiku_stream_get_latency(cubeb_stream* stm, uint32_t* latency_frames)
 +{
-+  if (!stream)
-+    return;
-+
-+  haiku_stream_stop(stream);
++  if (!stm || !latency_frames) return CUBEB_ERROR_INVALID_PARAMETER;
++  pthread_mutex_lock(&stm->mutex);
++  if (stm->sound_player && stm->output_format_haiku.channel_count > 0) {
++      uint32_t bytes_per_frame = stm->output_format_haiku.channel_count * sizeof(float);
++      *latency_frames = (bytes_per_frame > 0) ? (stm->output_format_haiku.buffer_size / bytes_per_frame) : 0;
++  } else if (stm->input_enabled && stm->input_ring_buffer) {
++      // Estimate: half ring buffer + capture latency guess
++      size_t ring_buffer_latency = stm->input_ring_buffer->capacity() / 2;
++      uint32_t capture_latency_est = (stm->input_params.rate * 15) / 1000; // ~15ms
++      *latency_frames = capture_latency_est + ring_buffer_latency;
++  } else { *latency_frames = 0; }
++  pthread_mutex_unlock(&stm->mutex);
++  return CUBEB_OK;
 +}
 +
 +static int
-+haiku_stream_start(cubeb_stream* stream)
++haiku_stream_set_volume(cubeb_stream* stm, float volume)
 +{
-+  if (!stream->sound_player) {
-+    stream->sound_player = new BSoundPlayer(&stream->format,
-+                                     stream->stream_name,
-+                                     haiku_audio_callback,
-+                                     nullptr,
-+                                     stream);
++  if (!stm)
++    return CUBEB_ERROR_INVALID_PARAMETER;
 +
-+    if (stream->sound_player->InitCheck() != B_OK)
-+      return CUBEB_ERROR;
++  float clamped_volume = std::max(0.0f, std::min(1.0f, volume));
 +
-+    stream->pause = false;
++  pthread_mutex_lock(&stm->mutex);
 +
-+    haiku_stream_set_volume(stream, stream->volume);
++  stm->output_volume = clamped_volume;
 +
-+    stream->sound_player->Start();
-+    stream->sound_player->SetHasData(true);
++  if (stm->sound_player)
++    stm->sound_player->SetVolume(stm->output_volume);
++
++  pthread_mutex_unlock(&stm->mutex);
++
++  return CUBEB_OK;
++}
++
++
++static int
++haiku_stream_get_current_device(cubeb_stream* stm, cubeb_device** const device)
++{
++  if (!stm || !device)
++    return CUBEB_ERROR_INVALID_PARAMETER;
++
++  static cubeb_device output_device_info;
++  static cubeb_device input_device_info;
++  static bool static_devices_initialized = false;
++
++  if (!static_devices_initialized) {
++    output_device_info.output_name = (char *)HAIKU_DEFAULT_OUT;
++    output_device_info.input_name = NULL;
++    input_device_info.input_name = (char *)HAIKU_DEFAULT_IN;
++    input_device_info.output_name = NULL;
++    static_devices_initialized = true;
 +  }
 +
-+  stream->state_callback(stream, stream->user_ptr, CUBEB_STATE_STARTED);
++  pthread_mutex_lock(&stm->mutex);
++  bool has_output = (stm->output_params.rate > 0);
++  bool has_input = stm->input_enabled;
++  pthread_mutex_unlock(&stm->mutex);
 +
-+  return CUBEB_OK;
-+}
-+
-+static int
-+haiku_stream_stop(cubeb_stream* stream)
-+{
-+  if (stream->sound_player) {
-+    stream->pause = true;
-+    stream->sound_player->SetHasData(false);
-+    stream->sound_player->Stop();
-+
-+    delete stream->sound_player;
-+    stream->sound_player = nullptr;
-+  }
-+
-+  stream->state_callback(stream, stream->user_ptr, CUBEB_STATE_STOPPED);
-+  return CUBEB_OK;
-+}
-+
-+static int
-+haiku_stream_get_position(cubeb_stream* stream, uint64_t* position)
-+{
-+  *position = stream->position;
-+  return CUBEB_OK;
-+}
-+
-+static int
-+haiku_stream_get_latency(cubeb_stream* stream, uint32_t* latency_frames)
-+{
-+  if (!stream) {
++  if (has_output) {
++    *device = &output_device_info;
++  } else if (has_input) {
++    *device = &input_device_info;
++  } else {
 +    return CUBEB_ERROR;
 +  }
 +
-+  *latency_frames = stream->format.buffer_size / 
-+                    (stream->format.channel_count * 
-+                     (stream->format.format == media_raw_audio_format::B_AUDIO_FLOAT ? 
-+                      sizeof(float) : sizeof(int16_t)));
-+  return CUBEB_OK;
-+}
-+
-+static int
-+haiku_stream_set_volume(cubeb_stream* stream, float volume)
-+{
-+  if (!stream) {
-+    return CUBEB_ERROR;
-+  }
-+  
-+  stream->volume = volume;
-+
-+  if (!stream->sound_player)
-+    return CUBEB_ERROR;
-+  
-+  stream->sound_player->SetVolume(volume);
-+
-+  return CUBEB_OK;
-+}
-+
-+static int
-+haiku_stream_get_current_device(cubeb_stream* stream, cubeb_device** const device)
-+{
-+  *device = (cubeb_device*)calloc(1, sizeof(cubeb_device));
-+  if (!*device) {
-+    return CUBEB_ERROR;
-+  }
-+
-+  (*device)->output_name = strdup("Haiku Audio Output");
-+  (*device)->input_name = strdup("");
-+  
-+  return CUBEB_OK;
-+}
-+
-+static int
-+haiku_stream_device_destroy(cubeb_stream* stream, cubeb_device* device)
-+{
-+  if (device->input_name) {
-+    free(device->input_name);
-+  }
-+  if (device->output_name) {
-+    free(device->output_name);
-+  }
-+  free(device);
 +  return CUBEB_OK;
 +}
 +
@@ -1053,37 +1657,77 @@ index 0000000..700f826
 +haiku_enumerate_devices(cubeb* context, cubeb_device_type type,
 +                       cubeb_device_collection* collection)
 +{
-+  if (!context || type != CUBEB_DEVICE_TYPE_OUTPUT) {
++  if (!context || !collection)
++    return CUBEB_ERROR_INVALID_PARAMETER;
++
++  collection->device = NULL;
++  collection->count = 0;
++  int device_count = 0;
++
++  if (type & CUBEB_DEVICE_TYPE_OUTPUT)
++    device_count++;
++
++  if (type & CUBEB_DEVICE_TYPE_INPUT)
++    device_count++;
++
++  if (device_count == 0)
++    return CUBEB_OK;
++
++  cubeb_device_info* devices = (cubeb_device_info*)calloc(device_count, sizeof(cubeb_device_info));
++  if (!devices)
 +    return CUBEB_ERROR;
-+  }
 +
 +  uint32_t rate;
 +  haiku_get_preferred_sample_rate(context, &rate);
 +
-+  collection->count = 1;
-+  collection->device = new cubeb_device_info[1];
-+  
-+  cubeb_device_info* dev = &collection->device[0];
-+  memset(dev, 0, sizeof(cubeb_device_info));
-+  
-+  char const * a_name = "default";
++  uint32_t latency;
++  haiku_get_min_latency(context, {}, &latency);
 +
-+  dev->device_id = a_name;
-+  dev->devid = (cubeb_devid)dev->device_id;
-+  dev->friendly_name = a_name;
-+  dev->group_id = a_name;
-+  dev->vendor_name = a_name;
-+  dev->type = CUBEB_DEVICE_TYPE_OUTPUT;
-+  dev->state = CUBEB_DEVICE_STATE_ENABLED;
-+  dev->preferred = CUBEB_DEVICE_PREF_ALL;
-+  dev->format = CUBEB_DEVICE_FMT_F32NE;
-+  dev->default_format = CUBEB_DEVICE_FMT_F32NE;
-+  dev->max_channels = MAX_CHANNELS;
-+  dev->min_rate = rate;
-+  dev->max_rate = rate;
-+  dev->default_rate = rate;
-+  dev->latency_lo = 0;
-+  dev->latency_hi = 0;
++  int current_index = 0;
++
++  if (type & CUBEB_DEVICE_TYPE_OUTPUT) {
++    cubeb_device_info* cur = &devices[current_index++];
++    cur->devid = HAIKU_DEFAULT_OUT_ID;
++    cur->device_id = HAIKU_DEFAULT_OUT;
++    cur->friendly_name = HAIKU_DEFAULT_OUT;
++    cur->group_id = HAIKU_DEFAULT_OUT;
++    cur->vendor_name = strdup("MediaKit");
++    cur->type = CUBEB_DEVICE_TYPE_OUTPUT;
++    cur->state = CUBEB_DEVICE_STATE_ENABLED;
++    cur->preferred = CUBEB_DEVICE_PREF_ALL;
++    cur->format = CUBEB_DEVICE_FMT_F32NE;
++    cur->default_format = CUBEB_DEVICE_FMT_F32NE;
++    cur->max_channels = MAX_CHANNELS;
++    cur->min_rate = rate;
++    cur->max_rate = rate;
++    cur->default_rate = rate;
++    cur->latency_lo = latency;
++    cur->latency_hi = latency * 4;
++    collection->count++;
++  }
++
++  if (type & CUBEB_DEVICE_TYPE_INPUT) {
++    cubeb_device_info* cur = &devices[current_index++];
++    cur->devid = HAIKU_DEFAULT_IN_ID;
++    cur->device_id = HAIKU_DEFAULT_IN;
++    cur->friendly_name = HAIKU_DEFAULT_IN;
++    cur->group_id = HAIKU_DEFAULT_IN;
++    cur->vendor_name = strdup("MediaKit");
++    cur->type = CUBEB_DEVICE_TYPE_INPUT;
++    cur->state = CUBEB_DEVICE_STATE_ENABLED;
++    cur->preferred = CUBEB_DEVICE_PREF_ALL;
++    cur->format = CUBEB_DEVICE_FMT_F32NE;
++    cur->default_format = CUBEB_DEVICE_FMT_F32NE;
++    cur->max_channels = MAX_CHANNELS;
++    cur->min_rate = rate;
++    cur->max_rate = rate;
++    cur->default_rate = rate;
++    cur->latency_lo = latency;
++    cur->latency_hi = latency * 4;
++    collection->count++;
++  }
++
++  collection->device = devices;
 +
 +  return CUBEB_OK;
 +}
@@ -1092,14 +1736,19 @@ index 0000000..700f826
 +haiku_device_collection_destroy(cubeb* context,
 +                              cubeb_device_collection* collection)
 +{
-+  delete[] collection->device;
-+  collection->device = nullptr;
-+  collection->count = 0;
++  if (!context || !collection)
++    return CUBEB_ERROR_INVALID_PARAMETER;
++
++  if (collection->device) {
++    free(collection->device);
++    collection->device = NULL;
++    collection->count = 0;
++  }
++
 +  return CUBEB_OK;
 +}
-+
 diff --git a/media/libcubeb/src/moz.build b/media/libcubeb/src/moz.build
-index fd6c684..880d871 100644
+index fd6c684..92f7eb2 100644
 --- a/media/libcubeb/src/moz.build
 +++ b/media/libcubeb/src/moz.build
 @@ -30,6 +30,7 @@ if CONFIG['MOZ_SUNAUDIO']:
@@ -1110,7 +1759,7 @@ index fd6c684..880d871 100644
      or CONFIG["MOZ_JACK"]
      or CONFIG["MOZ_AAUDIO"]
      or CONFIG["MOZ_OPENSL"]
-@@ -102,12 +103,22 @@ if CONFIG['MOZ_OPENSL']:
+@@ -102,12 +103,23 @@ if CONFIG['MOZ_OPENSL']:
      SOURCES += ['cubeb_opensl.cpp']
      DEFINES['USE_OPENSL'] = True
  
@@ -1121,6 +1770,7 @@ index fd6c684..880d871 100644
 +    DEFINES['USE_HAIKU'] = True
 +    OS_LIBS += [
 +        'media',
++        'mediahelpers',
 +    ]
 +
  FINAL_LIBRARY = 'xul'
@@ -1147,7 +1797,7 @@ index d05a301..627e2d2 100644
  #  define MOZ_REALLY_CRASH(line) __builtin_trap()
  
 diff --git a/modules/libpref/init/StaticPrefList.yaml b/modules/libpref/init/StaticPrefList.yaml
-index 65e2390..3d63d6f 100644
+index ef8e302..b3de4f7 100644
 --- a/modules/libpref/init/StaticPrefList.yaml
 +++ b/modules/libpref/init/StaticPrefList.yaml
 @@ -10984,6 +10984,8 @@
@@ -1363,6 +2013,144 @@ index b2456d2..127baf9 100644
 +OS_LIBS += [
 +    "network"
 +]
+diff --git a/netwerk/sctp/src/netinet/sctp.h b/netwerk/sctp/src/netinet/sctp.h
+index 6129e77..be8e413 100644
+--- a/netwerk/sctp/src/netinet/sctp.h
++++ b/netwerk/sctp/src/netinet/sctp.h
+@@ -35,7 +35,7 @@
+ #ifndef _NETINET_SCTP_H_
+ #define _NETINET_SCTP_H_
+ 
+-#if defined(__APPLE__) || defined(__linux__)
++#if defined(__APPLE__) || defined(__linux__) || defined(__HAIKU__)
+ #include <stdint.h>
+ #endif
+ #if defined(__FreeBSD__) && !defined(__Userspace__)
+diff --git a/netwerk/sctp/src/netinet/sctp_input.c b/netwerk/sctp/src/netinet/sctp_input.c
+index a3c1476..6fdae00 100644
+--- a/netwerk/sctp/src/netinet/sctp_input.c
++++ b/netwerk/sctp/src/netinet/sctp_input.c
+@@ -6310,11 +6310,11 @@ sctp_input_with_port(struct mbuf *i_pak, int off, uint16_t port)
+ #if defined(_WIN32) && !defined(__Userspace__)
+ 	NTOHS(ip->ip_len);
+ #endif
+-#if defined(__linux__) || (defined(_WIN32) && defined(__Userspace__))
++#if defined(__linux__) || defined(__HAIKU__) || (defined(_WIN32) && defined(__Userspace__))
+ 	ip->ip_len = ntohs(ip->ip_len);
+ #endif
+ #if defined(__Userspace__)
+-#if defined(__linux__) || defined(_WIN32)
++#if defined(__linux__) || defined(_WIN32) || defined(__HAIKU__)
+ 	length = ip->ip_len;
+ #else
+ 	length = ip->ip_len + iphlen;
+diff --git a/netwerk/sctp/src/netinet/sctp_os_userspace.h b/netwerk/sctp/src/netinet/sctp_os_userspace.h
+index 493ae02..cd160c5 100644
+--- a/netwerk/sctp/src/netinet/sctp_os_userspace.h
++++ b/netwerk/sctp/src/netinet/sctp_os_userspace.h
+@@ -1145,7 +1145,7 @@ sctp_get_mbuf_for_msg(unsigned int space_needed, int want_header, int how, int a
+ 
+ #define SCTP_IS_LISTENING(inp) ((inp->sctp_flags & SCTP_PCB_FLAGS_ACCEPTING) != 0)
+ 
+-#if defined(__APPLE__) || defined(__DragonFly__) || defined(__linux__) || defined(__native_client__) || defined(__NetBSD__) || defined(_WIN32) || defined(__Fuchsia__) || defined(__EMSCRIPTEN__)
++#if defined(__APPLE__) || defined(__DragonFly__) || defined(__linux__) || defined(__native_client__) || defined(__NetBSD__) || defined(_WIN32) || defined(__Fuchsia__) || defined(__HAIKU__) || defined(__EMSCRIPTEN__)
+ int
+ timingsafe_bcmp(const void *, const void *, size_t);
+ #endif
+diff --git a/netwerk/sctp/src/netinet/sctp_userspace.c b/netwerk/sctp/src/netinet/sctp_userspace.c
+index 7188890..fac3e16 100644
+--- a/netwerk/sctp/src/netinet/sctp_userspace.c
++++ b/netwerk/sctp/src/netinet/sctp_userspace.c
+@@ -94,7 +94,7 @@ sctp_userspace_set_threadname(const char *name)
+ #endif
+ }
+ 
+-#if !defined(_WIN32) && !defined(__native_client__)
++#if !defined(_WIN32) && !defined(__HAIKU__) && !defined(__native_client__)
+ int
+ sctp_userspace_get_mtu_from_ifn(uint32_t if_index)
+ {
+@@ -129,7 +129,7 @@ sctp_userspace_get_mtu_from_ifn(uint32_t if_index)
+ }
+ #endif
+ 
+-#if defined(__native_client__)
++#if defined(__native_client__) || defined(__HAIKU__)
+ int
+ sctp_userspace_get_mtu_from_ifn(uint32_t if_index)
+ {
+@@ -137,7 +137,7 @@ sctp_userspace_get_mtu_from_ifn(uint32_t if_index)
+ }
+ #endif
+ 
+-#if defined(__APPLE__) || defined(__DragonFly__) || defined(__linux__) || defined(__native_client__) || defined(__NetBSD__) || defined(__QNX__) || defined(_WIN32) || defined(__Fuchsia__) || defined(__EMSCRIPTEN__)
++#if defined(__APPLE__) || defined(__DragonFly__) || defined(__linux__) || defined(__native_client__) || defined(__NetBSD__) || defined(__QNX__) || defined(_WIN32) || defined(__Fuchsia__) || defined(__HAIKU__) || defined(__EMSCRIPTEN__)
+ int
+ timingsafe_bcmp(const void *b1, const void *b2, size_t n)
+ {
+diff --git a/netwerk/sctp/src/user_environment.c b/netwerk/sctp/src/user_environment.c
+index ea52f0a..85b37ee 100644
+--- a/netwerk/sctp/src/user_environment.c
++++ b/netwerk/sctp/src/user_environment.c
+@@ -172,7 +172,7 @@ finish_random(void)
+ {
+ 	return;
+ }
+-#elif (defined(__ANDROID__) && (__ANDROID_API__ < 28)) || defined(__QNX__) || defined(__EMSCRIPTEN__)
++#elif (defined(__ANDROID__) && (__ANDROID_API__ < 28)) || defined(__QNX__) || defined(__EMSCRIPTEN__) || defined(__HAIKU__)
+ #include <fcntl.h>
+ 
+ static int fd = -1;
+diff --git a/netwerk/sctp/src/user_socket.c b/netwerk/sctp/src/user_socket.c
+index cde6ecc..0407d01 100644
+--- a/netwerk/sctp/src/user_socket.c
++++ b/netwerk/sctp/src/user_socket.c
+@@ -50,6 +50,9 @@
+ #if defined(__linux__)
+ #define __FAVOR_BSD    /* (on Ubuntu at least) enables UDP header field names like BSD in RFC 768 */
+ #endif
++#if defined(__HAIKU__)
++#define UIO_MAXIOV _SC_IOV_MAX
++#endif
+ #if !defined(_WIN32)
+ #if defined INET || defined INET6
+ #include <netinet/udp.h>
+@@ -1020,7 +1023,7 @@ userspace_sctp_recvmsg(struct socket *so,
+ 	if (error) {
+ 		if ((auio.uio_resid != ulen) &&
+ 		    (error == EINTR ||
+-#if !defined(__NetBSD__)
++#if !defined(__NetBSD__) && !defined(__HAIKU__)
+ 		     error == ERESTART ||
+ #endif
+ 		     error == EWOULDBLOCK)) {
+@@ -1113,7 +1116,7 @@ usrsctp_recvv(struct socket *so,
+ 	if (errno) {
+ 		if ((auio.uio_resid != ulen) &&
+ 		    (errno == EINTR ||
+-#if !defined(__NetBSD__)
++#if !defined(__NetBSD__) && !defined(__HAIKU__)
+ 		     errno == ERESTART ||
+ #endif
+ 		     errno == EWOULDBLOCK)) {
+@@ -1929,7 +1932,7 @@ int user_connect(struct socket *so, struct sockaddr *sa)
+ 		error = pthread_cond_wait(SOCK_COND(so), SOCK_MTX(so));
+ #endif
+ 		if (error) {
+-#if defined(__NetBSD__)
++#if defined(__NetBSD__) || defined(__HAIKU__)
+ 			if (error == EINTR) {
+ #else
+ 			if (error == EINTR || error == ERESTART) {
+@@ -1949,7 +1952,7 @@ bad:
+ 	if (!interrupted) {
+ 		so->so_state &= ~SS_ISCONNECTING;
+ 	}
+-#if !defined(__NetBSD__)
++#if !defined(__NetBSD__) && !defined(__HAIKU__)
+ 	if (error == ERESTART) {
+ 		error = EINTR;
+ 	}
 diff --git a/nsprpub/pr/src/misc/prsystem.c b/nsprpub/pr/src/misc/prsystem.c
 index f9fa0f6..7bb78a9 100644
 --- a/nsprpub/pr/src/misc/prsystem.c
@@ -1524,6 +2312,47 @@ index 25f43bb..967aee7 100644
      "kFreeBSD": "__FreeBSD_kernel__",
      "Linux": "__linux__",
      "NetBSD": "__NetBSD__",
+diff --git a/python/mozbuild/mozbuild/gn_processor.py b/python/mozbuild/mozbuild/gn_processor.py
+index e0b2ca4..a6d7a0f 100644
+--- a/python/mozbuild/mozbuild/gn_processor.py
++++ b/python/mozbuild/mozbuild/gn_processor.py
+@@ -185,6 +185,7 @@ def filter_gn_config(path, gn_result, sandbox_vars, input_vars, gn_target):
+         "mips64el": "mips64",
+     }
+     oses = {
++        "haiku": "Haiku",
+         "android": "Android",
+         "linux": "Linux",
+         "mac": "Darwin",
+@@ -780,7 +781,7 @@ def main():
+ 
+     vars_set = []
+     for is_debug in (True, False):
+-        for target_os in ("android", "linux", "mac", "openbsd", "win"):
++        for target_os in ("android", "linux", "mac", "openbsd", "haiku", "win"):
+             target_cpus = ["x64"]
+             if target_os in ("android", "linux", "mac", "win", "openbsd"):
+                 target_cpus.append("arm64")
+@@ -797,7 +798,7 @@ def main():
+                     "host_cpu": "x64",
+                     "is_debug": is_debug,
+                     "target_cpu": target_cpu,
+-                    "target_os": target_os,
++                    "target_os": "haiku",
+                 }
+                 if target_os == "linux":
+                     for use_x11 in (True, False):
+@@ -806,6 +807,10 @@ def main():
+                 else:
+                     if target_os == "openbsd":
+                         vars["use_x11"] = True
++                    else:
++                        if target_os == "haiku":
++                            vars["use_x11"] = False
++
+                     vars_set.append(vars)
+ 
+     preprocessor = load_preprocessor(config.get("preprocessing_script", None))
 diff --git a/security/certverifier/ExtendedValidation.cpp b/security/certverifier/ExtendedValidation.cpp
 index 8c1e0ac..382ac9c 100644
 --- a/security/certverifier/ExtendedValidation.cpp
@@ -1661,6 +2490,75 @@ index 1943a2c..296fb25 100755
      info["os"] = "bsd"  # community builds
      version = os_version = sys.platform
  elif system == "Darwin":
+diff --git a/third_party/abseil-cpp/absl/base/internal/sysinfo.cc b/third_party/abseil-cpp/absl/base/internal/sysinfo.cc
+index 1937db3..08fdd1d 100644
+--- a/third_party/abseil-cpp/absl/base/internal/sysinfo.cc
++++ b/third_party/abseil-cpp/absl/base/internal/sysinfo.cc
+@@ -50,6 +50,10 @@
+ #include <zircon/process.h>
+ #endif
+ 
++#if defined(__HAIKU__)
++#include <OS.h>
++#endif
++
+ #include <string.h>
+ 
+ #include <cassert>
+@@ -475,6 +479,10 @@ pid_t GetTID() {
+   return static_cast<pid_t>(zx_thread_self());
+ }
+ 
++#elif defined(__HAIKU__)
++
++pid_t GetTID() { return find_thread(NULL); }
++
+ #else
+ 
+ // Fallback implementation of `GetTID` using `pthread_self`.
+diff --git a/third_party/abseil-cpp/absl/log/internal/log_message.cc b/third_party/abseil-cpp/absl/log/internal/log_message.cc
+index 4e9b08a..e5dab60 100644
+--- a/third_party/abseil-cpp/absl/log/internal/log_message.cc
++++ b/third_party/abseil-cpp/absl/log/internal/log_message.cc
+@@ -222,7 +222,7 @@ void LogMessage::LogMessageData::InitializeEncodingAndFormat() {
+   EncodeVarint(EventTag::kSeverity,
+                ProtoSeverity(entry.log_severity(), entry.verbosity()),
+                &encoded_remaining());
+-  EncodeVarint(EventTag::kThreadId, entry.tid(), &encoded_remaining());
++  EncodeVarint(EventTag::kThreadId, (uint32_t)entry.tid(), &encoded_remaining());
+ }
+ 
+ void LogMessage::LogMessageData::FinalizeEncodingAndFormat() {
+diff --git a/third_party/chromium/build/config/BUILDCONFIG.gn b/third_party/chromium/build/config/BUILDCONFIG.gn
+index 889bdb9..9400541 100644
+--- a/third_party/chromium/build/config/BUILDCONFIG.gn
++++ b/third_party/chromium/build/config/BUILDCONFIG.gn
+@@ -184,7 +184,7 @@ if (host_toolchain == "") {
+   # TODO(dpranke): Add some sort of assert here that verifies that
+   # no toolchain omitted host_toolchain from its toolchain_args().
+ 
+-  if (host_os == "linux" || host_os == "openbsd") {
++  if (host_os == "linux" || host_os == "openbsd" || host_os == "haiku") {
+     if (target_os != "linux") {
+       host_toolchain = "//chromium/build/toolchain/linux:clang_$host_cpu"
+     } else if (is_clang) {
+@@ -222,7 +222,7 @@ if (target_os == "android") {
+   assert(host_os == "linux" || host_os == "mac",
+          "Android builds are only supported on Linux and Mac hosts.")
+   _default_toolchain = "//chromium/build/toolchain/android:android_clang_$target_cpu"
+-} else if (target_os == "chromeos" || target_os == "linux" || target_os == "openbsd") {
++} else if (target_os == "chromeos" || target_os == "linux" || target_os == "openbsd" || host_os == "haiku") {
+   # See comments in build/toolchain/cros/BUILD.gn about board compiles.
+   if (is_clang) {
+     _default_toolchain = "//chromium/build/toolchain/linux:clang_$target_cpu"
+@@ -286,6 +286,7 @@ if (custom_toolchain != "") {
+ is_android = current_os == "android"
+ is_chromeos = current_os == "chromeos"
+ is_fuchsia = current_os == "fuchsia"
++is_haiku = current_os == "haiku"
+ is_ios = current_os == "ios"
+ is_linux = current_os == "linux"
+ is_bsd = current_os == "openbsd"
 diff --git a/third_party/dav1d/src/thread.h b/third_party/dav1d/src/thread.h
 index 459aace..b2989da 100644
 --- a/third_party/dav1d/src/thread.h
@@ -1688,6 +2586,1250 @@ index 459aace..b2989da 100644
  #else
  
  #define dav1d_set_thread_name(name) do {} while (0)
+diff --git a/third_party/libepoxy/libepoxy/src/dispatch_common.c b/third_party/libepoxy/libepoxy/src/dispatch_common.c
+index 153eb7c..f59c4db 100644
+--- a/third_party/libepoxy/libepoxy/src/dispatch_common.c
++++ b/third_party/libepoxy/libepoxy/src/dispatch_common.c
+@@ -306,8 +306,10 @@ get_dlopen_handle(void **handle, const char *lib_name, bool exit_on_fail, bool l
+     pthread_mutex_lock(&api.mutex);
+     if (!*handle) {
+         int flags = RTLD_LAZY | RTLD_LOCAL;
++#ifndef __HAIKU__
+         if (!load)
+             flags |= RTLD_NOLOAD;
++#endif
+ 
+         *handle = dlopen(lib_name, flags);
+         if (!*handle) {
+diff --git a/third_party/libwebrtc/BUILD.gn b/third_party/libwebrtc/BUILD.gn
+index 6f75ecb..43c9f86 100644
+--- a/third_party/libwebrtc/BUILD.gn
++++ b/third_party/libwebrtc/BUILD.gn
+@@ -210,7 +210,7 @@ config("common_inherited_config") {
+       target_gen_dir,
+     ]
+   }
+-  if (is_posix || is_fuchsia) {
++  if (is_posix || is_fuchsia || is_haiku) {
+     defines += [ "WEBRTC_POSIX" ]
+   }
+   if (is_ios) {
+@@ -219,7 +219,7 @@ config("common_inherited_config") {
+       "WEBRTC_IOS",
+     ]
+   }
+-  if (is_linux || is_chromeos) {
++  if ((is_linux && !is_haiku) || is_chromeos) {
+     defines += [ "WEBRTC_LINUX" ]
+   }
+   if (is_bsd) {
+@@ -231,6 +231,9 @@ config("common_inherited_config") {
+   if (is_fuchsia) {
+     defines += [ "WEBRTC_FUCHSIA" ]
+   }
++  if (is_haiku) {
++    defines += [ "WEBRTC_HAIKU", "_BSD_SOURCE" ]
++  }
+   if (is_win) {
+     defines += [ "WEBRTC_WIN" ]
+   }
+diff --git a/third_party/libwebrtc/modules/desktop_capture/BUILD.gn b/third_party/libwebrtc/modules/desktop_capture/BUILD.gn
+index 2f99e3f..db00c83 100644
+--- a/third_party/libwebrtc/modules/desktop_capture/BUILD.gn
++++ b/third_party/libwebrtc/modules/desktop_capture/BUILD.gn
+@@ -354,6 +354,19 @@ rtc_library("desktop_capture") {
+     ]
+   }
+ 
++  if (is_haiku) {
++    sources += [
++      "haiku/screen_capturer_haiku_impl.cc",
++      "screen_capturer_haiku.cc",
++      "mouse_cursor_monitor_haiku.cc",
++      "window_capturer_haiku.cc",
++    ]
++    libs = [
++      "be",
++      "game",
++    ]
++  }
++
+   if (rtc_use_x11_extensions) {
+     sources += [
+       "linux/x11/mouse_cursor_monitor_x11.cc",
+@@ -393,7 +406,7 @@ rtc_library("desktop_capture") {
+   }
+ 
+   if (!is_win && !is_mac && !rtc_use_x11_extensions && !rtc_use_pipewire &&
+-      !is_fuchsia) {
++      !is_fuchsia && !is_haiku) {
+     sources += [
+       "mouse_cursor_monitor_null.cc",
+       "screen_capturer_null.cc",
+diff --git a/third_party/libwebrtc/modules/desktop_capture/haiku/screen_capturer_haiku_impl.cc b/third_party/libwebrtc/modules/desktop_capture/haiku/screen_capturer_haiku_impl.cc
+new file mode 100644
+index 0000000..f1569ee
+--- /dev/null
++++ b/third_party/libwebrtc/modules/desktop_capture/haiku/screen_capturer_haiku_impl.cc
+@@ -0,0 +1,111 @@
++/*
++ *  Copyright 2025 Gerasim Troeglazov
++ *
++ *  Use of this source code is governed by a BSD-style license
++ *  that can be found in the LICENSE file in the root of the source
++ *  tree. An additional intellectual property rights grant can be found
++ *  in the file PATENTS.  All contributing project authors may
++ *  be found in the AUTHORS file in the root of the source tree.
++ */
++
++#include "modules/desktop_capture/haiku/screen_capturer_haiku_impl.h"
++
++#include <stdint.h>
++#include <string.h>
++
++#include <memory>
++#include <utility>
++
++#include "modules/desktop_capture/desktop_capture_options.h"
++#include "modules/desktop_capture/desktop_capturer.h"
++#include "modules/desktop_capture/desktop_frame.h"
++#include "modules/desktop_capture/desktop_geometry.h"
++#include "modules/desktop_capture/screen_capture_frame_queue.h"
++#include "modules/desktop_capture/screen_capturer_helper.h"
++#include "modules/desktop_capture/shared_desktop_frame.h"
++#include "rtc_base/checks.h"
++#include "rtc_base/logging.h"
++#include "rtc_base/sanitizer.h"
++#include "rtc_base/time_utils.h"
++#include "rtc_base/trace_event.h"
++
++#define MAX_FPS 5
++
++namespace webrtc {
++
++namespace {
++	
++static constexpr DesktopCapturer::SourceId kDirectScreenId = 1;
++static constexpr DesktopCapturer::SourceId kGetBitmapScreenId = 2;
++
++}
++
++ScreenCapturerHaiku::ScreenCapturerHaiku() {
++	screen_ = new BScreen(B_MAIN_SCREEN_ID);
++	bitmap_ = new BBitmap(screen_->Frame(), B_RGB32);
++	memset(bitmap_->Bits(), 0, bitmap_->BitsLength());
++	reader_ = new ScreenReader(screen_);
++	reader_->Show();
++}
++
++ScreenCapturerHaiku::~ScreenCapturerHaiku() {
++	reader_->Lock();
++	reader_->Quit();	
++	delete screen_;
++	delete bitmap_;
++}
++
++bool ScreenCapturerHaiku::Init(const DesktopCaptureOptions& options) {
++  options_ = options;
++  return true;
++}
++
++void ScreenCapturerHaiku::Start(Callback* callback) {
++  RTC_DCHECK(!callback_);
++  RTC_DCHECK(callback);
++  callback_ = callback;
++  lastShot_ = system_time();
++}
++
++void ScreenCapturerHaiku::CaptureFrame() {
++  int64_t capture_start_time_nanos = rtc::TimeNanos();
++  bigtime_t now_ = system_time();
++  if (now_ - lastShot_ > 1000000 / MAX_FPS) {
++    reader_->ReadBitmap(bitmap_, id_ == kDirectScreenId);
++    lastShot_ = now_;
++  }
++  DesktopRect r = DesktopRect::MakeXYWH(0, 0, bitmap_->Bounds().Width() + 1, bitmap_->Bounds().Height() + 1);
++  std::unique_ptr<DesktopFrame> frame(new BasicDesktopFrame(r.size()));
++  frame->CopyPixelsFrom((const uint8_t*)bitmap_->Bits(), bitmap_->BytesPerRow(), r);
++  frame->set_capture_time_ms((rtc::TimeNanos() - capture_start_time_nanos) / rtc::kNumNanosecsPerMillisec);
++  callback_->OnCaptureResult(Result::SUCCESS, std::move(frame));
++}
++
++bool ScreenCapturerHaiku::GetSourceList(SourceList* sources) {
++  sources->push_back({kDirectScreenId, 0, std::string("Active Desktop (BDirectWindow)")});
++  sources->push_back({kGetBitmapScreenId, 1, std::string("Active Desktop (GetBitmap)")});
++  return true;
++}
++
++bool ScreenCapturerHaiku::SelectSource(SourceId id) {
++  if (id != kDirectScreenId && id != kGetBitmapScreenId)
++    return false;
++
++  id_ = id;
++
++  return true;
++}
++
++
++// static
++std::unique_ptr<DesktopCapturer> ScreenCapturerHaiku::CreateRawScreenCapturer(
++    const DesktopCaptureOptions& options) {
++  std::unique_ptr<ScreenCapturerHaiku> capturer(new ScreenCapturerHaiku());
++  if (!capturer.get()->Init(options)) {
++    return nullptr;
++  }
++
++  return std::move(capturer);
++}
++
++}  // namespace webrtc
+diff --git a/third_party/libwebrtc/modules/desktop_capture/haiku/screen_capturer_haiku_impl.h b/third_party/libwebrtc/modules/desktop_capture/haiku/screen_capturer_haiku_impl.h
+new file mode 100644
+index 0000000..1f2dbd6
+--- /dev/null
++++ b/third_party/libwebrtc/modules/desktop_capture/haiku/screen_capturer_haiku_impl.h
+@@ -0,0 +1,96 @@
++/*
++ *  Copyright 2025 Gerasim Troeglazov
++ *
++ *  Use of this source code is governed by a BSD-style license
++ *  that can be found in the LICENSE file in the root of the source
++ *  tree. An additional intellectual property rights grant can be found
++ *  in the file PATENTS.  All contributing project authors may
++ *  be found in the AUTHORS file in the root of the source tree.
++ */
++
++#ifndef MODULES_DESKTOP_CAPTURE_HAIKU_SCREEN_CAPTURER_HAIKU_H_
++#define MODULES_DESKTOP_CAPTURE_HAIKU_SCREEN_CAPTURER_HAIKU_H_
++
++#include <memory>
++
++#include "modules/desktop_capture/desktop_capture_options.h"
++#include "modules/desktop_capture/desktop_capturer.h"
++#include "modules/desktop_capture/desktop_frame.h"
++#include "modules/desktop_capture/desktop_region.h"
++#include "modules/desktop_capture/screen_capture_frame_queue.h"
++#include "modules/desktop_capture/screen_capturer_helper.h"
++#include "modules/desktop_capture/shared_desktop_frame.h"
++
++#pragma GCC visibility push(default)
++#include <kernel/OS.h>
++#include <interface/Screen.h>
++#include <interface/Bitmap.h>
++#include <DirectWindow.h>
++#include <SupportDefs.h>
++#pragma GCC visibility pop
++
++namespace webrtc {
++	
++class  ScreenReader: public BDirectWindow {
++public:
++  ScreenReader(BScreen *screen) : BDirectWindow(BRect(-2, -2, -1, -1), "DirectWindow",
++		B_NO_BORDER_WINDOW_LOOK, window_feel(1025),
++		B_AVOID_FRONT | B_AVOID_FOCUS | B_NO_WORKSPACE_ACTIVATION,
++		B_ALL_WORKSPACES), fScreen(screen), fDirectAvailable(false) { };
++  virtual void DirectConnected(direct_buffer_info *info) {
++    switch (info->buffer_state & B_DIRECT_MODE_MASK) {
++      case B_DIRECT_START:
++      case B_DIRECT_MODIFY:
++        fDirectInfo = *info;
++        fDirectAvailable = true;
++        break;
++      case B_DIRECT_STOP:
++        fDirectAvailable = false;
++        break;
++      default:
++        break;
++    }
++  };
++  status_t ReadBitmap(BBitmap *bitmap, bool direct)	{
++    if (direct && fDirectAvailable) {
++      memcpy(bitmap->Bits(), fDirectInfo.bits, bitmap->BitsLength());
++      return B_OK;
++    }
++    return fScreen->ReadBitmap(bitmap);
++};
++private:
++  BScreen* fScreen;
++  direct_buffer_info fDirectInfo;
++  bool fDirectAvailable;
++};
++
++class ScreenCapturerHaiku : public DesktopCapturer {
++ public:
++  ScreenCapturerHaiku();
++  ~ScreenCapturerHaiku() override;
++
++  static std::unique_ptr<DesktopCapturer> CreateRawScreenCapturer(
++      const DesktopCaptureOptions& options);
++
++  bool Init(const DesktopCaptureOptions& options);
++  
++  void Start(Callback* delegate) override;
++  void CaptureFrame() override;
++  bool GetSourceList(SourceList* sources) override;
++  bool SelectSource(SourceId id) override;
++
++ private:
++  BScreen* screen_;  
++  BBitmap* bitmap_;
++  ScreenReader *reader_;
++  bigtime_t lastShot_;
++
++  SourceId id_;
++
++  DesktopCaptureOptions options_;
++  Callback* callback_ = nullptr;
++};
++
++}
++
++#endif  // MODULES_DESKTOP_CAPTURE_HAIKU_SCREEN_CAPTURER_HAIKU_H_
+diff --git a/third_party/libwebrtc/modules/desktop_capture/mouse_cursor_monitor_haiku.cc b/third_party/libwebrtc/modules/desktop_capture/mouse_cursor_monitor_haiku.cc
+new file mode 100644
+index 0000000..8ea2aa2
+--- /dev/null
++++ b/third_party/libwebrtc/modules/desktop_capture/mouse_cursor_monitor_haiku.cc
+@@ -0,0 +1,39 @@
++/*
++ *  Copyright 2018 The WebRTC project authors. All Rights Reserved.
++ *
++ *  Use of this source code is governed by a BSD-style license
++ *  that can be found in the LICENSE file in the root of the source
++ *  tree. An additional intellectual property rights grant can be found
++ *  in the file PATENTS.  All contributing project authors may
++ *  be found in the AUTHORS file in the root of the source tree.
++ */
++
++#include <memory>
++
++#include "modules/desktop_capture/desktop_capture_types.h"
++#include "modules/desktop_capture/mouse_cursor_monitor.h"
++//#include "modules/desktop_capture/haiku/mouse_cursor_monitor.h"
++
++namespace webrtc {
++
++// static
++MouseCursorMonitor* MouseCursorMonitor::CreateForWindow(
++    const DesktopCaptureOptions& options,
++    WindowId window) {
++  return nullptr;
++}
++
++// static
++MouseCursorMonitor* MouseCursorMonitor::CreateForScreen(
++    const DesktopCaptureOptions& options,
++    ScreenId screen) {
++  return nullptr;
++}
++
++// static
++std::unique_ptr<MouseCursorMonitor> MouseCursorMonitor::Create(
++    const DesktopCaptureOptions& options) {
++  return nullptr;
++}
++
++}  // namespace webrtc
+diff --git a/third_party/libwebrtc/modules/desktop_capture/screen_capturer_haiku.cc b/third_party/libwebrtc/modules/desktop_capture/screen_capturer_haiku.cc
+new file mode 100644
+index 0000000..e30fb04
+--- /dev/null
++++ b/third_party/libwebrtc/modules/desktop_capture/screen_capturer_haiku.cc
+@@ -0,0 +1,26 @@
++/*
++ *  Copyright 2021 Gerasim Troeglazov
++ *
++ *  Use of this source code is governed by a BSD-style license
++ *  that can be found in the LICENSE file in the root of the source
++ *  tree. An additional intellectual property rights grant can be found
++ *  in the file PATENTS.  All contributing project authors may
++ *  be found in the AUTHORS file in the root of the source tree.
++ */
++
++#include <memory>
++
++#include "modules/desktop_capture/desktop_capture_options.h"
++#include "modules/desktop_capture/desktop_capturer.h"
++
++#include "modules/desktop_capture/haiku/screen_capturer_haiku_impl.h"
++
++namespace webrtc {
++
++// static
++std::unique_ptr<DesktopCapturer> DesktopCapturer::CreateRawScreenCapturer(
++    const DesktopCaptureOptions& options) {
++  return ScreenCapturerHaiku::CreateRawScreenCapturer(options);
++}
++
++}  // namespace webrtc
+diff --git a/third_party/libwebrtc/modules/desktop_capture/window_capturer_haiku.cc b/third_party/libwebrtc/modules/desktop_capture/window_capturer_haiku.cc
+new file mode 100644
+index 0000000..a89b4a1
+--- /dev/null
++++ b/third_party/libwebrtc/modules/desktop_capture/window_capturer_haiku.cc
+@@ -0,0 +1,64 @@
++/*
++ *  Copyright 2021 Gerasim Troeglazov
++ *
++ *  Use of this source code is governed by a BSD-style license
++ *  that can be found in the LICENSE file in the root of the source
++ *  tree. An additional intellectual property rights grant can be found
++ *  in the file PATENTS.  All contributing project authors may
++ *  be found in the AUTHORS file in the root of the source tree.
++ */
++
++#include "modules/desktop_capture/desktop_capturer.h"
++#include "modules/desktop_capture/desktop_frame.h"
++
++#include <assert.h>
++
++namespace webrtc {
++
++namespace {
++
++class WindowCapturerHaiku : public DesktopCapturer {
++ public:
++  WindowCapturerHaiku();
++  ~WindowCapturerHaiku() override;
++
++  void Start(Callback* callback) override;
++  void CaptureFrame() override;
++  bool GetSourceList(SourceList* sources) override;
++  bool SelectSource(SourceId id) override;
++
++ private:
++  Callback* callback_ = nullptr;
++};
++
++WindowCapturerHaiku::WindowCapturerHaiku() {}
++WindowCapturerHaiku::~WindowCapturerHaiku() {}
++
++bool WindowCapturerHaiku::GetSourceList(SourceList* sources) {
++  return false;
++}
++
++bool WindowCapturerHaiku::SelectSource(SourceId id) {
++  return false;
++}
++
++void WindowCapturerHaiku::Start(Callback* callback) {
++  assert(!callback_);
++  assert(callback);
++
++  callback_ = callback;
++}
++
++void WindowCapturerHaiku::CaptureFrame() {
++  callback_->OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
++}
++
++}  // namespace
++
++// static
++std::unique_ptr<DesktopCapturer> DesktopCapturer::CreateRawWindowCapturer(
++    const DesktopCaptureOptions& options) {
++  return std::unique_ptr<DesktopCapturer>(new WindowCapturerHaiku());
++}
++
++}  // namespace webrtc
+diff --git a/third_party/libwebrtc/modules/video_capture/BUILD.gn b/third_party/libwebrtc/modules/video_capture/BUILD.gn
+index 60e1919..5985062 100644
+--- a/third_party/libwebrtc/modules/video_capture/BUILD.gn
++++ b/third_party/libwebrtc/modules/video_capture/BUILD.gn
+@@ -137,6 +137,20 @@ if (!build_with_chromium || is_linux || is_chromeos) {
+     if (is_fuchsia) {
+       sources += [ "video_capture_factory_null.cc" ]
+     }
++    if (is_haiku) {
++      sources += [
++        "haiku/video_capture_haiku.cc",
++        "haiku/video_capture_haiku.h",
++        "haiku/device_info_haiku.cc",
++        "haiku/device_info_haiku.h",
++      ]
++
++      libs = [
++        "be",
++        "media",
++        "mediahelpers",
++      ]
++    }
+ 
+     if (!build_with_mozilla && is_android) {
+       include_dirs = [
+diff --git a/third_party/libwebrtc/modules/video_capture/haiku/device_info_haiku.cc b/third_party/libwebrtc/modules/video_capture/haiku/device_info_haiku.cc
+new file mode 100644
+index 0000000..a9f55e1
+--- /dev/null
++++ b/third_party/libwebrtc/modules/video_capture/haiku/device_info_haiku.cc
+@@ -0,0 +1,157 @@
++/*
++ *  Copyright 2021-2025 Gerasim Troeglazov
++ *
++ *  Use of this source code is governed by a BSD-style license
++ *  that can be found in the LICENSE file in the root of the source
++ *  tree. An additional intellectual property rights grant can be found
++ *  in the file PATENTS.  All contributing project authors may
++ *  be found in the AUTHORS file in the root of the source tree.
++ */
++
++#include "modules/video_capture/haiku/device_info_haiku.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <unistd.h>
++
++#include <vector>
++
++#include "modules/video_capture/video_capture.h"
++#include "modules/video_capture/video_capture_defines.h"
++#include "modules/video_capture/video_capture_impl.h"
++#include "rtc_base/logging.h"
++
++#define MAX_DORMANT_NODES 32
++
++namespace webrtc {
++namespace videocapturemodule {
++VideoCaptureModule::DeviceInfo* VideoCaptureImpl::CreateDeviceInfo() {
++  return new videocapturemodule::DeviceInfoHaiku();
++}
++
++DeviceInfoHaiku::DeviceInfoHaiku() : DeviceInfoImpl() {}
++
++int32_t DeviceInfoHaiku::Init() {
++  return 0;
++}
++
++DeviceInfoHaiku::~DeviceInfoHaiku() {}
++
++uint32_t DeviceInfoHaiku::NumberOfDevices() {
++	status_t err = B_OK;
++
++	int32_t countDevices = 0;
++
++	dormant_node_info dni[MAX_DORMANT_NODES];
++	int32 ioCount = MAX_DORMANT_NODES;
++	media_format out;
++	out.type = B_MEDIA_RAW_VIDEO;
++	err = BMediaRoster::Roster()->GetDormantNodes(dni, &ioCount, 0, &out, 0, B_BUFFER_PRODUCER);
++	if (err < B_OK)
++		return countDevices;
++
++	for (int ix = 0; ix < ioCount; ix++) {
++		media_node_id running = -1;
++		if ((B_OK == BMediaRoster::CurrentRoster()->GetInstancesFor(
++				dni[ix].addon, dni[ix].flavor_id, &running)) && (running > -1)) {
++			media_node node;
++			BMediaRoster::CurrentRoster()->GetNodeFor(running, &node);
++			int32 count = 1;
++			media_output videoOutput;
++			BMediaRoster::CurrentRoster()->GetAllOutputsFor(node, &videoOutput, 1, &count);
++			if (count > 0)
++				countDevices++;
++			BMediaRoster::CurrentRoster()->ReleaseNode(node);
++		}
++	}
++
++	return countDevices;
++}
++
++int32_t DeviceInfoHaiku::GetDeviceName(uint32_t deviceNumber,
++                                       char* deviceNameUTF8,
++                                       uint32_t deviceNameLength,
++                                       char* deviceUniqueIdUTF8,
++                                       uint32_t deviceUniqueIdUTF8Length,
++                                       char* productUniqueIdUTF8,
++                                       uint32_t productUniqueIdUTF8Length,
++                                       pid_t* pid,
++                                       bool* deviceIsPlaceholder) {
++	if (deviceNumber >= NumberOfDevices())
++		return -1;
++
++	status_t err = B_OK;
++
++	int32_t countDevices = 0;
++
++	media_output videoOutput;
++
++	dormant_node_info dni[MAX_DORMANT_NODES];
++	int32 ioCount = MAX_DORMANT_NODES;
++	media_format out;
++	out.type = B_MEDIA_RAW_VIDEO;
++	err = BMediaRoster::Roster()->GetDormantNodes(dni, &ioCount, 0, &out, 0, B_BUFFER_PRODUCER);
++	if (err < B_OK)
++		return countDevices;
++
++	err = B_ERROR;
++
++	for (int ix = 0; ix < ioCount; ix++) {
++		media_node_id running = -1;
++		if ((B_OK == BMediaRoster::CurrentRoster()->GetInstancesFor(
++				dni[ix].addon, dni[ix].flavor_id, &running)) && (running > -1)) {
++			media_node node;
++			BMediaRoster::CurrentRoster()->GetNodeFor(running, &node);
++			int32 count = 1;
++			BMediaRoster::CurrentRoster()->GetAllOutputsFor(node, &videoOutput, 1, &count);
++			BMediaRoster::CurrentRoster()->ReleaseNode(node);
++			if (count > 0) {
++				if (countDevices == deviceNumber) {
++					if (deviceNameLength > strlen(videoOutput.name)) {
++						strncpy(deviceNameUTF8, videoOutput.name, deviceNameLength);
++						strncpy(deviceUniqueIdUTF8, videoOutput.name, deviceUniqueIdUTF8Length);
++						err = B_OK;
++					} else
++						err = B_ERROR;
++					break;
++				}
++				countDevices++;
++			}
++			BMediaRoster::CurrentRoster()->ReleaseNode(node);
++		}
++	}
++	return err == B_OK ? 0 : -1;
++}
++
++int32_t DeviceInfoHaiku::CreateCapabilityMap(const char* deviceUniqueIdUTF8) {
++	_captureCapabilities.clear();
++
++    unsigned int size[][2] = {{352, 288},  {640, 480}, {1280, 720}, {1920, 1080}, {0, 0}};
++
++    for (int i = 0; size[i][0] != 0; i++) {
++    	VideoCaptureCapability cap;
++  	    cap.width = size[i][0];
++	    cap.height = size[i][1];
++	    cap.maxFPS = 30;
++	    cap.videoType = VideoType::kARGB;
++	    _captureCapabilities.push_back(cap);
++    }
++
++	return _captureCapabilities.size();
++}
++
++int32_t DeviceInfoHaiku::DisplayCaptureSettingsDialogBox(
++    const char* deviceUniqueIdUTF8,
++    const char* dialogTitleUTF8,
++    void* parentWindow,
++    uint32_t positionX,
++    uint32_t positionY) {
++	return -1;
++}
++
++}  // namespace videocapturemodule
++}  // namespace webrtc
+diff --git a/third_party/libwebrtc/modules/video_capture/haiku/device_info_haiku.h b/third_party/libwebrtc/modules/video_capture/haiku/device_info_haiku.h
+new file mode 100644
+index 0000000..cdf5adb
+--- /dev/null
++++ b/third_party/libwebrtc/modules/video_capture/haiku/device_info_haiku.h
+@@ -0,0 +1,63 @@
++/*
++ *  Copyright 2021-2025 Gerasim Troeglazov
++ *
++ *  Use of this source code is governed by a BSD-style license
++ *  that can be found in the LICENSE file in the root of the source
++ *  tree. An additional intellectual property rights grant can be found
++ *  in the file PATENTS.  All contributing project authors may
++ *  be found in the AUTHORS file in the root of the source tree.
++ */
++
++#ifndef MODULES_VIDEO_CAPTURE_MAIN_SOURCE_HAIKU_DEVICE_INFO_HAIKU_H_
++#define MODULES_VIDEO_CAPTURE_MAIN_SOURCE_HAIKU_DEVICE_INFO_HAIKU_H_
++
++#include <stdint.h>
++
++#pragma GCC visibility push(default)
++#include <kernel/OS.h>
++#include <app/Roster.h>
++#include <support/String.h>
++#include <app/Application.h>
++#include <app/Messenger.h>
++#include <media/MediaAddOn.h>
++#include <media/MediaDefs.h>
++#include <media/MediaFile.h>
++#include <media/MediaNode.h>
++#include <media/MediaRecorder.h>
++#include <media/MediaRoster.h>
++#include <media/MediaTrack.h>
++#include <media/TimeSource.h>
++#include <storage/NodeInfo.h>
++#pragma GCC visibility pop
++
++#include "modules/video_capture/device_info_impl.h"
++#include "rtc_base/logging.h"
++
++namespace webrtc {
++namespace videocapturemodule {
++
++class DeviceInfoHaiku : public DeviceInfoImpl {
++ public:
++  DeviceInfoHaiku();
++  ~DeviceInfoHaiku() override;
++  uint32_t NumberOfDevices() override;
++  int32_t GetDeviceName(uint32_t deviceNumber,
++                        char* deviceNameUTF8,
++                        uint32_t deviceNameLength,
++                        char* deviceUniqueIdUTF8,
++                        uint32_t deviceUniqueIdUTF8Length,
++                        char* productUniqueIdUTF8 = 0,
++                        uint32_t productUniqueIdUTF8Length = 0,
++                        pid_t* pid = 0,
++                        bool* deviceIsPlaceholder = 0) override;
++  int32_t CreateCapabilityMap(const char* deviceUniqueIdUTF8) override;
++  int32_t DisplayCaptureSettingsDialogBox(const char*,
++                                          const char*,
++                                          void*,
++                                          uint32_t,
++                                          uint32_t) override;
++  int32_t Init() override;
++};
++}  // namespace videocapturemodule
++}  // namespace webrtc
++#endif  // MODULES_VIDEO_CAPTURE_MAIN_SOURCE_HAIKU_DEVICE_INFO_HAIKU_H_
+diff --git a/third_party/libwebrtc/modules/video_capture/haiku/video_capture_haiku.cc b/third_party/libwebrtc/modules/video_capture/haiku/video_capture_haiku.cc
+new file mode 100644
+index 0000000..29b319d
+--- /dev/null
++++ b/third_party/libwebrtc/modules/video_capture/haiku/video_capture_haiku.cc
+@@ -0,0 +1,213 @@
++/*
++ *  Copyright 2021-2025 Gerasim Troeglazov
++ *
++ *  Use of this source code is governed by a BSD-style license
++ *  that can be found in the LICENSE file in the root of the source
++ *  tree. An additional intellectual property rights grant can be found
++ *  in the file PATENTS.  All contributing project authors may
++ *  be found in the AUTHORS file in the root of the source tree.
++ */
++
++#include "modules/video_capture/haiku/video_capture_haiku.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <sys/select.h>
++#include <time.h>
++#include <unistd.h>
++
++#include <new>
++#include <string>
++
++#include "api/scoped_refptr.h"
++#include "media/base/video_common.h"
++#include "modules/video_capture/video_capture.h"
++#include "rtc_base/logging.h"
++#include "rtc_base/ref_counted_object.h"
++
++namespace webrtc {
++namespace videocapturemodule {
++rtc::scoped_refptr<VideoCaptureModule> VideoCaptureImpl::Create(
++    const char* deviceUniqueId) {
++  rtc::scoped_refptr<VideoCaptureModuleHaiku> implementation(
++      new rtc::RefCountedObject<VideoCaptureModuleHaiku>());
++
++  if (implementation->Init(deviceUniqueId) != 0)
++    return nullptr;
++
++  return implementation;
++}
++
++VideoCaptureModuleHaiku::VideoCaptureModuleHaiku()
++    : VideoCaptureImpl(),
++      _currentWidth(-1),
++      _currentHeight(-1),
++      _currentFrameRate(-1),
++      _captureStarted(false),
++      _captureVideoType(VideoType::kARGB) {}
++
++int32_t VideoCaptureModuleHaiku::Init(const char* deviceUniqueIdUTF8) {
++  int len = strlen((const char*)deviceUniqueIdUTF8);
++  _deviceUniqueId = new (std::nothrow) char[len + 1];
++  if (_deviceUniqueId) {
++    memcpy(_deviceUniqueId, deviceUniqueIdUTF8, len + 1);
++  }
++
++  return 0;
++}
++
++VideoCaptureModuleHaiku::~VideoCaptureModuleHaiku() {
++  StopCapture();
++}
++
++
++void MyFrameCallback(BBitmap* frame, void* userData) {
++	webrtc::videocapturemodule::VideoCaptureImpl *fVideoCapture = (webrtc::videocapturemodule::VideoCaptureImpl*)userData;
++
++	webrtc::VideoCaptureCapability frameInfo;
++	frameInfo.width = frame->Bounds().Width() + 1;
++	frameInfo.height = frame->Bounds().Height() + 1;
++	frameInfo.videoType = webrtc::VideoType::kARGB;
++
++	fVideoCapture->IncomingFrame((unsigned char*)frame->Bits(), frame->BitsLength(), frameInfo);
++}
++
++int32_t VideoCaptureModuleHaiku::StartCapture(
++	const VideoCaptureCapability& capability) {
++	if (_captureStarted) {
++		if (capability.width == _currentWidth &&
++			capability.height == _currentHeight &&
++			_captureVideoType == capability.videoType) {
++			return 0;
++		} else {
++			StopCapture();
++		}
++	}
++
++	_currentWidth = capability.width;
++	_currentHeight = capability.height;
++	_currentFrameRate = 30;
++
++	status_t fStatus;
++	fMediaRoster = BMediaRoster::Roster(&fStatus);
++	if (fStatus != B_OK)
++		return -1;
++
++	media_node fTimeSource;
++	fStatus = fMediaRoster->GetTimeSource(&fTimeSource);
++	if (fStatus != B_OK)
++		return -1;
++	
++	fVideoConsumer = new VideoConsumer("Floorp Browser", NULL, 0);
++	fVideoConsumer->SetFrameCallback(MyFrameCallback, (void*)this);
++
++	dormant_node_info dni[30];
++	int32 ioCount = 30;
++	media_format out;
++	out.type = B_MEDIA_RAW_VIDEO;
++	fStatus = BMediaRoster::Roster()->GetDormantNodes(dni, &ioCount, 0, &out, 0, B_BUFFER_PRODUCER);
++	if (fStatus < B_OK)
++		return -1;
++
++	fStatus = B_ERROR;
++	for (int ix=0; ix<ioCount; ix++) {
++		media_node_id running = -1;
++		if ((B_OK == BMediaRoster::CurrentRoster()->GetInstancesFor(
++				dni[ix].addon, dni[ix].flavor_id, &running)) && (running > -1)) {
++			BMediaRoster::CurrentRoster()->GetNodeFor(running, &fProducerNode);
++			int32 count = 1;
++			BMediaRoster::CurrentRoster()->GetFreeOutputsFor(
++				fProducerNode, &videoOutput, 1, &count, B_MEDIA_RAW_VIDEO);
++			if (count > 0) {
++				if (strcmp(videoOutput.name, _deviceUniqueId) == 0) {
++					fStatus = B_OK;
++					break;
++				}
++			}
++			BMediaRoster::CurrentRoster()->ReleaseNode(fProducerNode);
++		}
++	}
++	if (fStatus != B_OK)
++		return -1;
++
++	fStatus = fMediaRoster->RegisterNode(fVideoConsumer);
++	if (fStatus != B_OK)
++		return -1;
++	fConsumerNode = fVideoConsumer->Node();
++
++	int32 count = 1;
++	fStatus = fMediaRoster->GetFreeInputsFor(fConsumerNode, &videoInput, 1, &count, B_MEDIA_RAW_VIDEO);
++	if (fStatus != B_OK || count < 1)
++		return -1;
++
++	// connect the nodes
++	media_format format;
++	format.type = B_MEDIA_RAW_VIDEO;
++	media_raw_video_format videoFormat = {
++		30.0f, 1, 0,
++		(uint32)(_currentWidth - 1),
++		B_VIDEO_TOP_LEFT_RIGHT, 1, 1,
++		{
++			B_RGB32,
++			(uint32)(_currentWidth),
++			(uint32)(_currentHeight),
++			0, 0, 0
++		}
++	};
++	format.u.raw_video = videoFormat;
++	
++	fStatus = fMediaRoster->Connect(videoOutput.source, videoInput.destination,
++		&format, &videoOutput, &videoInput);
++
++	if (fStatus != B_OK)
++		return -1;
++		
++	timeSource = fMediaRoster->MakeTimeSourceFor(fTimeSource);
++	bigtime_t real = BTimeSource::RealTime();
++	bigtime_t perf = timeSource->PerformanceTimeFor(real) + 3000000;
++
++	fStatus = fMediaRoster->StartNode(fConsumerNode, perf);
++	if (fStatus != B_OK)
++		return -1;
++
++	fStatus = fMediaRoster->StopNode(fProducerNode, perf, true);
++	fStatus = fMediaRoster->StartNode(fProducerNode, perf);
++	if (fStatus != B_OK)
++		return -1;
++
++	_captureStarted = true;
++	return 0;
++}
++
++int32_t VideoCaptureModuleHaiku::StopCapture() {
++  if (_captureStarted) {
++  	fMediaRoster->StopNode(fProducerNode, BTimeSource::RealTime(), true);
++  	fMediaRoster->Disconnect(fProducerNode.node, videoOutput.source,
++  		fConsumerNode.node, videoInput.destination);
++  	fMediaRoster->UnregisterNode(fVideoConsumer);
++  	delete fVideoConsumer;
++    _captureStarted = false;
++  }
++
++  return 0;
++}
++
++bool VideoCaptureModuleHaiku::CaptureStarted() {
++  return _captureStarted;
++}
++
++int32_t VideoCaptureModuleHaiku::CaptureSettings(
++    VideoCaptureCapability& settings) {
++  settings.width = _currentWidth;
++  settings.height = _currentHeight;
++  settings.maxFPS = _currentFrameRate;
++  settings.videoType = _captureVideoType;
++
++  return 0;
++}
++}  // namespace videocapturemodule
++}  // namespace webrtc
+diff --git a/third_party/libwebrtc/modules/video_capture/haiku/video_capture_haiku.h b/third_party/libwebrtc/modules/video_capture/haiku/video_capture_haiku.h
+new file mode 100644
+index 0000000..fe33782
+--- /dev/null
++++ b/third_party/libwebrtc/modules/video_capture/haiku/video_capture_haiku.h
+@@ -0,0 +1,73 @@
++/*
++ *  Copyright 2021-2025 Gerasim Troeglazov
++ *
++ *  Use of this source code is governed by a BSD-style license
++ *  that can be found in the LICENSE file in the root of the source
++ *  tree. An additional intellectual property rights grant can be found
++ *  in the file PATENTS.  All contributing project authors may
++ *  be found in the AUTHORS file in the root of the source tree.
++ */
++
++#ifndef MODULES_VIDEO_CAPTURE_MAIN_SOURCE_HAIKU_VIDEO_CAPTURE_HAIKU_H_
++#define MODULES_VIDEO_CAPTURE_MAIN_SOURCE_HAIKU_VIDEO_CAPTURE_HAIKU_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include <memory>
++
++#pragma GCC visibility push(default)
++#include <kernel/OS.h>
++#include <support/String.h>
++#include <app/Roster.h>
++#include <app/Application.h>
++#include <media/MediaAddOn.h>
++#include <media/MediaDefs.h>
++#include <media/MediaFile.h>
++#include <media/MediaNode.h>
++#include <media/MediaRecorder.h>
++#include <media/MediaRoster.h>
++#include <media/MediaTrack.h>
++#include <media/TimeSource.h>
++#include <storage/NodeInfo.h>
++
++#include <VideoConsumer.h>
++
++#pragma GCC visibility pop
++
++#include "modules/video_capture/video_capture_defines.h"
++#include "modules/video_capture/video_capture_impl.h"
++#include "rtc_base/platform_thread.h"
++#include "rtc_base/synchronization/mutex.h"
++
++namespace webrtc {
++namespace videocapturemodule {
++class VideoCaptureModuleHaiku : public VideoCaptureImpl {
++ public:
++  VideoCaptureModuleHaiku();
++  ~VideoCaptureModuleHaiku() override;
++  int32_t Init(const char* deviceUniqueId);
++  int32_t StartCapture(const VideoCaptureCapability& capability) override;
++  int32_t StopCapture() override;
++  bool CaptureStarted() override;
++  int32_t CaptureSettings(VideoCaptureCapability& settings) override;
++
++ private:
++	BMediaRoster *fMediaRoster;
++	VideoConsumer *fVideoConsumer;
++	BTimeSource* timeSource;
++	media_node fProducerNode;
++	media_node fConsumerNode;
++	media_input videoInput;
++	media_output videoOutput;
++	
++  int32_t _currentWidth;
++  int32_t _currentHeight;
++  int32_t _currentFrameRate;
++  bool _captureStarted;
++  VideoType _captureVideoType;
++};
++}  // namespace videocapturemodule
++}  // namespace webrtc
++
++#endif  // MODULES_VIDEO_CAPTURE_MAIN_SOURCE_HAIKU_VIDEO_CAPTURE_HAIKU_H_
+diff --git a/third_party/libwebrtc/modules/video_capture/video_capture_factory.cc b/third_party/libwebrtc/modules/video_capture/video_capture_factory.cc
+index 2790fbb..16f4d58 100644
+--- a/third_party/libwebrtc/modules/video_capture/video_capture_factory.cc
++++ b/third_party/libwebrtc/modules/video_capture/video_capture_factory.cc
+@@ -24,7 +24,7 @@ rtc::scoped_refptr<VideoCaptureModule> VideoCaptureFactory::Create(
+     const char* deviceUniqueIdUTF8) {
+ // This is only implemented on pure Linux and WEBRTC_LINUX is defined for
+ // Android as well
+-#if (!defined(WEBRTC_LINUX) && !defined(WEBRTC_BSD)) || defined(WEBRTC_ANDROID)
++#if (!defined(WEBRTC_LINUX) && !defined(WEBRTC_BSD) && !defined(WEBRTC_HAIKU)) || defined(WEBRTC_ANDROID)
+   return nullptr;
+ #else
+   return videocapturemodule::VideoCaptureImpl::Create(options,
+@@ -40,7 +40,7 @@ VideoCaptureModule::DeviceInfo* VideoCaptureFactory::CreateDeviceInfo(
+     VideoCaptureOptions* options) {
+ // This is only implemented on pure Linux and WEBRTC_LINUX is defined for
+ // Android as well
+-#if (!defined(WEBRTC_LINUX) && !defined(WEBRTC_BSD)) || defined(WEBRTC_ANDROID)
++#if (!defined(WEBRTC_LINUX) && !defined(WEBRTC_BSD) && !defined(WEBRTC_HAIKU)) || defined(WEBRTC_ANDROID)
+   return nullptr;
+ #else
+   return videocapturemodule::VideoCaptureImpl::CreateDeviceInfo(options);
+diff --git a/third_party/libwebrtc/rtc_base/BUILD.gn b/third_party/libwebrtc/rtc_base/BUILD.gn
+index c12590e..56ed347 100644
+--- a/third_party/libwebrtc/rtc_base/BUILD.gn
++++ b/third_party/libwebrtc/rtc_base/BUILD.gn
+@@ -1171,6 +1171,10 @@ rtc_library("ifaddrs_converter") {
+       "ifaddrs_converter.h",
+     ]
+   }
++  
++  if (is_haiku) {
++    defines = [ "_BSD_SOURCE" ]
++  }
+ }
+ 
+ rtc_library("rolling_accumulator") {
+diff --git a/third_party/libwebrtc/rtc_base/logging.cc b/third_party/libwebrtc/rtc_base/logging.cc
+index d9c7829..8a8165d 100644
+--- a/third_party/libwebrtc/rtc_base/logging.cc
++++ b/third_party/libwebrtc/rtc_base/logging.cc
+@@ -116,7 +116,11 @@ std::string LogLineRef::DefaultLogLine() const {
+     log_output << timestamp;
+   }
+   if (thread_id_.has_value()) {
++#ifdef WEBRTC_HAIKU
++    log_output << "[" << (uint64_t)(*thread_id_) << "] ";
++#else
+     log_output << "[" << *thread_id_ << "] ";
++#endif
+   }
+   if (!filename_.empty()) {
+ #if defined(WEBRTC_ANDROID)
+diff --git a/third_party/libwebrtc/rtc_base/physical_socket_server.cc b/third_party/libwebrtc/rtc_base/physical_socket_server.cc
+index c316b10..35e025f 100644
+--- a/third_party/libwebrtc/rtc_base/physical_socket_server.cc
++++ b/third_party/libwebrtc/rtc_base/physical_socket_server.cc
+@@ -75,7 +75,7 @@ typedef void* SockOptArg;
+ 
+ #endif  // WEBRTC_POSIX
+ 
+-#if defined(WEBRTC_POSIX) && !defined(WEBRTC_MAC) && !defined(WEBRTC_BSD) && !defined(__native_client__)
++#if defined(WEBRTC_POSIX) && !defined(WEBRTC_MAC) && !defined(WEBRTC_BSD) && !defined(__native_client__) && !defined(__HAIKU__)
+ #if defined(WEBRTC_LINUX)
+ #include <linux/sockios.h>
+ #endif
+@@ -374,7 +374,7 @@ int PhysicalSocket::SetOption(Option opt, int value) {
+     ecn_ = value;
+     value = dscp_ + (ecn_ & kEcnMask);
+   }
+-#if defined(WEBRTC_POSIX)
++#if defined(WEBRTC_POSIX) && !defined(__HAIKU__)
+   if (sopt == IPV6_TCLASS) {
+     // Set the IPv4 option in all cases to support dual-stack sockets.
+     // Don't bother checking the return code, as this is expected to fail if
+@@ -518,7 +518,7 @@ int PhysicalSocket::DoReadFromSocket(void* buffer,
+   socklen_t addr_len = sizeof(addr_storage);
+   sockaddr* addr = reinterpret_cast<sockaddr*>(&addr_storage);
+ 
+-#if defined(WEBRTC_POSIX)
++#if defined(WEBRTC_POSIX) && !defined(WEBRTC_HAIKU)
+   int received = 0;
+   iovec iov = {.iov_base = buffer, .iov_len = length};
+   msghdr msg = {.msg_name = nullptr, .msg_namelen = 0, .msg_iov = &iov, .msg_iovlen = 1};
+@@ -705,7 +705,7 @@ int PhysicalSocket::TranslateOption(Option opt, int* slevel, int* sopt) {
+ #elif defined(WEBRTC_MAC) || defined(WEBRTC_BSD) || defined(__native_client__)
+       RTC_LOG(LS_WARNING) << "Socket::OPT_DONTFRAGMENT not supported.";
+       return -1;
+-#elif defined(WEBRTC_POSIX)
++#elif defined(WEBRTC_POSIX) && !defined(__HAIKU__)
+       *slevel = IPPROTO_IP;
+       *sopt = IP_MTU_DISCOVER;
+       break;
+@@ -723,7 +723,7 @@ int PhysicalSocket::TranslateOption(Option opt, int* slevel, int* sopt) {
+       *sopt = TCP_NODELAY;
+       break;
+     case OPT_DSCP:
+-#if defined(WEBRTC_POSIX)
++#if defined(WEBRTC_POSIX) && !defined(__HAIKU__)
+       if (family_ == AF_INET6) {
+         *slevel = IPPROTO_IPV6;
+         *sopt = IPV6_TCLASS;
+@@ -737,7 +737,7 @@ int PhysicalSocket::TranslateOption(Option opt, int* slevel, int* sopt) {
+       return -1;
+ #endif
+     case OPT_SEND_ECN:
+-#if defined(WEBRTC_POSIX)
++#if defined(WEBRTC_POSIX) && !defined(__HAIKU__)
+       if (family_ == AF_INET6) {
+         *slevel = IPPROTO_IPV6;
+         *sopt = IPV6_TCLASS;
+@@ -751,7 +751,7 @@ int PhysicalSocket::TranslateOption(Option opt, int* slevel, int* sopt) {
+       return -1;
+ #endif
+     case OPT_RECV_ECN:
+-#if defined(WEBRTC_POSIX)
++#if defined(WEBRTC_POSIX) && !defined(__HAIKU__)
+       if (family_ == AF_INET6) {
+         *slevel = IPPROTO_IPV6;
+         *sopt = IPV6_RECVTCLASS;
+@@ -770,22 +770,30 @@ int PhysicalSocket::TranslateOption(Option opt, int* slevel, int* sopt) {
+       *slevel = SOL_SOCKET;
+       *sopt = SO_KEEPALIVE;
+       break;
++#if !defined(WEBRTC_HAIKU)
+     case OPT_TCP_KEEPCNT:
+       *slevel = IPPROTO_TCP;
+       *sopt = TCP_KEEPCNT;
+       break;
++#endif
+     case OPT_TCP_KEEPIDLE:
+       *slevel = IPPROTO_TCP;
++#if defined(WEBRTC_HAIKU)
++      *sopt = SO_KEEPALIVE;
++#else
+ #if !defined(WEBRTC_MAC)
+       *sopt = TCP_KEEPIDLE;
+ #else
+       *sopt = TCP_KEEPALIVE;
++#endif
+ #endif
+       break;
++#if !defined(WEBRTC_HAIKU)
+     case OPT_TCP_KEEPINTVL:
+       *slevel = IPPROTO_TCP;
+       *sopt = TCP_KEEPINTVL;
+       break;
++#endif
+     case OPT_TCP_USER_TIMEOUT:
+ #if defined(WEBRTC_LINUX) || defined(WEBRTC_ANDROID)
+       *slevel = IPPROTO_TCP;
+@@ -834,7 +842,7 @@ bool SocketDispatcher::Initialize() {
+ #if defined(WEBRTC_WIN)
+   u_long argp = 1;
+   ioctlsocket(s_, FIONBIO, &argp);
+-#elif defined(WEBRTC_POSIX)
++#elif defined(WEBRTC_POSIX) && !defined(WEBRTC_HAIKU)
+   fcntl(s_, F_SETFL, fcntl(s_, F_GETFL, 0) | O_NONBLOCK);
+   int value = 1;
+   // Attempt to get receive packet timestamp from the socket.
+diff --git a/third_party/libwebrtc/rtc_base/platform_thread_types.cc b/third_party/libwebrtc/rtc_base/platform_thread_types.cc
+index c3c6955..5449ead 100644
+--- a/third_party/libwebrtc/rtc_base/platform_thread_types.cc
++++ b/third_party/libwebrtc/rtc_base/platform_thread_types.cc
+@@ -15,6 +15,10 @@
+ #include <sys/syscall.h>
+ #endif
+ 
++#if defined(WEBRTC_HAIKU)
++#include <OS.h>
++#endif
++
+ #if defined(WEBRTC_WIN)
+ #include "rtc_base/arraysize.h"
+ 
+@@ -44,6 +48,8 @@ PlatformThreadId CurrentThreadId() {
+   return gettid();
+ #elif defined(WEBRTC_FUCHSIA)
+   return zx_thread_self();
++#elif defined(WEBRTC_HAIKU)
++  return find_thread(NULL);
+ #elif defined(WEBRTC_LINUX)
+   return syscall(__NR_gettid);
+ #elif defined(__EMSCRIPTEN__)
+@@ -118,6 +124,8 @@ void SetCurrentThreadName(const char* name) {
+   prctl(PR_SET_NAME, reinterpret_cast<unsigned long>(name));  // NOLINT
+ #elif defined(WEBRTC_MAC) || defined(WEBRTC_IOS)
+   pthread_setname_np(name);
++#elif defined(WEBRTC_HAIKU)
++  rename_thread(find_thread(NULL), name);
+ #elif defined(WEBRTC_FUCHSIA)
+   zx_status_t status = zx_object_set_property(zx_thread_self(), ZX_PROP_NAME,
+                                               name, strlen(name));
+diff --git a/third_party/libwebrtc/system_wrappers/BUILD.gn b/third_party/libwebrtc/system_wrappers/BUILD.gn
+index 802f016..e243790 100644
+--- a/third_party/libwebrtc/system_wrappers/BUILD.gn
++++ b/third_party/libwebrtc/system_wrappers/BUILD.gn
+@@ -63,7 +63,9 @@ rtc_library("system_wrappers") {
+       sources += [ "source/cpu_features_linux.cc" ]
+     }
+ 
+-    libs += [ "rt" ]
++    if (!is_haiku) {
++      libs += [ "rt" ]
++    }
+   }
+ 
+   if (is_win) {
+diff --git a/third_party/libwebrtc/webrtc.gni b/third_party/libwebrtc/webrtc.gni
+index 6e86706..e8ec8cd 100644
+--- a/third_party/libwebrtc/webrtc.gni
++++ b/third_party/libwebrtc/webrtc.gni
+@@ -145,7 +145,7 @@ declare_args() {
+   rtc_build_tools = false
+ 
+   # Set this to false to skip building code that requires X11.
+-  rtc_use_x11 = use_x11
++  rtc_use_x11 = use_x11 && !is_haiku
+ 
+   # Set this to use PipeWire on the Wayland display server.
+   # By default it's only enabled on desktop Linux (excludes ChromeOS) and
+@@ -355,7 +355,7 @@ rtc_opus_dir = "//third_party/opus"
+ 
+ # Desktop capturer is supported only on Windows, OSX and Linux.
+ rtc_desktop_capture_supported =
+-    (is_win && current_os != "winuwp") || is_mac || is_bsd ||
++    (is_win && current_os != "winuwp") || is_mac || is_bsd || is_haiku ||
+     ((is_linux || is_chromeos) && (rtc_use_x11_extensions || rtc_use_pipewire))
+ 
+ ###############################################################################
+diff --git a/third_party/pipewire/pipewire/utils.h b/third_party/pipewire/pipewire/utils.h
+index b320db2..7e60d6f 100644
+--- a/third_party/pipewire/pipewire/utils.h
++++ b/third_party/pipewire/pipewire/utils.h
+@@ -32,7 +32,7 @@ extern "C" {
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/un.h>
+-#ifndef _POSIX_C_SOURCE
++#if !defined(_POSIX_C_SOURCE) && !defined(__HAIKU__)
+ # include <sys/mount.h>
+ #endif
+ 
 diff --git a/third_party/rust/glslopt/.cargo-checksum.json b/third_party/rust/glslopt/.cargo-checksum.json
 index ddd05da..d75a57c 100644
 --- a/third_party/rust/glslopt/.cargo-checksum.json
@@ -2472,6 +4614,24 @@ index 5873dbe..1534ba4 100644
              return "Mozilla"
          return ".mozilla"
  
+diff --git a/toolkit/system/gnome/moz.build b/toolkit/system/gnome/moz.build
+index aa2df2b..a42f897 100644
+--- a/toolkit/system/gnome/moz.build
++++ b/toolkit/system/gnome/moz.build
+@@ -7,8 +7,12 @@
+ with Files("**"):
+     BUG_COMPONENT = ("Firefox", "Shell Integration")
+ 
++if CONFIG["OS_ARCH"] != "Haiku":
++    SOURCES += [
++        "nsAlertsIconListener.cpp",
++    ]
++
+ SOURCES += [
+-    "nsAlertsIconListener.cpp",
+     "nsSystemAlertsService.cpp",
+ ]
+ 
 diff --git a/toolkit/system/gnome/nsGIOService.cpp b/toolkit/system/gnome/nsGIOService.cpp
 index fd173f9..839d9f4 100644
 --- a/toolkit/system/gnome/nsGIOService.cpp
@@ -2540,6 +4700,421 @@ index fd173f9..839d9f4 100644
  #else
    g_app_info_launch_default_for_uri(spec.get(),
                                      GetLaunchContext(aXDGToken).get(),
+diff --git a/toolkit/system/haiku/moz.build b/toolkit/system/haiku/moz.build
+new file mode 100644
+index 0000000..8c3bf79
+--- /dev/null
++++ b/toolkit/system/haiku/moz.build
+@@ -0,0 +1,26 @@
++# -*- Mode: python; indent-tabs-mode: nil; tab-width: 40 -*-
++# vim: set filetype=python:
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++with Files("**"):
++    BUG_COMPONENT = ("Firefox", "Shell Integration")
++
++if CONFIG["OS_ARCH"] == "Haiku":
++    SOURCES += [
++        "nsAlertsIconListener.cpp",
++    ]
++    OS_LIBS += [
++        'be',
++    ]
++
++
++FINAL_LIBRARY = "xul"
++
++LOCAL_INCLUDES += [
++    "/toolkit/components/build/",
++]
++
++CXXFLAGS += CONFIG["GLIB_CFLAGS"]
++CXXFLAGS += CONFIG["MOZ_GTK3_CFLAGS"]
+diff --git a/toolkit/system/haiku/nsAlertsIconListener.cpp b/toolkit/system/haiku/nsAlertsIconListener.cpp
+new file mode 100644
+index 0000000..f556f6b
+--- /dev/null
++++ b/toolkit/system/haiku/nsAlertsIconListener.cpp
+@@ -0,0 +1,299 @@
++/* -*- Mode: C++; tab-width: 2; indent-tabs-mode:nil; c-basic-offset: 2 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "../gnome/nsSystemAlertsService.h"
++
++#include "nsAlertsIconListener.h"
++#include "imgIContainer.h"
++#include "imgIRequest.h"
++#include "nsServiceManagerUtils.h"
++#include "nsIAlertsService.h"
++#include "nsICancelable.h"
++#include "nsImageToPixbuf.h"
++#include "nsIStringBundle.h"
++#include "nsIObserverService.h"
++#include "nsCRT.h"
++#include "mozilla/XREAppData.h"
++#include "mozilla/GRefPtr.h"
++#include "mozilla/GUniquePtr.h"
++#include "mozilla/UniquePtrExtensions.h"
++
++#include <stdio.h>
++#include <algorithm>
++#include <cmath>
++
++#include "mozilla/UniquePtr.h"
++
++using namespace mozilla;
++extern const StaticXREAppData* gAppData;
++
++NS_IMPL_ISUPPORTS(nsAlertsIconListener, nsIAlertNotificationImageListener,
++                  nsIObserver, nsISupportsWeakReference)
++
++GdkPixbuf* nsAlertsIconListener::GetPixbufFromImgRequest(imgIRequest* aRequest) {
++  nsCOMPtr<imgIContainer> image;
++  nsresult rv = aRequest->GetImage(getter_AddRefs(image));
++  if (NS_FAILED(rv) || !image) {
++    return nullptr;
++  }
++
++  RefPtr<GdkPixbuf> pixbuf = nsImageToPixbuf::ImageToPixbuf(image);
++  if (!pixbuf) {
++      return nullptr;
++  }
++
++  return pixbuf.forget().take();
++}
++
++
++BBitmap* nsAlertsIconListener::PixbufToBitmap(GdkPixbuf* aPixbuf) {
++  if (!aPixbuf) {
++    return nullptr;
++  }
++
++  GdkPixbuf* pixbufToUse = aPixbuf;
++  RefPtr<GdkPixbuf> scaledPixbuf;
++
++  int width = gdk_pixbuf_get_width(aPixbuf);
++  int height = gdk_pixbuf_get_height(aPixbuf);
++
++  const int maxWidth = 64;
++  const int maxHeight = 64;
++
++  if (width > maxWidth || height > maxHeight) {
++    double ratio = std::min(static_cast<double>(maxWidth) / width,
++                            static_cast<double>(maxHeight) / height);
++    int newWidth = std::max(1, static_cast<int>(std::round(width * ratio)));
++    int newHeight = std::max(1, static_cast<int>(std::round(height * ratio)));
++
++    scaledPixbuf = gdk_pixbuf_scale_simple(
++        aPixbuf, newWidth, newHeight, GDK_INTERP_BILINEAR);
++
++    if (!scaledPixbuf) {
++      fprintf(stderr, "PixbufToBitmap: Failed to scale pixbuf\n");
++      return nullptr;
++    }
++    pixbufToUse = scaledPixbuf.get();
++    width = newWidth;
++    height = newHeight;
++  }
++
++  int n_channels = gdk_pixbuf_get_n_channels(pixbufToUse);
++  bool has_alpha = gdk_pixbuf_get_has_alpha(pixbufToUse);
++
++  if (width <= 0 || height <= 0) {
++    return nullptr;
++  }
++
++  if (n_channels != 4 || !has_alpha) {
++      fprintf(stderr, "PixbufToBitmap: Expected 4 channels (RGBA) after potential scaling, got %d\n", n_channels);
++      return nullptr;
++  }
++
++  BRect bounds(0, 0, width - 1, height - 1);
++  BBitmap* bitmap = new BBitmap(bounds, B_RGBA32);
++
++  if (!bitmap || bitmap->InitCheck() != B_OK) {
++    delete bitmap;
++    return nullptr;
++  }
++
++  guchar* pixbufPixels = gdk_pixbuf_get_pixels(pixbufToUse);
++  int pixbufRowstride = gdk_pixbuf_get_rowstride(pixbufToUse);
++  uint8* bitmapPixels = (uint8*)bitmap->Bits();
++  uint32 bitmapRowstride = bitmap->BytesPerRow();
++
++  for (int y = 0; y < height; ++y) {
++    guchar* p = pixbufPixels + y * pixbufRowstride;
++    uint8* b = bitmapPixels + y * bitmapRowstride;
++    for (int x = 0; x < width; ++x) {
++      uint8 r = p[0];
++      uint8 g = p[1];
++      uint8 b_ = p[2];
++      uint8 a = p[3];
++
++      b[0] = b_;
++      b[1] = g;
++      b[2] = r;
++      b[3] = a;
++
++      p += 4;
++      b += 4;
++    }
++  }
++
++  return bitmap;
++}
++
++
++nsAlertsIconListener::nsAlertsIconListener(nsSystemAlertsService* aBackend,
++                                           const nsAString& aAlertName)
++    : mAlertName(aAlertName), mBackend(aBackend) {
++}
++
++nsAlertsIconListener::~nsAlertsIconListener() {
++  mBackend->RemoveListener(mAlertName, this);
++}
++
++NS_IMETHODIMP
++nsAlertsIconListener::OnImageMissing(nsISupports*) {
++  return ShowAlert(nullptr);
++}
++
++NS_IMETHODIMP
++nsAlertsIconListener::OnImageReady(nsISupports*, imgIRequest* aRequest) {
++  GdkPixbuf* pixbuf = GetPixbufFromImgRequest(aRequest);
++  if (!pixbuf) {
++      fprintf(stderr, "Failed to get GdkPixbuf from image request\n");
++      return ShowAlert(nullptr);
++  }
++
++  BBitmap* iconBitmap = PixbufToBitmap(pixbuf);
++
++  g_object_unref(pixbuf);
++
++  if (!iconBitmap) {
++       fprintf(stderr, "Failed to convert GdkPixbuf to BBitmap (possibly after scaling)\n");
++  }
++
++  nsresult rv = ShowAlert(iconBitmap);
++  return rv;
++}
++
++nsresult nsAlertsIconListener::ShowAlert(BBitmap* aIconBitmap) {
++  mozilla::UniquePtr<BBitmap> iconBitmap(aIconBitmap);
++
++  if (!mBackend->IsActiveListener(mAlertName, this)) return NS_OK;
++
++  notification_type type = B_INFORMATION_NOTIFICATION;
++
++  BNotification notification(type);
++  if (notification.InitCheck() != B_OK) {
++      fprintf(stderr, "Failed to initialize BNotification\n");
++      return NS_ERROR_FAILURE;
++  }
++
++  nsCOMPtr<nsIStringBundleService> bundleService =
++      do_GetService(NS_STRINGBUNDLE_CONTRACTID);
++
++  nsAutoCString appShortName;
++  if (bundleService) {
++    nsCOMPtr<nsIStringBundle> bundle;
++    bundleService->CreateBundle("chrome://branding/locale/brand.properties",
++                                getter_AddRefs(bundle));
++    nsAutoString appName;
++
++    if (bundle) {
++      bundle->GetStringFromName("brandShortName", appName);
++      CopyUTF16toUTF8(appName, appShortName);
++    } else {
++      NS_WARNING(
++          "brand.properties not present, using default application name");
++      appShortName.AssignLiteral("Mozilla");
++    }
++  } else {
++    appShortName.AssignLiteral("Mozilla");
++  }
++
++  notification.SetGroup(appShortName.get());
++
++  if (!mAlertTitle.IsEmpty()) {
++    notification.SetTitle(mAlertTitle.get());
++  } else {
++    notification.SetTitle("Notification");
++  }
++
++  if (!mAlertText.IsEmpty()) {
++    notification.SetContent(mAlertText.get());
++  }
++
++  if (!mAlertCookie.IsEmpty()) {
++     nsCString cookieStr = NS_ConvertUTF16toUTF8(mAlertCookie);
++     if (!cookieStr.IsEmpty()) {
++         notification.SetMessageID(cookieStr.get());
++     }
++  }
++
++  if (iconBitmap) {
++      notification.SetIcon(iconBitmap.get());
++  }
++
++  bigtime_t timeout = mAlertRequiresInteraction ? 15000000 : -1;
++
++  status_t sendStatus = notification.Send(timeout);
++  if (sendStatus != B_OK) {
++    fprintf(stderr, "Failed to send BNotification: %s\n", strerror(sendStatus));
++  }
++
++  nsCOMPtr<nsIObserverService> obsServ =
++      do_GetService("@mozilla.org/observer-service;1");
++  if (obsServ) obsServ->AddObserver(this, "quit-application", true);
++
++  if (mAlertListener)
++    mAlertListener->Observe(nullptr, "alertshow", mAlertCookie.get());
++
++  return NS_OK;
++}
++
++void nsAlertsIconListener::SendCallback() {
++  if (mAlertListener)
++    mAlertListener->Observe(nullptr, "alertclickcallback", mAlertCookie.get());
++}
++
++void nsAlertsIconListener::SendClosed() {
++  NotifyFinished();
++}
++
++NS_IMETHODIMP
++nsAlertsIconListener::Observe(nsISupports* aSubject, const char* aTopic,
++                              const char16_t* aData) {
++  if (!nsCRT::strcmp(aTopic, "quit-application")) {
++      Release();
++  }
++  return NS_OK;
++}
++
++nsresult nsAlertsIconListener::Close() {
++  if (mIconRequest) {
++    mIconRequest->Cancel(NS_BINDING_ABORTED);
++    mIconRequest = nullptr;
++  }
++  NotifyFinished();
++  return NS_OK;
++}
++
++nsresult nsAlertsIconListener::InitAlertAsync(nsIAlertNotification* aAlert,
++                                              nsIObserver* aAlertListener) {
++  nsresult rv = aAlert->GetTextClickable(&mAlertHasAction);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  rv = aAlert->GetSilent(&mAlertIsSilent);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  rv = aAlert->GetRequireInteraction(&mAlertRequiresInteraction);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  nsAutoString title;
++  rv = aAlert->GetTitle(title);
++  NS_ENSURE_SUCCESS(rv, rv);
++  CopyUTF16toUTF8(title, mAlertTitle);
++
++  nsAutoString text;
++  rv = aAlert->GetText(text);
++  NS_ENSURE_SUCCESS(rv, rv);
++  CopyUTF16toUTF8(text, mAlertText);
++
++  mAlertListener = aAlertListener;
++
++  rv = aAlert->GetCookie(mAlertCookie);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  return aAlert->LoadImage(0, this, nullptr, getter_AddRefs(mIconRequest));
++}
++
++void nsAlertsIconListener::NotifyFinished() {
++  if (mAlertListener)
++    mAlertListener->Observe(nullptr, "alertfinished", mAlertCookie.get());
++}
+diff --git a/toolkit/system/haiku/nsAlertsIconListener.h b/toolkit/system/haiku/nsAlertsIconListener.h
+new file mode 100644
+index 0000000..983e5a5
+--- /dev/null
++++ b/toolkit/system/haiku/nsAlertsIconListener.h
+@@ -0,0 +1,72 @@
++/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef nsAlertsIconListener_h__
++#define nsAlertsIconListener_h__
++
++#include "nsCOMPtr.h"
++#include "nsIAlertsService.h"
++#include "nsString.h"
++#include "nsIObserver.h"
++#include "nsWeakReference.h"
++
++#include <gdk-pixbuf/gdk-pixbuf.h>
++
++#pragma GCC visibility push(default)
++#include <app/Notification.h>
++#include <interface/InterfaceDefs.h>
++#include <interface/Bitmap.h>
++#include <interface/Rect.h>
++#pragma GCC visibility pop
++
++class nsIAlertNotification;
++class nsICancelable;
++class nsSystemAlertsService;
++class imgIRequest;
++
++class nsAlertsIconListener : public nsIAlertNotificationImageListener,
++                             public nsIObserver,
++                             public nsSupportsWeakReference {
++ public:
++  NS_DECL_ISUPPORTS
++  NS_DECL_NSIALERTNOTIFICATIONIMAGELISTENER
++  NS_DECL_NSIOBSERVER
++
++  nsAlertsIconListener(nsSystemAlertsService* aBackend,
++                       const nsAString& aAlertName);
++
++  nsresult InitAlertAsync(nsIAlertNotification* aAlert,
++                          nsIObserver* aAlertListener);
++  nsresult Close();
++
++  void SendCallback();
++  void SendClosed();
++
++ protected:
++  virtual ~nsAlertsIconListener();
++
++  static BBitmap* PixbufToBitmap(GdkPixbuf* aPixbuf);
++  static GdkPixbuf* GetPixbufFromImgRequest(imgIRequest* aRequest);
++
++  nsCOMPtr<nsICancelable> mIconRequest;
++  nsCString mAlertTitle;
++  nsCString mAlertText;
++
++  nsCOMPtr<nsIObserver> mAlertListener;
++  nsString mAlertCookie;
++  nsString mAlertName;
++
++  RefPtr<nsSystemAlertsService> mBackend;
++
++  bool mAlertHasAction;
++  bool mAlertIsSilent;
++  bool mAlertRequiresInteraction;
++
++  nsresult ShowAlert(BBitmap* aIconBitmap = nullptr);
++
++  void NotifyFinished();
++};
++
++#endif
 diff --git a/toolkit/themes/shared/popup.css b/toolkit/themes/shared/popup.css
 index 648c65a..7263a13 100644
 --- a/toolkit/themes/shared/popup.css
@@ -2557,6 +5132,18 @@ index 648c65a..7263a13 100644
    @media (-moz-platform: macos) {
      appearance: auto;
      -moz-default-appearance: menupopup;
+diff --git a/toolkit/toolkit.mozbuild b/toolkit/toolkit.mozbuild
+index c50b7f3..19f155c 100644
+--- a/toolkit/toolkit.mozbuild
++++ b/toolkit/toolkit.mozbuild
+@@ -145,6 +145,7 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
+     DIRS += [
+         "/media/mozva",
+         "/toolkit/system/gnome",
++        "/toolkit/system/haiku",
+     ]
+ 
+ if CONFIG["ENABLE_WEBDRIVER"]:
 diff --git a/toolkit/xre/nsAppRunner.cpp b/toolkit/xre/nsAppRunner.cpp
 index 4a663a5..bcd9d96 100644
 --- a/toolkit/xre/nsAppRunner.cpp
