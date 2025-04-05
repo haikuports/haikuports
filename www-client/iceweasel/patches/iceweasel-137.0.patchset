@@ -1,4 +1,4 @@
-From b2a49fc722d2d35d563cdcc0c18ca90e82c4f054 Mon Sep 17 00:00:00 2001
+From a949b39e3d32e9517ce92a91f83ab903fc63fb77 Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
 Date: Wed, 2 Apr 2025 15:27:57 +1000
 Subject: Add Haiku build support
@@ -11,7 +11,6 @@ Based on patches sourced from https://github.com/kenz-gelsoft/gecko-dev/
 -   Fixed build with WebRTC enabled.
 -   Implemented WebRTC modules for desktop capture and video capture.
 -   Made additional modifications for Haiku compatibility.
-
 
 diff --git a/Cargo.lock b/Cargo.lock
 index c91f39b..1afc921 100644
@@ -834,7 +833,7 @@ index b0db033..efe0927 100644
  #endif
 diff --git a/media/libcubeb/src/cubeb_haiku.cpp b/media/libcubeb/src/cubeb_haiku.cpp
 new file mode 100644
-index 0000000..db30a02
+index 0000000..d2385d7
 --- /dev/null
 +++ b/media/libcubeb/src/cubeb_haiku.cpp
 @@ -0,0 +1,952 @@
@@ -3252,7 +3251,7 @@ index 0000000..cdf5adb
 +#endif  // MODULES_VIDEO_CAPTURE_MAIN_SOURCE_HAIKU_DEVICE_INFO_HAIKU_H_
 diff --git a/third_party/libwebrtc/modules/video_capture/haiku/video_capture_haiku.cc b/third_party/libwebrtc/modules/video_capture/haiku/video_capture_haiku.cc
 new file mode 100644
-index 0000000..29b319d
+index 0000000..6759733
 --- /dev/null
 +++ b/third_party/libwebrtc/modules/video_capture/haiku/video_capture_haiku.cc
 @@ -0,0 +1,213 @@
@@ -5505,6 +5504,342 @@ index dbd9993..1431340 100644
  #  endif
  #  include <sys/types.h>
  #  include <signal.h>
+-- 
+2.48.1
+
+
+From fe67c29412362d63c85ff534412759fab78ba8c9 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sat, 5 Apr 2025 15:58:03 +1000
+Subject: Implement native remote server
+
+
+diff --git a/toolkit/components/remote/RemoteUtils.h b/toolkit/components/remote/RemoteUtils.h
+index c4c1bcd..2beb4ea 100644
+--- a/toolkit/components/remote/RemoteUtils.h
++++ b/toolkit/components/remote/RemoteUtils.h
+@@ -13,7 +13,7 @@
+ #  include "WinUtils.h"
+ #endif
+ 
+-#if defined XP_WIN || defined XP_MACOSX
++#if defined XP_WIN || defined XP_MACOSX || defined XP_HAIKU
+ static void BuildClassName(const char* aProgram, const char* aProfile,
+                            nsString& aClassName) {
+   // On Windows, the class name is used as the window class.
+@@ -30,6 +30,8 @@ static void BuildClassName(const char* aProgram, const char* aProfile,
+ 
+ #  if defined XP_WIN
+   constexpr size_t ClassNameMaxLength = 256;
++#  elif defined XP_HAIKU
++  constexpr size_t ClassNameMaxLength = 32;
+ #  else
+   constexpr size_t ClassNameMaxLength = 128;
+ #  endif
+diff --git a/toolkit/components/remote/moz.build b/toolkit/components/remote/moz.build
+index 4230dfe..f003ea3 100644
+--- a/toolkit/components/remote/moz.build
++++ b/toolkit/components/remote/moz.build
+@@ -28,7 +28,7 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
+         "nsUnixRemoteServer.cpp",
+         "RemoteUtils.cpp",
+     ]
+-    if CONFIG["MOZ_ENABLE_DBUS"]:
++    if CONFIG["MOZ_ENABLE_DBUS"] and CONFIG["OS_ARCH"] != "Haiku":
+         SOURCES += [
+             "nsDBusRemoteClient.cpp",
+             "nsDBusRemoteServer.cpp",
+@@ -39,11 +39,22 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
+         ]
+         CXXFLAGS += CONFIG["MOZ_DBUS_CFLAGS"]
+     else:
+-        SOURCES += [
+-            "nsGTKRemoteServer.cpp",
+-            "nsXRemoteClient.cpp",
+-            "nsXRemoteServer.cpp",
+-        ]
++        if CONFIG["OS_ARCH"] == "Haiku":
++            SOURCES += [
++                "nsHaikuRemoteClient.cpp",
++                "nsHaikuRemoteServer.cpp",
++            ]
++            EXPORTS += [
++                "nsUnixRemoteServer.h",
++                "RemoteUtils.h",
++            ]
++            CXXFLAGS += CONFIG["MOZ_GTK3_CFLAGS"]
++        else:
++            SOURCES += [
++                "nsGTKRemoteServer.cpp",
++                "nsXRemoteClient.cpp",
++                "nsXRemoteServer.cpp",
++            ]
+     CXXFLAGS += CONFIG["MOZ_GTK3_CFLAGS"]
+ 
+ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
+diff --git a/toolkit/components/remote/nsHaikuRemoteClient.cpp b/toolkit/components/remote/nsHaikuRemoteClient.cpp
+new file mode 100644
+index 0000000..2bec3ce
+--- /dev/null
++++ b/toolkit/components/remote/nsHaikuRemoteClient.cpp
+@@ -0,0 +1,35 @@
++#include <vector>
++#include <string.h>
++
++#include "nsHaikuRemoteClient.h"
++
++#include "RemoteUtils.h"
++
++nsresult nsHaikuRemoteClient::Init() {
++  return NS_OK;
++}
++
++nsresult nsHaikuRemoteClient::SendCommandLine(const char* aProgram,
++                                            const char* aProfile,
++                                            int32_t argc,
++                                            const char** argv,
++                                            bool aRaise) {
++  nsString className;
++  BuildClassName(aProgram, aProfile, className);
++  BString portName;
++  portName.SetTo(NS_ConvertUTF16toUTF8(className.get()).get());
++
++  port_id port = find_port(portName.String());
++  if (port < 0) {
++    return NS_ERROR_NOT_AVAILABLE;
++  }
++
++  BString message;
++  message << (aRaise ? "1" : "0");
++  for (int i = 0; i < argc; i++) {
++    message << "|" << argv[i];
++  }
++
++  status_t result = write_port(port, 1, message.String(), message.Length() + 1);
++  return (result == B_OK) ? NS_OK : NS_ERROR_FAILURE;
++}
+diff --git a/toolkit/components/remote/nsHaikuRemoteClient.h b/toolkit/components/remote/nsHaikuRemoteClient.h
+new file mode 100644
+index 0000000..de9c0a2
+--- /dev/null
++++ b/toolkit/components/remote/nsHaikuRemoteClient.h
+@@ -0,0 +1,22 @@
++#ifndef HAIKU_REMOTE_CLIENT_H
++#define HAIKU_REMOTE_CLIENT_H
++
++#pragma GCC visibility push(default)
++#include <kernel/OS.h>
++#include <app/Messenger.h>
++#include <support/String.h>
++#pragma GCC visibility pop
++
++#include "nsRemoteClient.h"
++
++class nsHaikuRemoteClient : public nsRemoteClient {
++public:
++  virtual ~nsHaikuRemoteClient() = default;
++
++  nsresult Init() override;
++  nsresult SendCommandLine(const char* aProgram, const char* aProfile,
++                           int32_t argc, const char** argv,
++                           bool aRaise) override;
++};
++
++#endif
+diff --git a/toolkit/components/remote/nsHaikuRemoteServer.cpp b/toolkit/components/remote/nsHaikuRemoteServer.cpp
+new file mode 100644
+index 0000000..aebefa1
+--- /dev/null
++++ b/toolkit/components/remote/nsHaikuRemoteServer.cpp
+@@ -0,0 +1,107 @@
++#include "nsHaikuRemoteServer.h"
++#include "RemoteUtils.h"
++
++#include "nsCommandLine.h"
++#include "nsICommandLineRunner.h"
++#include "nsICommandLine.h"
++#include "nsCOMPtr.h"
++#include "nsThreadUtils.h"
++
++#include <unistd.h>
++
++nsHaikuRemoteServer::nsHaikuRemoteServer()
++  : fRunning(false), fPort(B_BAD_PORT_ID) {}
++
++nsHaikuRemoteServer::~nsHaikuRemoteServer() {
++  Shutdown();
++}
++
++nsresult nsHaikuRemoteServer::Startup(const char* aAppName, const char* aProfileName) {
++  nsString className;
++  BuildClassName(aAppName, aProfileName, className);
++  BString portName;
++  portName.SetTo(NS_ConvertUTF16toUTF8(className.get()).get());
++
++  fPort = create_port(10, portName.String());
++  if (fPort < 0) {
++    return NS_ERROR_FAILURE;
++  }
++
++  fRunning = true;
++  fListenerThread = std::thread([this]() { ListenLoop(); });
++  
++  return NS_OK;
++}
++
++void nsHaikuRemoteServer::Shutdown() {
++  fRunning = false;
++  if (fPort >= 0) {
++    delete_port(fPort);
++    fPort = B_BAD_PORT_ID;
++  }
++  if (fListenerThread.joinable()) {
++    fListenerThread.join();
++  }
++}
++
++void nsHaikuRemoteServer::ListenLoop() {
++  while (fRunning) {
++    char buffer[B_PATH_NAME_LENGTH * 2];
++    int32 code;
++    ssize_t len = read_port(fPort, &code, buffer, sizeof(buffer));
++    if (len > 0) {
++      buffer[len] = '\0';
++      HandleMessage(buffer);
++    } else {
++      snooze(50000);
++    }
++  }
++}
++
++nsresult nsHaikuRemoteServer::HandleMessage(const char* message) {
++  return NS_DispatchToMainThread(
++    NS_NewRunnableFunction("HandleMessageOnMainThread", [this, msg = std::string(message)]() {
++         this->HandleMessageOnMainThread(msg.c_str());
++    })
++  );
++}
++
++void nsHaikuRemoteServer::HandleMessageOnMainThread(const char* message) {
++  BString messageString(message);
++  BStringList argsList;
++  messageString.Split("|", true, argsList);
++  
++  if (argsList.IsEmpty())
++    return;
++
++  bool activate = (argsList.First() == "1");
++
++  argsList.Remove(0);
++
++  int argc = argsList.CountStrings();
++  const char** argv = new const char*[argc];
++  for (int i = 0; i < argc; i++) {
++    argv[i] = argsList.StringAt(i).String();
++  }
++
++  nsCOMPtr<nsICommandLineRunner> cmdLine(new nsCommandLine());
++  nsresult rv = cmdLine->Init(argc, argv, nullptr, nsICommandLine::STATE_REMOTE_AUTO);
++  delete[] argv;
++
++  if (NS_SUCCEEDED(rv)) {
++    cmdLine->Run();
++    if (activate) {
++	  team_info teamInfo;
++	  if (get_team_info(B_CURRENT_TEAM, &teamInfo) == B_OK) {
++	    if (be_roster->ActivateApp(teamInfo.team) != B_OK && be_app != NULL) {
++	      // if the activation fails, activate all titled windows
++	      for (int32 i = 0; BWindow* window = be_app->WindowAt(i); i++) {
++	        if (window->Type() == B_TITLED_WINDOW) {
++	          window->Activate(true);
++	        }
++	      }
++	    }
++	  }
++    }
++  }
++}
+diff --git a/toolkit/components/remote/nsHaikuRemoteServer.h b/toolkit/components/remote/nsHaikuRemoteServer.h
+new file mode 100644
+index 0000000..7c6d057
+--- /dev/null
++++ b/toolkit/components/remote/nsHaikuRemoteServer.h
+@@ -0,0 +1,37 @@
++#ifndef HAIKU_REMOTE_SERVER_H
++#define HAIKU_REMOTE_SERVER_H
++
++#include "nsRemoteServer.h"
++
++#include <thread>
++#include <atomic>
++
++#pragma GCC visibility push(default)
++#include <kernel/OS.h>
++#include <app/Application.h>
++#include <app/Messenger.h>
++#include <app/Roster.h>
++#include <interface/Window.h>
++#include <support/String.h>
++#include <support/StringList.h>
++#pragma GCC visibility pop
++
++class nsHaikuRemoteServer : public nsRemoteServer {
++public:
++  nsHaikuRemoteServer();
++  ~nsHaikuRemoteServer() override;
++
++  nsresult Startup(const char* aAppName, const char* aProfileName) override;
++  void Shutdown() override;
++
++private:
++  void ListenLoop();
++  nsresult HandleMessage(const char* message);
++  void HandleMessageOnMainThread(const char* message);
++
++  std::atomic<bool> fRunning;
++  std::thread fListenerThread;
++  port_id fPort;
++};
++
++#endif
+diff --git a/toolkit/components/remote/nsRemoteService.cpp b/toolkit/components/remote/nsRemoteService.cpp
+index 46860f6..b010d4d 100644
+--- a/toolkit/components/remote/nsRemoteService.cpp
++++ b/toolkit/components/remote/nsRemoteService.cpp
+@@ -7,7 +7,10 @@
+ 
+ #include "nsRemoteClient.h"
+ #ifdef MOZ_WIDGET_GTK
+-#  ifdef MOZ_ENABLE_DBUS
++#  if defined(XP_HAIKU)
++#    include "nsHaikuRemoteServer.h"
++#    include "nsHaikuRemoteClient.h"
++#  elif defined(MOZ_ENABLE_DBUS)
+ #    include "nsDBusRemoteServer.h"
+ #    include "nsDBusRemoteClient.h"
+ #  else
+@@ -196,7 +199,9 @@ nsresult nsRemoteService::SendCommandLine(const nsACString& aProfile,
+ 
+   UniquePtr<nsRemoteClient> client;
+ #ifdef MOZ_WIDGET_GTK
+-#  if defined(MOZ_ENABLE_DBUS)
++#  if defined(XP_HAIKU)
++  client = MakeUnique<nsHaikuRemoteClient>();
++#  elif defined(MOZ_ENABLE_DBUS)
+   client = MakeUnique<nsDBusRemoteClient>(mStartupToken);
+ #  else
+   client = MakeUnique<nsXRemoteClient>(mStartupToken);
+@@ -258,7 +263,9 @@ void nsRemoteService::StartupServer() {
+   }
+ 
+ #ifdef MOZ_WIDGET_GTK
+-#  if defined(MOZ_ENABLE_DBUS)
++#  if defined(XP_HAIKU)
++  mRemoteServer = MakeUnique<nsHaikuRemoteServer>();
++#  elif defined(MOZ_ENABLE_DBUS)
+   mRemoteServer = MakeUnique<nsDBusRemoteServer>();
+ #  else
+   mRemoteServer = MakeUnique<nsGTKRemoteServer>();
 -- 
 2.48.1
 
