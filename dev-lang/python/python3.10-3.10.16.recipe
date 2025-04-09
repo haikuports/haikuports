@@ -11,7 +11,7 @@ OSI-approved open source license."
 HOMEPAGE="https://www.python.org"
 LICENSE="Python"
 COPYRIGHT="1990-2024 Python Software Foundation"
-REVISION="1"
+REVISION="2"
 SOURCE_URI="https://www.python.org/ftp/python/$portVersion/Python-$portVersion.tar.xz"
 CHECKSUM_SHA256="bfb249609990220491a1b92850a07135ed0831e41738cf681d63cf01b2a8fbd1"
 SOURCE_DIR="Python-$portVersion"
@@ -40,7 +40,7 @@ GLOBAL_WRITABLE_FILES="
 
 # If this is not intended to be the "default" Python version, set to "false", so "make altinstall"
 # is used, and only version-suffixed commands are used in PROVIDES.
-installAsDefaultPython=true
+installAsDefaultPython=false
 
 # Set to "true" if we should build the "tkinter" module.
 # Disabled for now, as tkinter deadlocks on Haiku. Try again when tk drops undroidwish for xlibe.
@@ -52,6 +52,10 @@ packageTests=false
 
 # Set to "false" for faster local/test builds. Around 4 to 5 times faster that way.
 optimizedBuild=true
+
+# Often we disable parallel builds if "optimizedBuild == true", as they can fail.
+# Some versions just work either way.
+forceParallelBuild=true
 
 # Run all tests by default. Set to "true" to make "hp --test" only run then known failing tests.
 runOnlyKnownFailingTests=false
@@ -110,11 +114,41 @@ BUILD_PREREQUIRES="
 
 if $installAsDefaultPython; then
 	PROVIDES+="
-		cmd:2to3 = $portVersion compat >= $pyShortVer
-		cmd:python3 = $portVersion compat >= $pyShortVer
-		cmd:pydoc3 = $portVersion compat >= $pyShortVer
-		cmd:python3_config = $portVersion compat >= $pyShortVer
+		cmd:2to3 = $pyVersionCompat
+		cmd:python3 = $pyVersionCompat
+		cmd:pydoc3 = $pyVersionCompat
+		cmd:python3_config = $pyVersionCompat
 		"
+else
+	SUMMARY_default="Sets the default Python version to: $portVersion"
+	DESCRIPTION_default="You can choose which Python version is used as \"default\" \
+ (ie: \"/bin/python3\") by simply installing one of the available \"python3.nn_default\" packages."
+
+	PROVIDES_default="
+		${portName}_default = $pyVersionCompat
+		cmd:2to3 = $pyVersionCompat
+		cmd:pydoc3 = $pyVersionCompat
+		cmd:python3 = $pyVersionCompat
+		cmd:python3_config = $pyVersionCompat
+		"
+	if $enableTkinter; then
+		PROVIDES_default+="
+			cmd:idle3 = $pyVersionCompat
+			"
+	fi
+
+	REQUIRES_default="
+		python$pyShortVer$secondaryArchSuffix == $portVersion base
+		haiku$secondaryArchSuffix
+		"
+
+	otherPythonVersions=(3.11 3.12 3.13 3.14)
+	for i in "${!otherPythonVersions[@]}"; do
+		otherVersion=${otherPythonVersions[$i]}
+		CONFLICTS_default+="
+			python$otherVersion${secondaryArchSuffix}_default
+			"
+	done
 fi
 
 if $enableTkinter; then
@@ -175,14 +209,20 @@ BUILD()
 		--with-ensurepip=no \
 		--with-readline=editline \
 		--with-system-expat \
-		--with-tzpath=$dataDir/zoneinfo
+		--with-tzpath=$(findpaths -c"/zoneinfo:" B_FIND_PATH_DATA_DIRECTORY)
 		# --with-lto # this one is too CPU/RAM intensive.
 
 	# Uncomment when doing repeated builds (for testing different flags/options).
 	# echo "[.recipe] Cleaning before rebuild:" && make clean && rm -f python
 
 	# NOTE: When using "--enable-optimizations" above, using "make $jobArgs" might be unreliable.
-	make $jobArgs
+	if $optimizedBuild && ! $forceParallelBuild; then
+		echo "Running make with: -j 1"
+		time make -j 1
+	else
+		echo "Running make with: $jobArgs"
+		time make $jobArgs
+	fi
 }
 
 INSTALL()
@@ -231,6 +271,26 @@ INSTALL()
 		cd $prefix/lib/python$pyShortVer
 		rm -rf ctypes/test distutils/tests idlelib/idle_test lib2to3/tests sqlite3/test test \
 			tkinter/test unittest/test
+	fi
+
+	# default_python3xx package:
+	if ! $installAsDefaultPython; then
+		cd $prefix/bin
+
+		ln -sr 2to3-$pyShortVer 2to3
+		ln -sr pydoc$pyShortVer pydoc3
+		ln -sr python$pyShortVer python3
+		ln -sr python$pyShortVer-config python3-config
+
+		packageEntries default $prefix/bin/2to3
+		packageEntries default $prefix/bin/pydoc3
+		packageEntries default $prefix/bin/python3
+		packageEntries default $prefix/bin/python3-config
+
+		if $enableTkinter; then
+			ln -sr idle$pyShortVer idle3
+			packageEntries default $prefix/bin/idle3
+		fi
 	fi
 }
 
@@ -306,21 +366,17 @@ TEST()
 		# Many of the tests hang/stall. We have two options:
 		#
 		# 1- Manually remove the problematic test-cases.
-		# 2- Set a TIMEOUT.
+		# 2- Set a TIMEOUT (eg: --timeout=300).
 		#
 		# Option 1: Works, but requires manual identification/mainteinance.
 		#
 		# Option 2: Doesn't requires maintaining a list of stalling tests, but:
-		# - Causes errors at the end of the run:
-		#	"unmounting failed: Device/File/Resource Busy"
-		# - Leaves dangling threads running when the tests timeout:
-		#	"Warning -- threading_cleanup() failed to cleanup 0 threads (count: 0, dangling: 2)"
-		# - The time it takes to run the full suite goes from 14 to 30+ minutes,
+		# at the end of the test run it causes:
+		# - "unmounting failed: Device/File/Resource Busy" errors, as there are
+		#   dangling threads running when the tests timeout (requiring `killall python`)
+		# - The time it takes to run the full suite largely increases.
 		#
-		# For Option 2, use: export EXTRATESTOPTS="--timeout=300"
-		# before calling "make $jobArgs test".
-		#
-		# Let's use Option 1, for now at least:
+		# Let's use Option 1, for now at least.
 
 		# These hang reliably.
 		-x test__xxsubinterpreters
@@ -338,13 +394,14 @@ TEST()
 		# "test_asyncio" doesn't seems to runs reliably, even after individually skipping
 		# all the problematic test-cases that could be identify by running them one by one.
 		-x test_asyncio
-		# -x test_asyncio/test_base_events
-		# -x test_asyncio/test_buffered_proto # Exception on Exception handler.
-		# -x test_asyncio/test_events
-		# -x test_asyncio/test_sendfile
-		# -x test_asyncio/test_server # Exception on Exception handler.
-		# -x test_asyncio/test_sslproto # Exception on Exception handler.
-		# -x test_asyncio/test_streams
+		# The following are all under "test_asyncio/"
+		# -x test_base_events
+		# -x test_buffered_proto # Exception on Exception handler.
+		# -x test_events
+		# -x test_sendfile
+		# -x test_server # Exception on Exception handler.
+		# -x test_sslproto # Exception on Exception handler.
+		# -x test_streams
 
 		# These not always hang/stall, but they do it enough to warrant skipping for now.
 		-x test_imaplib
@@ -407,6 +464,6 @@ TEST()
 	# Even the help for that function says to NOT use it, but some tests still do.
 	#
 	# If you find some strange "æ" suffix on temp dirnames, ej:
-	#    "cwd: /sources/Python-3.10.12/build/test_python_10324æ"
+	#    "cwd: /sources/Python-3.nn.nn/build/test_python_10324æ"
 	# That's due to usages of os_helper.FS_NONASCII.
 }

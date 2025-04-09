@@ -11,8 +11,8 @@ OSI-approved open source license."
 HOMEPAGE="https://www.python.org"
 LICENSE="Python"
 COPYRIGHT="1990-2025 Python Software Foundation"
-REVISION="1"
-SOURCE_URI="https://www.python.org/ftp/python/$portVersion/Python-${portVersion}.tar.xz"
+REVISION="2"
+SOURCE_URI="https://www.python.org/ftp/python/$portVersion/Python-$portVersion.tar.xz"
 CHECKSUM_SHA256="7220835d9f90b37c006e9842a8dff4580aaca4318674f947302b8d28f3f81112"
 SOURCE_DIR="Python-$portVersion"
 
@@ -52,6 +52,10 @@ packageTests=false
 
 # Set to "false" for faster local/test builds. Around 4 to 5 times faster that way.
 optimizedBuild=true
+
+# Often we disable parallel builds if "optimizedBuild == true", as they can fail.
+# Some versions just work either way.
+forceParallelBuild=true
 
 # Run all tests by default. Set to "true" to make "hp --test" only run then known failing tests.
 runOnlyKnownFailingTests=false
@@ -108,11 +112,41 @@ BUILD_PREREQUIRES="
 
 if $installAsDefaultPython; then
 	PROVIDES+="
-		cmd:2to3 = $portVersion compat >= $pyShortVer
-		cmd:python3 = $portVersion compat >= $pyShortVer
-		cmd:pydoc3 = $portVersion compat >= $pyShortVer
-		cmd:python3_config = $portVersion compat >= $pyShortVer
+		cmd:2to3 = $pyVersionCompat
+		cmd:python3 = $pyVersionCompat
+		cmd:pydoc3 = $pyVersionCompat
+		cmd:python3_config = $pyVersionCompat
 		"
+else
+	SUMMARY_default="Sets the default Python version to: $portVersion"
+	DESCRIPTION_default="You can choose which Python version is used as \"default\" \
+ (ie: \"/bin/python3\") by simply installing one of the available \"python3.nn_default\" packages."
+
+	PROVIDES_default="
+		${portName}_default = $pyVersionCompat
+		cmd:2to3 = $pyVersionCompat
+		cmd:pydoc3 = $pyVersionCompat
+		cmd:python3 = $pyVersionCompat
+		cmd:python3_config = $pyVersionCompat
+		"
+	if $enableTkinter; then
+		PROVIDES_default+="
+			cmd:idle3 = $pyVersionCompat
+			"
+	fi
+
+	REQUIRES_default="
+		python$pyShortVer$secondaryArchSuffix == $portVersion base
+		haiku$secondaryArchSuffix
+		"
+
+	otherPythonVersions=(3.10 3.11 3.13 3.14)
+	for i in "${!otherPythonVersions[@]}"; do
+		otherVersion=${otherPythonVersions[$i]}
+		CONFLICTS_default+="
+			python$otherVersion${secondaryArchSuffix}_default
+			"
+	done
 fi
 
 if $enableTkinter; then
@@ -154,7 +188,7 @@ BUILD()
 	# -NDEBUG gets added by ./configure unless "--with-assertions" is used.
 
 	export BASECFLAGS="-pipe -D_BSD_SOURCE"
-	export OPT=" -Wall"
+	export OPT="-Wall"	# remove "-g" until we use "defineDebugInfoPackage".
 
 	# Unless cmd:python3 >= 3.10 is available (by being listed on BUILD_PREREQUIRES), we'll
 	# get "python3: command not found" when the build tries to generate some files.
@@ -179,7 +213,7 @@ BUILD()
 		--with-ensurepip=no \
 		--with-readline=editline \
 		--with-system-expat \
-		--with-tzpath=$dataDir/zoneinfo \
+		--with-tzpath=$(findpaths -c"/zoneinfo:" B_FIND_PATH_DATA_DIRECTORY) \
 		--without-static-libpython
 		# --disable-test-modules interferes with the PGO tests. don't use it.
 		#
@@ -187,7 +221,7 @@ BUILD()
 		#	- Is too CPU intensive (at least 2.5x slower build times).
 		#	- 30% final package size increase, unless "-g" is removed from 'LTOFLAGS="$LTOFLAGS -g"'
 		#	   on "configure.ac".
-		#	but resulting Python is about %5 faster, at least on the "pystone.py" syntetic benchmark.
+		#	but resulting Python is about 5% faster, at least on the "pystone.py" syntetic benchmark.
 
 	# Uncomment when doing repeated builds (for testing different flags/options).
 	# echo "[.recipe] Cleaning before rebuild:" && make clean && rm -f python
@@ -204,11 +238,13 @@ BUILD()
 	#
 	# Not using multiple jobs for make solves both the warnings and the possible error.
 
-#	if $optimizedBuild; then
-#		make -j 1
-#	else
-		make $jobArgs
-#	fi
+	if $optimizedBuild && ! $forceParallelBuild; then
+		echo "Running make with: -j 1"
+		time make -j 1
+	else
+		echo "Running make with: $jobArgs"
+		time make $jobArgs
+	fi
 }
 
 INSTALL()
@@ -256,6 +292,26 @@ INSTALL()
 		# drop testsuite altogether
 		cd $prefix/lib/python$pyShortVer
 		rm -rf idlelib/idle_test test
+	fi
+
+	# default_python3xx package:
+	if ! $installAsDefaultPython; then
+		cd $prefix/bin
+
+		ln -sr 2to3-$pyShortVer 2to3
+		ln -sr pydoc$pyShortVer pydoc3
+		ln -sr python$pyShortVer python3
+		ln -sr python$pyShortVer-config python3-config
+
+		packageEntries default $prefix/bin/2to3
+		packageEntries default $prefix/bin/pydoc3
+		packageEntries default $prefix/bin/python3
+		packageEntries default $prefix/bin/python3-config
+
+		if $enableTkinter; then
+			ln -sr idle$pyShortVer idle3
+			packageEntries default $prefix/bin/idle3
+		fi
 	fi
 }
 
