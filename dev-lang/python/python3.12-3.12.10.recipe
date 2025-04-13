@@ -13,7 +13,7 @@ LICENSE="Python"
 COPYRIGHT="1990-2025 Python Software Foundation"
 REVISION="1"
 SOURCE_URI="https://www.python.org/ftp/python/$portVersion/Python-${portVersion}.tar.xz"
-CHECKSUM_SHA256="7220835d9f90b37c006e9842a8dff4580aaca4318674f947302b8d28f3f81112"
+CHECKSUM_SHA256="07ab697474595e06f06647417d3c7fa97ded07afc1a7e4454c5639919b46eaea"
 SOURCE_DIR="Python-$portVersion"
 
 pyShortVer="${portVersion%.*}"
@@ -53,8 +53,14 @@ packageTests=false
 # Set to "false" for faster local/test builds. Around 4 to 5 times faster that way.
 optimizedBuild=true
 
+# Generally, we disable parallel builds if "optimizedBuild == true" as they can fail.
+forceParallelBuild=true
+
 # Run all tests by default. Set to "true" to make "hp --test" only run then known failing tests.
 runOnlyKnownFailingTests=false
+
+# Run only the tests that are generally excluded. Expect LOTS of hangs/crashes/etc.
+runOnlyExcludedTests=false
 
 # <<<[RECIPE OPTIONS]
 
@@ -179,7 +185,7 @@ BUILD()
 		--with-ensurepip=no \
 		--with-readline=editline \
 		--with-system-expat \
-		--with-tzpath=$dataDir/zoneinfo \
+		--with-tzpath=$(findpaths -c : B_FIND_PATH_DATA_DIRECTORY zoneinfo) \
 		--without-static-libpython
 		# --disable-test-modules interferes with the PGO tests. don't use it.
 		#
@@ -204,11 +210,13 @@ BUILD()
 	#
 	# Not using multiple jobs for make solves both the warnings and the possible error.
 
-#	if $optimizedBuild; then
-#		make -j 1
-#	else
+	if $optimizedBuild && ! $forceParallelBuild; then
+		echo "Running make with: -j 1"
+		make -j 1
+	else
+		echo "Running make with: $jobArgs"
 		make $jobArgs
-#	fi
+	fi
 }
 
 INSTALL()
@@ -288,10 +296,15 @@ INSTALL()
 # "hp --test"'s chroot. (test_sysconfig.MakefileTests.test_parse_makefile, for example).
 # Problem is "os.getcwd()" will return wrong data, causing some file operations to fail.
 
-# For reference, results on hrev57937+113 (64 bits VBox):
-# Total duration: 13 min 9 sec
-# Total tests: run=33,883 failures=222 skipped=971
-# Total test files: run=434/424 failed=15 skipped=32 resource_denied=6 rerun=16
+# For reference, results on hrev57937+129 (64 bits VMware):
+# Total duration: 10 min 30 sec
+# Total tests: run=35,223 failures=634 skipped=1,009
+# Total test files: run=448/435 failed=21 skipped=32 resource_denied=8 rerun=21
+#
+# results on hrev58812 (32 bits bare metal):
+# Total duration: 4 min 41 sec
+# Total tests: run=36,581 failures=552 skipped=1,342
+# Total test files: run=454/445 failed=17 skipped=32 resource_denied=8 rerun=17
 TEST()
 {
 	# Remove tests data left-overs, if any:
@@ -319,16 +332,11 @@ TEST()
 	)
 
 	local tests_to_exclude=(
-		# distutils is deprecated, and will be removed on 3.12.
-		-x test_distutils
-
 		# The following tests invoke the crash dialog, and unless your configure
 		# debug_server default action to "kill" or "report", they will hang waiting for
 		# user input. See comment above TEST().
-		-x test_faulthandler
-		-x test_futures # from test_asyncio. Crashes: Exception (Segment violation)
-		-x test_subprocess # tends to hang.
-		-x test_threading # tends to hang.
+		-x test_subprocess # tends to hang. Causes segfaults in several binaries it calls (/bin/true, for example).
+		-x test_threading # tends to hang. Many "IsADirectoryError" when calling "subprocess._execute_child()"
 
 		# Many of the tests hang/stall. We have two options:
 		#
@@ -346,22 +354,18 @@ TEST()
 		# Let's use Option 1, for now at least.
 
 		# These hang reliably.
-		-x test__xxsubinterpreters
-		-x test_cmd_line
-		-x test_concurrent_futures
-		-x test_eintr
-		-x test_interpreters
-		-x test_multiprocessing_fork
-		-x test_multiprocessing_forkserver
-		-x test_multiprocessing_main_handling
+		-x test_cmd_line		# "IsADirectoryError" when calling "subprocess._execute_child()"
+		-x test_concurrent_futures	# resource_tracker: process died unexpectedly
+		-x test_interpreters	# segfaults when calling: finddir B_USER_NONPACKAGED_DIRECTORY
+#		-x test_multiprocessing_main_handling	# "IsADirectoryError" when calling "subprocess._execute_child()"
 		-x test_multiprocessing_spawn
-		-x test_os
-		-x test_posix
-		-x test_random
-		-x test_socketserver
-		-x test_threaded_import # test_importlib/test_threaded_import
-		-x test_tracemalloc
-		-x test_uuid
+		-x test_os				# Causes segfaults in several binaries it calls.
+		-x test_posix			# "Invalid Argument: '@test_94495_tmpæ'" in can_chmod
+
+#		-x test_socketserver	# skipped unless "network" resource is enabled.
+		-x test_threaded_import # RECHECK. test_importlib/test_threaded_import
+#		-x test_tracemalloc		# # "IsADirectoryError" when calling "subprocess._execute_child()"
+		-x test_uuid			# Causes segfaults in several binaries it calls (ifconfig/netstat).
 
 		# "test_asyncio" doesn't seems to runs reliably, even after individually skipping
 		# all the problematic test-cases that could be identify by running them one by one.
@@ -379,65 +383,89 @@ TEST()
 	#	-i TestThreadedServer # in test_asyncio.functional
 
 		# These not always hang/stall, but they do it enough to warrant skipping for now.
-		-x test_imaplib
+		-x test_multiprocessing_fork	# resource_tracker: process died unexpectedly
+		-x test_multiprocessing_forkserver
+		-x test_imaplib	# OK on hrev58812 32 bits, hangs on beta5 64 bits.
 		-x test_signal
-		-x test_socket
+		-x test_socket	# OK on hrev58812 32 bits, hangs on beta5 64 bits.
 		-x test_ssl
-		-x test_urllib2_localnet
+		-x test_urllib2_localnet	# OK on hrev58812 32 bits, hangs on beta5 64 bits.
 
 		# 3.11
-		-x test_urllib2net
-		-x test_venv
+#		-x test_urllib2net	# skipped if "network" resource is not enabled.
+#		-x test_venv # recheck
 
 		# 3.12 Either too slow or hangs;
-		-x test_builtin
-		-x test_mailbox
-		-x test_tempfile
-		-x test_thread
+#		-x test_builtin	# failures related to "Invalid Argument: '@test_95635_tmpæ'" in write_testfile and "IsADirectoryError" when calling "subprocess._execute_child()"
+#		-x test_mailbox
+#		-x test_tempfile
+#		-x test_thread # OK on 32 bits.
 
 		# 3.12.1
-		-x test_queue
+#		-x test_queue # OK on 32 bits.
 
 		# 3.11.8 / 3.12.2 (hang on nightlies, at least)
-		-x test_httplib
-		-x test_httpservers
+		-x test_httplib		# "Invalid Argument: '@test_97280_tmpæ'" in open(os_helper.TESTFN, "wb")
 		-x test_logging
-		-x test_pydoc
-		-x test_xmlrpc
+		-x test_pydoc		# "Invalid Argument: '@test_97476_tmpæ'" in open(TESTFN, "wb")
 
 		# Fails while outputing "ResourceWarning: unclosed <ssl.SSLSocket", but takes anywhere
 		# between 1 to 3+ minutes to end (and gets re-run!). Run it manually if needed, or
 		# re-enable once those SSLSocket warninings, that also pop up on other tests, get resolved.
-		-x test_ftplib
+		-x test_ftplib	# Shouldn't be enabled unless network-resource is granted.
 
 		# 3.12.4 hang at least once on beta4.
-		-x test_importlib
+		-x test_importlib # "test_importlib crashed" in 32 bits
 
-		# 3.12.6, on beta5
-		-x test_readline # hangs when running tests in parallel (or as part of the suite, at least).
+		# 3.12.6, on beta5 (still the same in hrev58812 32 bits)
+		-x test_readline # hangs when running tests in parallel (or as part of the suite, at least). deadlocks with test_pty?
+
+		# 3.12.10
+		# -x test_glob	# hangs on hrev58812 32 bits. works on beta5 64.
+		# hang on beta5 64 bits VM:
+		-x test_httpservers
+		-x test_kqueue
+		-x test_nntplib
+		-x test_poplib
+		-x test_smtplib
+		-x test_urllib2
+		-x test_wsgiref
+		-x test_xmlrpc
 	)
 
 	local tests_that_fail=(
+		test__locale
 		test_c_locale_coercion
-		test_datetime
-		test_fcntl
-		test_genericpath # os.path.getatime() should return an int.
-		test_json # either takes almost 5 minutes, or fails right away!?
-		test_kqueue
-		test_pathlib
-		test_popen
-		test_re
-		test_readline # hangs sometimes.
-		test_shutil
-		test_tarfile # os.path.getmtime() should return an int. Also, path.stat().st_mtime and pathlib.Path(TEMPDIR).stat().st_mtime seems to be using different scales: 1723.215266 vs 1723215266.0319815
-		test_termios
-		test_time
-		test_tools
+		test_ctypes		# stupid test compares wording of error message.
+#		test_datetime	# Fails on beta5 64 intermitently.
+		test_fcntl		# "Permission denied" in test_lockf_exclusive
+		test_glob		# Fails on beta5 64 intermitently.
+#		test_genericpath # os.path.getatime() should return an int. OK on 32 bits. and 64 beta5.
+#		test_httpservers	# on beta5 64. OK on hrev58812 32 bits.
+		test_json 		# either takes almost 5 minutes, or fails right away!? "AssertionError: 13 != -2147459059"
+		test_kqueue		# fails to read "foo" from a kqeuque. may hang on 64 bits beta5. other times PASSES :-/
+		test_mailbox	# only fails on 64 bits?
+		test_multiprocessing_main_handling	# Failed at least once in beta5 64.
+#		test_pathlib	# OK on 32 bits? Fails on beta5 64 intermitently.
+		test_popen		# sign error numbers in waitstatus_to_exitcode()... "AssertionError: -42 != 42"
+		test_re			# locale related failures.
+#		test_shutil		# OK on 32 bits?
+		test_stat		# Failed on beta5 64 at least once.
+		test_strptime	# on hrev58812 32 bits at least. locale related failures. beta5 64 vm too.
+		test_sysconfig	# on hrev58812 32 bits at least, "venv" related. beta5 64 vm too.
+		test_tarfile	# uid/gid overflows in 32 bits. On 64: os.path.getmtime() should return an int. Also, path.stat().st_mtime and pathlib.Path(TEMPDIR).stat().st_mtime seems to be using different scales: 1723.215266 vs 1723215266.0319815
+		test_termios	# tcdrain/tcflow/tcflush/tcsendbreak related failures.
+		test_time		# ctime/mktime related failures.
+		test_tools		# OK on hrev58812 32 bits. Fails on beta5 64 intermitently.
+#		test_urlib2_localnet	# OK on hrev58812 32 bits. Fails on beta5 64 VM?
+		test_venv		# Fails on beta5 64.
 	)
 
 	local -x LOGNAME=buildbot # this skips tests_tools/test_freeze, copied from Gentoo's ebuild
 
-	if $runOnlyKnownFailingTests; then
+	if $runOnlyExcludedTests; then
+		make $jobArgs test EXTRATESTOPTS="${test_options[*]} ${tests_to_exclude[*]}"
+	elif $runOnlyKnownFailingTests; then
 		make $jobArgs test EXTRATESTOPTS="${test_options[*]} ${tests_that_fail[*]}"
 	else
 		# Runs the full test suite (minus the tests that we explicitly exclude).
