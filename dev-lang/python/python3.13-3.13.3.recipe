@@ -13,7 +13,7 @@ LICENSE="Python"
 COPYRIGHT="1990-2025 Python Software Foundation"
 REVISION="1"
 SOURCE_URI="https://www.python.org/ftp/python/$portVersion/Python-$portVersion.tar.xz"
-CHECKSUM_SHA256="d984bcc57cd67caab26f7def42e523b1c015bbc5dc07836cf4f0b63fa159eb56"
+CHECKSUM_SHA256="40f868bcbdeb8149a3149580bb9bfd407b3321cd48f0be631af955ac92c0e041"
 SOURCE_DIR="Python-$portVersion"
 
 pyShortVer="${portVersion%.*}"
@@ -53,8 +53,14 @@ packageTests=false
 # Set to "false" for faster local/test builds. Around 4 to 5 times faster that way.
 optimizedBuild=true
 
+# Generally, we disable parallel builds if "optimizedBuild == true" as they can fail.
+forceParallelBuild=true
+
 # Run all tests by default. Set to "true" to make "hp --test" only run then known failing tests.
 runOnlyKnownFailingTests=false
+
+# Run only the tests that are generally excluded. Expect LOTS of hangs/crashes/etc.
+runOnlyExcludedTests=false
 
 # <<<[RECIPE OPTIONS]
 
@@ -172,7 +178,7 @@ BUILD()
 		--with-readline=editline \
 		--with-system-expat \
 		--with-system-libmpdec=no \
-		--with-tzpath=$dataDir/zoneinfo \
+		--with-tzpath=$(findpaths -c : B_FIND_PATH_DATA_DIRECTORY zoneinfo) \
 		--without-static-libpython \
 		--with-lto
 
@@ -204,9 +210,11 @@ BUILD()
 	#
 	# Not using multiple jobs for make solves both the warnings and the possible error.
 
-	if $optimizedBuild; then
+	if $optimizedBuild && ! $forceParallelBuild; then
+		echo "Running make with: -j 1"
 		make -j 1
 	else
+		echo "Running make with: $jobArgs"
 		make $jobArgs
 	fi
 }
@@ -288,10 +296,10 @@ INSTALL()
 # "hp --test"'s chroot. (test_sysconfig.MakefileTests.test_parse_makefile, for example).
 # Problem is "os.getcwd()" will return wrong data, causing some file operations to fail.
 
-# For reference, results on hrev57937+125 (64 bits bare-metal):
-# Total tests: run=37,204 failures=596 skipped=1,415
-# Total test files: run=426/409 failed=22 skipped=28 resource_denied=5 rerun=22
-# (a few more failures than usual, possibly due to having ran the tests from ramfs)
+# For reference, results on hrev57937+129 (64 bits, VMware, no-RAMFS):
+# Total duration: 9 min 42 sec
+# Total tests: run=40,337 failures=672 skipped=1,798
+# Total test files: run=465/445 failed=27 skipped=32 resource_denied=7 rerun=27
 TEST()
 {
 	# Remove tests data left-overs, if any:
@@ -301,6 +309,7 @@ TEST()
 
 	local test_options=(
 		# Use this to get same test order on different runs (actual value not important).
+		-r
 		--randseed 7858065
 
 		# Print the names of the 10 slowest tests.
@@ -319,16 +328,10 @@ TEST()
 	)
 
 	local tests_to_exclude=(
-		# distutils is deprecated, and will be removed on 3.12.
-		-x test_distutils
-
 		# The following tests invoke the crash dialog, and unless your configure
 		# debug_server default action to "kill" or "report", they will hang waiting for
 		# user input. See comment above TEST().
-		-x test_faulthandler
-		-x test_futures # from test_asyncio. Crashes: Exception (Segment violation)
-		-x test_subprocess # tends to hang.
-		-x test_threading # tends to hang.
+		-x test_threading # tends to hang (or at least run for more than 5 minutes).
 
 		# Many of the tests hang/stall. We have two options:
 		#
@@ -346,26 +349,10 @@ TEST()
 		# Let's use Option 1, for now at least.
 
 		# These hang reliably.
-		-x test__xxsubinterpreters
-		-x test_cmd_line
-		-x test_concurrent_futures
-		-x test_eintr
 		-x test_interpreters
-		-x test_multiprocessing_fork
-		-x test_multiprocessing_forkserver
-		-x test_multiprocessing_main_handling
 		-x test_multiprocessing_spawn
-		-x test_os
-		-x test_posix
-		-x test_random
-		-x test_socketserver
-		-x test_threaded_import # test_importlib/test_threaded_import
-		-x test_tracemalloc
-		-x test_uuid
+		-x test_threaded_import # test_importlib.test_threaded_import
 
-		# "test_asyncio" doesn't seems to runs reliably, even after individually skipping
-		# all the problematic test-cases that could be identify by running them one by one.
-		# -x test_asyncio
 		# The following are all under test_asyncio/
 		-x test_base_events
 		-x test_buffered_proto # Exception on Exception handler.
@@ -376,89 +363,91 @@ TEST()
 		-x test_sslproto # Exception on Exception handler.
 		-x test_streams
 		-x test_unix_events
-	#	-i TestThreadedServer # in test_asyncio.functional
 
 		# These not always hang/stall, but they do it enough to warrant skipping for now.
-		-x test_imaplib
-		-x test_signal
+		-x test_multiprocessing_fork		#? resource_tracker: process died unexpectedly
+		-x test_multiprocessing_forkserver	#?
 		-x test_socket
-		-x test_ssl
-		-x test_urllib2_localnet
-
-		# 3.11
-		-x test_urllib2net
-		-x test_venv
-
-		# 3.12 Either too slow or hangs;
-		-x test_builtin
-		-x test_mailbox
-		-x test_tempfile
-		-x test_thread
-
-		# 3.12.1
-		-x test_queue
+		-x test_ssl		# pegs one core to 100$
 
 		# 3.11.8 / 3.12.2 (hang on nightlies, at least)
 		-x test_httplib
-		-x test_httpservers
 		-x test_logging
-		-x test_xmlrpc
+
+		# Fails while outputing "ResourceWarning: unclosed <ssl.SSLSocket", but takes anywhere
+		# between 1 to 3+ minutes to end (and gets re-run!). Run it manually if needed, or
+		# re-enable once those SSLSocket warninings, that also pop up on other tests, get resolved.
+		-x test_ftplib	# Shouldn't be enabled unless network-resource is granted.
 
 		# 3.12.6, on beta5
 		-x test_readline # hangs when running tests in parallel (or as part of the suite, at least).
 
-		# 3.13.0a3
-		# these shouldn't run unless the GUI resource is enabled.
-		-x test_idle
-		-x test_tkinter
-		-x test_ttk
-
-		# should probably also disable:
-		# -x test_pydoc
-		-x test_mmap # this one is a HDD killer :-(
-		# -x test_getpass
-		# -x test_perfmaps
-		# -x test_sqlite3
-		# -x test___all__ # ???
-
-		# 3.13.0b1 (these seem to hang)
-		-x test_fork1
-		-x test_pty
-
-		# need to find how to avoid re-running the failing tests
-
-		# 3.13.0rc1
-		# -x test_li[???] # at least one test with name starting with "test_li" seems to hang.
-
-		# 3.13.0rc2
-		-x test_ftplib # Hangs with high CPU usage.
+		# 3.12.10 (still on 3.13.3)
+		-x test_glob # sometimes hangs.
+		-x test_kqueue # hangs sometimes.
+		# hang on beta5 64 bits VM (no network connected):
+		-x test_httpservers
+		-x test_poplib
+		-x test_xmlrpc
 	)
 
 	local tests_that_fail=(
+		test__locale
 	    test_c_locale_coercion
 	    test_cmd
-#	    test_compile # out of memory (with 2 GB of RAM)
-	    test_datetime
-	    test_fcntl
-#	    test_ftplib
+	    test_ctypes		# stupid test compares wording of error message.
+#	    test_compile	# out of memory (with 2 GB of RAM)
+	    test_datetime	# on rare ocassions, it passes.
+	    test_fcntl		# "Permission denied" in test_lockf_exclusive
 	    test_genericpath # os.path.getatime() should return an int.
-	    test_json
+	    test_glob	# sometimes hangs.
+	    test_importlib
+	    test_json	# "AssertionError: 13 != -2147459059" (errno.EPIPE)
 	    test_kqueue # hangs.
-	    test_math
-	    test_popen
-	    test_pyrepl # several: "module 'termios' has no attribute 'VREPRINT'". Adding hasattr(termios, 'VREPRINT') still results in error.
-	    test_re
-#	    test_readline # hangs sometimes.
-	    test_shutil
-	    test_tarfile # os.path.getmtime() should return an int. Also, path.stat().st_mtime and pathlib.Path(TEMPDIR).stat().st_mtime seems to be using different scales: 1723.215266 vs 1723215266.0319815
-	    test_termios
-	    test_time
-	    test_tools
+	    test_mailbox	# fails to clean a temp file? (os.utime() related?)
+	    test_math	# test expects to get -0.0, gets 0.0
+	    test_os		# named pipes related errors. set_get_priority, ttyname, and utime fails.
+	    test_popen	# sign error numbers in waitstatus_to_exitcode()... "AssertionError: -42 != 42"
+	    test_posix	# test_posix_fallocate and test_link_dir_fd. Operation not supported.
+	    test_pty	# sometimes fails.
+	    test_pyrepl	# several: "module 'termios' has no attribute 'VREPRINT'". Adding hasattr(termios, 'VREPRINT') still results in error.
+	    test_re		# locale related failures.
+	    test_readline	# hangs sometimes (when run in parallel with test_pty, I think).
+	    test_shutil		# "Operation not supported" calling "os.scandir(topfd)".
+	    test_signal		# stupid test compares wording of strsignal(signal.SIGTERM).
+	    test_strptime	# locale related failures.
+	    test_subprocess	# "Device/File/Resource busy" calling setrlimit()
+	    test_sysconfig	# venv related failures.
+	    test_tarfile	# os.path.getmtime() should return an int. Also, path.stat().st_mtime and pathlib.Path(TEMPDIR).stat().st_mtime seems to be using different scales: 1723.215266 vs 1723215266.0319815
+	    test_termios	# tcdrain/tcflow/tcflush/tcsendbreak related failures.
+	    test_time		# ctime/mktime related failures.
+	    test_tools		# _strptime / "%z" related.
+	    test_venv
 	)
 
-	local -x LOGNAME=buildbot # this skips tests_tools/test_freeze, copied from Gentoo's ebuild
+	# besides the above ones, the following only fail when the workdir is in RAMFS:
+	local tests_that_fail_only_on_ramfs=(
+		test.test_concurrent_futures.test_as_completed
+		test.test_concurrent_futures.test_deadlock
+		test.test_concurrent_futures.test_init
+		test.test_concurrent_futures.test_process_pool
+		test.test_concurrent_futures.test_shutdown
+		test.test_concurrent_futures.test_wait
+		test_multiprocessing_main_handling	# "IsADirectoryError" when calling "subprocess._execute_child()"
+		test_pathlib
+		test_smtplib
+		test_stat
+	)
 
-	if $runOnlyKnownFailingTests; then
+	# test_freeze_simple_script is auto-skipped on PGO builds.
+	if ! $optimizedBuild; then
+		# This skips tests_tools.test_freeze, copied from Gentoo's ebuild.
+		local -x LOGNAME=buildbot
+	fi
+
+	if $runOnlyExcludedTests; then
+		make $jobArgs test EXTRATESTOPTS="${test_options[*]} ${tests_to_exclude[*]}"
+	elif $runOnlyKnownFailingTests; then
 		make $jobArgs test EXTRATESTOPTS="${test_options[*]} ${tests_that_fail[*]}"
 	else
 		# Runs the full test suite (minus the tests that we explicitly exclude).
