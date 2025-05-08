@@ -1,6 +1,6 @@
-From 1c36b72e727dac7c115618f7791ac654c34443bb Mon Sep 17 00:00:00 2001
+From 44a8884305b2dd876fbecc4eb9362af0b1844419 Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Tue, 1 Apr 2025 13:50:00 +1000
+Date: Thu, 8 May 2025 10:43:27 +1000
 Subject: Add Haiku build support
 
 Based on patches sourced from https://github.com/kenz-gelsoft/gecko-dev/
@@ -11,6 +11,7 @@ Based on patches sourced from https://github.com/kenz-gelsoft/gecko-dev/
 -   Fixed build with WebRTC enabled.
 -   Implemented WebRTC modules for desktop capture and video capture.
 -   Made additional modifications for Haiku compatibility.
+-   Implement remote server
 
 diff --git a/.cargo/config.toml.in b/.cargo/config.toml.in
 index 827f912..b726474 100644
@@ -2575,6 +2576,36 @@ index 85ead41..459712b 100644
    if (is_win) {
      defines += [ "WEBRTC_WIN" ]
    }
+diff --git a/third_party/libwebrtc/build/config/BUILDCONFIG.gn b/third_party/libwebrtc/build/config/BUILDCONFIG.gn
+index 571ae5f..595c93b 100644
+--- a/third_party/libwebrtc/build/config/BUILDCONFIG.gn
++++ b/third_party/libwebrtc/build/config/BUILDCONFIG.gn
+@@ -184,7 +184,7 @@ if (host_toolchain == "") {
+   # TODO(dpranke): Add some sort of assert here that verifies that
+   # no toolchain omitted host_toolchain from its toolchain_args().
+ 
+-  if (host_os == "linux" || host_os == "openbsd") {
++  if (host_os == "linux" || host_os == "openbsd" || host_os == "haiku") {
+     if (target_os != "linux") {
+       host_toolchain = "//build/toolchain/linux:clang_$host_cpu"
+     } else if (is_clang) {
+@@ -222,7 +222,7 @@ if (target_os == "android") {
+   assert(host_os == "linux" || host_os == "mac",
+          "Android builds are only supported on Linux and Mac hosts.")
+   _default_toolchain = "//build/toolchain/android:android_clang_$target_cpu"
+-} else if (target_os == "chromeos" || target_os == "linux" || target_os == "openbsd") {
++} else if (target_os == "chromeos" || target_os == "linux" || target_os == "openbsd" || target_os == "haiku") {
+   # See comments in build/toolchain/cros/BUILD.gn about board compiles.
+   if (is_clang) {
+     _default_toolchain = "//build/toolchain/linux:clang_$target_cpu"
+@@ -286,6 +286,7 @@ if (custom_toolchain != "") {
+ is_android = current_os == "android"
+ is_chromeos = current_os == "chromeos"
+ is_fuchsia = current_os == "fuchsia"
++is_haiku = current_os == "haiku"
+ is_ios = current_os == "ios"
+ is_linux = current_os == "linux"
+ is_bsd = current_os == "openbsd"
 diff --git a/third_party/libwebrtc/modules/desktop_capture/BUILD.gn b/third_party/libwebrtc/modules/desktop_capture/BUILD.gn
 index 34fba62..eb03d26 100644
 --- a/third_party/libwebrtc/modules/desktop_capture/BUILD.gn
@@ -4336,6 +4367,308 @@ index ee9d07c..0b44d4c 100644
      else:
          UNIFIED_SOURCES += ["ProcInfo_linux.cpp"]
  elif toolkit == "windows":
+diff --git a/toolkit/components/remote/RemoteUtils.h b/toolkit/components/remote/RemoteUtils.h
+index 2d21293..1c271d0 100644
+--- a/toolkit/components/remote/RemoteUtils.h
++++ b/toolkit/components/remote/RemoteUtils.h
+@@ -11,7 +11,7 @@
+ #  include "WinUtils.h"
+ #endif
+ 
+-#if defined XP_WIN || defined XP_MACOSX
++#if defined XP_WIN || defined XP_MACOSX || defined XP_HAIKU
+ static void BuildClassName(const char* aProgram, const char* aProfile,
+                            nsString& aClassName) {
+   aClassName.AppendPrintf("Mozilla_%s", aProgram);
+diff --git a/toolkit/components/remote/moz.build b/toolkit/components/remote/moz.build
+index 4ac1408..caa5fba 100644
+--- a/toolkit/components/remote/moz.build
++++ b/toolkit/components/remote/moz.build
+@@ -16,7 +16,7 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
+         "nsUnixRemoteServer.cpp",
+         "RemoteUtils.cpp",
+     ]
+-    if CONFIG["MOZ_ENABLE_DBUS"]:
++    if CONFIG["MOZ_ENABLE_DBUS"] and CONFIG["OS_ARCH"] != "Haiku":
+         SOURCES += [
+             "nsDBusRemoteClient.cpp",
+             "nsDBusRemoteServer.cpp",
+@@ -27,11 +27,22 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
+         ]
+         CXXFLAGS += CONFIG["MOZ_DBUS_CFLAGS"]
+     else:
+-        SOURCES += [
+-            "nsGTKRemoteServer.cpp",
+-            "nsXRemoteClient.cpp",
+-            "nsXRemoteServer.cpp",
+-        ]
++        if CONFIG["OS_ARCH"] == "Haiku":
++            SOURCES += [
++                "nsHaikuRemoteClient.cpp",
++                "nsHaikuRemoteServer.cpp",
++            ]
++            EXPORTS += [
++                "nsUnixRemoteServer.h",
++                "RemoteUtils.h",
++            ]
++            CXXFLAGS += CONFIG["MOZ_GTK3_CFLAGS"]
++        else:
++            SOURCES += [
++                "nsGTKRemoteServer.cpp",
++                "nsXRemoteClient.cpp",
++                "nsXRemoteServer.cpp",
++            ]
+     CXXFLAGS += CONFIG["MOZ_GTK3_CFLAGS"]
+ 
+ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
+diff --git a/toolkit/components/remote/nsHaikuRemoteClient.cpp b/toolkit/components/remote/nsHaikuRemoteClient.cpp
+new file mode 100644
+index 0000000..17c8513
+--- /dev/null
++++ b/toolkit/components/remote/nsHaikuRemoteClient.cpp
+@@ -0,0 +1,37 @@
++#include <vector>
++#include <string.h>
++
++#include "nsHaikuRemoteClient.h"
++
++#include "RemoteUtils.h"
++
++nsresult nsHaikuRemoteClient::Init() {
++  return NS_OK;
++}
++
++nsresult nsHaikuRemoteClient::SendCommandLine(
++					const char* aProgram, const char* aProfile, int32_t argc, char** argv,
++					const char* aDesktopStartupID, char** aResponse, bool* aSucceeded) {
++  *aSucceeded = false;
++
++  nsString className;
++  BuildClassName(aProgram, aProfile, className);
++  BString portName;
++  portName.SetTo(NS_ConvertUTF16toUTF8(className.get()).get());
++
++  port_id port = find_port(portName.String());
++  if (port < 0) {
++    return NS_ERROR_NOT_AVAILABLE;
++  }
++
++  BString message;
++  for (int i = 0; i < argc; i++) {
++    if (i > 0)
++      message << "|";
++    message << argv[i];
++  }
++
++  status_t result = write_port(port, 1, message.String(), message.Length() + 1);  
++  *aSucceeded = (result == B_OK);  
++  return (result == B_OK) ? NS_OK : NS_ERROR_FAILURE;
++}
+diff --git a/toolkit/components/remote/nsHaikuRemoteClient.h b/toolkit/components/remote/nsHaikuRemoteClient.h
+new file mode 100644
+index 0000000..290c4a5
+--- /dev/null
++++ b/toolkit/components/remote/nsHaikuRemoteClient.h
+@@ -0,0 +1,22 @@
++#ifndef HAIKU_REMOTE_CLIENT_H
++#define HAIKU_REMOTE_CLIENT_H
++
++#pragma GCC visibility push(default)
++#include <kernel/OS.h>
++#include <app/Messenger.h>
++#include <support/String.h>
++#pragma GCC visibility pop
++
++#include "nsRemoteClient.h"
++
++class nsHaikuRemoteClient : public nsRemoteClient {
++public:
++  virtual ~nsHaikuRemoteClient() = default;
++
++  nsresult Init() override;
++  nsresult SendCommandLine(const char* aProgram, const char* aProfile,
++                           int32_t argc, char** argv, const char* aStartupToken,
++                           char** aResponse, bool* aSucceeded) override;
++};
++
++#endif
+diff --git a/toolkit/components/remote/nsHaikuRemoteServer.cpp b/toolkit/components/remote/nsHaikuRemoteServer.cpp
+new file mode 100644
+index 0000000..dacd6a7
+--- /dev/null
++++ b/toolkit/components/remote/nsHaikuRemoteServer.cpp
+@@ -0,0 +1,90 @@
++#include "nsHaikuRemoteServer.h"
++#include "RemoteUtils.h"
++
++#include "nsCommandLine.h"
++#include "nsICommandLineRunner.h"
++#include "nsICommandLine.h"
++#include "nsCOMPtr.h"
++#include "nsThreadUtils.h"
++
++#include <unistd.h>
++
++nsHaikuRemoteServer::nsHaikuRemoteServer()
++  : fRunning(false), fPort(B_BAD_PORT_ID) {}
++
++nsHaikuRemoteServer::~nsHaikuRemoteServer() {
++  Shutdown();
++}
++
++nsresult nsHaikuRemoteServer::Startup(const char* aAppName, const char* aProfileName) {
++  nsString className;
++  BuildClassName(aAppName, aProfileName, className);
++  BString portName;
++  portName.SetTo(NS_ConvertUTF16toUTF8(className.get()).get());
++
++  fPort = create_port(10, portName.String());
++  if (fPort < 0) {
++    return NS_ERROR_FAILURE;
++  }
++
++  fRunning = true;
++  fListenerThread = std::thread([this]() { ListenLoop(); });
++  
++  return NS_OK;
++}
++
++void nsHaikuRemoteServer::Shutdown() {
++  fRunning = false;
++  if (fPort >= 0) {
++    delete_port(fPort);
++    fPort = B_BAD_PORT_ID;
++  }
++  if (fListenerThread.joinable()) {
++    fListenerThread.join();
++  }
++}
++
++void nsHaikuRemoteServer::ListenLoop() {
++  while (fRunning) {
++    char buffer[B_PATH_NAME_LENGTH * 2];
++    int32 code;
++    ssize_t len = read_port(fPort, &code, buffer, sizeof(buffer));
++    if (len > 0) {
++      buffer[len] = '\0';
++      HandleMessage(buffer);
++    } else {
++      snooze(50000);
++    }
++  }
++}
++
++nsresult nsHaikuRemoteServer::HandleMessage(const char* message) {
++  return NS_DispatchToMainThread(
++    NS_NewRunnableFunction("HandleMessageOnMainThread", [this, msg = std::string(message)]() {
++         this->HandleMessageOnMainThread(msg.c_str());
++    })
++  );
++}
++
++void nsHaikuRemoteServer::HandleMessageOnMainThread(const char* message) {
++  BString messageString(message);
++  BStringList argsList;
++  messageString.Split("|", true, argsList);
++  
++  if (argsList.IsEmpty())
++    return;
++
++  int argc = argsList.CountStrings();
++  const char** argv = new const char*[argc];
++  for (int i = 0; i < argc; i++) {
++    argv[i] = argsList.StringAt(i).String();
++  }
++
++  nsCOMPtr<nsICommandLineRunner> cmdLine(new nsCommandLine());
++  nsresult rv = cmdLine->Init(argc, argv, nullptr, nsICommandLine::STATE_REMOTE_AUTO);
++  delete[] argv;
++
++  if (NS_SUCCEEDED(rv)) {
++    cmdLine->Run();
++  }
++}
+diff --git a/toolkit/components/remote/nsHaikuRemoteServer.h b/toolkit/components/remote/nsHaikuRemoteServer.h
+new file mode 100644
+index 0000000..7c6d057
+--- /dev/null
++++ b/toolkit/components/remote/nsHaikuRemoteServer.h
+@@ -0,0 +1,37 @@
++#ifndef HAIKU_REMOTE_SERVER_H
++#define HAIKU_REMOTE_SERVER_H
++
++#include "nsRemoteServer.h"
++
++#include <thread>
++#include <atomic>
++
++#pragma GCC visibility push(default)
++#include <kernel/OS.h>
++#include <app/Application.h>
++#include <app/Messenger.h>
++#include <app/Roster.h>
++#include <interface/Window.h>
++#include <support/String.h>
++#include <support/StringList.h>
++#pragma GCC visibility pop
++
++class nsHaikuRemoteServer : public nsRemoteServer {
++public:
++  nsHaikuRemoteServer();
++  ~nsHaikuRemoteServer() override;
++
++  nsresult Startup(const char* aAppName, const char* aProfileName) override;
++  void Shutdown() override;
++
++private:
++  void ListenLoop();
++  nsresult HandleMessage(const char* message);
++  void HandleMessageOnMainThread(const char* message);
++
++  std::atomic<bool> fRunning;
++  std::thread fListenerThread;
++  port_id fPort;
++};
++
++#endif
+diff --git a/toolkit/components/remote/nsRemoteService.cpp b/toolkit/components/remote/nsRemoteService.cpp
+index 3e8e4b5..59cdc7b 100644
+--- a/toolkit/components/remote/nsRemoteService.cpp
++++ b/toolkit/components/remote/nsRemoteService.cpp
+@@ -6,7 +6,10 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #ifdef MOZ_WIDGET_GTK
+-#  ifdef MOZ_ENABLE_DBUS
++#  if defined(XP_HAIKU)
++#    include "nsHaikuRemoteServer.h"
++#    include "nsHaikuRemoteClient.h"
++#  elif defined(MOZ_ENABLE_DBUS)
+ #    include "nsDBusRemoteServer.h"
+ #    include "nsDBusRemoteClient.h"
+ #  else
+@@ -99,7 +102,9 @@ RemoteResult nsRemoteService::StartClient(const char* aStartupToken) {
+ 
+   UniquePtr<nsRemoteClient> client;
+ #ifdef MOZ_WIDGET_GTK
+-#  if defined(MOZ_ENABLE_DBUS)
++#  if defined(XP_HAIKU)
++  client = MakeUnique<nsHaikuRemoteClient>();
++#  elif defined(MOZ_ENABLE_DBUS)
+   client = MakeUnique<nsDBusRemoteClient>();
+ #  else
+   client = MakeUnique<nsXRemoteClient>();
+@@ -143,7 +148,9 @@ void nsRemoteService::StartupServer() {
+   }
+ 
+ #ifdef MOZ_WIDGET_GTK
+-#  if defined(MOZ_ENABLE_DBUS)
++#  if defined(XP_HAIKU)
++  mRemoteServer = MakeUnique<nsHaikuRemoteServer>();
++#  elif defined(MOZ_ENABLE_DBUS)
+   mRemoteServer = MakeUnique<nsDBusRemoteServer>();
+ #  else
+   mRemoteServer = MakeUnique<nsGTKRemoteServer>();
 diff --git a/toolkit/library/moz.build b/toolkit/library/moz.build
 index c33d81a..e58f269 100644
 --- a/toolkit/library/moz.build
@@ -5305,36 +5638,6 @@ index dbd9993..1431340 100644
  #  endif
  #  include <sys/types.h>
  #  include <signal.h>
-diff --git a/third_party/libwebrtc/build/config/BUILDCONFIG.gn b/third_party/libwebrtc/build/config/BUILDCONFIG.gn
-index 571ae5f..595c93b 100644
---- a/third_party/libwebrtc/build/config/BUILDCONFIG.gn
-+++ b/third_party/libwebrtc/build/config/BUILDCONFIG.gn
-@@ -184,7 +184,7 @@ if (host_toolchain == "") {
-   # TODO(dpranke): Add some sort of assert here that verifies that
-   # no toolchain omitted host_toolchain from its toolchain_args().
- 
--  if (host_os == "linux" || host_os == "openbsd") {
-+  if (host_os == "linux" || host_os == "openbsd" || host_os == "haiku") {
-     if (target_os != "linux") {
-       host_toolchain = "//build/toolchain/linux:clang_$host_cpu"
-     } else if (is_clang) {
-@@ -222,7 +222,7 @@ if (target_os == "android") {
-   assert(host_os == "linux" || host_os == "mac",
-          "Android builds are only supported on Linux and Mac hosts.")
-   _default_toolchain = "//build/toolchain/android:android_clang_$target_cpu"
--} else if (target_os == "chromeos" || target_os == "linux" || target_os == "openbsd") {
-+} else if (target_os == "chromeos" || target_os == "linux" || target_os == "openbsd" || target_os == "haiku") {
-   # See comments in build/toolchain/cros/BUILD.gn about board compiles.
-   if (is_clang) {
-     _default_toolchain = "//build/toolchain/linux:clang_$target_cpu"
-@@ -286,6 +286,7 @@ if (custom_toolchain != "") {
- is_android = current_os == "android"
- is_chromeos = current_os == "chromeos"
- is_fuchsia = current_os == "fuchsia"
-+is_haiku = current_os == "haiku"
- is_ios = current_os == "ios"
- is_linux = current_os == "linux"
- is_bsd = current_os == "openbsd"
 -- 
 2.48.1
 
