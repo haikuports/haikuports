@@ -1,0 +1,434 @@
+From 3aec93e6f646e58fc255ef135916d554848bfe32 Mon Sep 17 00:00:00 2001
+From: PulkoMandy <pulkomandy@pulkomandy.tk>
+Date: Sat, 21 Jun 2025 20:21:15 +0200
+Subject: Get it to build on Haiku
+
+- Disable handling of SIGIO (not defined on Haiku)
+- Remove includes of ucontext.h (ucontext is defined in signal.h in
+  Haiku)
+- Link libsd (for strsep) and libnetwork (for sockets)
+- Disable code for TUN/TAP handling (Haiku specific code needs to be
+  written for this)
+
+diff --git a/configure.ac b/configure.ac
+index 25da201..5a6aa6a 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -501,6 +501,12 @@ AC_CHECK_HEADERS([asm/ucontext.h],,, [
+   #include <ucontext.h>
+   #include <signal.h>
+ ])
++
++if test "$CONFIG_OS" == "Haiku"; then
++    LIBS="$LIBS -lbsd -lnetwork"
++fi
++
++if test "$CONFIG_OS" != "Haiku"; then
+ if test "$machine" != "wasm32"; then
+   AC_CHECK_HEADERS([ucontext.h],, [
+     AS_UNSET([ac_cv_header_ucontext_h])
+@@ -510,6 +516,7 @@ if test "$machine" != "wasm32"; then
+     #define _XOPEN_SOURCE 500
+   ])])
+ fi
++fi
+ AC_CHECK_HEADERS([linux/signal.h],,, [#include <signal.h>])
+ AC_CHECK_HEADERS([sys/soundcard.h], [
+   USE_OSS=1
+@@ -840,7 +847,7 @@ fi
+ DOSEMU_CFLAGS="${DOSEMU_CFLAGS} ${OPT} ${PIPE}"
+ DOSEMU_CPPFLAGS="${DOSEMU_CPPFLAGS} -MD -DCFLAGS_STR=\"$DOSEMU_CFLAGS $CFLAGS\""
+ DOSEMU_VERSION=`cd $srcdir && ./getversion -b`
+-AS_LDFLAGS="-melf_i386"
++AS_LDFLAGS="-melf_i386_haiku"
+ 
+ AC_SUBST(XASFLAGS)
+ AC_SUBST(ASFLAGS)
+diff --git a/src/arch/linux/async/signal.c b/src/arch/linux/async/signal.c
+index 680799e..3571645 100644
+--- a/src/arch/linux/async/signal.c
++++ b/src/arch/linux/async/signal.c
+@@ -485,9 +485,11 @@ signal_pre_init(void)
+   sigemptyset(&q_mask);
+   sigemptyset(&nonfatal_q_mask);
+   registersig_std(SIGALRM, SIGALRM_call);
++#ifndef __HAIKU__
+   /* SIGIO is only used for irqs from vm86 */
+   if (config.cpu_vm == CPUVM_VM86)
+     registersig_std(SIGIO, SIGIO_call);
++#endif
+   registersig_std(SIG_THREAD_NOTIFY, async_call);
+   registersig(SIGCHLD, sig_child);
+   newsetqsig(SIGQUIT, leavedos_signal);
+diff --git a/src/base/core/int.c b/src/base/core/int.c
+index ba8dca5..5e2ab10 100644
+--- a/src/base/core/int.c
++++ b/src/base/core/int.c
+@@ -16,8 +16,10 @@
+ #include <sys/vfs.h>
+ #else
+ #include <sys/param.h>
++#ifndef __HAIKU__
+ #include <sys/mount.h>
+ #endif
++#endif
+ #include <sys/statvfs.h>
+ #include "Linux/magic.h"
+ #include <signal.h>
+diff --git a/src/base/init/config.c b/src/base/init/config.c
+index efda100..668eaa2 100644
+--- a/src/base/init/config.c
++++ b/src/base/init/config.c
+@@ -43,6 +43,14 @@
+ #include "mhpdbg.h"
+ #include "mapping/mapping.h"
+ 
++#ifdef __HAIKU__
++/* Rename some conflicting functions that we don't need */
++#define read_port haiku_read_port
++#define write_port haiku_write_port
++#include <kernel/OS.h>
++#undef read_port
++#undef write_port
++#endif
+ /*
+  * Options used in config_init().
+  *
+@@ -79,7 +87,7 @@ char *dosemu_plugin_dir_path;
+ char *commands_path;
+ char *dosemu_image_dir_path;
+ char *dosemu_drive_c_path;
+-char keymaploadbase_default[] = PREFIX "/share/";
++char keymaploadbase_default[] = PREFIX "/data/";
+ char *keymap_load_base_path = keymaploadbase_default;
+ const char *keymap_dir_path = "keymap/";
+ const char *owner_tty_locks = "uucp";
+@@ -466,10 +474,16 @@ static void set_freedos_dir(void)
+   int loaded = 0;
+   const char *xdir = getenv("DOSEMU2_EXTRAS_DIR");
+   const char *xdirs[] = {
++#ifdef __HAIKU__
++    "/system/data/dosemu2-extras",
++    "/system/non-packaged/data/dosemu2-extras",
++    PREFIX "/data/dosemu2-extras",
++#else
+     "/usr/share/dosemu2-extras",
+     "/usr/local/share/dosemu2-extras",
+     PREFIX "/share/dosemu2-extras",
+     "/opt/dosemu2-extras",			/* gentoo */
++#endif
+     NULL,
+   };
+ #ifdef USE_FDPP
+@@ -512,6 +526,17 @@ static void set_freedos_dir(void)
+     comcom_dir = strdup(ccdir);
+   } else {
+     const char *comcom[] = {
++#ifdef __HAIKU__
++#ifdef USE_DJDEV64
++      "/system/data/comcom64",
++      "/system/non-packaged/data/comcom64",
++      PREFIX "/data/comcom64",
++#endif
++      "/system/data/comcom32",
++      "/system/non-packaged/data/comcom32",
++      PREFIX "/data/comcom32",
++      "/opt/comcom32",			/* gentoo */
++#else
+ #ifdef USE_DJDEV64
+       "/usr/share/comcom64",
+       "/usr/local/share/comcom64",
+@@ -521,6 +546,7 @@ static void set_freedos_dir(void)
+       "/usr/local/share/comcom32",
+       PREFIX "/share/comcom32",
+       "/opt/comcom32",			/* gentoo */
++#endif
+       NULL,
+     };
+     int i;
+@@ -812,10 +838,84 @@ void secure_option_preparse(int *argc, char **argv)
+ 
+ static void read_cpu_info(void)
+ {
+-    char *cpuflags, *cpu;
+     int k = 3;
++    int cores = 0;
+     int err;
+ 
++#ifdef __HAIKU__
++    cpuid_info info;
++
++    err = get_cpuid(&info, 1, 0);
++    if (err != B_OK)
++        return;
++
++    k = info.eax_1.family;
++    bool fpu = info.eax_1.extended_features & (1 << 0);
++    bool tsc = info.eax_1.extended_features & (1 << 4);
++    bool mmx = info.eax_1.extended_features & (1 << 23);
++    bool fxsr = info.eax_1.extended_features & (1 << 24);
++    bool sse = info.eax_1.extended_features & (1 << 25);
++
++    cpu_topology_node_info topology[128];
++    int count = 128;
++    get_cpu_topology_info(topology, &count);
++
++    if (k >= 5) {
++        config.realcpu = CPU_586;
++
++#ifdef X86_EMULATOR
++        if (mmx || sse) {
++	  config.cpuprefetcht0 = 1;
++        }
++#endif
++#ifdef __i386__
++        if (fxsr) {
++          config.cpufxsr = 1;
++	  if (sse)
++	    config.cpusse = 1;
++	}
++#endif
++        if (tsc) {
++            long long chz = 0;
++            for (int i = 0; i < count; i++) {
++                if (topology[i].type == B_TOPOLOGY_CORE) {
++                    chz = topology[i].data.core.default_frequency;
++                    cores ++;
++                }
++            }
++		/* speed division factor to get 1us from CPU clock */
++		config.cpu_spd = (LLF_US*1000000)/chz;
++
++		/* speed division factor to get 838ns from CPU clock */
++		config.cpu_tick_spd = (LLF_TICKS*1000000)/chz;
++
++		config.CPUSpeedInMhz = chz / 1000000;
++
++        }
++    } else if (k == 4) {
++        config.realcpu = CPU_486;
++    } else if (k != 3) {
++        error("Unknown CPU type!\n");
++    }
++
++    if (config.mathco) {
++        config.mathco = fpu;
++    }
++
++    err = get_cpuid(&info, 9, 0);
++    if (err != B_OK)
++      return;
++
++    if (info.regs.ecx & (1 << 2))
++      config.umip = 1;
++    else
++      warn("Your CPU doesn't support UMIP\n");
++
++    if (cores > 0)
++        config.smp = 1;
++#else
++    char *cpuflags, *cpu;
++
+     err = open_proc_scan("/proc/cpuinfo");
+     if (err)
+       return;
+@@ -853,6 +953,7 @@ static void read_cpu_info(void)
+ 	    config.cpusse = 1;
+ 	}
+ #endif
++
+         if (cpuflags && strstr(cpuflags, "tsc")) {
+           /* bogospeed currently returns 0; should it deny
+            * pentium features, fall back into 486 case */
+@@ -921,6 +1022,7 @@ static void read_cpu_info(void)
+       config.smp = 1;		/* for checking overrides, later */
+     }
+     close_proc_scan();
++#endif
+ }
+ 
+ static void config_post_process(void)
+diff --git a/src/base/lib/libpcl/pcl_ctx.c b/src/base/lib/libpcl/pcl_ctx.c
+index 308071d..b06919f 100644
+--- a/src/base/lib/libpcl/pcl_ctx.c
++++ b/src/base/lib/libpcl/pcl_ctx.c
+@@ -20,7 +20,10 @@
+  * Author: Stas Sergeev
+  */
+ 
++#ifndef __HAIKU__
+ #include <ucontext.h>
++#endif
++
+ #include <assert.h>
+ #include "misc/pcontext.h"
+ #include "sig.h"
+diff --git a/src/base/lib/mcontext/asm.SS b/src/base/lib/mcontext/asm.SS
+index fefe877..bf1dba5 100644
+--- a/src/base/lib/mcontext/asm.SS
++++ b/src/base/lib/mcontext/asm.SS
+@@ -12,6 +12,18 @@
+ #endif
+ #endif
+ 
++#if defined(__HAIKU__) && defined(__i386__)
++#define NEEDX86CONTEXT 1
++#define SET setmcontext
++#define GET getmcontext
++#else
++#if defined(__HAIKU__) && defined(__x86_64__)
++#define NEEDAMD64CONTEXT 1
++#define SET _setmcontext
++#define GET _getmcontext
++#endif
++#endif
++
+ #if defined(__OpenBSD__) && defined(__i386__)
+ #define NEEDX86CONTEXT 1
+ #define SET setmcontext
+diff --git a/src/base/lib/mcontext/context.c b/src/base/lib/mcontext/context.c
+index ebc718c..248ce91 100644
+--- a/src/base/lib/mcontext/context.c
++++ b/src/base/lib/mcontext/context.c
+@@ -4,7 +4,9 @@
+ 
+ /* Copyright (c) 2005-2006 Russ Cox, MIT; see COPYRIGHT */
+ 
++#ifndef __HAIKU__
+ #include <ucontext.h>
++#endif
+ #include <string.h>
+ #include <inttypes.h>
+ #include <stdlib.h>
+diff --git a/src/base/misc/utilities.c b/src/base/misc/utilities.c
+index 087561a..b2f4774 100644
+--- a/src/base/misc/utilities.c
++++ b/src/base/misc/utilities.c
+@@ -598,7 +598,7 @@ char *path_prefix(const char *suffix)
+         ret = assemble_path(p, suffix);
+       else if (strcmp(p1 + 1, "dosemu2") == 0) {
+         p1 = strrchr(p, '/');
+-        if (p1 && strcmp(p1 + 1, "libexec") == 0) {
++        if (p1 && strcmp(p1 + 1, "lib") == 0) {
+           *p1 = '\0';
+           ret = assemble_path(p, suffix);
+         }
+diff --git a/src/dosemu b/src/dosemu
+index d423af5..176f715 100644
+--- a/src/dosemu
++++ b/src/dosemu
+@@ -23,7 +23,7 @@ get_binary() {
+     fi
+ 
+   else
+-    BINARY="$prefix"/libexec/dosemu2/dosemu2.bin
++    BINARY="$prefix"/lib/dosemu2/dosemu2.bin
+     if [ ! -f "$BINARY" ]; then
+       echo "$BINARY does not exist"
+       exit 1
+diff --git a/src/dosext/mfs/mfs.c b/src/dosext/mfs/mfs.c
+index 7657bd7..286a845 100644
+--- a/src/dosext/mfs/mfs.c
++++ b/src/dosext/mfs/mfs.c
+@@ -147,8 +147,10 @@ TODO:
+ #include <sys/vfs.h>
+ #else
+ #include <sys/param.h>
++#ifndef __HAIKU__
+ #include <sys/mount.h>
+ #endif
++#endif
+ #include <sys/ioctl.h>
+ #include <errno.h>
+ #include <sys/statvfs.h>
+diff --git a/src/dosext/net/libpacket.c b/src/dosext/net/libpacket.c
+index a2a359f..66130f9 100644
+--- a/src/dosext/net/libpacket.c
++++ b/src/dosext/net/libpacket.c
+@@ -423,6 +423,9 @@ int GetDeviceMTU(void)
+ 
+ int tun_alloc(char *dev)
+ {
++#ifdef __HAIKU__
++      return -1;
++#else
+       PRIV_SAVE_AREA
+       struct ifreq ifr;
+       int fd, err;
+@@ -459,6 +462,7 @@ int tun_alloc(char *dev)
+       strcpy(dev, ifr.ifr_name);
+ 
+       return fd;
++#endif
+ }
+ 
+ static ssize_t pkt_read_eth(int pkt_fd, void *buf, size_t count)
+diff --git a/src/include/Linux/if_tun.h b/src/include/Linux/if_tun.h
+index 5feacf5..16f9184 100644
+--- a/src/include/Linux/if_tun.h
++++ b/src/include/Linux/if_tun.h
+@@ -26,6 +26,7 @@
+ #define TUN_TYPE_MASK   0x000f
+ 
+ /* Ioctl defines */
++#ifndef __HAIKU__
+ #define TUNSETNOCSUM  _IOW('T', 200, int) 
+ #define TUNSETDEBUG   _IOW('T', 201, int) 
+ #define TUNSETIFF     _IOW('T', 202, int) 
+@@ -54,6 +55,7 @@
+  */
+ #define TUNSETVNETBE _IOW('T', 222, int)
+ #define TUNGETVNETBE _IOR('T', 223, int)
++#endif
+ 
+ /* TUNSETIFF ifr flags */
+ #define IFF_TUN		0x0001
+diff --git a/src/include/dosemu_config.h b/src/include/dosemu_config.h
+index 0b18a0d..bbd7a8c 100644
+--- a/src/include/dosemu_config.h
++++ b/src/include/dosemu_config.h
+@@ -53,7 +53,11 @@ extern int config_check_only;
+ #define  FREEDOS_DIR        "freedos"         /* freedos dir name */
+ #define  FDBOOT_DIR         "fdboot"          /* freedos boot dir name */
+ #define  XBAT_DIR           "bat"             /* extras */
++#ifdef __HAIKU__
++#define  DOSEMULIB_DEFAULT  "data/dosemu"
++#else
+ #define  DOSEMULIB_DEFAULT  "share/dosemu"
++#endif
+ #define  DOSEMUCMDS_DEFAULT DOSEMULIB_DEFAULT "/" CMDS_SUFF
+ #define  DOSEMUEXEC_DEFAULT  LIBEXECDIR "/dosemu"
+ #define  DOSEMUIMAGE_DEFAULT "~/" LOCALDIR_BASE_NAME
+diff --git a/src/plugin/midimisc/mid_i_pipe.c b/src/plugin/midimisc/mid_i_pipe.c
+index c54a45e..6b4d9e5 100644
+--- a/src/plugin/midimisc/mid_i_pipe.c
++++ b/src/plugin/midimisc/mid_i_pipe.c
+@@ -26,6 +26,7 @@
+ #include "init.h"
+ #include "sound/midi.h"
+ #include <sys/types.h>
++#include <sys/select.h>
+ #include <sys/stat.h>
+ #include <unistd.h>
+ #include <fcntl.h>
+diff --git a/src/plugin/midimisc/mid_o_tmdty.c b/src/plugin/midimisc/mid_o_tmdty.c
+index 923af9c..5d89da6 100644
+--- a/src/plugin/midimisc/mid_o_tmdty.c
++++ b/src/plugin/midimisc/mid_o_tmdty.c
+@@ -160,9 +160,13 @@ static int midotmdty_preinit(void)
+ 
+ 	/* unblock SIGIO and SIGALRM as timidity may use it */
+ 	sigemptyset(&sigs);
++#ifndef __HAIKU__
+ 	sigaddset(&sigs, SIGIO);
++#endif
+ 	sigaddset(&sigs, SIGALRM);
++#ifndef __HAIKU__
+ 	signal(SIGIO, SIG_IGN);
++#endif
+ 	signal(SIGALRM, SIG_IGN);
+ 	sigprocmask(SIG_UNBLOCK, &sigs, NULL);
+ 
+-- 
+2.48.1
+
