@@ -3,12 +3,20 @@ From: PulkoMandy <pulkomandy@pulkomandy.tk>
 Date: Sat, 21 Jun 2025 20:21:15 +0200
 Subject: Get it to build on Haiku
 
-- Disable handling of SIGIO (not defined on Haiku)
-- Remove includes of ucontext.h (ucontext is defined in signal.h in
-  Haiku)
+- Disable search for ucontext.h on Haiku (Haiku defines ucontext struct in signal.h)
 - Link libsd (for strsep) and libnetwork (for sockets)
 - Disable code for TUN/TAP handling (Haiku specific code needs to be
-  written for this)
+  written for this): _IOW and _IOR don't exist on Haiku, and the TUN configration uses a different
+  interface.
+- Use elf_i386_haiku instead of elf_i386 (not sure why Haiku's binutils don't know about elf_i386)
+- Implement CPU features detection (there is no /proc/cpuinfo in Haiku; use cpuid and
+  get_cpu_topology_info instead)
+- Missing include of sys/select.h for use of fd_set (required by POSIX but not needed on some other
+  OS)
+- Enable definition of getmcontext and setmcontext for Haiku
+- In Haiku, the libexec directory is /system/lib and the lib directory is /system/develop/lib. This
+  should be handled using LIBDIR and LIBEXECDIR ideally (just like DATADIR and other directories
+  handled by autoconf)
 
 diff --git a/configure.ac b/configure.ac
 index 25da201..5a6aa6a 100644
@@ -44,37 +52,6 @@ index 25da201..5a6aa6a 100644
  
  AC_SUBST(XASFLAGS)
  AC_SUBST(ASFLAGS)
-diff --git a/src/arch/linux/async/signal.c b/src/arch/linux/async/signal.c
-index 680799e..3571645 100644
---- a/src/arch/linux/async/signal.c
-+++ b/src/arch/linux/async/signal.c
-@@ -485,9 +485,11 @@ signal_pre_init(void)
-   sigemptyset(&q_mask);
-   sigemptyset(&nonfatal_q_mask);
-   registersig_std(SIGALRM, SIGALRM_call);
-+#ifndef __HAIKU__
-   /* SIGIO is only used for irqs from vm86 */
-   if (config.cpu_vm == CPUVM_VM86)
-     registersig_std(SIGIO, SIGIO_call);
-+#endif
-   registersig_std(SIG_THREAD_NOTIFY, async_call);
-   registersig(SIGCHLD, sig_child);
-   newsetqsig(SIGQUIT, leavedos_signal);
-diff --git a/src/base/core/int.c b/src/base/core/int.c
-index ba8dca5..5e2ab10 100644
---- a/src/base/core/int.c
-+++ b/src/base/core/int.c
-@@ -16,8 +16,10 @@
- #include <sys/vfs.h>
- #else
- #include <sys/param.h>
-+#ifndef __HAIKU__
- #include <sys/mount.h>
- #endif
-+#endif
- #include <sys/statvfs.h>
- #include "Linux/magic.h"
- #include <signal.h>
 diff --git a/src/base/init/config.c b/src/base/init/config.c
 index efda100..668eaa2 100644
 --- a/src/base/init/config.c
@@ -94,58 +71,6 @@ index efda100..668eaa2 100644
  /*
   * Options used in config_init().
   *
-@@ -79,7 +87,7 @@ char *dosemu_plugin_dir_path;
- char *commands_path;
- char *dosemu_image_dir_path;
- char *dosemu_drive_c_path;
--char keymaploadbase_default[] = PREFIX "/share/";
-+char keymaploadbase_default[] = PREFIX "/data/";
- char *keymap_load_base_path = keymaploadbase_default;
- const char *keymap_dir_path = "keymap/";
- const char *owner_tty_locks = "uucp";
-@@ -466,10 +474,16 @@ static void set_freedos_dir(void)
-   int loaded = 0;
-   const char *xdir = getenv("DOSEMU2_EXTRAS_DIR");
-   const char *xdirs[] = {
-+#ifdef __HAIKU__
-+    "/system/data/dosemu2-extras",
-+    "/system/non-packaged/data/dosemu2-extras",
-+    PREFIX "/data/dosemu2-extras",
-+#else
-     "/usr/share/dosemu2-extras",
-     "/usr/local/share/dosemu2-extras",
-     PREFIX "/share/dosemu2-extras",
-     "/opt/dosemu2-extras",			/* gentoo */
-+#endif
-     NULL,
-   };
- #ifdef USE_FDPP
-@@ -512,6 +526,17 @@ static void set_freedos_dir(void)
-     comcom_dir = strdup(ccdir);
-   } else {
-     const char *comcom[] = {
-+#ifdef __HAIKU__
-+#ifdef USE_DJDEV64
-+      "/system/data/comcom64",
-+      "/system/non-packaged/data/comcom64",
-+      PREFIX "/data/comcom64",
-+#endif
-+      "/system/data/comcom32",
-+      "/system/non-packaged/data/comcom32",
-+      PREFIX "/data/comcom32",
-+      "/opt/comcom32",			/* gentoo */
-+#else
- #ifdef USE_DJDEV64
-       "/usr/share/comcom64",
-       "/usr/local/share/comcom64",
-@@ -521,6 +546,7 @@ static void set_freedos_dir(void)
-       "/usr/local/share/comcom32",
-       PREFIX "/share/comcom32",
-       "/opt/comcom32",			/* gentoo */
-+#endif
-       NULL,
-     };
-     int i;
 @@ -812,10 +838,84 @@ void secure_option_preparse(int *argc, char **argv)
  
  static void read_cpu_info(void)
@@ -248,21 +173,6 @@ index efda100..668eaa2 100644
  }
  
  static void config_post_process(void)
-diff --git a/src/base/lib/libpcl/pcl_ctx.c b/src/base/lib/libpcl/pcl_ctx.c
-index 308071d..b06919f 100644
---- a/src/base/lib/libpcl/pcl_ctx.c
-+++ b/src/base/lib/libpcl/pcl_ctx.c
-@@ -20,7 +20,10 @@
-  * Author: Stas Sergeev
-  */
- 
-+#ifndef __HAIKU__
- #include <ucontext.h>
-+#endif
-+
- #include <assert.h>
- #include "misc/pcontext.h"
- #include "sig.h"
 diff --git a/src/base/lib/mcontext/asm.SS b/src/base/lib/mcontext/asm.SS
 index fefe877..bf1dba5 100644
 --- a/src/base/lib/mcontext/asm.SS
@@ -286,20 +196,6 @@ index fefe877..bf1dba5 100644
  #if defined(__OpenBSD__) && defined(__i386__)
  #define NEEDX86CONTEXT 1
  #define SET setmcontext
-diff --git a/src/base/lib/mcontext/context.c b/src/base/lib/mcontext/context.c
-index ebc718c..248ce91 100644
---- a/src/base/lib/mcontext/context.c
-+++ b/src/base/lib/mcontext/context.c
-@@ -4,7 +4,9 @@
- 
- /* Copyright (c) 2005-2006 Russ Cox, MIT; see COPYRIGHT */
- 
-+#ifndef __HAIKU__
- #include <ucontext.h>
-+#endif
- #include <string.h>
- #include <inttypes.h>
- #include <stdlib.h>
 diff --git a/src/base/misc/utilities.c b/src/base/misc/utilities.c
 index 087561a..b2f4774 100644
 --- a/src/base/misc/utilities.c
@@ -326,21 +222,6 @@ index d423af5..176f715 100644
      if [ ! -f "$BINARY" ]; then
        echo "$BINARY does not exist"
        exit 1
-diff --git a/src/dosext/mfs/mfs.c b/src/dosext/mfs/mfs.c
-index 7657bd7..286a845 100644
---- a/src/dosext/mfs/mfs.c
-+++ b/src/dosext/mfs/mfs.c
-@@ -147,8 +147,10 @@ TODO:
- #include <sys/vfs.h>
- #else
- #include <sys/param.h>
-+#ifndef __HAIKU__
- #include <sys/mount.h>
- #endif
-+#endif
- #include <sys/ioctl.h>
- #include <errno.h>
- #include <sys/statvfs.h>
 diff --git a/src/dosext/net/libpacket.c b/src/dosext/net/libpacket.c
 index a2a359f..66130f9 100644
 --- a/src/dosext/net/libpacket.c
@@ -411,24 +292,6 @@ index c54a45e..6b4d9e5 100644
  #include <sys/stat.h>
  #include <unistd.h>
  #include <fcntl.h>
-diff --git a/src/plugin/midimisc/mid_o_tmdty.c b/src/plugin/midimisc/mid_o_tmdty.c
-index 923af9c..5d89da6 100644
---- a/src/plugin/midimisc/mid_o_tmdty.c
-+++ b/src/plugin/midimisc/mid_o_tmdty.c
-@@ -160,9 +160,13 @@ static int midotmdty_preinit(void)
- 
- 	/* unblock SIGIO and SIGALRM as timidity may use it */
- 	sigemptyset(&sigs);
-+#ifndef __HAIKU__
- 	sigaddset(&sigs, SIGIO);
-+#endif
- 	sigaddset(&sigs, SIGALRM);
-+#ifndef __HAIKU__
- 	signal(SIGIO, SIG_IGN);
-+#endif
- 	signal(SIGALRM, SIG_IGN);
- 	sigprocmask(SIG_UNBLOCK, &sigs, NULL);
- 
 -- 
 2.48.1
 
