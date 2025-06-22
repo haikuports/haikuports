@@ -1,13 +1,8 @@
-From 6232970736d9d23a2c9534cd7217c8554be67745 Mon Sep 17 00:00:00 2001
+From 1ce9ed46c5bdf0dd09a767e005feef0f3d6cbf7e Mon Sep 17 00:00:00 2001
 From: PulkoMandy <pulkomandy@pulkomandy.tk>
 Date: Sat, 21 Jun 2025 20:21:15 +0200
 Subject: Get it to build on Haiku
 
-- Disable search for ucontext.h on Haiku (Haiku defines ucontext struct in signal.h)
-- Search for network functions in libnetwork
-- Change libbsd include paths: Haiku's libbsd needs the normal <string.h> include
-  instead of <bsd/string.h> (otherwise there are problems with the use
-  of #include_next in Haiku headers)
 - Disable code for TUN/TAP handling (Haiku specific code needs to be
   written for this): _IOW and _IOR don't exist on Haiku, and the TUN configration uses a different
   interface. TODO use configure script to detect the needed flags
@@ -24,31 +19,10 @@ Subject: Get it to build on Haiku
   http://dev.haiku-os.org/ticket/19264
 
 diff --git a/configure.ac b/configure.ac
-index 6b51284..511a7df 100644
+index 0bd5081..f210aba 100644
 --- a/configure.ac
 +++ b/configure.ac
-@@ -505,6 +505,12 @@ AC_CHECK_HEADERS([asm/ucontext.h],,, [
-   #include <ucontext.h>
-   #include <signal.h>
- ])
-+
-+AC_SEARCH_LIBS([accept], [network],[],[
-+  AC_MSG_ERROR([Unable t find BSD sockets support])
-+])
-+
-+if test "$CONFIG_OS" != "Haiku"; then
- if test "$machine" != "wasm32"; then
-   AC_CHECK_HEADERS([ucontext.h],, [
-     AS_UNSET([ac_cv_header_ucontext_h])
-@@ -514,6 +520,7 @@ if test "$machine" != "wasm32"; then
-     #define _XOPEN_SOURCE 500
-   ])])
- fi
-+fi
- AC_CHECK_HEADERS([linux/signal.h],,, [#include <signal.h>])
- AC_CHECK_HEADERS([sys/soundcard.h], [
-   USE_OSS=1
-@@ -844,7 +851,7 @@ fi
+@@ -840,7 +840,7 @@ fi
  DOSEMU_CFLAGS="${DOSEMU_CFLAGS} ${OPT} ${PIPE}"
  DOSEMU_CPPFLAGS="${DOSEMU_CPPFLAGS} -MD -DCFLAGS_STR=\"$DOSEMU_CFLAGS $CFLAGS\""
  DOSEMU_VERSION=`cd $srcdir && ./getversion -b`
@@ -238,72 +212,6 @@ index fefe877..bf1dba5 100644
  #if defined(__OpenBSD__) && defined(__i386__)
  #define NEEDX86CONTEXT 1
  #define SET setmcontext
-diff --git a/src/base/misc/utilities.c b/src/base/misc/utilities.c
-index 087561a..b2f4774 100644
---- a/src/base/misc/utilities.c
-+++ b/src/base/misc/utilities.c
-@@ -598,7 +598,7 @@ char *path_prefix(const char *suffix)
-         ret = assemble_path(p, suffix);
-       else if (strcmp(p1 + 1, "dosemu2") == 0) {
-         p1 = strrchr(p, '/');
--        if (p1 && strcmp(p1 + 1, "libexec") == 0) {
-+        if (p1 && strcmp(p1 + 1, "lib") == 0) {
-           *p1 = '\0';
-           ret = assemble_path(p, suffix);
-         }
-diff --git a/src/dosemu b/src/dosemu
-index d423af5..176f715 100644
---- a/src/dosemu
-+++ b/src/dosemu
-@@ -23,7 +23,7 @@ get_binary() {
-     fi
- 
-   else
--    BINARY="$prefix"/libexec/dosemu2/dosemu2.bin
-+    BINARY="$prefix"/lib/dosemu2/dosemu2.bin
-     if [ ! -f "$BINARY" ]; then
-       echo "$BINARY does not exist"
-       exit 1
-diff --git a/src/dosext/net/libpacket.c b/src/dosext/net/libpacket.c
-index a2a359f..66130f9 100644
---- a/src/dosext/net/libpacket.c
-+++ b/src/dosext/net/libpacket.c
-@@ -423,6 +423,9 @@ int GetDeviceMTU(void)
- 
- int tun_alloc(char *dev)
- {
-+#ifdef __HAIKU__
-+      return -1;
-+#else
-       PRIV_SAVE_AREA
-       struct ifreq ifr;
-       int fd, err;
-@@ -459,6 +462,7 @@ int tun_alloc(char *dev)
-       strcpy(dev, ifr.ifr_name);
- 
-       return fd;
-+#endif
- }
- 
- static ssize_t pkt_read_eth(int pkt_fd, void *buf, size_t count)
-diff --git a/src/dosext/net/tcp.c b/src/dosext/net/tcp.c
-index 8742deb..69e1736 100644
---- a/src/dosext/net/tcp.c
-+++ b/src/dosext/net/tcp.c
-@@ -27,8 +27,13 @@
- #include "Netinet/tcp.h"
- #include <limits.h>
- #ifdef HAVE_LIBBSD
-+#ifdef __HAIKU__
-+/* Let Haiku headers do their own thing with #include_next... */
-+#include <string.h>
-+#else
- #include <bsd/string.h>
- #endif
-+#endif
- #include "emu.h"
- #include "hlt.h"
- #include "int.h"
 diff --git a/src/include/Linux/if_tun.h b/src/include/Linux/if_tun.h
 index 5feacf5..16f9184 100644
 --- a/src/include/Linux/if_tun.h
@@ -324,39 +232,6 @@ index 5feacf5..16f9184 100644
  
  /* TUNSETIFF ifr flags */
  #define IFF_TUN		0x0001
-diff --git a/src/include/dosemu_config.h b/src/include/dosemu_config.h
-index 0b18a0d..bbd7a8c 100644
---- a/src/include/dosemu_config.h
-+++ b/src/include/dosemu_config.h
-@@ -53,7 +53,11 @@ extern int config_check_only;
- #define  FREEDOS_DIR        "freedos"         /* freedos dir name */
- #define  FDBOOT_DIR         "fdboot"          /* freedos boot dir name */
- #define  XBAT_DIR           "bat"             /* extras */
-+#ifdef __HAIKU__
-+#define  DOSEMULIB_DEFAULT  "data/dosemu"
-+#else
- #define  DOSEMULIB_DEFAULT  "share/dosemu"
-+#endif
- #define  DOSEMUCMDS_DEFAULT DOSEMULIB_DEFAULT "/" CMDS_SUFF
- #define  DOSEMUEXEC_DEFAULT  LIBEXECDIR "/dosemu"
- #define  DOSEMUIMAGE_DEFAULT "~/" LOCALDIR_BASE_NAME
-diff --git a/src/plugin/fdpp/hooks.c b/src/plugin/fdpp/hooks.c
-index d2f0e9f..1a420ea 100644
---- a/src/plugin/fdpp/hooks.c
-+++ b/src/plugin/fdpp/hooks.c
-@@ -20,8 +20,12 @@
-  * Author: Stas Sergeev
-  */
- #ifdef HAVE_LIBBSD
-+#ifdef __HAIKU__
-+#include <string.h>
-+#else
- #include <bsd/string.h>
- #endif
-+#endif
- #include <stddef.h>
- #include <fdpp/loader.h>
- #include <fdpp/thunks.h>
 -- 
 2.48.1
 
