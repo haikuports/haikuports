@@ -1,19 +1,11 @@
-From 1ce9ed46c5bdf0dd09a767e005feef0f3d6cbf7e Mon Sep 17 00:00:00 2001
+From 22b5aba470fa5c65425b2aec59c6a747c1e60951 Mon Sep 17 00:00:00 2001
 From: PulkoMandy <pulkomandy@pulkomandy.tk>
 Date: Sat, 21 Jun 2025 20:21:15 +0200
 Subject: Get it to build on Haiku
 
-- Disable code for TUN/TAP handling (Haiku specific code needs to be
-  written for this): _IOW and _IOR don't exist on Haiku, and the TUN configration uses a different
-  interface. TODO use configure script to detect the needed flags
-  instead of adding Haiku special cases in the sourcecode.
 - Use elf_i386_haiku instead of elf_i386 (not sure why Haiku's binutils don't know about elf_i386)
 - Implement CPU features detection (there is no /proc/cpuinfo in Haiku; use cpuid and
   get_cpu_topology_info instead)
-- Enable definition of getmcontext and setmcontext for Haiku
-- In Haiku, the libexec directory is /system/lib and the lib directory is /system/develop/lib. This
-  should be handled using LIBDIR and LIBEXECDIR ideally (just like DATADIR and other directories
-  handled by autoconf)
 - Set MAP_NORESERVE and B_OVERCOMMITING_AREA where needed (in Linux this is implied by
   PROT_NONE). Still not working and causing a KDL, see
   http://dev.haiku-os.org/ticket/19264
@@ -32,25 +24,20 @@ index 0bd5081..f210aba 100644
  AC_SUBST(XASFLAGS)
  AC_SUBST(ASFLAGS)
 diff --git a/src/base/init/config.c b/src/base/init/config.c
-index 0d5f8dd..7b21340 100644
+index 0d5f8dd..7ded0da 100644
 --- a/src/base/init/config.c
 +++ b/src/base/init/config.c
-@@ -43,6 +43,14 @@
+@@ -43,6 +43,9 @@
  #include "mhpdbg.h"
  #include "mapping/mapping.h"
  
 +#ifdef __HAIKU__
-+/* Rename some conflicting functions that we don't need */
-+#define read_port haiku_read_port
-+#define write_port haiku_write_port
 +#include <kernel/OS.h>
-+#undef read_port
-+#undef write_port
 +#endif
  /*
   * Options used in config_init().
   *
-@@ -812,10 +820,84 @@ void secure_option_preparse(int *argc, char **argv)
+@@ -812,10 +815,84 @@ void secure_option_preparse(int *argc, char **argv)
  
  static void read_cpu_info(void)
  {
@@ -136,7 +123,7 @@ index 0d5f8dd..7b21340 100644
      err = open_proc_scan("/proc/cpuinfo");
      if (err)
        return;
-@@ -853,6 +935,7 @@ static void read_cpu_info(void)
+@@ -853,6 +930,7 @@ static void read_cpu_info(void)
  	    config.cpusse = 1;
  	}
  #endif
@@ -144,7 +131,7 @@ index 0d5f8dd..7b21340 100644
          if (cpuflags && strstr(cpuflags, "tsc")) {
            /* bogospeed currently returns 0; should it deny
             * pentium features, fall back into 486 case */
-@@ -921,6 +1004,7 @@ static void read_cpu_info(void)
+@@ -921,6 +999,7 @@ static void read_cpu_info(void)
        config.smp = 1;		/* for checking overrides, later */
      }
      close_proc_scan();
@@ -153,25 +140,21 @@ index 0d5f8dd..7b21340 100644
  
  static void config_post_process(void)
 diff --git a/src/base/lib/mapping/mapping.c b/src/base/lib/mapping/mapping.c
-index 21bbe0a..e21b1ed 100644
+index 21bbe0a..fe91b05 100644
 --- a/src/base/lib/mapping/mapping.c
 +++ b/src/base/lib/mapping/mapping.c
-@@ -42,6 +42,14 @@
+@@ -42,6 +42,10 @@
  #include <linux/version.h>
  #endif
  
 +#ifdef __HAIKU__
-+#define read_port haiku_read_port
-+#define write_port write_read_port
 +#include <private/system/vm_defs.h>
-+#undef read_port
-+#undef write_port
 +#endif
 +
  enum { MEM_BASE, KVM_BASE, JIT_BASE,
  #ifdef __i386__
         VM86_BASE,
-@@ -413,7 +421,7 @@ static void *do_huge_page(int flags, size_t mapsize, int protect)
+@@ -413,7 +417,7 @@ static void *do_huge_page(int flags, size_t mapsize, int protect)
  
  void *mmap_mapping_huge_page_aligned(int cap, size_t mapsize, int protect)
  {
@@ -180,7 +163,7 @@ index 21bbe0a..e21b1ed 100644
    void *addr = do_huge_page(flags, mapsize, protect);
    if (addr == MAP_FAILED)
      return addr;
-@@ -784,7 +792,7 @@ void *alloc_mapping_huge_page_aligned(int cap, size_t mapsize)
+@@ -784,7 +788,7 @@ void *alloc_mapping_huge_page_aligned(int cap, size_t mapsize)
  {
    void *addr;
    Q__printf("MAPPING: alloc_huge_page_aligned, cap=%s size=%#zx\n", cap, mapsize);
@@ -189,49 +172,6 @@ index 21bbe0a..e21b1ed 100644
    return addr == MAP_FAILED ? MAP_FAILED : do_alloc_mapping(cap, mapsize, addr);
  }
  
-diff --git a/src/base/lib/mcontext/asm.SS b/src/base/lib/mcontext/asm.SS
-index fefe877..bf1dba5 100644
---- a/src/base/lib/mcontext/asm.SS
-+++ b/src/base/lib/mcontext/asm.SS
-@@ -12,6 +12,18 @@
- #endif
- #endif
- 
-+#if defined(__HAIKU__) && defined(__i386__)
-+#define NEEDX86CONTEXT 1
-+#define SET setmcontext
-+#define GET getmcontext
-+#else
-+#if defined(__HAIKU__) && defined(__x86_64__)
-+#define NEEDAMD64CONTEXT 1
-+#define SET _setmcontext
-+#define GET _getmcontext
-+#endif
-+#endif
-+
- #if defined(__OpenBSD__) && defined(__i386__)
- #define NEEDX86CONTEXT 1
- #define SET setmcontext
-diff --git a/src/include/Linux/if_tun.h b/src/include/Linux/if_tun.h
-index 5feacf5..16f9184 100644
---- a/src/include/Linux/if_tun.h
-+++ b/src/include/Linux/if_tun.h
-@@ -26,6 +26,7 @@
- #define TUN_TYPE_MASK   0x000f
- 
- /* Ioctl defines */
-+#ifndef __HAIKU__
- #define TUNSETNOCSUM  _IOW('T', 200, int) 
- #define TUNSETDEBUG   _IOW('T', 201, int) 
- #define TUNSETIFF     _IOW('T', 202, int) 
-@@ -54,6 +55,7 @@
-  */
- #define TUNSETVNETBE _IOW('T', 222, int)
- #define TUNGETVNETBE _IOR('T', 223, int)
-+#endif
- 
- /* TUNSETIFF ifr flags */
- #define IFF_TUN		0x0001
 -- 
 2.48.1
 
