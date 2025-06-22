@@ -1,4 +1,4 @@
-From 235280aa551819a75c09da858a6451e9260488f7 Mon Sep 17 00:00:00 2001
+From dddcd3bfaa3c5cd6e4b1d113af31af962a57e605 Mon Sep 17 00:00:00 2001
 From: Leorize <alaviss@users.noreply.github.com>
 Date: Mon, 1 Jan 2018 22:35:07 +0700
 Subject: utils/process/child_test: fix type mismatch
@@ -6,23 +6,23 @@ Subject: utils/process/child_test: fix type mismatch
 Align pipe_fail with syscall_pipe definition
 
 diff --git a/utils/process/child_test.cpp b/utils/process/child_test.cpp
-index 8996c31..2641716 100644
+index 69de999..0da0836 100644
 --- a/utils/process/child_test.cpp
 +++ b/utils/process/child_test.cpp
-@@ -256,7 +256,7 @@ open_fail(const char* path, const int flags, ...) throw()
+@@ -255,7 +255,7 @@ open_fail(const char* path, const int flags, ...) throw()
  ///
  /// \return Always -1.
  template< int Errno >
 -static pid_t
 +static int
- pipe_fail(int* UTILS_UNUSED_PARAM(fildes)) throw()
+ pipe_fail(int* /* fildes */) throw()
  {
      errno = Errno;
 -- 
-2.16.2
+2.48.1
 
 
-From ea5b2176fc2fb7b89a14d39469fc33814506e84f Mon Sep 17 00:00:00 2001
+From c83148d74a2761e97fa9a5e949576053e9e266a8 Mon Sep 17 00:00:00 2001
 From: Leorize <alaviss@users.noreply.github.com>
 Date: Wed, 3 Jan 2018 20:56:21 +0700
 Subject: kyua: use Haiku user directory
@@ -31,7 +31,7 @@ This broke a lot of tests that assume kyua will save it's data in
 $HOME/.kyua
 
 diff --git a/cli/common.cpp b/cli/common.cpp
-index 9204082..b937bdd 100644
+index dbb7f12..b07a8ab 100644
 --- a/cli/common.cpp
 +++ b/cli/common.cpp
 @@ -121,9 +121,9 @@ namespace {
@@ -84,10 +84,10 @@ index 531c252..67820cd 100644
          const optional< std::string > tmpdir(utils::getenv("TMPDIR"));
          if (tmpdir) {
 diff --git a/store/layout.cpp b/store/layout.cpp
-index 6bc67a8..b5f39d2 100644
+index f69cd96..6366bd9 100644
 --- a/store/layout.cpp
 +++ b/store/layout.cpp
-@@ -228,13 +228,13 @@ layout::new_db_for_migration(const fs::path& root,
+@@ -229,13 +229,13 @@ layout::new_db_for_migration(const fs::path& root,
  fs::path
  layout::query_store_dir(void)
  {
@@ -191,10 +191,10 @@ index 2370ee4..a60ca5e 100644
  void unsetenv(const std::string&);
  
 -- 
-2.16.2
+2.48.1
 
 
-From ea4b248c9731d9c782f2e0dc37e58942bbce00b1 Mon Sep 17 00:00:00 2001
+From eb3472019eebef65d1408f52f6a6ca41d165d7b2 Mon Sep 17 00:00:00 2001
 From: Leorize <alaviss@users.noreply.github.com>
 Date: Wed, 3 Jan 2018 21:05:37 +0700
 Subject: utils/process/operations_test: fixes
@@ -229,94 +229,11 @@ index e9c1ebb..708a740 100644
  
  
 -- 
-2.16.2
+2.48.1
 
 
-From 9bdf4754429fd3ee72e8309eb02879b1ea94a925 Mon Sep 17 00:00:00 2001
-From: Leorize <alaviss@users.noreply.github.com>
-Date: Thu, 4 Jan 2018 11:54:25 +0700
-Subject: utils/fs/directory: use dirent correctly
 
-
-diff --git a/utils/fs/directory.cpp b/utils/fs/directory.cpp
-index ff7ad5e..c6794e5 100644
---- a/utils/fs/directory.cpp
-+++ b/utils/fs/directory.cpp
-@@ -32,6 +32,7 @@ extern "C" {
- #include <sys/types.h>
- 
- #include <dirent.h>
-+#include <unistd.h>
- }
- 
- #include <cerrno>
-@@ -131,7 +132,7 @@ struct utils::fs::detail::directory_iterator::impl : utils::noncopyable {
-     ///
-     /// We need to keep this at the class level so that we can use the
-     /// readdir_r(3) function.
--    ::dirent _dirent;
-+    ::dirent* _dirent;
- 
-     /// Custom representation of the directory entry.
-     ///
-@@ -141,7 +142,7 @@ struct utils::fs::detail::directory_iterator::impl : utils::noncopyable {
-     std::auto_ptr< directory_entry > _entry;
- 
-     /// Constructs an iterator pointing to the "end" of the directory.
--    impl(void) : _path("invalid-directory-entry"), _dirp(NULL)
-+    impl(void) : _path("invalid-directory-entry"), _dirp(NULL), _dirent(NULL)
-     {
-     }
- 
-@@ -160,6 +161,16 @@ struct utils::fs::detail::directory_iterator::impl : utils::noncopyable {
-         }
-         _dirp = dirp;
- 
-+        long name_max = pathconf(_path.c_str(), _PC_NAME_MAX);
-+        if (name_max == -1)
-+#if defined(NAME_MAX)
-+            name_max = NAME_MAX;
-+#else
-+            name_max = 256; /* Wild guess */
-+#endif
-+        const size_t length = offsetof(::dirent, d_name) + name_max + 1;
-+        _dirent = static_cast< ::dirent* >(operator new(length));
-+
-         // Initialize our first directory entry.  Note that this may actually
-         // close the directory we just opened if the directory happens to be
-         // empty -- but directories are never empty because they at least have
-@@ -174,6 +185,8 @@ struct utils::fs::detail::directory_iterator::impl : utils::noncopyable {
-     {
-         if (_dirp != NULL)
-             close();
-+        delete _dirent;
-+        _dirent = NULL;
-     }
- 
-     /// Closes the directory and invalidates the iterator.
-@@ -198,7 +211,7 @@ struct utils::fs::detail::directory_iterator::impl : utils::noncopyable {
-     {
-         ::dirent* result;
- 
--        if (::readdir_r(_dirp, &_dirent, &result) == -1) {
-+        if (::readdir_r(_dirp, _dirent, &result) == -1) {
-             const int original_errno = errno;
-             throw fs::system_error(F("readdir_r(%s) failed") % _path,
-                                    original_errno);
-@@ -207,7 +220,7 @@ struct utils::fs::detail::directory_iterator::impl : utils::noncopyable {
-             _entry.reset(NULL);
-             close();
-         } else {
--            _entry.reset(new directory_entry(_dirent.d_name));
-+            _entry.reset(new directory_entry(_dirent->d_name));
-         }
-     }
- };
--- 
-2.16.2
-
-
-From 399fd5c96c4b725019082c6d4dbee8b44ea7e9f2 Mon Sep 17 00:00:00 2001
+From 3d49d26670fb4dd54d01b6c32c053d87f7275459 Mon Sep 17 00:00:00 2001
 From: Leorize <alaviss@users.noreply.github.com>
 Date: Fri, 5 Jan 2018 20:36:11 +0700
 Subject: utils/process/status: use WIFCORED on Haiku
@@ -352,10 +269,10 @@ index a3cea8e..98605c7 100644
  #endif
  
 -- 
-2.16.2
+2.48.1
 
 
-From d2cc0a80c05fe537e4b3c0907eba03010a7e9d99 Mon Sep 17 00:00:00 2001
+From e0fe97d4dbf73ae9a2352726930033376bdc3597 Mon Sep 17 00:00:00 2001
 From: Leorize <alaviss@users.noreply.github.com>
 Date: Fri, 5 Jan 2018 21:28:14 +0700
 Subject: utils/process/tests: Fix SIGKILL check on Haiku
@@ -458,10 +375,10 @@ index ef8758d..a7e9840 100644
  
  
 -- 
-2.16.2
+2.48.1
 
 
-From 6f25c5caa9849d3b7a2e3f958f929395cc147bca Mon Sep 17 00:00:00 2001
+From da4025dfe1455daa112df50e06ca94018caed860 Mon Sep 17 00:00:00 2001
 From: Leorize <alaviss@users.noreply.github.com>
 Date: Fri, 5 Jan 2018 21:33:32 +0700
 Subject: utils/memory: add get_system_info support
@@ -499,7 +416,7 @@ index 3d9a83a..c829d8f 100644
 +    AC_CHECK_FUNCS([get_system_info], [$1], [$2])
 +])
 diff --git a/utils/memory.cpp b/utils/memory.cpp
-index fb5da79..dfa6786 100644
+index ca121f6..1790338 100644
 --- a/utils/memory.cpp
 +++ b/utils/memory.cpp
 @@ -44,6 +44,10 @@ extern "C" {
@@ -524,7 +441,7 @@ index fb5da79..dfa6786 100644
  /// Name of the sysctl MIB with the physical memory as detected by configure.
  ///
  /// This should only be used if memory_query_type is 'sysctl'.
-@@ -107,6 +115,37 @@ sysctlbyname(const char* UTILS_UNUSED_PARAM(name),
+@@ -101,6 +109,37 @@ sysctlbyname(const char* /* name */,
  #endif
  
  
@@ -562,7 +479,7 @@ index fb5da79..dfa6786 100644
  }  // anonymous namespace
  
  
-@@ -154,6 +193,12 @@ utils::physical_memory(void)
+@@ -148,6 +187,12 @@ utils::physical_memory(void)
              amount = 0;
          } else if (std::strcmp(query_type, query_type_sysctlbyname) == 0) {
              amount = query_sysctl(query_sysctl_mib);
@@ -590,10 +507,10 @@ index 66750fb..7b76a5c 100644
          ATF_REQUIRE(memory < 100 * units::TB);  // Large enough for now...
      } else {
 -- 
-2.16.2
+2.48.1
 
 
-From 24a103d26f668154b434e4a7c1690927a1447aa5 Mon Sep 17 00:00:00 2001
+From 5f622bcf369745c37ddebf37a5f67f0449fc337f Mon Sep 17 00:00:00 2001
 From: Leorize <alaviss@users.noreply.github.com>
 Date: Sat, 6 Jan 2018 07:07:31 +0700
 Subject: Kyuafiles: disable tests that depends on HOME
@@ -642,10 +559,10 @@ index ada2f7c..0f8ad43 100644
  atf_test_program{name="write_backend_test"}
  atf_test_program{name="write_transaction_test"}
 -- 
-2.16.2
+2.48.1
 
 
-From b50332f25345fdd2c0e3c24a5452159b7bbbdf4a Mon Sep 17 00:00:00 2001
+From 659f82e747d5b92f963bc0a9a1136b4f21d1be0a Mon Sep 17 00:00:00 2001
 From: Leorize <alaviss@users.noreply.github.com>
 Date: Sat, 6 Jan 2018 08:49:26 +0700
 Subject: utils/fs/operations_test: disable ENOENT test
@@ -667,5 +584,5 @@ index f134935..c77ec6b 100644
      fs::mkdir(fs::path("root"), 0755);
      ATF_REQUIRE(::chdir("root") != -1);
 -- 
-2.16.2
+2.48.1
 
