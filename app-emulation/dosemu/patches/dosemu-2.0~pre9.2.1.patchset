@@ -1,41 +1,46 @@
-From 3aec93e6f646e58fc255ef135916d554848bfe32 Mon Sep 17 00:00:00 2001
+From 6232970736d9d23a2c9534cd7217c8554be67745 Mon Sep 17 00:00:00 2001
 From: PulkoMandy <pulkomandy@pulkomandy.tk>
 Date: Sat, 21 Jun 2025 20:21:15 +0200
 Subject: Get it to build on Haiku
 
 - Disable search for ucontext.h on Haiku (Haiku defines ucontext struct in signal.h)
-- Link libsd (for strsep) and libnetwork (for sockets)
+- Search for network functions in libnetwork
+- Change libbsd include paths: Haiku's libbsd needs the normal <string.h> include
+  instead of <bsd/string.h> (otherwise there are problems with the use
+  of #include_next in Haiku headers)
 - Disable code for TUN/TAP handling (Haiku specific code needs to be
   written for this): _IOW and _IOR don't exist on Haiku, and the TUN configration uses a different
-  interface.
+  interface. TODO use configure script to detect the needed flags
+  instead of adding Haiku special cases in the sourcecode.
 - Use elf_i386_haiku instead of elf_i386 (not sure why Haiku's binutils don't know about elf_i386)
 - Implement CPU features detection (there is no /proc/cpuinfo in Haiku; use cpuid and
   get_cpu_topology_info instead)
-- Missing include of sys/select.h for use of fd_set (required by POSIX but not needed on some other
-  OS)
 - Enable definition of getmcontext and setmcontext for Haiku
 - In Haiku, the libexec directory is /system/lib and the lib directory is /system/develop/lib. This
   should be handled using LIBDIR and LIBEXECDIR ideally (just like DATADIR and other directories
   handled by autoconf)
+- Set MAP_NORESERVE and B_OVERCOMMITING_AREA where needed (in Linux this is implied by
+  PROT_NONE). Still not working and causing a KDL, see
+  http://dev.haiku-os.org/ticket/19264
 
 diff --git a/configure.ac b/configure.ac
-index 25da201..5a6aa6a 100644
+index 6b51284..511a7df 100644
 --- a/configure.ac
 +++ b/configure.ac
-@@ -501,6 +501,12 @@ AC_CHECK_HEADERS([asm/ucontext.h],,, [
+@@ -505,6 +505,12 @@ AC_CHECK_HEADERS([asm/ucontext.h],,, [
    #include <ucontext.h>
    #include <signal.h>
  ])
 +
-+if test "$CONFIG_OS" == "Haiku"; then
-+    LIBS="$LIBS -lbsd -lnetwork"
-+fi
++AC_SEARCH_LIBS([accept], [network],[],[
++  AC_MSG_ERROR([Unable t find BSD sockets support])
++])
 +
 +if test "$CONFIG_OS" != "Haiku"; then
  if test "$machine" != "wasm32"; then
    AC_CHECK_HEADERS([ucontext.h],, [
      AS_UNSET([ac_cv_header_ucontext_h])
-@@ -510,6 +516,7 @@ if test "$machine" != "wasm32"; then
+@@ -514,6 +520,7 @@ if test "$machine" != "wasm32"; then
      #define _XOPEN_SOURCE 500
    ])])
  fi
@@ -43,7 +48,7 @@ index 25da201..5a6aa6a 100644
  AC_CHECK_HEADERS([linux/signal.h],,, [#include <signal.h>])
  AC_CHECK_HEADERS([sys/soundcard.h], [
    USE_OSS=1
-@@ -840,7 +847,7 @@ fi
+@@ -844,7 +851,7 @@ fi
  DOSEMU_CFLAGS="${DOSEMU_CFLAGS} ${OPT} ${PIPE}"
  DOSEMU_CPPFLAGS="${DOSEMU_CPPFLAGS} -MD -DCFLAGS_STR=\"$DOSEMU_CFLAGS $CFLAGS\""
  DOSEMU_VERSION=`cd $srcdir && ./getversion -b`
@@ -53,7 +58,7 @@ index 25da201..5a6aa6a 100644
  AC_SUBST(XASFLAGS)
  AC_SUBST(ASFLAGS)
 diff --git a/src/base/init/config.c b/src/base/init/config.c
-index efda100..668eaa2 100644
+index 0d5f8dd..7b21340 100644
 --- a/src/base/init/config.c
 +++ b/src/base/init/config.c
 @@ -43,6 +43,14 @@
@@ -71,7 +76,7 @@ index efda100..668eaa2 100644
  /*
   * Options used in config_init().
   *
-@@ -812,10 +838,84 @@ void secure_option_preparse(int *argc, char **argv)
+@@ -812,10 +820,84 @@ void secure_option_preparse(int *argc, char **argv)
  
  static void read_cpu_info(void)
  {
@@ -157,7 +162,7 @@ index efda100..668eaa2 100644
      err = open_proc_scan("/proc/cpuinfo");
      if (err)
        return;
-@@ -853,6 +953,7 @@ static void read_cpu_info(void)
+@@ -853,6 +935,7 @@ static void read_cpu_info(void)
  	    config.cpusse = 1;
  	}
  #endif
@@ -165,7 +170,7 @@ index efda100..668eaa2 100644
          if (cpuflags && strstr(cpuflags, "tsc")) {
            /* bogospeed currently returns 0; should it deny
             * pentium features, fall back into 486 case */
-@@ -921,6 +1022,7 @@ static void read_cpu_info(void)
+@@ -921,6 +1004,7 @@ static void read_cpu_info(void)
        config.smp = 1;		/* for checking overrides, later */
      }
      close_proc_scan();
@@ -173,6 +178,43 @@ index efda100..668eaa2 100644
  }
  
  static void config_post_process(void)
+diff --git a/src/base/lib/mapping/mapping.c b/src/base/lib/mapping/mapping.c
+index 21bbe0a..e21b1ed 100644
+--- a/src/base/lib/mapping/mapping.c
++++ b/src/base/lib/mapping/mapping.c
+@@ -42,6 +42,14 @@
+ #include <linux/version.h>
+ #endif
+ 
++#ifdef __HAIKU__
++#define read_port haiku_read_port
++#define write_port write_read_port
++#include <private/system/vm_defs.h>
++#undef read_port
++#undef write_port
++#endif
++
+ enum { MEM_BASE, KVM_BASE, JIT_BASE,
+ #ifdef __i386__
+        VM86_BASE,
+@@ -413,7 +421,7 @@ static void *do_huge_page(int flags, size_t mapsize, int protect)
+ 
+ void *mmap_mapping_huge_page_aligned(int cap, size_t mapsize, int protect)
+ {
+-  int flags = (cap & MAPPING_INIT_LOWRAM) ? _MAP_32BIT : 0;
++  int flags = (cap & MAPPING_INIT_LOWRAM) ? _MAP_32BIT | MAP_NORESERVE : 0;
+   void *addr = do_huge_page(flags, mapsize, protect);
+   if (addr == MAP_FAILED)
+     return addr;
+@@ -784,7 +792,7 @@ void *alloc_mapping_huge_page_aligned(int cap, size_t mapsize)
+ {
+   void *addr;
+   Q__printf("MAPPING: alloc_huge_page_aligned, cap=%s size=%#zx\n", cap, mapsize);
+-  addr = do_huge_page(0, mapsize, PROT_NONE);
++  addr = do_huge_page(0, mapsize, PROT_NONE | B_OVERCOMMITTING_AREA);
+   return addr == MAP_FAILED ? MAP_FAILED : do_alloc_mapping(cap, mapsize, addr);
+ }
+ 
 diff --git a/src/base/lib/mcontext/asm.SS b/src/base/lib/mcontext/asm.SS
 index fefe877..bf1dba5 100644
 --- a/src/base/lib/mcontext/asm.SS
@@ -244,6 +286,24 @@ index a2a359f..66130f9 100644
  }
  
  static ssize_t pkt_read_eth(int pkt_fd, void *buf, size_t count)
+diff --git a/src/dosext/net/tcp.c b/src/dosext/net/tcp.c
+index 8742deb..69e1736 100644
+--- a/src/dosext/net/tcp.c
++++ b/src/dosext/net/tcp.c
+@@ -27,8 +27,13 @@
+ #include "Netinet/tcp.h"
+ #include <limits.h>
+ #ifdef HAVE_LIBBSD
++#ifdef __HAIKU__
++/* Let Haiku headers do their own thing with #include_next... */
++#include <string.h>
++#else
+ #include <bsd/string.h>
+ #endif
++#endif
+ #include "emu.h"
+ #include "hlt.h"
+ #include "int.h"
 diff --git a/src/include/Linux/if_tun.h b/src/include/Linux/if_tun.h
 index 5feacf5..16f9184 100644
 --- a/src/include/Linux/if_tun.h
@@ -280,18 +340,23 @@ index 0b18a0d..bbd7a8c 100644
  #define  DOSEMUCMDS_DEFAULT DOSEMULIB_DEFAULT "/" CMDS_SUFF
  #define  DOSEMUEXEC_DEFAULT  LIBEXECDIR "/dosemu"
  #define  DOSEMUIMAGE_DEFAULT "~/" LOCALDIR_BASE_NAME
-diff --git a/src/plugin/midimisc/mid_i_pipe.c b/src/plugin/midimisc/mid_i_pipe.c
-index c54a45e..6b4d9e5 100644
---- a/src/plugin/midimisc/mid_i_pipe.c
-+++ b/src/plugin/midimisc/mid_i_pipe.c
-@@ -26,6 +26,7 @@
- #include "init.h"
- #include "sound/midi.h"
- #include <sys/types.h>
-+#include <sys/select.h>
- #include <sys/stat.h>
- #include <unistd.h>
- #include <fcntl.h>
+diff --git a/src/plugin/fdpp/hooks.c b/src/plugin/fdpp/hooks.c
+index d2f0e9f..1a420ea 100644
+--- a/src/plugin/fdpp/hooks.c
++++ b/src/plugin/fdpp/hooks.c
+@@ -20,8 +20,12 @@
+  * Author: Stas Sergeev
+  */
+ #ifdef HAVE_LIBBSD
++#ifdef __HAIKU__
++#include <string.h>
++#else
+ #include <bsd/string.h>
+ #endif
++#endif
+ #include <stddef.h>
+ #include <fdpp/loader.h>
+ #include <fdpp/thunks.h>
 -- 
 2.48.1
 
