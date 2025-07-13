@@ -1,4 +1,4 @@
-From 9fb38e359a50186860da569a373b222340b85f67 Mon Sep 17 00:00:00 2001
+From 8efd8e14e15a2da2f5c1f8e450968f25adbb6c64 Mon Sep 17 00:00:00 2001
 From: PulkoMandy <pulkomandy@pulkomandy.tk>
 Date: Sat, 21 Jun 2025 20:21:15 +0200
 Subject: Get it to build on Haiku
@@ -176,7 +176,7 @@ index 21bbe0a..fe91b05 100644
 2.48.1
 
 
-From f5ccc8d0f264e2265037fead1f30c52e95987436 Mon Sep 17 00:00:00 2001
+From 6c296258935a005bfa068b41e72f61256f721f3d Mon Sep 17 00:00:00 2001
 From: PulkoMandy <pulkomandy@pulkomandy.tk>
 Date: Tue, 24 Jun 2025 23:08:16 +0200
 Subject: Autostart SDL GUI when not run from Terminal
@@ -198,6 +198,151 @@ index f5aa289..23bad62
  [ -n "$LOG_FILE" ] || LOG_FILE=~/.dosemu/boot.log
  MAX_LOGS=3
  
+-- 
+2.48.1
+
+
+From 7f4f1fa2484d0e45729fa995d50454fa469215d3 Mon Sep 17 00:00:00 2001
+From: PulkoMandy <pulkomandy@pulkomandy.tk>
+Date: Sat, 12 Jul 2025 21:14:49 +0200
+Subject: Use listarea to dump memory mapping in case of crash
+
+
+diff --git a/src/arch/linux/async/debug.c b/src/arch/linux/async/debug.c
+index 616dae4..f286a3b 100644
+--- a/src/arch/linux/async/debug.c
++++ b/src/arch/linux/async/debug.c
+@@ -128,7 +128,11 @@ static void collect_info(pid_t pid)
+   const char *cmd0 = "ldd %s";
+   const char *cmd1 = "getconf GNU_LIBC_VERSION";
+   const char *cmd2 = "getconf GNU_LIBPTHREAD_VERSION";
++#ifdef __HAIKU__
++  const char *cmd3 = "listarea %i";
++#else
+   const char *cmd3 = "cat /proc/%i/maps";
++#endif
+   char *tmp;
+   int ret;
+ 
+diff --git a/src/dosext/dpmi/memory.c b/src/dosext/dpmi/memory.c
+index dfba67c..b43205b 100644
+--- a/src/dosext/dpmi/memory.c
++++ b/src/dosext/dpmi/memory.c
+@@ -176,7 +176,11 @@ void dump_maps(void)
+     char buf[64];
+ 
+     log_printf("\nmemory maps dump:\n");
++#ifdef __HAIKU__
++    sprintf(buf, "listarea %i >&%i", getpid(), vlog_get_fd());
++#else
+     sprintf(buf, "cat /proc/%i/maps >&%i", getpid(), vlog_get_fd());
++#endif
+     system(buf);
+ }
+ 
+-- 
+2.48.1
+
+
+From a2335351ee94b3156323a5edb9ca1627ae5685ff Mon Sep 17 00:00:00 2001
+From: PulkoMandy <pulkomandy@pulkomandy.tk>
+Date: Sat, 12 Jul 2025 21:15:43 +0200
+Subject: Define mcontext registers for Haiku to enable JIT
+
+
+diff --git a/src/include/sig.h b/src/include/sig.h
+index e4b5be6..e5c776d 100644
+--- a/src/include/sig.h
++++ b/src/include/sig.h
+@@ -164,6 +164,41 @@ typedef mcontext_t sigcontext_t;
+ #define _scp_rip _scp_eip
+ #define _scp_rsp _scp_esp
+ #endif
++#elif defined(__HAIKU__)
++
++#ifdef __x86_64__
++#define _scp_eax scp->rax
++#define _scp_edx scp->rdx
++#define _scp_edi scp->rdi
++#define _scp_rdi scp->rdi
++#define _scp_eflags scp->rflags
++#define _scp_eip scp->rip
++#define _scp_rip scp->rip
++#define _scp_esp scp->rsp
++#define _scp_rsp scp->rsp
++#define _scp_rbp scp->rbp
++#define PRI_RG PRIx64
++#elif defined(__i386__)
++#define _scp_eax scp->eax
++#define _scp_edx scp->edx
++#define _scp_edi scp->edi
++#define _scp_rdi scp->edi
++#define _scp_eflags scp->eflags
++#define _scp_rip scp->eip
++#define _scp_eip scp->eip
++#define _scp_esp scp->esp
++#define _scp_rsp scp->esp
++#define _scp_rbp scp->ebp
++#define PRI_RG PRIx32
++#else
++#error "Unknown or unupported CPU architecture"
++#endif
++
++#define _scp_trapno scp->fpu.fp_fxsave.trap_number
++#define _scp_err scp->fpu.fp_fxsave.error_code
++#define _scp_cr2 scp->fpu.fp_fxsave.fault_address
++#define _scp_cs scp->fpu.fp_fxsave.cs
++
+ #endif  // __linux__
+ 
+ extern void SIGNAL_save( void (*signal_call)(void *), void *arg, size_t size,
+-- 
+2.48.1
+
+
+From 5f21af4b8b7f5e64a4b97a5b45b2b83467aadece Mon Sep 17 00:00:00 2001
+From: PulkoMandy <pulkomandy@pulkomandy.tk>
+Date: Sun, 13 Jul 2025 09:01:55 +0200
+Subject: Address hint for mmap
+
+dosemu needs somewhat contiguous or at least "near" mapping of memory.
+
+Haiku's ASLR is very agressive so by default, this won't happen. But we
+can hint the kernel to do it by setting a base address for mmap. This
+causes the underlying create_area to use the B_BASE_ADDRESS flag, which
+will do its best to keep the new allocation near the previous ones.
+
+diff --git a/src/base/lib/misc/dlmalloc.c b/src/base/lib/misc/dlmalloc.c
+index 703b213..7dec74b 100644
+--- a/src/base/lib/misc/dlmalloc.c
++++ b/src/base/lib/misc/dlmalloc.c
+@@ -363,10 +363,25 @@ extern void*     sbrk(ptrdiff_t);
+ #define MAP_ANONYMOUS        MAP_ANON
+ #endif /* MAP_ANON */
+ #ifdef MAP_ANONYMOUS
++
+ /* We use this only for JITted code. We need MAP_32BIT because the
+  * jumps are only possible in a range of +/-2Gb. */
+ #define MMAP_FLAGS           (MAP_PRIVATE|MAP_ANONYMOUS|MAP_32BIT)
+-#define CALL_MMAP(s)         mmap(0, (s), MMAP_PROT, MMAP_FLAGS, -1, 0)
++
++static void* mmap_wrap(size_t size)
++{
++	// First allocation is put wherever the kernel decides.
++	// Then we reuse that address as the address hint, and hopefully the
++	// kernel will give us the next free page after it, keeping everything
++	// contiguous.
++	static void* base = 0;
++	void* ret = mmap(base, size, MMAP_PROT, MMAP_FLAGS, -1, 0);
++	if (base == 0)
++		base = ret;
++	return ret;
++}
++
++#define CALL_MMAP(s)         mmap_wrap(s)
+ #else /* MAP_ANONYMOUS */
+ /*
+    Nearly all versions of mmap support MAP_ANONYMOUS, so the following
 -- 
 2.48.1
 
