@@ -1,4 +1,4 @@
-From a3d6a5bd76865eeb98289c5dc42615a708f272b8 Mon Sep 17 00:00:00 2001
+From 43a23a4a5575e48d05591b0068a89c2a29c86a18 Mon Sep 17 00:00:00 2001
 From: Schrijvers Luc <begasus@gmail.com>
 Date: Mon, 15 Jul 2024 14:14:21 +0200
 Subject: Disable doctools
@@ -30,10 +30,10 @@ index 0e130c8..472367a 100644
  
  FEATURE_SUMMARY(WHAT ALL FATAL_ON_MISSING_REQUIRED_PACKAGES)
 -- 
-2.45.2
+2.48.1
 
 
-From 3bfcaa9fe70b771fab9827b29652d4587889e786 Mon Sep 17 00:00:00 2001
+From 48ac7b93b972985376269c9af1c2b4c7cd96b936 Mon Sep 17 00:00:00 2001
 From: Schrijvers Luc <begasus@gmail.com>
 Date: Mon, 15 Jul 2024 14:14:54 +0200
 Subject: Silense deprecated warnings
@@ -55,5 +55,151 @@ index 472367a..cff78bc 100644
  #ADD_DEFINITIONS(-DRKWARD_NO_TRACE)
  
 -- 
-2.45.2
+2.48.1
+
+
+From 5710bd57da6a1ab635817026b247f8eb29d33404 Mon Sep 17 00:00:00 2001
+From: Thomas Friedrichsmeier <thomas.friedrichsmeier@kdemail.net>
+Date: Sun, 28 Jul 2024 15:51:08 +0200
+Subject: Adjust to the removal of Rf_addTaskCallback() in R (devel) 4.5
+
+Adjust to hiding for R_checkActivityEx in R-devel (for R 4.5)
+
+diff --git a/rkward/autotests/core_test.cpp b/rkward/autotests/core_test.cpp
+index 0fb23c6..4980086 100644
+--- a/rkward/autotests/core_test.cpp
++++ b/rkward/autotests/core_test.cpp
+@@ -215,6 +215,34 @@ private slots:
+ 		cleanGlobalenv();
+ 	}
+ 
++	void userCommandTest() {
++		// Two commands submitted on one user line should both be run
++		runCommandWithTimeout(new RCommand("print('first'); print('second')", RCommand::User), nullptr, [](RCommand *command) {
++			QVERIFY(!command->failed());
++			QVERIFY(command->fullOutput().contains("first"));
++			QVERIFY(command->fullOutput().contains("second"));
++		});
++		// Also, of course for commands on separate lines:
++		runCommandWithTimeout(new RCommand("print('first')\nprint('second')", RCommand::User), nullptr, [](RCommand *command) {
++			QVERIFY(!command->failed());
++			QVERIFY(command->fullOutput().contains("first"));
++			QVERIFY(command->fullOutput().contains("second"));
++		});
++		// or multi-line commands:
++		runCommandWithTimeout(new RCommand("{ print('first')\nprint('second') }", RCommand::User), nullptr, [](RCommand *command) {
++			QVERIFY(!command->failed());
++			QVERIFY(command->fullOutput().contains("first"));
++			QVERIFY(command->fullOutput().contains("second"));
++		});
++		// However, if a partial command fails, the next part should not get parsed:
++		runCommandWithTimeout(new RCommand("stop('first'); print('second')", RCommand::User), nullptr, [](RCommand *command) {
++			QVERIFY(command->failed());
++			QVERIFY(command->fullOutput().contains("first"));
++			QVERIFY(!command->fullOutput().contains("second"));
++		});
++		// TODO: verify that calls to readline() and browser() are handled, correctly
++	}
++
+ 	void commandOrderAndOutputTest() {
+ 		// commands shall run in the order 1, 3, 2, 5, 4, but also, of course, all different types of output shall be captured
+ 		QStringList output;
+diff --git a/rkward/rbackend/rkrbackend.cpp b/rkward/rbackend/rkrbackend.cpp
+index 77ebb40..eb388f2 100644
+--- a/rkward/rbackend/rkrbackend.cpp
++++ b/rkward/rbackend/rkrbackend.cpp
+@@ -175,38 +175,6 @@ extern "C" void run_Rmainloop (void);
+ extern SEXP RKWard_RData_Tag;
+ 
+ // ############## R Standard callback overrides BEGIN ####################
+-Rboolean RKToplevelStatementFinishedCallback (SEXP expr, SEXP value, Rboolean succeeded, Rboolean visible, void *) {
+-	RK_TRACE (RBACKEND);
+-	Q_UNUSED (expr);
+-	Q_UNUSED (value);
+-	Q_UNUSED (visible);
+-
+-	if ((RKRBackend::repl_status.eval_depth == 0) && (!RKRBackend::repl_status.browser_context)) {		// Yes, toplevel-handlers _do_ get called in a browser context!
+-		RK_ASSERT (RKRBackend::repl_status.user_command_status = RKRBackend::RKReplStatus::UserCommandRunning);
+-		if (succeeded) {
+-			RKRBackend::repl_status.user_command_successful_up_to = RKRBackend::repl_status.user_command_parsed_up_to;
+-			if (RKRBackend::repl_status.user_command_completely_transmitted) {
+-				RKRBackend::repl_status.user_command_status = RKRBackend::RKReplStatus::NoUserCommand;
+-				RKRBackend::this_pointer->commandFinished ();
+-			} else RKRBackend::repl_status.user_command_status = RKRBackend::RKReplStatus::UserCommandTransmitted;
+-		} else {
+-			// well, this point of code is never reached with R up to 2.12.0. Instead failed user commands are handled in doError().
+-			RKRBackend::repl_status.user_command_status = RKRBackend::RKReplStatus::UserCommandFailed;
+-		}
+-	}
+-	
+-	return (Rboolean) true;
+-}
+-
+-void RKInsertToplevelStatementFinishedCallback (void *) {
+-	RK_TRACE (RBACKEND);
+-
+-	if (RKRBackend::this_pointer->r_running) {
+-		int pos;
+-		Rf_addTaskCallback (&RKToplevelStatementFinishedCallback, 0, &RKInsertToplevelStatementFinishedCallback, "_rkward_main_callback", &pos);
+-	}
+-}
+-
+ void RKTransmitNextUserCommandChunk (unsigned char* buf, int buflen) {
+ 	RK_TRACE (RBACKEND);
+ 
+@@ -326,7 +294,7 @@ int RReadConsole (const char* prompt, unsigned char* buf, int buflen, int hist)
+ 				// This can mean three different things:
+ 				// 1) User called readline ()
+ 				// 2) User called browser ()
+-				// 3) R jumped us back to toplevel behind our backs.
++                               // 3) The user command has finished (successfully or not)
+ 				// Let's find out, which one it is.
+ 				if (hist && (RKRBackend::default_global_context != R_GlobalContext)) {
+ 					break;	// this looks like a call to browser(). Will be handled below.
+@@ -338,13 +306,13 @@ int RReadConsole (const char* prompt, unsigned char* buf, int buflen, int hist)
+ 					n_frames = dummy->intVector ().at (0);
+ 				}
+ 				// What the ??? Why does this simple version always return 0?
+-				//int n_frames = RKRSupport::SEXPToInt (RKRSupport::callSimpleFun0 (Rf_install ("sys.nframe"), R_GlobalEnv));
++                               //int n_frames = RKRSupport::SEXPToInt (RKRSupport::callSimpleFun0 (RFn::Rf_install ("sys.nframe"), ROb(R_GlobalEnv);
+ 				if (n_frames < 1) {
+-					// No active frames? This can't be a call to readline(), then, so probably R jumped us back to toplevel, behind our backs.
+-					// For safety, let's reset and start over.
+-					RKRBackend::this_pointer->current_command->status |= RCommand::Failed | RCommand::ErrorOther;
+-					RKRBackend::repl_status.user_command_status = RKRBackend::RKReplStatus::ReplIterationKilled;
+-					Rf_error("");	// to discard the buffer
++                                       // No active frames? This can't be a call to readline(), so the previous command must have finished.
++                                       if (RKRBackend::repl_status.user_command_completely_transmitted) {
++                                               RKRBackend::repl_status.user_command_status = RKRBackend::RKReplStatus::NoUserCommand;
++                                               RKRBackend::this_pointer->commandFinished ();
++                                       } else RKRBackend::repl_status.user_command_status = RKRBackend::RKReplStatus::UserCommandTransmitted;
+ 				} else {
+ 					// A call to readline(). Will be handled below
+ 					break;
+@@ -1166,7 +1134,6 @@ bool RKRBackend::startR () {
+ 	R_registerRoutines (R_getEmbeddingDllInfo(), NULL, callMethods, NULL, NULL);
+ 
+ 	connectCallbacks();
+-	RKInsertToplevelStatementFinishedCallback (0);
+ 	RKREventLoop::setRKEventHandler (doPendingPriorityCommands);
+ 	default_global_context = R_GlobalContext;
+ #ifdef Q_OS_WIN
+diff --git a/rkward/rbackend/rkreventloop.cpp b/rkward/rbackend/rkreventloop.cpp
+index d815a4a..588f4c6 100644
+--- a/rkward/rbackend/rkreventloop.cpp
++++ b/rkward/rbackend/rkreventloop.cpp
+@@ -25,9 +25,9 @@ static void processX11EventsWorker (void *) {
+ #ifndef Q_OS_WIN
+ 	for (;;) {
+ 		fd_set *what;
+-		what = R_checkActivityEx(R_wait_usec > 0 ? R_wait_usec : 50, 1, RK_doIntr);
++               what = R_checkActivity(R_wait_usec > 0 ? R_wait_usec : 50, 1);
+ 		R_runHandlers(R_InputHandlers, what);
+-		if (what == NULL) break;
++               if (!what) break;
+ 	}
+ 	/* This seems to be needed to make Rcmdr react to events. Has this always been the case? It was commented out for a long time, without anybody noticing. */
+ 	R_PolledEvents ();
+-- 
+2.48.1
 
