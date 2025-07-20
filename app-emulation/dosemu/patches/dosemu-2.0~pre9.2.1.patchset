@@ -1,260 +1,41 @@
-From 8efd8e14e15a2da2f5c1f8e450968f25adbb6c64 Mon Sep 17 00:00:00 2001
+From c122c829ff8445327136c9981570104a87dfe99c Mon Sep 17 00:00:00 2001
 From: PulkoMandy <pulkomandy@pulkomandy.tk>
-Date: Sat, 21 Jun 2025 20:21:15 +0200
-Subject: Get it to build on Haiku
+Date: Sun, 20 Jul 2025 10:39:44 +0200
+Subject: Refresh patch after upstreaming some changes
 
-- Use elf_i386_haiku instead of elf_i386 (not sure why Haiku's binutils don't know about elf_i386)
-- Implement CPU features detection (there is no /proc/cpuinfo in Haiku; use cpuid and
-  get_cpu_topology_info instead)
-- Set MAP_NORESERVE and B_OVERCOMMITING_AREA where needed (in Linux this is implied by
-  PROT_NONE). Still not working and causing a KDL, see
-  http://dev.haiku-os.org/ticket/19264
 
 diff --git a/configure.ac b/configure.ac
-index 0bd5081..f210aba 100644
+index 6bed80c..94eb44d 100644
 --- a/configure.ac
 +++ b/configure.ac
-@@ -840,7 +840,7 @@ fi
+@@ -832,7 +832,7 @@ fi
  DOSEMU_CFLAGS="${DOSEMU_CFLAGS} ${OPT} ${PIPE}"
  DOSEMU_CPPFLAGS="${DOSEMU_CPPFLAGS} -MD -DCFLAGS_STR=\"$DOSEMU_CFLAGS $CFLAGS\""
  DOSEMU_VERSION=`cd $srcdir && ./getversion -b`
--AS_LDFLAGS="-melf_i386"
-+AS_LDFLAGS="-melf_i386_haiku"
+-AS_LDFLAGS="-melf_i386 --oformat=binary"
++AS_LDFLAGS="-melf_i386_haiku --oformat=binary"
  
  AC_SUBST(XASFLAGS)
  AC_SUBST(ASFLAGS)
-diff --git a/src/base/init/config.c b/src/base/init/config.c
-index 0d5f8dd..7ded0da 100644
---- a/src/base/init/config.c
-+++ b/src/base/init/config.c
-@@ -43,6 +43,9 @@
- #include "mhpdbg.h"
- #include "mapping/mapping.h"
- 
-+#ifdef __HAIKU__
-+#include <kernel/OS.h>
-+#endif
- /*
-  * Options used in config_init().
-  *
-@@ -812,10 +815,84 @@ void secure_option_preparse(int *argc, char **argv)
- 
- static void read_cpu_info(void)
- {
--    char *cpuflags, *cpu;
-     int k = 3;
-+    int cores = 0;
-     int err;
- 
-+#ifdef __HAIKU__
-+    cpuid_info info;
-+
-+    err = get_cpuid(&info, 1, 0);
-+    if (err != B_OK)
-+        return;
-+
-+    k = info.eax_1.family;
-+    bool fpu = info.eax_1.extended_features & (1 << 0);
-+    bool tsc = info.eax_1.extended_features & (1 << 4);
-+    bool mmx = info.eax_1.extended_features & (1 << 23);
-+    bool fxsr = info.eax_1.extended_features & (1 << 24);
-+    bool sse = info.eax_1.extended_features & (1 << 25);
-+
-+    cpu_topology_node_info topology[128];
-+    int count = 128;
-+    get_cpu_topology_info(topology, &count);
-+
-+    if (k >= 5) {
-+        config.realcpu = CPU_586;
-+
-+#ifdef X86_EMULATOR
-+        if (mmx || sse) {
-+	  config.cpuprefetcht0 = 1;
-+        }
-+#endif
-+#ifdef __i386__
-+        if (fxsr) {
-+          config.cpufxsr = 1;
-+	  if (sse)
-+	    config.cpusse = 1;
-+	}
-+#endif
-+        if (tsc) {
-+            long long chz = 0;
-+            for (int i = 0; i < count; i++) {
-+                if (topology[i].type == B_TOPOLOGY_CORE) {
-+                    chz = topology[i].data.core.default_frequency;
-+                    cores ++;
-+                }
-+            }
-+		/* speed division factor to get 1us from CPU clock */
-+		config.cpu_spd = (LLF_US*1000000)/chz;
-+
-+		/* speed division factor to get 838ns from CPU clock */
-+		config.cpu_tick_spd = (LLF_TICKS*1000000)/chz;
-+
-+		config.CPUSpeedInMhz = chz / 1000000;
-+
-+        }
-+    } else if (k == 4) {
-+        config.realcpu = CPU_486;
-+    } else if (k != 3) {
-+        error("Unknown CPU type!\n");
-+    }
-+
-+    if (config.mathco) {
-+        config.mathco = fpu;
-+    }
-+
-+    err = get_cpuid(&info, 9, 0);
-+    if (err != B_OK)
-+      return;
-+
-+    if (info.regs.ecx & (1 << 2))
-+      config.umip = 1;
-+    else
-+      warn("Your CPU doesn't support UMIP\n");
-+
-+    if (cores > 0)
-+        config.smp = 1;
-+#else
-+    char *cpuflags, *cpu;
-+
-     err = open_proc_scan("/proc/cpuinfo");
-     if (err)
-       return;
-@@ -853,6 +930,7 @@ static void read_cpu_info(void)
- 	    config.cpusse = 1;
- 	}
- #endif
-+
-         if (cpuflags && strstr(cpuflags, "tsc")) {
-           /* bogospeed currently returns 0; should it deny
-            * pentium features, fall back into 486 case */
-@@ -921,6 +999,7 @@ static void read_cpu_info(void)
-       config.smp = 1;		/* for checking overrides, later */
-     }
-     close_proc_scan();
-+#endif
- }
- 
- static void config_post_process(void)
-diff --git a/src/base/lib/mapping/mapping.c b/src/base/lib/mapping/mapping.c
-index 21bbe0a..fe91b05 100644
---- a/src/base/lib/mapping/mapping.c
-+++ b/src/base/lib/mapping/mapping.c
-@@ -42,6 +42,10 @@
- #include <linux/version.h>
- #endif
- 
-+#ifdef __HAIKU__
-+#include <private/system/vm_defs.h>
-+#endif
-+
- enum { MEM_BASE, KVM_BASE, JIT_BASE,
- #ifdef __i386__
-        VM86_BASE,
-@@ -413,7 +417,7 @@ static void *do_huge_page(int flags, size_t mapsize, int protect)
- 
- void *mmap_mapping_huge_page_aligned(int cap, size_t mapsize, int protect)
- {
--  int flags = (cap & MAPPING_INIT_LOWRAM) ? _MAP_32BIT : 0;
-+  int flags = (cap & MAPPING_INIT_LOWRAM) ? _MAP_32BIT | MAP_NORESERVE : 0;
-   void *addr = do_huge_page(flags, mapsize, protect);
-   if (addr == MAP_FAILED)
-     return addr;
-@@ -784,7 +788,7 @@ void *alloc_mapping_huge_page_aligned(int cap, size_t mapsize)
- {
-   void *addr;
-   Q__printf("MAPPING: alloc_huge_page_aligned, cap=%s size=%#zx\n", cap, mapsize);
--  addr = do_huge_page(0, mapsize, PROT_NONE);
-+  addr = do_huge_page(0, mapsize, PROT_NONE | B_OVERCOMMITTING_AREA);
-   return addr == MAP_FAILED ? MAP_FAILED : do_alloc_mapping(cap, mapsize, addr);
- }
- 
--- 
-2.48.1
-
-
-From 6c296258935a005bfa068b41e72f61256f721f3d Mon Sep 17 00:00:00 2001
-From: PulkoMandy <pulkomandy@pulkomandy.tk>
-Date: Tue, 24 Jun 2025 23:08:16 +0200
-Subject: Autostart SDL GUI when not run from Terminal
-
-
 diff --git a/src/dosemu b/src/dosemu
-old mode 100644
-new mode 100755
-index f5aa289..23bad62
+index 27c4031..93f085c 100644
 --- a/src/dosemu
 +++ b/src/dosemu
-@@ -199,6 +199,9 @@ SUFFIX="$SUFFIX $*"
- [ -z "$DOSEMU_QUIET" ] || OPTS="$OPTS -q"
- [ -z "$DOSEMU_LOG_FILE" ] || LOG_FILE="$DOSEMU_LOG_FILE"
+@@ -202,6 +202,9 @@ while [ $# -gt 0 ] ; do
+ done
+ SUFFIX="$SUFFIX $*"
  
 +# Force use of SDL if not starting from terminal
 +[ "dumb" == "$TERM" ] && OPTS="$OPTS -S"
 +
- [ -n "$LOG_FILE" ] || LOG_FILE=~/.dosemu/boot.log
- MAX_LOGS=3
+ [ -z "$DOSEMU_QUIET" ] || OPTS="$OPTS -q"
+ [ -z "$DOSEMU_LOG_FILE" ] || LOG_FILE="$DOSEMU_LOG_FILE"
  
--- 
-2.48.1
-
-
-From 7f4f1fa2484d0e45729fa995d50454fa469215d3 Mon Sep 17 00:00:00 2001
-From: PulkoMandy <pulkomandy@pulkomandy.tk>
-Date: Sat, 12 Jul 2025 21:14:49 +0200
-Subject: Use listarea to dump memory mapping in case of crash
-
-
-diff --git a/src/arch/linux/async/debug.c b/src/arch/linux/async/debug.c
-index 616dae4..f286a3b 100644
---- a/src/arch/linux/async/debug.c
-+++ b/src/arch/linux/async/debug.c
-@@ -128,7 +128,11 @@ static void collect_info(pid_t pid)
-   const char *cmd0 = "ldd %s";
-   const char *cmd1 = "getconf GNU_LIBC_VERSION";
-   const char *cmd2 = "getconf GNU_LIBPTHREAD_VERSION";
-+#ifdef __HAIKU__
-+  const char *cmd3 = "listarea %i";
-+#else
-   const char *cmd3 = "cat /proc/%i/maps";
-+#endif
-   char *tmp;
-   int ret;
- 
-diff --git a/src/dosext/dpmi/memory.c b/src/dosext/dpmi/memory.c
-index dfba67c..b43205b 100644
---- a/src/dosext/dpmi/memory.c
-+++ b/src/dosext/dpmi/memory.c
-@@ -176,7 +176,11 @@ void dump_maps(void)
-     char buf[64];
- 
-     log_printf("\nmemory maps dump:\n");
-+#ifdef __HAIKU__
-+    sprintf(buf, "listarea %i >&%i", getpid(), vlog_get_fd());
-+#else
-     sprintf(buf, "cat /proc/%i/maps >&%i", getpid(), vlog_get_fd());
-+#endif
-     system(buf);
- }
- 
--- 
-2.48.1
-
-
-From a2335351ee94b3156323a5edb9ca1627ae5685ff Mon Sep 17 00:00:00 2001
-From: PulkoMandy <pulkomandy@pulkomandy.tk>
-Date: Sat, 12 Jul 2025 21:15:43 +0200
-Subject: Define mcontext registers for Haiku to enable JIT
-
-
 diff --git a/src/include/sig.h b/src/include/sig.h
-index e4b5be6..e5c776d 100644
+index 0d12511..b251517 100644
 --- a/src/include/sig.h
 +++ b/src/include/sig.h
-@@ -164,6 +164,41 @@ typedef mcontext_t sigcontext_t;
+@@ -166,6 +166,43 @@ typedef mcontext_t sigcontext_t;
  #define _scp_rip _scp_eip
  #define _scp_rsp _scp_esp
  #endif
@@ -271,6 +52,10 @@ index e4b5be6..e5c776d 100644
 +#define _scp_esp scp->rsp
 +#define _scp_rsp scp->rsp
 +#define _scp_rbp scp->rbp
++#define _scp_trapno scp->fpu.fp_fxsave.trap_number
++#define _scp_err scp->fpu.fp_fxsave.error_code
++#define _scp_cr2 scp->fpu.fp_fxsave.fault_address
++#define _scp_cs scp->fpu.fp_fxsave.cs
 +#define PRI_RG PRIx64
 +#elif defined(__i386__)
 +#define _scp_eax scp->eax
@@ -283,66 +68,17 @@ index e4b5be6..e5c776d 100644
 +#define _scp_esp scp->esp
 +#define _scp_rsp scp->esp
 +#define _scp_rbp scp->ebp
++#define _scp_trapno scp->xregs.state.new_format.trap_number
++#define _scp_err scp->xregs.state.new_format.error_code
++#define _scp_cr2 scp->xregs.state.new_format.fault_address
++#define _scp_cs scp->xregs.state.new_format.cs
 +#define PRI_RG PRIx32
 +#else
 +#error "Unknown or unupported CPU architecture"
 +#endif
-+
-+#define _scp_trapno scp->fpu.fp_fxsave.trap_number
-+#define _scp_err scp->fpu.fp_fxsave.error_code
-+#define _scp_cr2 scp->fpu.fp_fxsave.fault_address
-+#define _scp_cs scp->fpu.fp_fxsave.cs
-+
  #endif  // __linux__
  
  extern void SIGNAL_save( void (*signal_call)(void *), void *arg, size_t size,
--- 
-2.48.1
-
-
-From 5f21af4b8b7f5e64a4b97a5b45b2b83467aadece Mon Sep 17 00:00:00 2001
-From: PulkoMandy <pulkomandy@pulkomandy.tk>
-Date: Sun, 13 Jul 2025 09:01:55 +0200
-Subject: Address hint for mmap
-
-dosemu needs somewhat contiguous or at least "near" mapping of memory.
-
-Haiku's ASLR is very agressive so by default, this won't happen. But we
-can hint the kernel to do it by setting a base address for mmap. This
-causes the underlying create_area to use the B_BASE_ADDRESS flag, which
-will do its best to keep the new allocation near the previous ones.
-
-diff --git a/src/base/lib/misc/dlmalloc.c b/src/base/lib/misc/dlmalloc.c
-index 703b213..7dec74b 100644
---- a/src/base/lib/misc/dlmalloc.c
-+++ b/src/base/lib/misc/dlmalloc.c
-@@ -363,10 +363,25 @@ extern void*     sbrk(ptrdiff_t);
- #define MAP_ANONYMOUS        MAP_ANON
- #endif /* MAP_ANON */
- #ifdef MAP_ANONYMOUS
-+
- /* We use this only for JITted code. We need MAP_32BIT because the
-  * jumps are only possible in a range of +/-2Gb. */
- #define MMAP_FLAGS           (MAP_PRIVATE|MAP_ANONYMOUS|MAP_32BIT)
--#define CALL_MMAP(s)         mmap(0, (s), MMAP_PROT, MMAP_FLAGS, -1, 0)
-+
-+static void* mmap_wrap(size_t size)
-+{
-+	// First allocation is put wherever the kernel decides.
-+	// Then we reuse that address as the address hint, and hopefully the
-+	// kernel will give us the next free page after it, keeping everything
-+	// contiguous.
-+	static void* base = 0;
-+	void* ret = mmap(base, size, MMAP_PROT, MMAP_FLAGS, -1, 0);
-+	if (base == 0)
-+		base = ret;
-+	return ret;
-+}
-+
-+#define CALL_MMAP(s)         mmap_wrap(s)
- #else /* MAP_ANONYMOUS */
- /*
-    Nearly all versions of mmap support MAP_ANONYMOUS, so the following
 -- 
 2.48.1
 
