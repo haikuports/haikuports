@@ -1,0 +1,142 @@
+From 8e72a6c7b99f91cb5e05e8fcc6edf3c30178f693 Mon Sep 17 00:00:00 2001
+From: Oscar Lesta <oscar.lesta@gmail.com>
+Date: Wed, 6 Aug 2025 12:40:46 -0300
+Subject: Initial Haiku patch.
+
+
+diff --git a/abduco.c b/abduco.c
+index 3c60a36..2682a13 100644
+--- a/abduco.c
++++ b/abduco.c
+@@ -57,6 +57,8 @@
+ # include "forkpty-aix.c"
+ #elif defined(__sun)
+ # include "forkpty-sunos.c"
++#elif defined(__HAIKU__)
++# include "forkpty-haiku.c"
+ #endif
+ 
+ #define countof(arr) (sizeof(arr) / sizeof((arr)[0]))
+diff --git a/client.c b/client.c
+index 744f061..5b6f1b3 100644
+--- a/client.c
++++ b/client.c
+@@ -40,7 +40,9 @@ static void client_setup_terminal(void) {
+ 	cur_term.c_lflag &= ~(ECHO|ECHONL|ICANON|ISIG|IEXTEN);
+ 	cur_term.c_cflag &= ~(CSIZE|PARENB);
+ 	cur_term.c_cflag |= CS8;
++#ifndef __HAIKU__
+ 	cur_term.c_cc[VLNEXT] = _POSIX_VDISABLE;
++#endif
+ 	cur_term.c_cc[VMIN] = 1;
+ 	cur_term.c_cc[VTIME] = 0;
+ 	tcsetattr(STDIN_FILENO, TCSANOW, &cur_term);
+diff --git a/config.mk b/config.mk
+index 7bb0d94..f0f96e0 100644
+--- a/config.mk
++++ b/config.mk
+@@ -7,7 +7,7 @@ PREFIX ?= /usr/local
+ MANPREFIX = ${PREFIX}/share/man
+ 
+ INCS = -I.
+-LIBS = -lc -lutil
++LIBS ?= -lc -lutil
+ 
+ CPPFLAGS = -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700
+ CFLAGS += -std=c99 -pedantic -Wall ${INCS} -DVERSION=\"${VERSION}\" -DNDEBUG ${CPPFLAGS}
+diff --git a/forkpty-haiku.c b/forkpty-haiku.c
+new file mode 100644
+index 0000000..c6e466b
+--- /dev/null
++++ b/forkpty-haiku.c
+@@ -0,0 +1,87 @@
++/*
++ * Copyright (c) 2008 Nicholas Marriott <nicm@users.sourceforge.net>
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF MIND, USE, DATA OR PROFITS, WHETHER
++ * IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
++ * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#include <sys/types.h>
++#include <sys/ioctl.h>
++#include <fcntl.h>
++#include <stdlib.h>
++#include <strings.h>
++#include <unistd.h>
++
++#ifndef TTY_NAME_MAX
++#define TTY_NAME_MAX TTYNAME_MAX
++#endif
++
++pid_t forkpty(int *master, char *name, struct termios *tio, struct winsize *ws)
++{
++	int	slave;
++	char   *path;
++	pid_t	pid;
++
++	if ((*master = open("/dev/ptmx", O_RDWR|O_NOCTTY)) == -1)
++		return -1;
++	if (grantpt(*master) != 0)
++		goto out;
++	if (unlockpt(*master) != 0)
++		goto out;
++
++	if ((path = ptsname(*master)) == NULL)
++		goto out;
++	if (name != NULL)
++		strlcpy(name, path, TTY_NAME_MAX);
++	if ((slave = open(path, O_RDWR|O_NOCTTY)) == -1)
++		goto out;
++
++	switch (pid = fork()) {
++	case -1:
++		goto out;
++	case 0:
++		close(*master);
++
++		setsid();
++#ifdef TIOCSCTTY
++		if (ioctl(slave, TIOCSCTTY, NULL) == -1)
++			return -1;
++#endif
++/*
++		if (ioctl(slave, I_PUSH, "ptem") == -1)
++			return -1;
++		if (ioctl(slave, I_PUSH, "ldterm") == -1)
++			return -1;
++*/
++		if (tio != NULL && tcsetattr(slave, TCSAFLUSH, tio) == -1)
++			return -1;
++		if (ioctl(slave, TIOCSWINSZ, ws) == -1)
++			return -1;
++
++		dup2(slave, 0);
++		dup2(slave, 1);
++		dup2(slave, 2);
++		if (slave > 2)
++			close(slave);
++		return 0;
++	}
++
++	close(slave);
++	return pid;
++
++out:
++	if (*master != -1)
++		close(*master);
++	if (slave != -1)
++		close(slave);
++	return -1;
++}
+-- 
+2.48.1
+
