@@ -1,4 +1,4 @@
-From 543ce85e4111315916d42c7053354e7c51488c82 Mon Sep 17 00:00:00 2001
+From c6938ce49e88383ed109ffb0b4663b9091668b43 Mon Sep 17 00:00:00 2001
 From: zeldakatze <mail@zeldakatze.de>
 Date: Wed, 10 Apr 2024 23:11:58 +0200
 Subject: fix build for haiku
@@ -118,7 +118,7 @@ index e0f56c0..d81eb15 100644
 2.48.1
 
 
-From 79e7e94116611ca6e710b36630c1ca910c3ae8a2 Mon Sep 17 00:00:00 2001
+From a3bb805cba1bcdf7c3db1258538a11223257718f Mon Sep 17 00:00:00 2001
 From: zeldakatze <mail@zeldakatze.de>
 Date: Thu, 11 Apr 2024 00:16:45 +0200
 Subject: abaddon: add haiku platform code
@@ -185,6 +185,1163 @@ index 726655b..de75e8f 100644
  
  #else
  std::string Platform::FindResourceFolder() {
+-- 
+2.48.1
+
+
+From 014f8b78347807035b49daaae3bda14800d30672 Mon Sep 17 00:00:00 2001
+From: zeldakatze <mail@zeldakatze.de>
+Date: Thu, 7 Aug 2025 20:39:54 +0200
+Subject: add a portaudio sound interface
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index be6b650..9b1a81d 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -13,6 +13,7 @@ option(USE_KEYCHAIN "Store the token in the keychain (default)" ON)
+ option(ENABLE_NOTIFICATION_SOUNDS "Enable notification sounds (default)" ON)
+ option(ENABLE_RNNOISE "Enable RNNoise for voice activity detection (default)" ON)
+ option(ENABLE_QRCODE_LOGIN "Enable QR code login (default)" ON)
++option(USE_PORTAUDIO "Use portaudio instead of miniaudio" OFF)
+ 
+ find_package(nlohmann_json REQUIRED)
+ find_package(CURL)
+@@ -162,7 +163,12 @@ if (ENABLE_VOICE)
+ 
+     find_package(PkgConfig)
+ 
+-    set(USE_MINIAUDIO TRUE)
++    if (USE_PORTAUDIO)
++       set(USE_PORTAUDIO TRUE)
++    else ()
++       set(USE_MINIAUDIO TRUE)
++    endif ()
++
+     pkg_check_modules(Opus REQUIRED IMPORTED_TARGET opus)
+     target_link_libraries(abaddon PkgConfig::Opus)
+ 
+@@ -206,7 +212,12 @@ if (ENABLE_VOICE)
+ endif ()
+ 
+ if (${ENABLE_NOTIFICATION_SOUNDS})
+-    set(USE_MINIAUDIO TRUE)
++    if (USE_PORTAUDIO)
++       set(USE_PORTAUDIO TRUE)
++    else ()
++       set(USE_MINIAUDIO TRUE)
++    endif ()
++
+     target_compile_definitions(abaddon PRIVATE ENABLE_NOTIFICATION_SOUNDS)
+ endif ()
+ 
+@@ -221,6 +232,12 @@ if (USE_MINIAUDIO)
+     target_compile_definitions(abaddon PRIVATE WITH_MINIAUDIO)
+ endif ()
+ 
++if (USE_PORTAUDIO)
++#    find_package(portaudio-2.0)
++    target_compile_definitions(abaddon PRIVATE USE_PORTAUDIO)
++    target_link_libraries(abaddon portaudio)
++endif()
++
+ set(ABADDON_COMPILER_DEFS "" CACHE STRING "Additional compiler definitions")
+ foreach (COMPILER_DEF IN LISTS ABADDON_COMPILER_DEFS)
+     target_compile_definitions(abaddon PRIVATE "${COMPILER_DEF}")
+diff --git a/src/audio/devices.cpp b/src/audio/devices.cpp
+index dfb7164..09fc156 100644
+--- a/src/audio/devices.cpp
++++ b/src/audio/devices.cpp
+@@ -21,6 +21,75 @@ Glib::RefPtr<Gtk::ListStore> AudioDevices::GetCaptureDeviceModel() {
+     return m_capture;
+ }
+ 
++#ifdef USE_PORTAUDIO
++void AudioDevices::SetDevices() {
++	const PaDeviceInfo *deviceInfo;
++	int i;
++	
++	/* clear the lists */
++	m_playback->clear();
++	m_capture->clear();
++	
++	/* iterate over all available devices */
++	int numDevices = Pa_GetDeviceCount();
++
++#if 0
++	for(i=0; i<numDevices; i++) {
++		deviceInfo = Pa_GetDeviceInfo(i);
++		
++		/* add it as an input if maxInputChannels > 0 */
++		if(deviceInfo->maxInputChannels > 0) {
++			auto row = *m_playback->append();
++			row[m_playback_columns.Name] = deviceInfo->name;
++			row[m_playback_columns.DeviceID] = i;
++			
++			/* if it is the default, mark it as such */
++			if(i == Pa_GetHostApiInfo(deviceInfo->hostApi)->defaultInputDevice) {
++				m_default_capture_iter = row;
++                SetActiveCaptureDevice(row);
++			}
++		}
++		
++		/* add it as an input if maxInputChannels > 0 */
++		if(deviceInfo->maxOutputChannels > 0) {
++			auto row = *m_capture->append();
++            row[m_capture_columns.Name] = deviceInfo->name;
++			row[m_capture_columns.DeviceID] = i;
++			
++			/* if it is the default, mark it as such */
++			if(i == Pa_GetHostApiInfo( deviceInfo->hostApi )->defaultOutputDevice) {
++				m_default_playback_iter = row;
++                SetActivePlaybackDevice(row);
++			}
++		}
++
++	}
++#endif
++	{
++	auto row = *m_playback->append();
++	row[m_playback_columns.Name] = "Default Output";
++	row[m_playback_columns.DeviceID] = Pa_GetDefaultOutputDevice();
++	m_default_playback_iter = row;
++	SetActivePlaybackDevice(row);
++    }
++
++	{
++	auto row = *m_capture->append();
++	row[m_capture_columns.Name] = "Default Input";
++	row[m_capture_columns.DeviceID] = Pa_GetDefaultInputDevice();
++	m_default_capture_iter = row;
++	SetActiveCaptureDevice(row);
++    }
++
++	if (!m_default_playback_iter) {
++        spdlog::get("audio")->warn("No default playback device found");
++    }
++
++    if (!m_default_capture_iter) {
++        spdlog::get("audio")->warn("No default capture device found");
++    }
++}
++#else /* USE_PORTAUDIO */
+ void AudioDevices::SetDevices(ma_device_info *pPlayback, ma_uint32 playback_count, ma_device_info *pCapture, ma_uint32 capture_count) {
+     m_playback->clear();
+ 
+@@ -60,7 +129,39 @@ void AudioDevices::SetDevices(ma_device_info *pPlayback, ma_uint32 playback_coun
+         spdlog::get("audio")->warn("No default capture device found");
+     }
+ }
++#endif /* USE_PORTAUDIO */
+ 
++#ifdef USE_PORTAUDIO
++std::optional<PaDeviceIndex> AudioDevices::GetPlaybackDeviceIDFromModel(const Gtk::TreeModel::iterator &iter) const {
++    if (iter) {
++        return static_cast<PaDeviceIndex>((*iter)[m_playback_columns.DeviceID]);
++    }
++
++    return std::nullopt;
++}
++
++std::optional<PaDeviceIndex> AudioDevices::GetCaptureDeviceIDFromModel(const Gtk::TreeModel::iterator &iter) const {
++    if (iter) {
++        return static_cast<PaDeviceIndex>((*iter)[m_capture_columns.DeviceID]);
++    }
++
++    return std::nullopt;
++}
++
++std::optional<PaDeviceIndex> AudioDevices::GetDefaultPlayback() const {
++	PaDeviceIndex pi = Pa_GetHostApiInfo(Pa_GetHostApiCount()-1)->defaultOutputDevice;
++	if(pi == paNoDevice)
++		return std::nullopt;
++	return pi;
++}
++
++std::optional<PaDeviceIndex> AudioDevices::GetDefaultCapture() const {
++    PaDeviceIndex pi = Pa_GetHostApiInfo(Pa_GetHostApiCount()-1)->defaultInputDevice;
++	if(pi == paNoDevice)
++		return std::nullopt;
++	return pi;
++}
++#else /* USE_PORTAUDIO */
+ std::optional<ma_device_id> AudioDevices::GetPlaybackDeviceIDFromModel(const Gtk::TreeModel::iterator &iter) const {
+     if (iter) {
+         return static_cast<ma_device_id>((*iter)[m_playback_columns.DeviceID]);
+@@ -92,6 +193,7 @@ std::optional<ma_device_id> AudioDevices::GetDefaultCapture() const {
+ 
+     return std::nullopt;
+ }
++#endif /* USE_PORTAUDIO */
+ 
+ void AudioDevices::SetActivePlaybackDevice(const Gtk::TreeModel::iterator &iter) {
+     m_active_playback_iter = iter;
+diff --git a/src/audio/devices.hpp b/src/audio/devices.hpp
+index c83bdb4..54d1713 100644
+--- a/src/audio/devices.hpp
++++ b/src/audio/devices.hpp
+@@ -4,7 +4,13 @@
+ // clang-format off
+ 
+ #include <gtkmm/liststore.h>
++
++#ifndef USE_PORTAUDIO
+ #include <miniaudio.h>
++#else
++#include <portaudio.h>
++#endif
++
+ #include <optional>
+ 
+ // clang-format on
+@@ -16,13 +22,26 @@ public:
+     Glib::RefPtr<Gtk::ListStore> GetPlaybackDeviceModel();
+     Glib::RefPtr<Gtk::ListStore> GetCaptureDeviceModel();
+ 
++	#ifndef USE_PORTAUDIO
+     void SetDevices(ma_device_info *pPlayback, ma_uint32 playback_count, ma_device_info *pCapture, ma_uint32 capture_count);
++	#else
++	/* call Pa directly */
++	void SetDevices();
++	#endif
+ 
++#ifdef USE_PORTAUDIO
++    [[nodiscard]] std::optional<PaDeviceIndex> GetPlaybackDeviceIDFromModel(const Gtk::TreeModel::iterator &iter) const;
++    [[nodiscard]] std::optional<PaDeviceIndex> GetCaptureDeviceIDFromModel(const Gtk::TreeModel::iterator &iter) const;
++
++    [[nodiscard]] std::optional<PaDeviceIndex> GetDefaultPlayback() const;
++    [[nodiscard]] std::optional<PaDeviceIndex> GetDefaultCapture() const;
++#else
+     [[nodiscard]] std::optional<ma_device_id> GetPlaybackDeviceIDFromModel(const Gtk::TreeModel::iterator &iter) const;
+     [[nodiscard]] std::optional<ma_device_id> GetCaptureDeviceIDFromModel(const Gtk::TreeModel::iterator &iter) const;
+ 
+     [[nodiscard]] std::optional<ma_device_id> GetDefaultPlayback() const;
+     [[nodiscard]] std::optional<ma_device_id> GetDefaultCapture() const;
++#endif
+ 
+     void SetActivePlaybackDevice(const Gtk::TreeModel::iterator &iter);
+     void SetActiveCaptureDevice(const Gtk::TreeModel::iterator &iter);
+@@ -36,7 +55,11 @@ private:
+         PlaybackColumns();
+ 
+         Gtk::TreeModelColumn<Glib::ustring> Name;
++#ifdef USE_PORTAUDIO
++        Gtk::TreeModelColumn<PaDeviceIndex> DeviceID;
++#else
+         Gtk::TreeModelColumn<ma_device_id> DeviceID;
++#endif
+     };
+     PlaybackColumns m_playback_columns;
+     Glib::RefPtr<Gtk::ListStore> m_playback;
+@@ -48,7 +71,11 @@ private:
+         CaptureColumns();
+ 
+         Gtk::TreeModelColumn<Glib::ustring> Name;
++#ifndef USE_PORTAUDIO
+         Gtk::TreeModelColumn<ma_device_id> DeviceID;
++#else /* USE_PORTAUDIO */
++        Gtk::TreeModelColumn<PaDeviceIndex> DeviceID;
++#endif /* USE_PORTAUDIO */
+     };
+     CaptureColumns m_capture_columns;
+     Glib::RefPtr<Gtk::ListStore> m_capture;
+diff --git a/src/audio/ma_impl.cpp b/src/audio/ma_impl.cpp
+index 531b24f..767dec1 100644
+--- a/src/audio/ma_impl.cpp
++++ b/src/audio/ma_impl.cpp
+@@ -1,7 +1,9 @@
+-#ifdef WITH_MINIAUDIO
+-    #define MINIAUDIO_IMPLEMENTATION
+-    #ifdef __APPLE__
+-        #define MA_NO_RUNTIME_LINKING
+-    #endif
+-    #include <miniaudio.h>
++#ifndef USE_PORTAUDIO
++	#ifdef WITH_MINIAUDIO
++		#define MINIAUDIO_IMPLEMENTATION
++		#ifdef __APPLE__
++			#define MA_NO_RUNTIME_LINKING
++		#endif
++		#include <miniaudio.h>
++	#endif
+ #endif
+diff --git a/src/audio/manager.hpp b/src/audio/manager.hpp
+index 5716fc5..a657dcc 100644
+--- a/src/audio/manager.hpp
++++ b/src/audio/manager.hpp
+@@ -11,7 +11,13 @@
+ #include <unordered_map>
+ #include <unordered_set>
+ #include <vector>
++
++#ifndef USE_PORTAUDIO
+ #include <miniaudio.h>
++#else
++#include <portaudio.h>
++#endif
++
+ #include <opus.h>
+ #include <sigc++/sigc++.h>
+ #include <spdlog/spdlog.h>
+@@ -80,7 +86,9 @@ public:
+     void SetVADMethod(VADMethod method);
+     VADMethod GetVADMethod() const;
+ 
++#ifndef USE_PORTAUDIO
+     static std::vector<ma_backend> ParseBackendsList(const Glib::ustring &list);
++#endif /* USE_PORTAUDIO */
+ 
+ #ifdef WITH_RNNOISE
+     float GetCurrentVADProbability() const;
+@@ -94,10 +102,18 @@ public:
+     bool GetMixMono() const;
+ 
+ private:
++#ifndef USE_PORTAUDIO
+     void OnCapturedPCM(const int16_t *pcm, ma_uint32 frames);
++#else /* USE_PORTAUDIO */
++    void OnCapturedPCM(const int16_t *pcm, uint32_t frames);
++#endif /* USE_PORTAUDIO */
+ 
+     void UpdateReceiveVolume(uint32_t ssrc, const int16_t *pcm, int frames);
++#ifndef USE_PORTAUDIO
+     void UpdateCaptureVolume(const int16_t *pcm, ma_uint32 frames);
++#else
++    void UpdateCaptureVolume(const int16_t *pcm, uint32_t frames);
++#endif /* USE_PORTAUDIO */
+     std::atomic<int> m_capture_peak_meter = 0;
+ 
+     bool DecayVolumeMeters();
+@@ -111,13 +127,24 @@ private:
+     void RNNoiseUninitialize();
+ #endif
+ 
++#ifndef USE_PORTAUDIO
+     friend void data_callback(ma_device *, void *, const void *, ma_uint32);
+     friend void capture_data_callback(ma_device *, void *, const void *, ma_uint32);
++#else /* USE_PORTAUDIO */
++	friend int playCallback(const void *pInput, void *pOutput, unsigned long frameCount, 
++		const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags, void *userData );
++	friend int recordCallback(const void *pInput, void *pOutput,
++                           unsigned long frameCount,
++                           const PaStreamCallbackTimeInfo* timeInfo,
++                           PaStreamCallbackFlags statusFlags,
++                           void *userData );
++#endif /* USE_PORTAUDIO */
+ 
+     std::thread m_thread;
+ 
+     bool m_ok;
+ 
++#ifndef USE_PORTAUDIO
+     // playback
+     ma_device m_playback_device;
+     ma_device_config m_playback_config;
+@@ -126,8 +153,18 @@ private:
+     ma_device m_capture_device;
+     ma_device_config m_capture_config;
+     ma_device_id m_capture_id;
+-
++    
+     ma_context m_context;
++#else
++	// playback
++	PaStream* pa_playback_device;
++	PaStreamParameters m_playback_config;
++    // capture
++    PaStream* pa_capture_device;
++    PaStreamParameters m_capture_config;
++    
++#endif
++
+ 
+     mutable std::mutex m_mutex;
+     mutable std::mutex m_enc_mutex;
+@@ -166,7 +203,9 @@ private:
+ #endif
+     std::atomic<uint32_t> m_rtp_timestamp = 0;
+ 
++#ifndef USE_PORTAUDIO
+     ma_log m_ma_log;
++#endif
+     std::shared_ptr<spdlog::logger> m_log;
+ 
+ public:
+diff --git a/src/audio/manager.cpp b/src/audio/miniaudioManager.cpp
+similarity index 99%
+rename from src/audio/manager.cpp
+rename to src/audio/miniaudioManager.cpp
+index d32c5e2..3a155fc 100644
+--- a/src/audio/manager.cpp
++++ b/src/audio/miniaudioManager.cpp
+@@ -1,3 +1,4 @@
++#ifndef USE_PORTAUDIO
+ #ifdef WITH_VOICE
+ // clang-format off
+ 
+@@ -704,3 +705,4 @@ AudioManager::type_signal_opus_packet AudioManager::signal_opus_packet() {
+ }
+ 
+ #endif
++#endif /* USE_PORTAUDIO */
+diff --git a/src/audio/portaudioManager.cpp b/src/audio/portaudioManager.cpp
+new file mode 100644
+index 0000000..bcd1254
+--- /dev/null
++++ b/src/audio/portaudioManager.cpp
+@@ -0,0 +1,601 @@
++#ifdef WITH_VOICE
++#ifdef USE_PORTAUDIO
++
++#include "manager.hpp"
++#include "abaddon.hpp"
++#include <array>
++#include <glibmm/main.h>
++#include <spdlog/sinks/stdout_color_sinks.h>
++#include <portaudio.h>
++#include <opus.h>
++#include <cstring>
++
++int playCallback(const void *pInput, void *pOutput,
++                           unsigned long frameCount,
++                           const PaStreamCallbackTimeInfo* timeInfo,
++                           PaStreamCallbackFlags statusFlags,
++                           void *userData ) {
++    AudioManager *mgr = reinterpret_cast<AudioManager *>(userData);
++    if (mgr == nullptr) {printf("NULL\n");return paContinue;};
++    std::lock_guard<std::mutex> _(mgr->m_mutex);
++
++    auto *pOutputF32 = static_cast<int16_t *>(pOutput);
++    
++    /* clear the output buffer */
++    for(int i = 0; i<frameCount *  2; i++)
++		pOutputF32[i] = 0;
++
++	/* write every SSRC into the output stream */
++    for (auto &[ssrc, pair] : mgr->m_sources) {
++        double volume = 1.0;
++        if (const auto vol_it = mgr->m_volume_ssrc.find(ssrc); vol_it != mgr->m_volume_ssrc.end()) {
++            volume = vol_it->second;
++        }
++        auto &buf = pair.first;
++        const size_t n = std::min(static_cast<size_t>(buf.size()), static_cast<size_t>(frameCount * 2ULL));
++        for (size_t i = 0; i < n; i++) {
++            pOutputF32[i] += (int16_t) (volume * buf[i]);
++            //pOutputF32[i] += volume * buf[i] / 32768.F;
++        }
++        buf.erase(buf.begin(), buf.begin() + n);
++    }
++    
++    return paContinue;
++}
++
++int recordCallback(const void *pInput, void *pOutput,
++                           unsigned long frameCount,
++                           const PaStreamCallbackTimeInfo* timeInfo,
++                           PaStreamCallbackFlags statusFlags,
++                           void *userData ) {
++    auto *mgr = reinterpret_cast<AudioManager *>(userData);
++    if (mgr == nullptr) return paContinue;
++    
++    mgr->OnCapturedPCM(static_cast<const int16_t *>(pInput), frameCount);
++
++    /*
++     * You can simply increment it by 480 in UDPSocket::SendEncrypted but this is wrong
++     * The timestamp is supposed to be strictly linear eg. if there's discontinuous
++     * transmission for 1 second then the timestamp should be 48000 greater than the
++     * last packet. So it's incremented here because this is fired 100x per second
++     * and is always called in sync with UDPSocket::SendEncrypted
++     */
++    mgr->m_rtp_timestamp += 480;
++    return paContinue;
++}
++
++AudioManager::AudioManager(const Glib::ustring &backends_string)
++    : m_log(spdlog::stdout_color_mt("portaudio")) {
++    m_ok = true;
++
++	PaError pa_err;
++	int opus_err;
++
++	/* try to initialize PortAudio */
++    pa_err = Pa_Initialize();
++    if(pa_err != paNoError) {
++        spdlog::get("audio")->error("ERROR: Pa_Initialize returned 0x%x\n", pa_err);
++        Pa_Terminate();
++        m_ok = false;
++        return;
++    }
++    
++    /* initialize RNNoise */
++#ifdef WITH_RNNOISE
++    RNNoiseInitialize();
++#endif
++
++	/* try to initialize opus */
++    m_encoder = opus_encoder_create(48000, 2, OPUS_APPLICATION_VOIP, &opus_err);
++    if (opus_err != OPUS_OK) {
++        spdlog::get("audio")->error("failed to initialize opus encoder: {}", opus_err);
++        m_ok = false;
++        return;
++    }
++    opus_encoder_ctl(m_encoder, OPUS_SET_BITRATE(64000));
++
++    /* get the backends */
++    Enumerate();
++
++	/* create the configurations for capture and playback */
++	m_playback_config.sampleFormat = paInt16;
++	m_playback_config.channelCount = 2;
++    m_playback_config.suggestedLatency = Pa_GetDeviceInfo( m_capture_config.device )->defaultLowInputLatency;
++    m_playback_config.hostApiSpecificStreamInfo = NULL;
++    m_playback_config.device = Pa_GetDefaultOutputDevice();
++
++    m_capture_config.sampleFormat = paInt16;
++	m_capture_config.channelCount = 2;
++    m_capture_config.suggestedLatency = Pa_GetDeviceInfo( m_capture_config.device )->defaultLowInputLatency;
++    m_capture_config.hostApiSpecificStreamInfo = NULL;
++    m_capture_config.device = Pa_GetDefaultInputDevice();
++    
++    /* create the streams */
++    pa_err = Pa_OpenStream(&pa_capture_device, &m_capture_config, NULL, 48000, 480, paClipOff, recordCallback, this);
++	if(pa_err != paNoError) {
++		m_ok = false;
++		spdlog::get("audio")->error("ERROR: Pa_OpenStream for capture returned %d\n", pa_err);
++		return;
++	}
++	
++	pa_err = Pa_OpenStream(&pa_playback_device, NULL, &m_playback_config, 48000, 480, paClipOff, playCallback, this);
++	if(pa_err != paNoError) {
++		m_ok = false;
++		spdlog::get("audio")->error("ERROR: Pa_OpenStream for playback returned %d\n", pa_err);
++		return;
++	}
++	
++	if(Pa_StartStream(pa_playback_device) != paNoError) {
++		spdlog::get("audio")->error("ERROR: Could not start playback\n");
++	}
++/**TODO
++    if (const auto capture_id = m_devices.GetDefaultCapture(); capture_id.has_value()) {
++        m_capture_id = *capture_id;
++        m_capture_config.capture.pDeviceID = &m_capture_id;
++    }*/
++
++    Glib::signal_timeout().connect(sigc::mem_fun(*this, &AudioManager::DecayVolumeMeters), 40);
++}
++
++AudioManager::~AudioManager() {
++    Pa_Terminate();
++    RemoveAllSSRCs();
++
++#ifdef WITH_RNNOISE
++    RNNoiseUninitialize();
++#endif
++}
++
++void AudioManager::AddSSRC(uint32_t ssrc) {
++    std::lock_guard<std::mutex> _(m_mutex);
++    int error;
++    if (m_sources.find(ssrc) == m_sources.end()) {
++        auto *decoder = opus_decoder_create(48000, 2, &error);
++        m_sources.insert(std::make_pair(ssrc, std::make_pair(std::deque<int16_t> {}, decoder)));
++    }
++}
++
++void AudioManager::RemoveSSRC(uint32_t ssrc) {
++    std::lock_guard<std::mutex> _(m_mutex);
++    if (auto it = m_sources.find(ssrc); it != m_sources.end()) {
++        opus_decoder_destroy(it->second.second);
++        m_sources.erase(it);
++    }
++}
++
++void AudioManager::RemoveAllSSRCs() {
++    spdlog::get("audio")->info("removing all ssrc");
++    std::lock_guard<std::mutex> _(m_mutex);
++    for (auto &[ssrc, pair] : m_sources) {
++        opus_decoder_destroy(pair.second);
++    }
++    m_sources.clear();
++}
++
++void AudioManager::SetOpusBuffer(uint8_t *ptr) {
++    m_opus_buffer = ptr;
++}
++
++void AudioManager::FeedMeOpus(uint32_t ssrc, const std::vector<uint8_t> &data) {
++    if (!m_should_playback || Pa_IsStreamActive(pa_playback_device) != 1) return;
++
++    std::lock_guard<std::mutex> _(m_mutex);
++    if (m_muted_ssrcs.find(ssrc) != m_muted_ssrcs.end()) return;
++
++    static std::array<opus_int16, 120 * 48 * 2> pcm;
++    if (auto it = m_sources.find(ssrc); it != m_sources.end()) {
++        int decoded = opus_decode(it->second.second, data.data(), static_cast<opus_int32>(data.size()), pcm.data(), 120 * 48, 0);
++        if (decoded <= 0) {
++        } else {
++            UpdateReceiveVolume(ssrc, pcm.data(), decoded);
++            auto &buf = it->second.first;
++            buf.insert(buf.end(), pcm.begin(), pcm.begin() + decoded * 2);
++        }
++    }
++}
++
++void AudioManager::StartCaptureDevice() {
++    if (Pa_StartStream(pa_capture_device) != paNoError) {
++        spdlog::get("audio")->error("Failed to start capture device");
++    }
++}
++
++void AudioManager::StopCaptureDevice() {
++    if (Pa_StopStream(pa_capture_device) != paNoError) {
++        spdlog::get("audio")->error("Failed to stop capture device");
++    }
++}
++
++void AudioManager::SetPlaybackDevice(const Gtk::TreeModel::iterator &iter) {
++    PaError pa_err;
++    spdlog::get("audio")->debug("Setting new playback device");
++
++    const auto device_id = m_devices.GetPlaybackDeviceIDFromModel(iter);
++    if (!device_id) {
++        spdlog::get("audio")->error("Requested ID from iterator is invalid");
++        return;
++    }
++
++    m_devices.SetActivePlaybackDevice(iter);
++
++    // TODO m_playback_config.device = *device_id;
++    
++    Pa_AbortStream(pa_playback_device);
++    pa_err = Pa_OpenStream(&pa_playback_device, NULL, &m_playback_config, 48000, 480, paClipOff, playCallback, this);
++    if(pa_err != paNoError) {
++		spdlog::get("audio")->error("Error setting playback device");
++	}
++
++    Pa_StartStream(pa_playback_device);
++    
++}
++
++void AudioManager::SetCaptureDevice(const Gtk::TreeModel::iterator &iter) {
++    PaError pa_err;
++    spdlog::get("audio")->debug("Setting new capture device");
++
++    const auto device_id = m_devices.GetCaptureDeviceIDFromModel(iter);
++    if (!device_id) {
++        spdlog::get("audio")->error("Requested ID from iterator is invalid");
++        return;
++    }
++
++    m_devices.SetActiveCaptureDevice(iter);
++
++    //TODO m_playback_config.device = *device_id;
++    
++    Pa_AbortStream(pa_playback_device);
++    pa_err = Pa_OpenStream(&pa_capture_device, &m_capture_config, NULL, 48000, 480, paClipOff, recordCallback, this);
++
++    Pa_StartStream(pa_playback_device);
++}
++
++void AudioManager::SetCapture(bool capture) {
++    m_should_capture = capture;
++}
++
++void AudioManager::SetPlayback(bool playback) {
++    m_should_playback = playback;
++}
++
++void AudioManager::SetCaptureGate(double gate) {
++    m_capture_gate = gate;
++}
++
++void AudioManager::SetCaptureGain(double gain) {
++    m_capture_gain = gain;
++}
++
++double AudioManager::GetCaptureGate() const noexcept {
++    return m_capture_gate;
++}
++
++double AudioManager::GetCaptureGain() const noexcept {
++    return m_capture_gain;
++}
++
++void AudioManager::SetMuteSSRC(uint32_t ssrc, bool mute) {
++    std::lock_guard<std::mutex> _(m_mutex);
++    if (mute) {
++        m_muted_ssrcs.insert(ssrc);
++    } else {
++        m_muted_ssrcs.erase(ssrc);
++    }
++}
++
++void AudioManager::SetVolumeSSRC(uint32_t ssrc, double volume) {
++    std::lock_guard<std::mutex> _(m_mutex);
++    m_volume_ssrc[ssrc] = volume;
++}
++
++double AudioManager::GetVolumeSSRC(uint32_t ssrc) const {
++    std::lock_guard<std::mutex> _(m_mutex);
++    if (const auto iter = m_volume_ssrc.find(ssrc); iter != m_volume_ssrc.end()) {
++        return iter->second;
++    }
++    return 1.0;
++}
++
++void AudioManager::SetEncodingApplication(int application) {
++    std::lock_guard<std::mutex> _(m_enc_mutex);
++    int prev_bitrate = 64000;
++    if (int err = opus_encoder_ctl(m_encoder, OPUS_GET_BITRATE(&prev_bitrate)); err != OPUS_OK) {
++        spdlog::get("audio")->error("Failed to get old bitrate when reinitializing: {}", err);
++    }
++    opus_encoder_destroy(m_encoder);
++    int err = 0;
++    m_encoder = opus_encoder_create(48000, 2, application, &err);
++    if (err != OPUS_OK) {
++        spdlog::get("audio")->critical("opus_encoder_create failed: {}", err);
++        return;
++    }
++
++    if (int err = opus_encoder_ctl(m_encoder, OPUS_SET_BITRATE(prev_bitrate)); err != OPUS_OK) {
++        spdlog::get("audio")->error("Failed to set bitrate when reinitializing: {}", err);
++    }
++}
++
++int AudioManager::GetEncodingApplication() {
++    std::lock_guard<std::mutex> _(m_enc_mutex);
++    int temp = OPUS_APPLICATION_VOIP;
++    if (int err = opus_encoder_ctl(m_encoder, OPUS_GET_APPLICATION(&temp)); err != OPUS_OK) {
++        spdlog::get("audio")->error("opus_encoder_ctl(OPUS_GET_APPLICATION) failed: {}", err);
++    }
++    return temp;
++}
++
++void AudioManager::SetSignalHint(int signal) {
++    std::lock_guard<std::mutex> _(m_enc_mutex);
++    if (int err = opus_encoder_ctl(m_encoder, OPUS_SET_SIGNAL(signal)); err != OPUS_OK) {
++        spdlog::get("audio")->error("opus_encoder_ctl(OPUS_SET_SIGNAL) failed: {}", err);
++    }
++}
++
++int AudioManager::GetSignalHint() {
++    std::lock_guard<std::mutex> _(m_enc_mutex);
++    int temp = OPUS_AUTO;
++    if (int err = opus_encoder_ctl(m_encoder, OPUS_GET_SIGNAL(&temp)); err != OPUS_OK) {
++        spdlog::get("audio")->error("opus_encoder_ctl(OPUS_GET_SIGNAL) failed: {}", err);
++    }
++    return temp;
++}
++
++void AudioManager::SetBitrate(int bitrate) {
++    std::lock_guard<std::mutex> _(m_enc_mutex);
++    if (int err = opus_encoder_ctl(m_encoder, OPUS_SET_BITRATE(bitrate)); err != OPUS_OK) {
++        spdlog::get("audio")->error("opus_encoder_ctl(OPUS_SET_BITRATE) failed: {}", err);
++    }
++}
++
++int AudioManager::GetBitrate() {
++    std::lock_guard<std::mutex> _(m_enc_mutex);
++    int temp = 64000;
++    if (int err = opus_encoder_ctl(m_encoder, OPUS_GET_BITRATE(&temp)); err != OPUS_OK) {
++        spdlog::get("audio")->error("opus_encoder_ctl(OPUS_GET_BITRATE) failed: {}", err);
++    }
++    return temp;
++}
++
++void AudioManager::Enumerate() {
++	spdlog::get("audio")->debug("Enumerating devices");
++    m_devices.SetDevices();
++}
++
++void AudioManager::OnCapturedPCM(const int16_t *pcm, uint32_t frames) {
++    if (m_opus_buffer == nullptr || !m_should_capture) return;
++
++    const double gain = m_capture_gain;
++
++    std::vector<int16_t> new_pcm(pcm, pcm + frames * 2);
++    for (auto &val : new_pcm) {
++        const int32_t unclamped = static_cast<int32_t>(val * gain);
++        val = std::clamp(unclamped, INT16_MIN, INT16_MAX);
++    }
++
++    if (m_mix_mono) {
++        for (size_t i = 0; i < frames * 2; i += 2) {
++            const int sample_L = new_pcm[i];
++            const int sample_R = new_pcm[i + 1];
++            const int16_t mixed = static_cast<int16_t>((sample_L + sample_R) / 2);
++            new_pcm[i] = mixed;
++            new_pcm[i + 1] = mixed;
++        }
++    }
++
++    UpdateCaptureVolume(new_pcm.data(), frames);
++
++    static std::array<float, 480> denoised_L;
++    static std::array<float, 480> denoised_R;
++
++    bool m_rnnoise_passed = false;
++#ifdef WITH_RNNOISE
++    if (m_vad_method == VADMethod::RNNoise || m_enable_noise_suppression) {
++        m_rnnoise_passed = CheckVADRNNoise(new_pcm.data(), denoised_L.data(), denoised_R.data());
++    }
++#endif
++
++    switch (m_vad_method) {
++        case VADMethod::Gate:
++            if (!CheckVADVoiceGate()) return;
++            break;
++#ifdef WITH_RNNOISE
++        case VADMethod::RNNoise:
++            if (!m_rnnoise_passed) return;
++            break;
++#endif
++    }
++
++    m_enc_mutex.lock();
++    int payload_len = -1;
++
++    if (m_enable_noise_suppression) {
++        static std::array<int16_t, 960> denoised_interleaved;
++        for (size_t i = 0; i < 480; i++) {
++            denoised_interleaved[i * 2] = static_cast<int16_t>(denoised_L[i]);
++        }
++        for (size_t i = 0; i < 480; i++) {
++            denoised_interleaved[i * 2 + 1] = static_cast<int16_t>(denoised_R[i]);
++        }
++        payload_len = opus_encode(m_encoder, denoised_interleaved.data(), 480, static_cast<unsigned char *>(m_opus_buffer), 1275);
++    } else {
++        payload_len = opus_encode(m_encoder, new_pcm.data(), 480, static_cast<unsigned char *>(m_opus_buffer), 1275);
++    }
++
++    m_enc_mutex.unlock();
++    if (payload_len < 0) {
++        spdlog::get("audio")->error("encoding error: {}", payload_len);
++    } else {
++        m_signal_opus_packet.emit(payload_len);
++    }
++}
++
++void AudioManager::UpdateReceiveVolume(uint32_t ssrc, const int16_t *pcm, int frames) {
++    std::lock_guard<std::mutex> _(m_vol_mtx);
++
++    auto &meter = m_volumes[ssrc];
++    for (int i = 0; i < frames * 2; i += 2) {
++        const int amp = std::abs(pcm[i]);
++        meter = std::max(meter, std::abs(amp) / 32768.0);
++    }
++}
++
++void AudioManager::UpdateCaptureVolume(const int16_t *pcm, uint32_t frames) {
++    for (uint32_t i = 0; i < frames * 2; i += 2) {
++        const int amp = std::abs(pcm[i]);
++        m_capture_peak_meter = std::max(m_capture_peak_meter.load(std::memory_order_relaxed), amp);
++    }
++}
++
++bool AudioManager::DecayVolumeMeters() {
++    m_capture_peak_meter -= 600;
++    if (m_capture_peak_meter < 0) m_capture_peak_meter = 0;
++
++    const auto x = m_vad_prob.load() - 0.05f;
++    m_vad_prob.store(x < 0.0f ? 0.0f : x);
++
++    std::lock_guard<std::mutex> _(m_vol_mtx);
++
++    for (auto &[ssrc, meter] : m_volumes) {
++        meter -= 0.01;
++        if (meter < 0.0) meter = 0.0;
++    }
++
++    return true;
++}
++
++bool AudioManager::CheckVADVoiceGate() {
++    return m_capture_peak_meter / 32768.0 > m_capture_gate;
++}
++
++#ifdef WITH_RNNOISE
++bool AudioManager::CheckVADRNNoise(const int16_t *pcm, float *denoised_left, float *denoised_right) {
++    // use left channel for vad, only denoise right if noise suppression enabled
++    std::unique_lock<std::mutex> _(m_rnn_mutex);
++
++    static float rnnoise_input[480];
++    for (size_t i = 0; i < 480; i++) {
++        rnnoise_input[i] = static_cast<float>(pcm[i * 2]);
++    }
++    m_vad_prob = std::max(m_vad_prob.load(), rnnoise_process_frame(m_rnnoise[0], denoised_left, rnnoise_input));
++
++    if (m_enable_noise_suppression) {
++        for (size_t i = 0; i < 480; i++) {
++            rnnoise_input[i] = static_cast<float>(pcm[i * 2 + 1]);
++        }
++        rnnoise_process_frame(m_rnnoise[1], denoised_right, rnnoise_input);
++    }
++
++    return m_vad_prob > m_prob_threshold;
++}
++
++void AudioManager::RNNoiseInitialize() {
++    spdlog::get("audio")->debug("Initializing RNNoise");
++    RNNoiseUninitialize();
++    std::unique_lock<std::mutex> _(m_rnn_mutex);
++    m_rnnoise[0] = rnnoise_create(nullptr);
++    m_rnnoise[1] = rnnoise_create(nullptr);
++    const auto expected = rnnoise_get_frame_size();
++    if (expected != 480) {
++        spdlog::get("audio")->warn("RNNoise expects a frame count other than 480");
++    }
++}
++
++void AudioManager::RNNoiseUninitialize() {
++    if (m_rnnoise[0] != nullptr) {
++        spdlog::get("audio")->debug("Uninitializing RNNoise");
++        std::unique_lock<std::mutex> _(m_rnn_mutex);
++        rnnoise_destroy(m_rnnoise[0]);
++        rnnoise_destroy(m_rnnoise[1]);
++        m_rnnoise[0] = nullptr;
++        m_rnnoise[1] = nullptr;
++    }
++}
++#endif
++
++bool AudioManager::OK() const {
++    return m_ok;
++}
++
++double AudioManager::GetCaptureVolumeLevel() const noexcept {
++    return m_capture_peak_meter / 32768.0;
++}
++
++double AudioManager::GetSSRCVolumeLevel(uint32_t ssrc) const noexcept {
++    std::lock_guard<std::mutex> _(m_vol_mtx);
++    if (const auto it = m_volumes.find(ssrc); it != m_volumes.end()) {
++        return it->second;
++    }
++    return 0.0;
++}
++
++AudioDevices &AudioManager::GetDevices() {
++    return m_devices;
++}
++
++uint32_t AudioManager::GetRTPTimestamp() const noexcept {
++    return m_rtp_timestamp;
++}
++
++void AudioManager::SetVADMethod(const std::string &method) {
++    spdlog::get("audio")->debug("Setting VAD method to {}", method);
++    if (method == "gate") {
++        SetVADMethod(VADMethod::Gate);
++    } else if (method == "rnnoise") {
++#ifdef WITH_RNNOISE
++        SetVADMethod(VADMethod::RNNoise);
++#else
++        SetVADMethod(VADMethod::Gate);
++        spdlog::get("audio")->error("Tried to set RNNoise VAD method with support disabled");
++#endif
++    } else {
++        SetVADMethod(VADMethod::Gate);
++        spdlog::get("audio")->error("Tried to set unknown VAD method {}", method);
++    }
++}
++
++void AudioManager::SetVADMethod(VADMethod method) {
++    const auto method_int = static_cast<int>(method);
++    spdlog::get("audio")->debug("Setting VAD method to enum {}", method_int);
++    m_vad_method = method;
++}
++
++AudioManager::VADMethod AudioManager::GetVADMethod() const {
++    return m_vad_method;
++}
++
++#ifdef WITH_RNNOISE
++float AudioManager::GetCurrentVADProbability() const {
++    return m_vad_prob;
++}
++
++double AudioManager::GetRNNProbThreshold() const {
++    return m_prob_threshold;
++}
++
++void AudioManager::SetRNNProbThreshold(double value) {
++    m_prob_threshold = value;
++}
++
++void AudioManager::SetSuppressNoise(bool value) {
++    m_enable_noise_suppression = value;
++}
++
++bool AudioManager::GetSuppressNoise() const {
++    return m_enable_noise_suppression;
++}
++#endif
++
++void AudioManager::SetMixMono(bool value) {
++    m_mix_mono = value;
++}
++
++bool AudioManager::GetMixMono() const {
++    return m_mix_mono;
++}
++
++AudioManager::type_signal_opus_packet AudioManager::signal_opus_packet() {
++    return m_signal_opus_packet;
++}
++
++#endif /* USE_PORTAUDIO */
++#endif /* WITH_VOICE */
+-- 
+2.48.1
+
+
+From 34c05a18705deaee0583c14898de89cb2c8d5609 Mon Sep 17 00:00:00 2001
+From: zeldakatze <mail@zeldakatze.de>
+Date: Wed, 13 Aug 2025 13:50:28 +0200
+Subject: do resampling for portaudio
+
+
+diff --git a/src/audio/manager.hpp b/src/audio/manager.hpp
+index a657dcc..2d1ae71 100644
+--- a/src/audio/manager.hpp
++++ b/src/audio/manager.hpp
+@@ -163,6 +163,14 @@ private:
+     PaStream* pa_capture_device;
+     PaStreamParameters m_capture_config;
+     
++    // portaudio does not do resampling. We have to do that ourselves.
++    // create target buffers
++    int16_t *resample_capture_buffer;
++    int16_t *resample_playback_buffer;
++    uint32_t resample_capture_source_rate, resample_playback_source_rate;
++    uint32_t resample_capture_framesPerBuffer;
++    uint32_t resample_playback_framesPerBuffer;
++    
+ #endif
+ 
+ 
+diff --git a/src/audio/portaudioManager.cpp b/src/audio/portaudioManager.cpp
+index bcd1254..f21f9ff 100644
+--- a/src/audio/portaudioManager.cpp
++++ b/src/audio/portaudioManager.cpp
+@@ -10,19 +10,39 @@
+ #include <opus.h>
+ #include <cstring>
+ 
++// TODO replace with libresample
++// a simple nearest-neigbhor resampler
++static void resampleBuffer(const int16_t *input, const int inputFrames,
++		int16_t *output, const int outputFrames) {
++	float ratio = (float) inputFrames / (float) outputFrames;
++	for(int oi = 0; oi < outputFrames; oi++) {
++		int ii = (int) (((float) oi) * ratio);
++		
++		// clamp the input index
++		if(ii >= inputFrames) {
++			ii = inputFrames - 1;
++		}
++		
++		// copy the samples. * 2 because stereo
++		output[oi * 2] = input[ii * 2];
++		output[oi * 2 + 1] = input[ii * 2 + 1];
++	}
++}
++
+ int playCallback(const void *pInput, void *pOutput,
+                            unsigned long frameCount,
+                            const PaStreamCallbackTimeInfo* timeInfo,
+                            PaStreamCallbackFlags statusFlags,
+                            void *userData ) {
+     AudioManager *mgr = reinterpret_cast<AudioManager *>(userData);
+-    if (mgr == nullptr) {printf("NULL\n");return paContinue;};
++    if (mgr == nullptr) {return paContinue;};
+     std::lock_guard<std::mutex> _(mgr->m_mutex);
+ 
+-    auto *pOutputF32 = static_cast<int16_t *>(pOutput);
++    int16_t *resample_playback_buffer = mgr->resample_playback_buffer;
++    auto *pOutputF32 = static_cast<int16_t *>(resample_playback_buffer);
+     
+     /* clear the output buffer */
+-    for(int i = 0; i<frameCount *  2; i++)
++    for(int i = 0; i<480 *  2; i++)
+ 		pOutputF32[i] = 0;
+ 
+ 	/* write every SSRC into the output stream */
+@@ -32,7 +52,7 @@ int playCallback(const void *pInput, void *pOutput,
+             volume = vol_it->second;
+         }
+         auto &buf = pair.first;
+-        const size_t n = std::min(static_cast<size_t>(buf.size()), static_cast<size_t>(frameCount * 2ULL));
++        const size_t n = std::min(static_cast<size_t>(buf.size()), static_cast<size_t>(480 * 2ULL));
+         for (size_t i = 0; i < n; i++) {
+             pOutputF32[i] += (int16_t) (volume * buf[i]);
+             //pOutputF32[i] += volume * buf[i] / 32768.F;
+@@ -40,6 +60,9 @@ int playCallback(const void *pInput, void *pOutput,
+         buf.erase(buf.begin(), buf.begin() + n);
+     }
+     
++    /* scale the resample buffer to the output buffer */
++    resampleBuffer(resample_playback_buffer, 480, static_cast<int16_t *>(pOutput), frameCount);
++
+     return paContinue;
+ }
+ 
+@@ -51,7 +74,11 @@ int recordCallback(const void *pInput, void *pOutput,
+     auto *mgr = reinterpret_cast<AudioManager *>(userData);
+     if (mgr == nullptr) return paContinue;
+     
+-    mgr->OnCapturedPCM(static_cast<const int16_t *>(pInput), frameCount);
++    int16_t *resample_capture_buffer = mgr->resample_capture_buffer;
++    
++    resampleBuffer(static_cast<const int16_t *>(pInput), frameCount, resample_capture_buffer, 480);
++    
++    mgr->OnCapturedPCM(static_cast<const int16_t *>(resample_capture_buffer), 480);
+ 
+     /*
+      * You can simply increment it by 480 in UDPSocket::SendEncrypted but this is wrong
+@@ -103,22 +130,30 @@ AudioManager::AudioManager(const Glib::ustring &backends_string)
+     m_playback_config.suggestedLatency = Pa_GetDeviceInfo( m_capture_config.device )->defaultLowInputLatency;
+     m_playback_config.hostApiSpecificStreamInfo = NULL;
+     m_playback_config.device = Pa_GetDefaultOutputDevice();
++	resample_playback_source_rate = Pa_GetDeviceInfo( m_playback_config.device )->defaultSampleRate;
++	resample_playback_framesPerBuffer = (int) (((float) resample_playback_source_rate / 48000.0) * 480.0);
+ 
+     m_capture_config.sampleFormat = paInt16;
+ 	m_capture_config.channelCount = 2;
+     m_capture_config.suggestedLatency = Pa_GetDeviceInfo( m_capture_config.device )->defaultLowInputLatency;
+     m_capture_config.hostApiSpecificStreamInfo = NULL;
+     m_capture_config.device = Pa_GetDefaultInputDevice();
++	resample_capture_source_rate = Pa_GetDeviceInfo( m_capture_config.device )->defaultSampleRate;
++    resample_capture_framesPerBuffer = (int) (((float) resample_capture_source_rate / 48000.0) * 480.0);
++    
++    /* initialize the buffers for resampling */
++    resample_capture_buffer = (int16_t*) malloc(480 * 2 * sizeof(uint16_t));
++    resample_playback_buffer = (int16_t*) malloc(480 * 2 * sizeof(uint16_t));
+     
+     /* create the streams */
+-    pa_err = Pa_OpenStream(&pa_capture_device, &m_capture_config, NULL, 48000, 480, paClipOff, recordCallback, this);
++    pa_err = Pa_OpenStream(&pa_capture_device, &m_capture_config, NULL, resample_capture_source_rate, resample_capture_framesPerBuffer, paClipOff, recordCallback, this);
+ 	if(pa_err != paNoError) {
+ 		m_ok = false;
+ 		spdlog::get("audio")->error("ERROR: Pa_OpenStream for capture returned %d\n", pa_err);
+ 		return;
+ 	}
+ 	
+-	pa_err = Pa_OpenStream(&pa_playback_device, NULL, &m_playback_config, 48000, 480, paClipOff, playCallback, this);
++	pa_err = Pa_OpenStream(&pa_playback_device, NULL, &m_playback_config, resample_playback_source_rate, resample_playback_framesPerBuffer, paClipOff, playCallback, this);
+ 	if(pa_err != paNoError) {
+ 		m_ok = false;
+ 		spdlog::get("audio")->error("ERROR: Pa_OpenStream for playback returned %d\n", pa_err);
+@@ -140,6 +175,9 @@ AudioManager::AudioManager(const Glib::ustring &backends_string)
+ AudioManager::~AudioManager() {
+     Pa_Terminate();
+     RemoveAllSSRCs();
++    
++    free(resample_capture_buffer);
++    free(resample_playback_buffer);
+ 
+ #ifdef WITH_RNNOISE
+     RNNoiseUninitialize();
 -- 
 2.48.1
 
