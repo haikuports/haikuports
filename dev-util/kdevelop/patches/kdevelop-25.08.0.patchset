@@ -1,0 +1,426 @@
+From 633b66892f8851d82f61ead659c34fafca238e56 Mon Sep 17 00:00:00 2001
+From: begasus <begasus@gmail.com>
+Date: Mon, 23 Dec 2024 19:54:46 +0000
+Subject: Add option BUILD_DOC_VIEWER to disable the integrated document viewer
+
+
+diff --git a/config-kdevelop.h.cmake b/config-kdevelop.h.cmake
+index 28b8465..cd5d425 100644
+--- a/config-kdevelop.h.cmake
++++ b/config-kdevelop.h.cmake
+@@ -7,4 +7,6 @@
+ 
+ #cmakedefine01 HAVE_KSYSGUARD
+ 
++#cmakedefine01 BUILD_DOC_VIEWER
++
+ #endif // CONFIG_KDEVELOP_H
+diff --git a/kdevplatform/documentation/CMakeLists.txt b/kdevplatform/documentation/CMakeLists.txt
+index 74759ff..f710a12 100644
+--- a/kdevplatform/documentation/CMakeLists.txt
++++ b/kdevplatform/documentation/CMakeLists.txt
+@@ -1,10 +1,13 @@
+ add_definitions(-DTRANSLATION_DOMAIN=\"kdevplatform\")
+ 
+-find_package(Qt6WebEngineWidgets CONFIG)
+-set_package_properties(Qt6WebEngineWidgets PROPERTIES
+-    PURPOSE "QtWebEngine, for integrated documentation"
+-    URL "https://qt.io/"
+-    TYPE REQUIRED)
++option(BUILD_DOC_VIEWER "Build integrated documentation viewer" ON)
++if(BUILD_DOC_VIEWER)
++    find_package(Qt6WebEngineWidgets CONFIG)
++    set_package_properties(Qt6WebEngineWidgets PROPERTIES
++        PURPOSE "QtWebEngine, for integrated documentation"
++        URL "https://qt.io/"
++        TYPE REQUIRED)
++endif()
+ 
+ set(KDevPlatformDocumentation_LIB_SRCS
+     standarddocumentationview.cpp
+@@ -23,10 +26,16 @@ kdevplatform_add_library(KDevPlatformDocumentation SOURCES ${KDevPlatformDocumen
+ target_link_libraries(KDevPlatformDocumentation
+ PUBLIC
+     KDev::Interfaces
+-    Qt::WebEngineWidgets
+ PRIVATE
+     KDev::Util
+ )
++if(BUILD_DOC_VIEWER)
++    target_compile_definitions(KDevPlatformDocumentation PUBLIC -DKDEV_STANDARD_DOCUMENTATION_VIEW_ENABLED=1)
++    target_link_libraries(KDevPlatformDocumentation PUBLIC Qt::WebEngineWidgets)
++else()
++    target_compile_definitions(KDevPlatformDocumentation PUBLIC -DKDEV_STANDARD_DOCUMENTATION_VIEW_ENABLED=0)
++    message(WARNING "Integrated documentation viewer will not function without QtWebEngine")
++endif()
+ 
+ install(FILES
+     documentationfindwidget.h
+diff --git a/kdevplatform/documentation/standarddocumentationview.cpp b/kdevplatform/documentation/standarddocumentationview.cpp
+index e5e09be..2d4f759 100644
+--- a/kdevplatform/documentation/standarddocumentationview.cpp
++++ b/kdevplatform/documentation/standarddocumentationview.cpp
+@@ -5,6 +5,7 @@
+     SPDX-License-Identifier: LGPL-2.0-or-later
+ */
+ 
++#include "config-kdevelop.h"
+ #include "standarddocumentationview.h"
+ #include "documentationfindwidget.h"
+ #include "debug.h"
+@@ -21,18 +22,21 @@
+ #include <QMenu>
+ #include <QUrl>
+ #include <QFile>
++#if BUILD_DOC_VIEWER
+ #include <QWebEngineView>
+ #include <QWebEnginePage>
+ #include <QWebEngineUrlScheme>
+ #include <QWebEngineProfile>
+ #include <QWebEngineScript>
+ #include <QWebEngineScriptCollection>
++#endif
+ 
+ using namespace KDevelop;
+ 
+ namespace {
+ auto qtHelpSchemeName() { return QByteArrayLiteral("qthelp"); }
+ 
++#if BUILD_DOC_VIEWER
+ class StandardDocumentationPage : public QWebEnginePage
+ {
+     Q_OBJECT
+@@ -67,13 +71,15 @@ private:
+     KDevelop::StandardDocumentationView* const m_view;
+     bool m_isDelegating = false;
+ };
+-
++#endif
+ } // unnamed namespace
+ 
+ void StandardDocumentationView::registerCustomUrlSchemes()
+ {
++#if BUILD_DOC_VIEWER
+     QWebEngineUrlScheme scheme(qtHelpSchemeName());
+     QWebEngineUrlScheme::registerScheme(scheme);
++#endif
+ }
+ 
+ class KDevelop::StandardDocumentationViewPrivate
+@@ -82,18 +88,23 @@ public:
+     ZoomController* m_zoomController = nullptr;
+     IDocumentation::Ptr m_doc;
+ 
++#if BUILD_DOC_VIEWER
+     QWebEngineView* m_view = nullptr;
+     StandardDocumentationPage* m_page = nullptr;
++#endif
+ 
+     ~StandardDocumentationViewPrivate()
+     {
+         // make sure the page is deleted before the profile
+         // see https://doc.qt.io/qt-5/qwebenginepage.html#QWebEnginePage-1
++#if BUILD_DOC_VIEWER
+         delete m_page;
++#endif
+     }
+ 
+     void init(StandardDocumentationView* parent)
+     {
++#if BUILD_DOC_VIEWER
+         // prevent QWebEngine (Chromium) from overriding the signal handlers of KCrash
+         const auto chromiumFlags = qgetenv("QTWEBENGINE_CHROMIUM_FLAGS");
+         if (!chromiumFlags.contains("disable-in-process-stack-traces")) {
+@@ -110,6 +121,7 @@ public:
+ 
+         // The event filter is necessary for handling mouse events since they are swallowed by QWebEngineView.
+         m_view->installEventFilter(parent);
++#endif
+     }
+ };
+ 
+@@ -118,13 +130,16 @@ StandardDocumentationView::StandardDocumentationView(DocumentationFindWidget* fi
+     , d_ptr(new StandardDocumentationViewPrivate)
+ {
+     Q_D(StandardDocumentationView);
+-
++#if BUILD_DOC_VIEWER
+     auto mainLayout = new QVBoxLayout(this);
+     mainLayout->setContentsMargins(0, 0, 0, 0);
+     setLayout(mainLayout);
++#endif
+ 
+     d->init(this);
++#if BUILD_DOC_VIEWER
+     layout()->addWidget(d->m_view);
++#endif
+ 
+     findWidget->setEnabled(true);
+     connect(findWidget, &DocumentationFindWidget::searchRequested, this, &StandardDocumentationView::search);
+@@ -137,13 +152,16 @@ KDevelop::StandardDocumentationView::~StandardDocumentationView()
+     Q_D(StandardDocumentationView);
+ 
+     // Prevent getting a loadFinished() signal on destruction.
++#if BUILD_DOC_VIEWER
+     disconnect(d->m_view, nullptr, this, nullptr);
++#endif
+ }
+ 
+ void StandardDocumentationView::search ( const QString& text, DocumentationFindWidget::FindOptions options )
+ {
+     Q_D(StandardDocumentationView);
+ 
++#if BUILD_DOC_VIEWER
+     QWebEnginePage::FindFlags ff = {};
+     if(options & DocumentationFindWidget::Previous)
+         ff |= QWebEnginePage::FindBackward;
+@@ -152,12 +170,14 @@ void StandardDocumentationView::search ( const QString& text, DocumentationFindW
+         ff |= QWebEnginePage::FindCaseSensitively;
+ 
+     d->m_view->page()->findText(text, ff);
++#endif
+ }
+ 
+ void StandardDocumentationView::searchIncremental(const QString& text, DocumentationFindWidget::FindOptions options)
+ {
+     Q_D(StandardDocumentationView);
+ 
++#if BUILD_DOC_VIEWER
+     QWebEnginePage::FindFlags findFlags;
+ 
+     if (options & DocumentationFindWidget::MatchCase)
+@@ -173,6 +193,7 @@ void StandardDocumentationView::searchIncremental(const QString& text, Documenta
+     // casesensitivity, that global matches are not updated and the ones with non-matching casing
+     // still active. no workaround so far.
+     d->m_view->page()->findText(text, findFlags);
++#endif
+ }
+ 
+ void StandardDocumentationView::finishSearch()
+@@ -180,7 +201,9 @@ void StandardDocumentationView::finishSearch()
+     Q_D(StandardDocumentationView);
+ 
+     // passing empty string to reset search, as told in API docs
++#if BUILD_DOC_VIEWER
+     d->m_view->page()->findText(QString());
++#endif
+ }
+ 
+ void StandardDocumentationView::initZoom(const QString& configSubGroup)
+@@ -235,6 +258,7 @@ void StandardDocumentationView::setOverrideCssCode(const QByteArray& cssCode)
+ {
+     Q_D(StandardDocumentationView);
+ 
++#if BUILD_DOC_VIEWER
+     const auto scriptName = QStringLiteral("OverrideCss");
+     auto& scripts = d->m_view->page()->scripts();
+ 
+@@ -268,20 +292,25 @@ void StandardDocumentationView::setOverrideCssCode(const QByteArray& cssCode)
+     script.setWorldId(QWebEngineScript::ApplicationWorld);
+ 
+     scripts.insert(script);
++#endif
+ }
+ 
+ void KDevelop::StandardDocumentationView::load(const QUrl& url)
+ {
+     Q_D(StandardDocumentationView);
+ 
++#if BUILD_DOC_VIEWER
+     d->m_view->page()->load(url);
++#endif
+ }
+ 
+ void KDevelop::StandardDocumentationView::setHtml(const QString& html)
+ {
+     Q_D(StandardDocumentationView);
+ 
++#if BUILD_DOC_VIEWER
+     d->m_view->page()->setHtml(html);
++#endif
+ }
+ 
+ void KDevelop::StandardDocumentationView::installUrlSchemeHandler(const QByteArray& scheme,
+@@ -289,25 +318,30 @@ void KDevelop::StandardDocumentationView::installUrlSchemeHandler(const QByteArr
+ {
+     Q_D(StandardDocumentationView);
+ 
++#if BUILD_DOC_VIEWER
+     if (QWebEngineUrlScheme::schemeByName(scheme).name() != scheme) {
+         qCWarning(DOCUMENTATION).nospace() << "unknown URL scheme " << scheme
+                                            << ", custom schemes must be registered early during startup, see "
+                                               "StandardDocumentationView::registerCustomUrlSchemes()";
+     }
+     d->m_view->page()->profile()->installUrlSchemeHandler(scheme, handler);
++#endif
+ }
+ 
+ void KDevelop::StandardDocumentationView::setDelegateLinks(bool delegate)
+ {
+     Q_D(StandardDocumentationView);
+ 
++#if BUILD_DOC_VIEWER
+     d->m_page->setLinkDelegating(delegate);
++#endif
+ }
+ 
+ QMenu* StandardDocumentationView::createStandardContextMenu()
+ {
+     Q_D(StandardDocumentationView);
+ 
++#if BUILD_DOC_VIEWER
+     auto menu = new QMenu(this);
+     auto copyAction = d->m_view->pageAction(QWebEnginePage::Copy);
+     if (copyAction) {
+@@ -315,12 +349,16 @@ QMenu* StandardDocumentationView::createStandardContextMenu()
+         menu->addAction(copyAction);
+     }
+     return menu;
++#else
++    return nullptr;
++#endif
+ }
+ 
+ bool StandardDocumentationView::eventFilter(QObject* object, QEvent* event)
+ {
+     Q_D(StandardDocumentationView);
+ 
++#if BUILD_DOC_VIEWER
+     if (object == d->m_view) {
+         /* HACK / Workaround for QTBUG-43602
+          * Need to set an eventFilter on the child of WebengineView because it swallows
+@@ -359,6 +397,9 @@ bool StandardDocumentationView::eventFilter(QObject* object, QEvent* event)
+         }
+     }
+     return QWidget::eventFilter(object, event);
++#else
++    return false;
++#endif
+ }
+ 
+ void StandardDocumentationView::contextMenuEvent(QContextMenuEvent* event)
+@@ -377,7 +418,9 @@ void StandardDocumentationView::updateZoomFactor(double zoomFactor)
+ {
+     Q_D(StandardDocumentationView);
+ 
++#if BUILD_DOC_VIEWER
+     d->m_view->setZoomFactor(zoomFactor);
++#endif
+ }
+ 
+ void StandardDocumentationView::keyReleaseEvent(QKeyEvent* event)
+diff --git a/plugins/qthelp/qthelpdocumentation.cpp b/plugins/qthelp/qthelpdocumentation.cpp
+index 3a762bc..e156360 100644
+--- a/plugins/qthelp/qthelpdocumentation.cpp
++++ b/plugins/qthelp/qthelpdocumentation.cpp
+@@ -6,6 +6,7 @@
+     SPDX-License-Identifier: LGPL-2.0-or-later
+ */
+ 
++#include "config-kdevelop.h"
+ #include "qthelpdocumentation.h"
+ 
+ #include <QBuffer>
+@@ -20,8 +21,10 @@
+ #include <QRegularExpression>
+ #include <QActionGroup>
+ #include <QThread>
++#if BUILD_DOC_VIEWER
+ #include <QWebEngineUrlRequestJob>
+ #include <QWebEngineUrlSchemeHandler>
++#endif
+ 
+ #include <KLocalizedString>
+ 
+@@ -330,6 +333,7 @@ QString QtHelpDocumentation::description() const
+ 
+ namespace {
+ 
++#if BUILD_DOC_VIEWER
+ class QtHelpSchemeHandler : public QWebEngineUrlSchemeHandler
+ {
+     Q_OBJECT
+@@ -373,6 +377,7 @@ public:
+ private:
+     const QtHelpProviderAbstract* const m_provider;
+ };
++#endif
+ 
+ } // unnamed namespace
+ 
+@@ -384,6 +389,7 @@ QWidget* QtHelpDocumentation::documentationWidget(DocumentationFindWidget* findW
+         auto* view = new StandardDocumentationView(findWidget, parent);
+         view->initZoom(m_provider->name());
+         view->setDelegateLinks(true);
++#if BUILD_DOC_VIEWER
+         view->installUrlSchemeHandler(QByteArrayLiteral("qthelp"), new QtHelpSchemeHandler(m_provider, this));
+         view->setContextMenuPolicy(Qt::CustomContextMenu);
+         QObject::connect(view, &StandardDocumentationView::linkClicked, this, &QtHelpDocumentation::jumpedTo);
+@@ -391,6 +397,9 @@ QWidget* QtHelpDocumentation::documentationWidget(DocumentationFindWidget* findW
+ 
+         view->load(currentUrl());
+         return view;
++#else
++        return new QLabel(i18n("Documentation viewer is disabled"), parent);
++#endif
+     }
+ }
+ 
+-- 
+2.50.1
+
+
+From 35c4bcb64f95f7de85e12031099beeb6cf5b2a3a Mon Sep 17 00:00:00 2001
+From: begasus <begasus@gmail.com>
+Date: Mon, 23 Dec 2024 21:51:03 +0000
+Subject: Build fix?
+
+
+diff --git a/plugins/cmake/parser/cmStandardLexer.h b/plugins/cmake/parser/cmStandardLexer.h
+index c489c03..aca1df7 100644
+--- a/plugins/cmake/parser/cmStandardLexer.h
++++ b/plugins/cmake/parser/cmStandardLexer.h
+@@ -3,7 +3,12 @@
+ #ifndef cmStandardLexer_h
+ #define cmStandardLexer_h
+ 
+-#include <QtGlobal>
++typedef signed char qint8;         /* 8 bit signed */
++typedef unsigned char quint8;      /* 8 bit unsigned */
++typedef short qint16;              /* 16 bit signed */
++typedef unsigned short quint16;    /* 16 bit unsigned */
++typedef int qint32;                /* 32 bit signed */
++typedef unsigned int quint32;      /* 32 bit unsigned */
+ 
+ /* Disable some warnings.  */
+ #if defined(_MSC_VER)
+-- 
+2.50.1
+
+
+From 41cfba901f5ecfcaa592ec15fe1ee5f4366607ad Mon Sep 17 00:00:00 2001
+From: Schrijvers Luc <begasus@gmail.com>
+Date: Tue, 26 Mar 2024 08:14:54 +0100
+Subject: Use system theme
+
+
+diff --git a/kdevplatform/shell/mainwindow_p.cpp b/kdevplatform/shell/mainwindow_p.cpp
+index 9c8861e..f412bda 100644
+--- a/kdevplatform/shell/mainwindow_p.cpp
++++ b/kdevplatform/shell/mainwindow_p.cpp
+@@ -315,10 +315,12 @@ void MainWindowPrivate::setupActions()
+     action->setWhatsThis( i18nc( "@info:whatsthis", "Adds a new tool view to this window." ) );
+ 
+     //Load themes
++#ifndef Q_OS_HAIKU
+     auto* const manager = new KColorSchemeManager(this);
+     auto* const colorSelectionMenu = KColorSchemeMenu::createMenu(manager, actionCollection());
+     colorSelectionMenu->menu()->setTitle(i18n("&Window Color Scheme"));
+     actionCollection()->addAction(QStringLiteral("colorscheme_menu"), colorSelectionMenu);
++#endif
+ }
+ 
+ void MainWindowPrivate::toggleArea(bool b)
+-- 
+2.50.1
+
