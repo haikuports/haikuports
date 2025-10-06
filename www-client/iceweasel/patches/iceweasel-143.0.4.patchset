@@ -1,4 +1,4 @@
-From f5ff1d1e7bced1c13e1f55f20e5ae956dd38c8b6 Mon Sep 17 00:00:00 2001
+From dceffb069be8498507480c231561a0abf04a5e24 Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
 Date: Thu, 2 Oct 2025 21:41:00 +1000
 Subject: Add Haiku build support
@@ -5932,6 +5932,200 @@ index dbd9993..1431340 100644
  #  endif
  #  include <sys/types.h>
  #  include <signal.h>
+-- 
+2.50.1
+
+
+From b94e4a8c930e40defd9fde07db8a3ffc6de42db9 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Mon, 6 Oct 2025 13:13:03 +1000
+Subject: Fix timezone
+
+
+diff --git a/js/src/vm/DateTime.cpp b/js/src/vm/DateTime.cpp
+index ca220ac..f773ef5 100644
+--- a/js/src/vm/DateTime.cpp
++++ b/js/src/vm/DateTime.cpp
+@@ -10,6 +10,15 @@
+ #  include "mozilla/intl/ICU4CGlue.h"
+ #  include "mozilla/intl/TimeZone.h"
+ #endif
++
++#if JS_HAS_INTL_API && defined(__HAIKU__)
++#  pragma GCC visibility push(default)
++#  include <locale/LocaleRoster.h>
++#  include <locale/TimeZone.h>
++#  include <support/String.h>
++#  pragma GCC visibility pop
++#endif
++
+ #include "mozilla/ScopeExit.h"
+ #include "mozilla/Span.h"
+ #include "mozilla/TextUtils.h"
+@@ -784,6 +793,21 @@ void js::DateTimeInfo::internalResyncICUDefaultTimeZone() {
+     return;
+   }
+ 
++#if defined(__HAIKU__)
++  BTimeZone timeZone;
++  if (BLocaleRoster::Default()->GetDefaultTimeZone(&timeZone) == B_OK) {
++    BString timeZoneID = timeZone.ID();
++    if (timeZoneID.Length() > 0) {
++      mozilla::Span<const char> tzid(timeZoneID.String(),
++                                      timeZoneID.Length());
++      auto result = mozilla::intl::TimeZone::SetDefaultTimeZone(tzid);
++      if (result.isOk() && result.unwrap()) {
++        return;
++      }
++    }
++  }
++  (void)mozilla::intl::TimeZone::SetDefaultTimeZoneFromHostTimeZone();
++#else
+   if (const char* tzenv = std::getenv("TZ")) {
+     std::string_view tz(tzenv);
+ 
+@@ -845,5 +869,6 @@ void js::DateTimeInfo::internalResyncICUDefaultTimeZone() {
+   // Intentionally ignore any errors, because we don't have a good way to report
+   // errors from this function.
+   (void)mozilla::intl::TimeZone::SetDefaultTimeZoneFromHostTimeZone();
+-#endif
++#endif /* __HAIKU__ */
++#endif /* JS_HAS_INTL_API */
+ }
+diff --git a/nsprpub/pr/src/misc/Makefile.in b/nsprpub/pr/src/misc/Makefile.in
+index 3d87da2..64b9b29 100644
+--- a/nsprpub/pr/src/misc/Makefile.in
++++ b/nsprpub/pr/src/misc/Makefile.in
+@@ -45,6 +45,12 @@ CSRCS += \
+ 	$(NULL)
+ endif
+ 
++ifeq ($OS_ARCH),Haiku)
++CPPSRCS += \
++	prhaiku.cpp \
++	$(NULL)
++endif
++
+ TARGETS	= $(OBJS)
+ 
+ INCLUDES = -I$(dist_includedir) -I$(topsrcdir)/pr/include -I$(topsrcdir)/pr/include/private
+diff --git a/nsprpub/pr/src/misc/prhaiku.cpp b/nsprpub/pr/src/misc/prhaiku.cpp
+new file mode 100644
+index 0000000..7532003
+--- /dev/null
++++ b/nsprpub/pr/src/misc/prhaiku.cpp
+@@ -0,0 +1,46 @@
++/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/*
++ * Haiku-specific time zone support using native BTimeZone API
++ */
++
++#if defined(__HAIKU__)
++
++#pragma GCC visibility push(default)
++#include <locale/LocaleRoster.h>
++#include <locale/TimeZone.h>
++#include <support/String.h>
++#pragma GCC visibility pop
++
++extern "C" {
++
++int32_t _PR_Haiku_GetTimeZoneOffset(void) {
++  BTimeZone timeZone;
++  if (BLocaleRoster::Default()->GetDefaultTimeZone(&timeZone) != B_OK) {
++    return 0;
++  }
++  return timeZone.OffsetFromGMT();
++}
++
++int32_t _PR_Haiku_GetDSTOffset(int64_t utcTimeInSeconds) {
++  BTimeZone timeZone;
++  if (BLocaleRoster::Default()->GetDefaultTimeZone(&timeZone) != B_OK) {
++    return 0;
++  }
++
++  bigtime_t utcTime = utcTimeInSeconds * 1000000LL;
++  if (!timeZone.IsDaylightSavingTime(utcTime)) {
++    return 0;
++  }
++
++  int32_t fullOffset = timeZone.OffsetFromGMT(utcTime);
++  int32_t standardOffset = timeZone.OffsetFromGMT();
++  return fullOffset - standardOffset;
++}
++
++}  // extern "C"
++
++#endif  // __HAIKU__
+diff --git a/nsprpub/pr/src/misc/prtime.c b/nsprpub/pr/src/misc/prtime.c
+index da917ad..370f1dd 100644
+--- a/nsprpub/pr/src/misc/prtime.c
++++ b/nsprpub/pr/src/misc/prtime.c
+@@ -21,6 +21,11 @@
+ #include <errno.h> /* for EINVAL */
+ #include <time.h>
+ 
++#if defined(__HAIKU__)
++extern int32_t _PR_Haiku_GetTimeZoneOffset(void);
++extern int32_t _PR_Haiku_GetDSTOffset(int64_t utcTimeInSeconds);
++#endif
++
+ /*
+  * The COUNT_LEAPS macro counts the number of leap years passed by
+  * till the start of the given year Y.  At the start of the year 4
+@@ -556,7 +561,47 @@ void _PR_CleanupTime(void) {
+ #endif
+ }
+ 
+-#if defined(XP_UNIX) || defined(XP_PC)
++#if defined(__HAIKU__)
++
++PR_IMPLEMENT(PRTimeParameters)
++PR_LocalTimeParameters(const PRExplodedTime* gmt) {
++  PRTimeParameters retVal;
++  PRTime secs64;
++  PRInt64 usecPerSec;
++  PRInt64 usecPerSec_1;
++  PRInt64 maxInt32;
++  PRInt64 minInt32;
++  int64_t utcSeconds;
++
++  retVal.tp_gmt_offset = _PR_Haiku_GetTimeZoneOffset();
++
++  secs64 = PR_ImplodeTime(gmt);
++  LL_I2L(usecPerSec, PR_USEC_PER_SEC);
++  LL_I2L(usecPerSec_1, PR_USEC_PER_SEC - 1);
++
++  if (LL_GE_ZERO(secs64)) {
++    LL_DIV(secs64, secs64, usecPerSec);
++  } else {
++    LL_NEG(secs64, secs64);
++    LL_ADD(secs64, secs64, usecPerSec_1);
++    LL_DIV(secs64, secs64, usecPerSec);
++    LL_NEG(secs64, secs64);
++  }
++
++  LL_I2L(maxInt32, PR_INT32_MAX);
++  LL_I2L(minInt32, PR_INT32_MIN);
++  if (LL_CMP(secs64, >, maxInt32) || LL_CMP(secs64, <, minInt32)) {
++    retVal.tp_dst_offset = 0;
++    return retVal;
++  }
++
++  LL_L2I(utcSeconds, secs64);
++  retVal.tp_dst_offset = _PR_Haiku_GetDSTOffset(utcSeconds);
++
++  return retVal;
++}
++
++#elif defined(XP_UNIX) || defined(XP_PC)
+ 
+ PR_IMPLEMENT(PRTimeParameters)
+ PR_LocalTimeParameters(const PRExplodedTime* gmt) {
 -- 
 2.50.1
 
