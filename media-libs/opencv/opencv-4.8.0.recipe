@@ -10,7 +10,7 @@ COPYRIGHT="2000-2020, Intel Corporation
 	2015-2016, Itseez Inc.
 	2019-2020, Xperience AI"
 LICENSE="BSD (3-clause)"
-REVISION="3"
+REVISION="4"
 SOURCE_URI="https://github.com/opencv/opencv/archive/$portVersion.tar.gz"
 SOURCE_FILENAME="opencv-$portVersion.tar.gz"
 CHECKSUM_SHA256="cbf47ecc336d2bff36b0dcd7d6c179a9bb59e805136af6b9670ca944aef889bd"
@@ -28,6 +28,14 @@ commandBinDir=$binDir
 if [ "$targetArchitecture" = x86_gcc2 ]; then
 	commandSuffix=
 	commandBinDir=$prefix/bin
+fi
+
+pythonModuleEnabled=true
+
+# Building the python bindings fails on beta5 32 bits with an OOM error.
+# Try re-enabling it after beta6 (new allocator might fix things).
+if [ "$targetArchitecture" = x86_gcc2 ]; then
+	pythonModuleEnabled=false
 fi
 
 portVersionCompat="$portVersion compat >= ${portVersion%%.*}"
@@ -196,26 +204,29 @@ REQUIRES_devel="
 pythonVersion=3.10
 pythonPackage=python${pythonVersion//.}
 
-# Allows using dot in sub-package names (eg: "_python3.10" vs "_python310"):
-eval "PACKAGE_NAME_$pythonPackage=\"${portName}_python$pythonVersion\""
+if $pythonModuleEnabled; then
+	# Allows using dot in sub-package names (eg: "_python3.10" vs "_python310"):
+	eval "PACKAGE_NAME_$pythonPackage=\"${portName}_python$pythonVersion\""
 
-eval "PROVIDES_$pythonPackage=\"
-	${portName}_python$pythonVersion = $portVersionCompat
-	\""
-
-if [ -n "$secondaryArchSuffix" ]; then
-	eval "PROVIDES_${pythonPackage}+=\"
-		${portBaseName}_python$pythonVersion= $portVersionCompat
+	eval "PROVIDES_$pythonPackage=\"
+		${portName}_python$pythonVersion = $portVersionCompat
 		\""
+
+	if [ -n "$secondaryArchSuffix" ]; then
+		eval "PROVIDES_${pythonPackage}+=\"
+			${portBaseName}_python$pythonVersion= $portVersionCompat
+			\""
+	fi
+
+	eval "REQUIRES_$pythonPackage=\"
+		haiku$secondaryArchSuffix
+		opencv$secondaryArchSuffix == $portVersion base
+		numpy_$pythonPackage
+		cmd:python$pythonVersion
+		\""
+
+	eval "REPLACES_$pythonPackage=\"${portName}_python\""
 fi
-
-eval "REQUIRES_$pythonPackage=\"
-	haiku$secondaryArchSuffix
-	opencv$secondaryArchSuffix == $portVersion base
-	cmd:python$pythonVersion
-	\""
-
-eval "REPLACES_$pythonPackage=\"${portName}_python\""
 
 PROVIDES_tools="
 	opencv${secondaryArchSuffix}_tools = $portVersionCompat
@@ -230,8 +241,6 @@ PROVIDES_tools="
 REQUIRES_tools="
 	haiku$secondaryArchSuffix
 	opencv$secondaryArchSuffix == $portVersion base
-	numpy_$pythonPackage
-	cmd:python$pythonVersion
 	"
 
 BUILD_REQUIRES="
@@ -285,7 +294,6 @@ BUILD_PREREQUIRES="
 #	cmd:ant
 	cmd:cmake
 	cmd:doxygen
-	numpy_$pythonPackage
 	cmd:gcc$secondaryArchSuffix
 #	cmd:javac
 #	cmd:jni
@@ -293,8 +301,13 @@ BUILD_PREREQUIRES="
 	cmd:make
 #	cmd:matlab # maybe later
 	cmd:pkg_config$secondaryArchSuffix
-	cmd:python$pythonVersion
 	"
+if $pythonModuleEnabled; then
+	BUILD_PREREQUIRES+="
+		numpy_$pythonPackage
+		cmd:python$pythonVersion
+		"
+fi
 
 defineDebugInfoPackage opencv$secondaryArchSuffix \
 	$libDir/libopencv_alphamat.so.$libVersion \
@@ -355,6 +368,23 @@ defineDebugInfoPackage opencv$secondaryArchSuffix \
 
 BUILD()
 {
+	withPythonBindings=
+	if $pythonModuleEnabled; then
+		withPythonBindings="
+			-DBUILD_opencv_python3=ON \
+			-DBUILD_opencv_python_bindings_generator=ON \
+			-DBUILD_opencv_python_tests=OFF
+			-DOPENCV_PYTHON3_INSTALL_PATH="$prefix/lib/python$pythonVersion/vendor-packages" \
+			-DPYTHON3_NUMPY_INCLUDE_DIRS:PATH="`finddir B_SYSTEM_LIB_DIRECTORY`/python$pythonVersion/vendor-packages/numpy/_core/include" \
+			"
+	else
+		withPythonBindings="
+			-DBUILD_opencv_python3=OFF \
+			-DBUILD_opencv_python_bindings_generator=OFF \
+			-DBUILD_opencv_python_tests=OFF
+			"
+	fi
+
 	mkdir -p build_haiku && cd build_haiku
 
 	local ARCH_SUBDIR=
@@ -383,13 +413,12 @@ BUILD()
 		-DOPENCV_OTHER_INSTALL_PATH:PATH="$dataDir" \
 		-DOpenBLAS_INCLUDE_DIR="$portPackageLinksDir/openblas${secondaryArchSuffix}_devel/develop/headers/$ARCH_SUBDIR" \
 		-DOpenBLAS_LIB="$portPackageLinksDir/openblas${secondaryArchSuffix}_devel/develop/lib/$ARCH_SUBDIR" \
-		-DOPENCV_PYTHON3_INSTALL_PATH="$prefix/lib/python$pythonVersion/vendor-packages" \
-		-DPYTHON3_NUMPY_INCLUDE_DIRS:PATH="`finddir B_SYSTEM_LIB_DIRECTORY`/python$pythonVersion/vendor-packages/numpy/_core/include" \
 		-DOPENCV_EXTRA_MODULES_PATH="$sourceDir2/opencv_contrib-$portVersion/modules" \
 		-DEigen3_DIR=`finddir B_SYSTEM_DATA_DIRECTORY`/eigen3/cmake \
+		$withPythonBindings \
 		-Wno-dev
 
-	make VERBOSE=1
+	make $jobArgs
 }
 
 INSTALL()
@@ -475,8 +504,10 @@ INSTALL()
 		$libDir/cmake
 
 	# python package
-	packageEntries $pythonPackage \
-		$prefix/lib/python*
+	if $pythonModuleEnabled; then
+		packageEntries $pythonPackage \
+			$prefix/lib/python*
+	fi
 
 	# tools package
 	packageEntries tools \
