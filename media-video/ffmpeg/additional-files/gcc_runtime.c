@@ -402,3 +402,25 @@ __ctzdi2 (UDWtype x)
   count_trailing_zeros (ret, word);
   return ret + add;
 }
+
+#define POPCOUNTCST2(x) (((UWtype) x << __CHAR_BIT__) | x)
+#define POPCOUNTCST4(x) (((UWtype) x << (2 * __CHAR_BIT__)) | x)
+#define POPCOUNTCST8(x) (((UWtype) x << (4 * __CHAR_BIT__)) | x)
+#if W_TYPE_SIZE == __CHAR_BIT__
+#define POPCOUNTCST(x) x
+#elif W_TYPE_SIZE == 2 * __CHAR_BIT__
+#define POPCOUNTCST(x) POPCOUNTCST2 (x)
+#elif W_TYPE_SIZE == 4 * __CHAR_BIT__
+#define POPCOUNTCST(x) POPCOUNTCST4 (POPCOUNTCST2 (x))
+#elif W_TYPE_SIZE == 8 * __CHAR_BIT__
+#define POPCOUNTCST(x) POPCOUNTCST8 (POPCOUNTCST4 (POPCOUNTCST2 (x)))
+#endif
+
+int
+__popcountsi2 (UWtype x)
+{
+  x = x - ((x >> 1) & POPCOUNTCST (0x55));
+  x = (x & POPCOUNTCST (0x33)) + ((x >> 2) & POPCOUNTCST (0x33));
+  x = (x + (x >> 4)) & POPCOUNTCST (0x0F);
+  return (x * POPCOUNTCST (0x01)) >> (W_TYPE_SIZE - __CHAR_BIT__);
+}
