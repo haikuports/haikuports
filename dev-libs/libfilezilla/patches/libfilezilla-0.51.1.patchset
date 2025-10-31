@@ -1,0 +1,249 @@
+From 50f80d453c35b9d932e9d000b8a868858a2da1a8 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Sun, 20 Nov 2022 10:35:55 +0100
+Subject: fix includes on Haiku
+
+
+diff --git a/lib/local_filesys.cpp b/lib/local_filesys.cpp
+index 22e9122..101be74 100644
+--- a/lib/local_filesys.cpp
++++ b/lib/local_filesys.cpp
+@@ -10,7 +10,7 @@
+ #include <winternl.h>
+ #else
+ #include <errno.h>
+-#include <sys/fcntl.h>
++#include <posix/fcntl.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include <unistd.h>
+diff --git a/lib/process.cpp b/lib/process.cpp
+index 5f24b96..92bf378 100644
+--- a/lib/process.cpp
++++ b/lib/process.cpp
+@@ -568,7 +568,9 @@ private:
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <signal.h>
++#ifndef __HAIKU__
+ #include <sys/syscall.h>
++#endif
+ #include <sys/wait.h>
+ #include <string.h>
+ #include <unistd.h>
+-- 
+2.51.0
+
+
+From 3e41cca1dbf4339ec56209863a553f09030e9f5d Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Sun, 20 Nov 2022 10:35:55 +0100
+Subject: Haiku: use crypt() instead of crypt_r()
+
+
+diff --git a/lib/impersonation.cpp b/lib/impersonation.cpp
+index 2e7b20a..03c3f3e 100644
+--- a/lib/impersonation.cpp
++++ b/lib/impersonation.cpp
+@@ -206,8 +206,13 @@ bool check_auth(native_string const& username, native_string const& password)
+ #if FZ_UNIX
+ 	auto shadow = get_shadow(username);
+ 	if (shadow.shadow_) {
++#ifdef __HAIKU__
++		//FIXME
++		char* encrypted = crypt(password.c_str(), shadow.shadow_->sp_pwdp);
++#else
+ 		struct crypt_data data{};
+ 		char* encrypted = crypt_r(password.c_str(), shadow.shadow_->sp_pwdp, &data);
++#endif
+ 		if (encrypted && !strcmp(encrypted, shadow.shadow_->sp_pwdp)) {
+ 			return true;
+ 		}
+-- 
+2.51.0
+
+
+From a4dcb4bb4f364e444646913059860cb8978afce5 Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Sun, 20 Nov 2022 10:35:55 +0100
+Subject: configure: detect crypt.h and -lcrypt
+
+
+diff --git a/configure.ac b/configure.ac
+index 2207a6a..b3385df 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -129,6 +129,11 @@ CHECK_STRUCT_STAT_ST_MTIM
+ 
+ AC_CHECK_DECLS([pthread_condattr_setclock], [], [], [[#include <pthread.h>]])
+ 
++if test "$unix" = "1"; then
++  AC_CHECK_HEADERS([crypt.h])
++  AC_SEARCH_LIBS([crypt], [crypt])
++fi
++
+ if test "$windows" = "1"; then
+   libdeps="-lws2_32 -liphlpapi"
+ else
+diff --git a/lib/Makefile.am b/lib/Makefile.am
+index b157b08..466636b 100644
+--- a/lib/Makefile.am
++++ b/lib/Makefile.am
+@@ -164,10 +164,6 @@ if FZ_MAC
+ libfilezilla_la_LDFLAGS += -framework CoreServices
+ endif
+ 
+-if FZ_UNIX
+-libfilezilla_la_LDFLAGS += -lcrypt
+-endif
+-
+ libfilezilla_la_CPPFLAGS = $(AM_CPPFLAGS)
+ libfilezilla_la_CPPFLAGS += -I$(top_builddir)/config
+ libfilezilla_la_CPPFLAGS += -DBUILDING_LIBFILEZILLA
+diff --git a/lib/impersonation.cpp b/lib/impersonation.cpp
+index 03c3f3e..8f7160d 100644
+--- a/lib/impersonation.cpp
++++ b/lib/impersonation.cpp
+@@ -28,7 +28,9 @@ impersonation_token::impersonation_token(fz::native_string const& username, impe
+ #include <tuple>
+ 
+ #if FZ_UNIX
++#ifdef HAVE_CRYPT_H
+ #include <crypt.h>
++#endif
+ #include <shadow.h>
+ #endif
+ #include <grp.h>
+-- 
+2.51.0
+
+
+From 4718a33704f11f1cb9c49ad127b21c798ee31e5a Mon Sep 17 00:00:00 2001
+From: David Karoly <david.karoly@outlook.com>
+Date: Sun, 20 Nov 2022 10:35:55 +0100
+Subject: configure: detect -lnetwork
+
+
+diff --git a/configure.ac b/configure.ac
+index b3385df..d3c95f2 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -134,6 +134,8 @@ if test "$unix" = "1"; then
+   AC_SEARCH_LIBS([crypt], [crypt])
+ fi
+ 
++AC_SEARCH_LIBS([socket], [network])
++
+ if test "$windows" = "1"; then
+   libdeps="-lws2_32 -liphlpapi"
+ else
+-- 
+2.51.0
+
+
+From 770de93a096e94c9f7e0fee75107ba4364ec40b3 Mon Sep 17 00:00:00 2001
+From: Luc Schrijvers <begasus@gmail.com>
+Date: Fri, 31 Oct 2025 10:36:50 +0100
+Subject: Haiku (beta5) doesn't have ESOCKTNOSUPPORT
+
+
+diff --git a/lib/socket_errors.cpp b/lib/socket_errors.cpp
+index 3c1f090..53f165b 100644
+--- a/lib/socket_errors.cpp
++++ b/lib/socket_errors.cpp
+@@ -107,7 +107,9 @@ std::unordered_map<int, Error> const& get_errors()
+ 	#ifdef EADDRNOTAVAIL
+ 		insert(EADDRNOTAVAIL, fztranslate_mark("Cannot assign requested address"));
+ 	#endif
++#ifndef __HAIKU__
+ 		insert(ESOCKTNOSUPPORT, fztranslate_mark("Socket type not supported"));
++#endif
+ 
+ 	// Codes that have no POSIX equivalence
+ 	#ifdef FZ_WINDOWS
+-- 
+2.51.0
+
+
+From 9b30da3954013efc40204655b7c163d8b1acb4d0 Mon Sep 17 00:00:00 2001
+From: Begasus <begasus@gmail.com>
+Date: Fri, 31 Oct 2025 12:05:39 +0100
+Subject: applying patch gcc13.patch
+
+
+diff --git a/lib/libfilezilla/buffer.hpp b/lib/libfilezilla/buffer.hpp
+index 51e2de3..c583508 100644
+--- a/lib/libfilezilla/buffer.hpp
++++ b/lib/libfilezilla/buffer.hpp
+@@ -5,6 +5,7 @@
+ 
+ #include <vector>
+ #include <type_traits>
++#include <cstdint>
+ 
+ /** \file
+ * \brief Declares fz::buffer
+diff --git a/lib/libfilezilla/encode.hpp b/lib/libfilezilla/encode.hpp
+index f5af0e3..ed4fa93 100644
+--- a/lib/libfilezilla/encode.hpp
++++ b/lib/libfilezilla/encode.hpp
+@@ -5,6 +5,7 @@
+ 
+ #include <string>
+ #include <vector>
++#include <cstdint>
+ 
+ /** \file
+  * \brief Functions to encode/decode strings
+diff --git a/lib/libfilezilla/encryption.hpp b/lib/libfilezilla/encryption.hpp
+index 722dab6..198c5e4 100644
+--- a/lib/libfilezilla/encryption.hpp
++++ b/lib/libfilezilla/encryption.hpp
+@@ -14,6 +14,7 @@
+ 
+ #include <vector>
+ #include <string>
++#include <cstdint>
+ 
+ namespace fz {
+ 
+diff --git a/lib/libfilezilla/hash.hpp b/lib/libfilezilla/hash.hpp
+index d5f4ebb..1c30681 100644
+--- a/lib/libfilezilla/hash.hpp
++++ b/lib/libfilezilla/hash.hpp
+@@ -9,6 +9,7 @@
+ 
+ #include <vector>
+ #include <string>
++#include <cstdint>
+ 
+ namespace fz {
+ 
+diff --git a/lib/libfilezilla/nonowning_buffer.hpp b/lib/libfilezilla/nonowning_buffer.hpp
+index 6e63094..3cb288b 100644
+--- a/lib/libfilezilla/nonowning_buffer.hpp
++++ b/lib/libfilezilla/nonowning_buffer.hpp
+@@ -3,6 +3,8 @@
+ 
+ #include "libfilezilla.hpp"
+ 
++#include <cstdint>
++
+ /** \file
+ * \brief Declares fz::nonowning_buffer
+ */
+diff --git a/lib/libfilezilla/signature.hpp b/lib/libfilezilla/signature.hpp
+index f95afc0..bd7f4b6 100644
+--- a/lib/libfilezilla/signature.hpp
++++ b/lib/libfilezilla/signature.hpp
+@@ -11,6 +11,7 @@
+ 
+ #include <vector>
+ #include <string>
++#include <cstdint>
+ 
+ namespace fz {
+ 
+-- 
+2.51.0
+
