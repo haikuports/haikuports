@@ -21,21 +21,67 @@ elif [ "$1" = "2" ]; then
 	echo "$wadname selected"
 fi
 
+# Can only have 3 buttons on these kinds of alerts AFAICT
+
+# Slot 1 is reserved for Chocolate Doom
 if [ $(command -v chocolate-doom) ]; then
 	port1="chocolate-doom"
 	port1name="Chocolate Doom"
 	echo "Chocolate Doom detected"
 fi
 
-if [ $(command -v GZDoom) ]; then
+# Slot 2 is for PrBoom+
+if [ $(command -v prboom-plus) ]; then
+	if [ "$port1" = "" ]; then
+		port1="prboom-plus"
+		port1name="PrBoom+"
+	elif [ "$port2" = "" ]; then
+		port2="prboom-plus"
+		port2name="PrBoom+"
+	fi
+	echo "PrBoom+ detected"
+fi
+
+# Slot 3 is UZDoom > GZDoom 4 > LZDoom > GZDoom 3
+# But can still populate earlier slots
+if [ $(command -v UZDoom) ]; then
+	if [ "$port1" = "" ]; then
+		port1="UZDoom"
+		port1name=$port1
+	elif [ "$port2" = "" ]; then
+		port2="UZDoom"
+		port2name=$port2
+	elif [ "$port3" = "" ]; then
+		port3="UZDoom"
+		port3name=$port3
+	fi
+	echo "UZDoom detected"
+elif [ $(command -v GZDoom) ]; then
 	if [ "$port1" = "" ]; then
 		port1="GZDoom"
 		port1name=$port1
 	elif [ "$port2" = "" ]; then
 		port2="GZDoom"
 		port2name=$port2
+	elif [ "$port3" = "" ]; then
+		port3="GZDoom"
+		port3name=$port3
 	fi
 	echo "GZDoom detected"
+fi
+
+if [ $(command -v LZDoom) ]; then
+	if [ "$port1" = "" ]; then
+		port1="LZDoom"
+		port1name=$port1
+	elif [ "$port2" = "" ]; then
+		port2="LZDoom"
+		port2name=$port2
+	elif [ "$port3" = "" ]; then
+		port3="LZDoom"
+		port3name=$port3
+	fi
+	echo "LZDoom detected"
 fi
 
 if [ -e $(finddir B_SYSTEM_APPS_DIRECTORY)/GZDoom/GZDoom ]; then
@@ -45,22 +91,23 @@ if [ -e $(finddir B_SYSTEM_APPS_DIRECTORY)/GZDoom/GZDoom ]; then
 	elif [ "$port2" = "" ]; then
 		port2="$(finddir B_SYSTEM_APPS_DIRECTORY)/GZDoom/GZDoom"
 		port2name="GZDoom (Legacy)"
+	elif [ "$port3" = "" ]; then
+		port3="$(finddir B_SYSTEM_APPS_DIRECTORY)/GZDoom/GZDoom"
+		port3name="GZDoom (Legacy)"
 	fi
 	echo "GZDoom (Legacy) detected"
-fi
-
-if [ $(command -v prboom-plus) ]; then
+elif [ -e $(finddir B_USER_APPS_DIRECTORY)/GZDoom/GZDoom ]; then
 	if [ "$port1" = "" ]; then
-		port1="prboom-plus"
-		port1name="PrBoom+"
+		port1="$(finddir B_USER_APPS_DIRECTORY)/GZDoom/GZDoom"
+		port1name="GZDoom (Legacy)"
 	elif [ "$port2" = "" ]; then
-		port2="prboom-plus"
-		port2name="PrBoom+"
+		port2="$(finddir B_USER_APPS_DIRECTORY)/GZDoom/GZDoom"
+		port2name="GZDoom (Legacy)"
 	elif [ "$port3" = "" ]; then
-		port3="prboom-plus"
-		port3name="PrBoom+"
+		port3="$(finddir B_USER_APPS_DIRECTORY)/GZDoom/GZDoom"
+		port3name="GZDoom (Legacy)"
 	fi
-	echo "PrBoom+ detected"
+	echo "GZDoom (Legacy) detected"
 fi
 
 if [ "$port1" = "" ]; then
