@@ -11,12 +11,21 @@ channels."
 HOMEPAGE="https://developers.google.com/speed/webp"
 COPYRIGHT="2011-2025 Google Inc."
 LICENSE="BSD (3-clause)"
-REVISION="1"
+REVISION="2"
 SOURCE_URI="http://downloads.webmproject.org/releases/webp/libwebp-$portVersion.tar.gz"
 CHECKSUM_SHA256="e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
+PATCHES="libwebp-$portVersion.patchset"
 
 ARCHITECTURES="all"
 SECONDARY_ARCHITECTURES="x86"
+
+# On x86_gcc2 we don't want to install the commands in bin/<arch>/, but in bin/.
+commandBinDir=$binDir
+commandSuffix=$secondaryArchSuffix
+if [ "$targetArchitecture" = x86_gcc2 ]; then
+	commandSuffix=
+	commandBinDir=$prefix/bin
+fi
 
 webpLibs="\
 	libsharpyuv \
@@ -36,12 +45,6 @@ done
 
 PROVIDES="
 	libwebp$secondaryArchSuffix = $portVersion
-	cmd:cwebp$secondaryArchSuffix
-	cmd:dwebp$secondaryArchSuffix
-	cmd:gif2webp$secondaryArchSuffix
-	cmd:img2webp$secondaryArchSuffix
-	cmd:webpinfo$secondaryArchSuffix
-	cmd:webpmux$secondaryArchSuffix
 	lib:libsharpyuv$secondaryArchSuffix = $libsharpyuvVersionCompat
 	lib:libwebp$secondaryArchSuffix = $libwebpVersionCompat
 	lib:libwebpdecoder$secondaryArchSuffix = $libwebpdecoderVersionCompat
@@ -69,6 +72,20 @@ REQUIRES_devel="
 	libwebp$secondaryArchSuffix == $portVersion base
 	"
 
+PROVIDES_tools="
+	libwebp${secondaryArchSuffix}_tools = $portVersion
+	cmd:cwebp$commandSuffix
+	cmd:dwebp$commandSuffix
+	cmd:gif2webp$commandSuffix
+	cmd:img2webp$commandSuffix
+	cmd:webpinfo$commandSuffix
+	cmd:webpmux$commandSuffix
+	"
+REQUIRES_tools="
+	libwebp$secondaryArchSuffix == $portVersion base
+	$REQUIRES
+	"
+
 BUILD_REQUIRES="
 	haiku${secondaryArchSuffix}_devel
 	devel:libgif$secondaryArchSuffix >= 7
@@ -79,22 +96,18 @@ BUILD_REQUIRES="
 	devel:libz$secondaryArchSuffix
 	"
 BUILD_PREREQUIRES="
-	cmd:aclocal
-	cmd:autoreconf
-	cmd:awk
-	cmd:find
+	cmd:cmake
 	cmd:gcc$secondaryArchSuffix
-	cmd:libtoolize$secondaryArchSuffix
 	cmd:make
 	"
 
 defineDebugInfoPackage libwebp$secondaryArchSuffix \
-	"$binDir"/cwebp \
-	"$binDir"/dwebp \
-	"$binDir"/gif2webp \
-	"$binDir"/img2webp \
-	"$binDir"/webpinfo \
-	"$binDir"/webpmux \
+	"$(getPackagePrefix tools)"/bin/cwebp \
+	"$(getPackagePrefix tools)"/bin/dwebp \
+	"$(getPackagePrefix tools)"/bin/gif2webp \
+	"$(getPackagePrefix tools)"/bin/img2webp \
+	"$(getPackagePrefix tools)"/bin/webpinfo \
+	"$(getPackagePrefix tools)"/bin/webpmux \
 	"$libDir"/libwebp.so.$libwebpVersion \
 	"$libDir"/libwebpdecoder.so.$libwebpdecoderVersion \
 	"$libDir"/libwebpdemux.so.$libwebpdemuxVersion \
@@ -102,24 +115,22 @@ defineDebugInfoPackage libwebp$secondaryArchSuffix \
 
 BUILD()
 {
-	autoreconf -vfi
+	cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+		$cmakeDirArgs \
+		-DCMAKE_INSTALL_BINDIR=$commandBinDir \
+		-DBUILD_SHARED_LIBS=ON \
+		-DWEBP_BUILD_VWEBP=OFF
 
-	if [ "$targetArchitecture" = x86_gcc2 ]; then
-		SSE_OPTIONS="--disable-sse4.1 --disable-sse2"
-	fi
+	# Mimic autotools build without --enable-asserts
+	CFLAGS+=" -DNDEBUG"
+	CXXFLAGS+=" -DNDEBUG"
 
-	runConfigure ./configure \
-		--enable-libwebpdemux --enable-libwebpmux \
-		--enable-libwebpdecoder --enable-libwebpextras \
-		--enable-swap-16bit-csp --disable-static $SSE_OPTIONS
-	make $jobArgs
+	make -C build $jobArgs
 }
 
 INSTALL()
 {
-	make install
-
-	rm -f $libDir/*.la
+	make -C build install
 
 	prepareInstalledDevelLibs $webpLibs
 	fixPkgconfig
@@ -134,15 +145,19 @@ INSTALL()
 		maybe_manDir=$manDir
 	fi
 
+	# tools package
+	packageEntries tools \
+		$commandBinDir \
+		$maybe_manDir
+
 	#devel package
 	packageEntries devel \
 		$developDir \
-		$maybe_manDir
-
-	rm -r $documentationDir
+		$libDir/cmake
 }
 
 TEST()
 {
-	make check
+	# need fuzz-tests to be enabled (git fetching from upstream)
+	ctest --test-dir build --output-on-failure
 }
