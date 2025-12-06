@@ -1,0 +1,113 @@
+From 0445e299fd8062b0613cf5a349c6e46c395c3616 Mon Sep 17 00:00:00 2001
+From: user0-07161 <user0thenyancat@proton.me>
+Date: Wed, 3 Dec 2025 17:54:39 +0000
+Subject: [PATCH] make it compile on haiku, avoid broken checks
+
+---
+ blink/hostfs.c              | 10 ++++++++--
+ tool/config/clock_settime.c |  4 ++++
+ tool/config/sendto_zero.c   |  7 ++++++-
+ 3 files changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/blink/hostfs.c b/blink/hostfs.c
+index 0382528..5e36409 100644
+--- a/blink/hostfs.c
++++ b/blink/hostfs.c
+@@ -911,7 +911,10 @@ int HostfsFcntl(struct VfsInfo *info, int cmd, va_list args) {
+   if (hostinfo == NULL) {
+     return enoent();
+   }
+-  if (cmd == F_GETFD || cmd == F_GETFL || cmd == F_GETOWN
++  if (cmd == F_GETFD || cmd == F_GETFL
++#ifdef F_GETOWN
++      || cmd == F_GETOWN
++#endif
+ #ifdef F_GETSIG
+       || cmd == F_GETSIG
+ #endif
+@@ -926,7 +929,10 @@ int HostfsFcntl(struct VfsInfo *info, int cmd, va_list args) {
+ #endif
+   ) {
+     rc = fcntl(hostinfo->filefd, cmd);
+-  } else if (cmd == F_SETFD || cmd == F_SETFL || cmd == F_SETOWN
++  } else if (cmd == F_SETFD || cmd == F_SETFL
++#ifdef F_SETOWN
++	     || cmd == F_SETOWN
++#endif
+ #ifdef F_SETSIG
+              || cmd == F_SETSIG
+ #endif
+diff --git a/tool/config/clock_settime.c b/tool/config/clock_settime.c
+index b5fc75d..a5e94dd 100644
+--- a/tool/config/clock_settime.c
++++ b/tool/config/clock_settime.c
+@@ -1,5 +1,9 @@
+ #include <time.h>
+ 
+ int main(int argc, char *argv[]) {
++#ifndef __HAIKU__ // this crashes on haiku for some reason
+   clock_settime(-1, 0);
++#else
++  return -1;
++#endif
+ }
+diff --git a/blink/vfs.c b/blink/vfs.c
+index 423b8de..6f44f3f 100644
+--- a/blink/vfs.c
++++ b/blink/vfs.c
+@@ -351,7 +351,7 @@ int VfsFreeDevice(struct VfsDevice *device) {
+   if (device == NULL) {
+     return 0;
+   }
+-  if ((rc = atomic_fetch_sub(&device->refcount, 1)) != 1) {
++  if ((rc = __atomic_fetch_sub(&device->refcount, 1, 0)) != 1) {
+     return 0;
+   }
+   LOCK(&device->lock);
+@@ -386,7 +386,7 @@ int VfsAcquireDevice(struct VfsDevice *device, struct VfsDevice **output) {
+     *output = NULL;
+     return 0;
+   }
+-  rc = atomic_fetch_add(&device->refcount, 1);
++  rc = __atomic_fetch_add(&device->refcount, 1, 0);
+   unassert(rc > 0);
+   *output = device;
+   return 0;
+@@ -425,7 +427,7 @@ int VfsAcquireInfo(struct VfsInfo *info, struct VfsInfo **output) {
+     *output = NULL;
+     return 0;
+   }
+-  rc = atomic_fetch_add(&info->refcount, 1);
++  rc = __atomic_fetch_add(&info->refcount, 1, 0);
+   unassert(rc > 0);
+   VFS_LOGF("Acquired VfsInfo %p, refcount now %i.", info, rc + 1);
+   *output = info;
+@@ -437,7 +439,7 @@ int VfsFreeInfo(struct VfsInfo *info) {
+   if (info == NULL) {
+     return 0;
+   }
+-  if ((rc = atomic_fetch_sub(&info->refcount, 1)) != 1) {
++  if ((rc = __atomic_fetch_sub(&info->refcount, 1, 0)) != 1) {
+     VFS_LOGF("Freeing VfsInfo %p, refcount now %i.", info, rc - 1);
+     return 0;
+   }
+diff --git a/tool/config/sendto_zero.c b/tool/config/sendto_zero.c
+index f8b5526..4a84265 100644
+--- a/tool/config/sendto_zero.c
++++ b/tool/config/sendto_zero.c
+@@ -1,4 +1,5 @@
+ // checks if sendto(0.0.0.0) will copy address from connect()
++#ifndef __HAIKU__
+ #include <netinet/in.h>
+ #include <netinet/udp.h>
+ #include <stdio.h>
+@@ -41,3 +42,6 @@ int main(int argc, char *argv[]) {
+   if (wait(&ws) != pid) return 11;
+   return WEXITSTATUS(ws);
+ }
++#else
++int main() { return 0; }
++#endif
+-- 
+2.51.0
+
