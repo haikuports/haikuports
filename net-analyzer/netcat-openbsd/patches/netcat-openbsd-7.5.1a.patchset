@@ -38,3 +38,95 @@ index 8cc37f6..4df7d7f 100644
 -- 
 2.51.0
 
+From 42f64ae1365c6356123adff915b5c7c147ea2d34 Mon Sep 17 00:00:00 2001
+From: Christof Meerwald <cmeerw@cmeerw.org>
+Date: Fri, 2 Jan 2026 13:25:47 +0000
+Subject: [PATCH] Work around missing accept4/SOCK_NONBLOCK/SOCK_CLOEXEC
+
+---
+ netcat.c | 41 ++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 40 insertions(+), 1 deletion(-)
+
+diff --git a/netcat.c b/netcat.c
+index 4df7d7f..3a50cfa 100644
+--- a/netcat.c
++++ b/netcat.c
+@@ -596,8 +596,20 @@ main(int argc, char *argv[])
+ 				int connfd;
+ 
+ 				len = sizeof(cliaddr);
++#ifdef SOCK_NONBLOCK
+ 				connfd = accept4(s, (struct sockaddr *)&cliaddr,
+ 				    &len, SOCK_NONBLOCK);
++#else
++				connfd = accept(s, (struct sockaddr *)&cliaddr,
++				    &len);
++				if (connfd != -1) {
++					int flags = fcntl(connfd, F_GETFL, 0);
++					if (fcntl(connfd, F_SETFL, flags | O_NONBLOCK) < 0 ) {
++						close(connfd);
++						connfd = -1;
++					}
++				}
++#endif
+ 				if (connfd == -1) {
+ 					/* For now, all errnos are fatal */
+ 					err(1, "accept");
+@@ -768,16 +780,31 @@ unix_connect(char *path)
+ 		return -1;
+ 
+ 	if (uflag) {
++#ifdef SOCK_CLOEXEC
+ 		if ((s = unix_bind(unix_dg_tmp_socket, SOCK_CLOEXEC)) == -1)
++#else
++		if ((s = unix_bind(unix_dg_tmp_socket, 0)) == -1)
++#endif
+ 			return -1;
+ 	} else {
+-		if ((s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0)) == 
++#ifdef SOCK_CLOEXEC
++		if ((s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0)) ==
++#else
++		if ((s = socket(AF_UNIX, SOCK_STREAM, 0)) ==
++#endif
+ 		    -1) {
+ 			errx(1, "create unix socket failed");
+ 			return -1;
+ 		}
+ 	}
+ 
++#ifndef SOCK_CLOEXEC
++	if (fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_CLOEXEC) < 0 ) {
++		close(s);
++		return -1;
++	}
++#endif
++
+ 	if (connect(s, (struct sockaddr *)&s_un, addrlen) == -1) {
+ 		save_errno = errno;
+ 		warn("unix connect failed");
+@@ -848,9 +875,21 @@ remote_connect(const char *host, const char *port, struct addrinfo hints,
+ 		    port, gai_strerror(error));
+ 
+ 	for (res = res0; res; res = res->ai_next) {
++#ifdef SOCK_NONBLOCK
+ 		if ((s = socket(res->ai_family, res->ai_socktype |
+ 		    SOCK_NONBLOCK, res->ai_protocol)) == -1)
+ 			continue;
++#else
++		int flags;
++		if ((s = socket(res->ai_family, res->ai_socktype,
++		    res->ai_protocol)) == -1)
++			continue;
++		flags = fcntl(s, F_GETFL, 0);
++		if (fcntl(s, F_SETFL, flags | O_NONBLOCK) < 0 ) {
++			close(s);
++			continue;
++		}
++#endif
+ 
+ 		/* Bind to a local port or source address if specified. */
+ 		if (sflag || pflag) {
+-- 
+2.52.0
+
