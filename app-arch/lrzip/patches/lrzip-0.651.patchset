@@ -1,0 +1,209 @@
+From 267c0c05eeb4a99f2ef43d3be210e84e863a7a31 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Fri, 22 Dec 2017 15:21:32 +0700
+Subject: add Haiku support
+
+use find_directory for settings
+
+use int typedefs from SupportDefs instead
+
+use fallback ffsll
+
+diff --git a/lrzip_private.h b/lrzip_private.h
+index 67ba247..f8c15f7 100644
+--- a/lrzip_private.h
++++ b/lrzip_private.h
+@@ -78,6 +78,10 @@ void *alloca (size_t);
+ # endif
+ #endif
+ 
++#ifdef __HAIKU__
++#include <SupportDefs.h>
++#endif
++
+ #ifndef MD5_DIGEST_SIZE
+ # define MD5_DIGEST_SIZE 16
+ #endif
+@@ -144,7 +148,7 @@ extern int errno;
+ #define unlikely(x)	__builtin_expect(!!(x), 0)
+ #define __maybe_unused	__attribute__((unused))
+ 
+-#if defined(__MINGW32__) || defined(__CYGWIN__) || defined(__ANDROID__) || defined(__APPLE__)
++#if defined(__MINGW32__) || defined(__CYGWIN__) || defined(ANDROID) || defined(__APPLE__) || defined(__HAIKU__)
+ # define ffsll __builtin_ffsll
+ #endif
+ 
+diff --git a/util.c b/util.c
+index f643303..58a5aaf 100644
+--- a/util.c
++++ b/util.c
+@@ -59,6 +59,11 @@
+ # include <ctype.h>
+ #endif
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#include <fs_info.h>
++#endif
++
+ /* Macros for testing parameters */
+ #define isparameter( parmstring, value )	(!strcasecmp( parmstring, value ))
+ #define iscaseparameter( parmvalue, value )	(!strcmp( parmvalue, value ))
+@@ -190,7 +195,13 @@ bool get_rand(rzip_control *control, uchar *buf, int len)
+ bool read_config(rzip_control *control)
+ {
+ 	/* check for lrzip.conf in ., $HOME/.lrzip and /etc/lrzip */
++#ifndef __HAIKU__
+ 	char *HOME, homeconf[255];
++#else
++       dev_t volume;
++       char buffer[B_PATH_NAME_LENGTH];
++       char confpath[B_PATH_NAME_LENGTH + B_FILE_NAME_LENGTH];
++#endif
+ 	char *parametervalue;
+ 	char *parameter;
+ 	char line[255];
+@@ -199,6 +210,7 @@ bool read_config(rzip_control *control)
+ 	fp = fopen("lrzip.conf", "r");
+ 	if (fp)
+ 		fprintf(control->msgout, "Using configuration file ./lrzip.conf\n");
++#ifndef __HAIKU__
+ 	if (fp == NULL) {
+ 		HOME=getenv("HOME");
+ 		if (HOME) {
+@@ -213,6 +225,25 @@ bool read_config(rzip_control *control)
+ 		if (fp)
+ 			fprintf(control->msgout, "Using configuration file /etc/lrzip/lrzip.conf\n");
+ 	}
++#else
++       if (fp == NULL) {
++               volume = dev_for_path("/boot");
++               if (find_directory(B_USER_SETTINGS_DIRECTORY, volume, false, buffer, sizeof(buffer)) == B_OK) {
++                       snprintf(confpath, sizeof(confpath), "%s/lrzip/lrzip.conf", buffer);
++                       fp = fopen(confpath, "r");
++                       if (fp)
++                               fprintf(control->msgout, "Using configuration file %s\n", confpath);
++               }
++       }
++       if (fp == NULL) {
++               if (find_directory(B_SYSTEM_SETTINGS_DIRECTORY, volume, false, buffer, sizeof(buffer)) == B_OK) {
++                       snprintf(confpath, sizeof(confpath), "%s/lrzip/lrzip.conf", buffer);
++                       fp = fopen(confpath, "r");
++                       if (fp)
++                               fprintf(control->msgout, "Using configuration file %s\n", confpath);
++               }
++       }
++#endif
+ 	if (fp == NULL)
+ 		return false;
+ 
+-- 
+2.52.0
+
+
+From 142b778eeafa88dc81a598fd585a190f0890db56 Mon Sep 17 00:00:00 2001
+From: Leorize <alaviss@users.noreply.github.com>
+Date: Fri, 22 Dec 2017 15:36:59 +0700
+Subject: use no-op implementation for setpriority, mlock, munlock
+
+
+diff --git a/lrzip_private.h b/lrzip_private.h
+index f8c15f7..ef939ce 100644
+--- a/lrzip_private.h
++++ b/lrzip_private.h
+@@ -174,6 +174,12 @@ typedef sem_t cksem_t;
+  #define mremap fake_mremap
+ #endif
+ 
++#if defined(__HAIKU__)
++# define setpriority(...) 0
++# define mlock(...) 0
++# define munlock(...) 0
++#endif
++
+ #define bswap_32(x) \
+      ((((x) & 0xff000000) >> 24) | (((x) & 0x00ff0000) >>  8) |		      \
+       (((x) & 0x0000ff00) <<  8) | (((x) & 0x000000ff) << 24))
+-- 
+2.52.0
+
+
+From 5244048fc6dfc96c17ba8409d6dffe820683a47e Mon Sep 17 00:00:00 2001
+From: Luc Schrijvers <begasus@gmail.com>
+Date: Fri, 2 Jan 2026 12:58:55 +0100
+Subject: Haiku doesn't have PRIO_MIN(?)
+
+
+diff --git a/main.c b/main.c
+index eb0985f..927cefb 100644
+--- a/main.c
++++ b/main.c
+@@ -451,11 +451,15 @@ int main(int argc, char *argv[])
+ 		case 'N':
+ 			nice_set = true;
+ 			control->nice_val = strtol(optarg, &endptr, 10);
+-			if (control->nice_val < PRIO_MIN || control->nice_val > PRIO_MAX)
+-				failure("Invalid nice value (must be %d...%d)\n", PRIO_MIN, PRIO_MAX);
+-			if (*endptr)
+-				failure("Extra characters after nice level: \'%s\'\n", endptr);
+-			break;
++			#if defined(__HAIKU__)
++				return false;
++			#else
++				if (control->nice_val < PRIO_MIN || control->nice_val > PRIO_MAX)
++					failure("Invalid nice value (must be %d...%d)\n", PRIO_MIN, PRIO_MAX);
++				if (*endptr)
++					failure("Extra characters after nice level: \'%s\'\n", endptr);
++				break;
++			#endif
+ 		case 'o':
+ 			if (control->outdir)
+ 				failure("Cannot have -o and -O together\n");
+-- 
+2.52.0
+
+
+From 89471831ed206ef69648f2822a4515b3d54f49bc Mon Sep 17 00:00:00 2001
+From: Luc Schrijvers <begasus@gmail.com>
+Date: Fri, 2 Jan 2026 13:26:56 +0100
+Subject: CVE-2018-5786 patch
+
+
+diff --git a/lrzip.c b/lrzip.c
+index 03a7962..3d55db8 100644
+--- a/lrzip.c
++++ b/lrzip.c
+@@ -1093,7 +1093,7 @@ next_chunk:
+ 		do {
+ 			i64 head_off;
+ 
+-			if (unlikely(last_head && last_head < second_last))
++			if (unlikely(last_head && last_head <= second_last))
+ 				failure_goto(("Invalid earlier last_head position, corrupt archive.\n"), error);
+ 			second_last = last_head;
+ 			if (unlikely(last_head + ofs > infile_size))
+-- 
+2.52.0
+
+
+From b8ce6c94b047fc6880728b7864eba34250932aab Mon Sep 17 00:00:00 2001
+From: Luc Schrijvers <begasus@gmail.com>
+Date: Fri, 2 Jan 2026 13:29:47 +0100
+Subject: CVE-2023-39741 patch
+
+
+diff --git a/libzpaq/libzpaq.cpp b/libzpaq/libzpaq.cpp
+index 633c6f1..5d10d2e 100644
+--- a/libzpaq/libzpaq.cpp
++++ b/libzpaq/libzpaq.cpp
+@@ -1195,6 +1195,7 @@ int PostProcessor::write(int c) {
+     case 3:  // PROG psize[0]
+       if (c<0) error("Unexpected EOS");
+       hsize+=c*256;  // high byte of psize
++      if (hsize<1) error("Empty PCOMP");
+       z.header.resize(hsize+300);
+       z.cend=8;
+       z.hbegin=z.hend=z.cend+128;
+-- 
+2.52.0
+
