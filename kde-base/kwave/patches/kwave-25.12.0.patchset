@@ -1,0 +1,180 @@
+From 7cdd16399c633f2e6347eb3a4a12eac76073629f Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 24 Mar 2019 21:46:12 +1000
+Subject: Fix error: overflow in constant expression [-fpermissive]
+
+
+diff --git a/kwave/TopWidget.cpp b/kwave/TopWidget.cpp
+index efc0cc1..15c3dfb 100644
+--- a/kwave/TopWidget.cpp
++++ b/kwave/TopWidget.cpp
+@@ -1045,6 +1045,7 @@ int Kwave::TopWidget::loadFile(const QUrl &url)
+     if (res != 0) {
+         qWarning("TopWidget::loadFile() failed: result=%d", res);
+         QString reason;
++#ifndef Q_OS_HAIKU
+         switch (res) {
+             case -ENOMEM:
+                 reason = i18n("Out of memory");
+@@ -1061,6 +1062,7 @@ int Kwave::TopWidget::loadFile(const QUrl &url)
+             default:
+                 reason = _("");
+         }
++#endif
+ 
+         // show an error message box if the reason was known
+         if (reason.length()) {
+-- 
+2.51.0
+
+
+From 5dafbf927ac6a2c8ecca1346c5079ed57397d8f3 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 31 Mar 2019 15:27:01 +1000
+Subject: Increase sound buffer
+
+
+diff --git a/libkwave/PlayBackParam.h b/libkwave/PlayBackParam.h
+index 6e8843a..c0400e5 100644
+--- a/libkwave/PlayBackParam.h
++++ b/libkwave/PlayBackParam.h
+@@ -56,7 +56,7 @@ namespace Kwave
+         /** Default constructor */
+         PlayBackParam()
+             :rate(44100), channels(2), bits_per_sample(16),
+-            device(), bufbase(10),
++            device(), bufbase(13),
+             method(Kwave::PLAYBACK_NONE)
+         {
+         }
+-- 
+2.51.0
+
+
+From e6b7ef3a3c3b3b24a76ea74b2ec0857fa29cfd22 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sat, 16 Nov 2024 17:54:31 +0100
+Subject: Disable DBus on Haiku, don't build documentation
+
+Co-authored-by: Schrijvers Luc <begasus@gmail.com>
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1677f52..35762f9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -171,8 +171,6 @@ FIND_PACKAGE(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS
+     ConfigWidgets
+     CoreAddons
+     Crash
+-    DBusAddons
+-    DocTools
+     I18n
+     IconThemes
+     KIO
+@@ -181,6 +179,14 @@ FIND_PACKAGE(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS
+     WidgetsAddons
+ )
+ 
++# OPTION(WITH_DBUS) "enable KF6::DBbusAddons [default=on]" ON)
++IF (NOT HAIKU)
++    SET(WITH_DBUS on)
++    FIND_PACKAGE(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS
++        DBusAddons
++    )
++ENDIF (WITH_DBUS)
++
+ IF (NOT WITH_DOC)
+     SET_PACKAGE_PROPERTIES(KF6DocTools
+         PROPERTIES DESCRIPTION "Tools to generate documentation"
+@@ -387,7 +393,9 @@ ADD_CUSTOM_TARGET(wrapper
+ ### install translations                                                  ###
+ 
+ ki18n_install(po)
+-kdoctools_install(po)
++IF (WITH_DOC)
++    kdoctools_install(po)
++ENDIF (WITH_DOC)
+ 
+ #############################################################################
+ 
+diff --git a/config.h.cmake b/config.h.cmake
+index 726dc2d..796cee2 100644
+--- a/config.h.cmake
++++ b/config.h.cmake
+@@ -24,6 +24,9 @@
+ /* support playback/recording via PulseAudio */
+ #cmakedefine HAVE_PULSEAUDIO_SUPPORT
+ 
++/* support DBUS */
++#cmakedefine01 WITH_DBUS
++
+ /* support playback via Qt */
+ #cmakedefine HAVE_QT_AUDIO_SUPPORT
+ 
+diff --git a/kwave/CMakeLists.txt b/kwave/CMakeLists.txt
+index 62b7459..c97fd25 100644
+--- a/kwave/CMakeLists.txt
++++ b/kwave/CMakeLists.txt
+@@ -83,13 +83,18 @@ TARGET_LINK_LIBRARIES(kwave_core
+     KF6::Completion
+     KF6::ConfigCore
+     KF6::Crash
+-    KF6::DBusAddons
+     KF6::I18n
+     KF6::IconThemes
+     KF6::KIOFileWidgets
+     KF6::XmlGui
+ )
+ 
++IF (WITH_DBUS)
++TARGET_LINK_LIBRARIES(kwave_core
++    KF6::DBusAddons
++)
++ENDIF (WITH_DBUS)
++
+ SET_TARGET_PROPERTIES(kwave_core PROPERTIES
+     OUTPUT_NAME "kwave"
+     ENABLE_EXPORTS TRUE
+diff --git a/kwave/main.cpp b/kwave/main.cpp
+index 7457a5c..3ac2e54 100644
+--- a/kwave/main.cpp
++++ b/kwave/main.cpp
+@@ -25,7 +25,9 @@
+ 
+ #include <KAboutData>
+ #include <KCrash>
+-#include <KDBusService>
++#if WITH_DBUS
++    #include <KDBusService>
++#endif
+ #include <KLocalizedString>
+ #include <kxmlgui_version.h>
+ 
+@@ -226,7 +228,9 @@ int main(int argc, char **argv)
+     about.processCommandLine(&cmdline);
+ 
+     /* let Kwave be a "unique" application, only one instance */
++#if WITH_DBUS
+     KDBusService service(KDBusService::Unique);
++#endif
+ 
+     // check whether to start up without splash screen or in iconic mode
+     // which implicitly also disables the splash screen
+@@ -238,12 +242,14 @@ int main(int argc, char **argv)
+     // now as the splash screen is in place, we can start a new instance
+     retval = app.newInstance(app.arguments(), QString());
+ 
++#if WITH_DBUS
+     QObject::connect(
+         &service,
+         SIGNAL(activateRequested(QStringList,QString)),
+         &app,
+         SLOT(newInstance(QStringList,QString))
+     );
++#endif
+ 
+     if (retval != ECANCELED)
+         retval = app.exec();
+-- 
+2.51.0
+

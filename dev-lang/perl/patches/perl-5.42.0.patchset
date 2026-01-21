@@ -1,0 +1,763 @@
+From c174878c2db0e9518ca7ccfdcd65c373afab50ee Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 14:52:03 +0200
+Subject: Tell perl that BFS has a link count of 1
+
+
+diff --git a/cpan/File-Temp/lib/File/Temp.pm b/cpan/File-Temp/lib/File/Temp.pm
+index 570f25a..81baf48 100644
+--- a/cpan/File-Temp/lib/File/Temp.pm
++++ b/cpan/File-Temp/lib/File/Temp.pm
+@@ -2157,7 +2157,8 @@ sub unlink0 {
+     # On NFS the link count may still be 1 but we can't know that
+     # we are on NFS.  Since we can't be sure, we'll defer it
+ 
+-    return 1 if $fh[3] == 0 || $^O eq 'cygwin';
++    # On haiku, the link count seems to be always 1 (at least for BFS)
++    return 1 if $fh[3] == 0 || $^O eq 'cygwin' || $^O eq 'haiku';
+   }
+   # fall-through if we can't unlink now
+   _deferred_unlink($fh, $path, 0);
+-- 
+2.51.0
+
+
+From 6eeb97dc6245c1467c53c5909b2721c4831ef597 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 14:52:53 +0200
+Subject: Haiku defines, but does not implement O_EXLOCK
+
+
+diff --git a/cpan/File-Temp/t/lock.t b/cpan/File-Temp/t/lock.t
+index 7bcd491..85260b8 100644
+--- a/cpan/File-Temp/t/lock.t
++++ b/cpan/File-Temp/t/lock.t
+@@ -8,7 +8,8 @@ use Fcntl;
+ BEGIN {
+ # see if we have O_EXLOCK
+   eval { &Fcntl::O_EXLOCK; };
+-  if ($@) {
++  if ($@  || $^O eq 'haiku') {
++    # haiku doesn't implement O_EXLOCK yet (but it defines the value)
+     plan skip_all => 'Do not seem to have O_EXLOCK';
+   } else {
+     plan tests => 4;
+-- 
+2.51.0
+
+
+From 33ac1d6bb729288e030f0272b190554f1a6f1ff8 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 14:53:40 +0200
+Subject: haiku sets all its specifics via Configure
+
+
+diff --git a/hints/haiku.sh b/hints/haiku.sh
+index 0ec7479..0f09f53 100644
+--- a/hints/haiku.sh
++++ b/hints/haiku.sh
+@@ -1,46 +1 @@
+-# Haiku hints file
+-# $Id$
+-
+-case "$prefix" in
+-'') prefix="$(finddir B_COMMON_DIRECTORY)" ;;
+-*) ;; # pass the user supplied value through
+-esac
+-
+-libpth="$(finddir B_USER_DEVELOP_DIRECTORY)/lib $(finddir B_SYSTEM_DEVELOP_DIRECTORY)/lib $(finddir B_COMMON_DIRECTORY)/lib /system/lib"
+-usrinc="$(finddir B_SYSTEM_DEVELOP_DIRECTORY)/headers/posix"
+-locinc="$(finddir B_USER_CONFIG_DIRECTORY)/develop/headers $(finddir B_COMMON_DIRECTORY)/headers $(finddir B_SYSTEM_DEVELOP_DIRECTORY)/headers"
+-
+-libc="$(finddir B_SYSTEM_LIB_DIRECTORY)/libroot.so"
+-libs='-lnetwork'
+-
+-# Use Haiku's malloc() by default.
+-case "$usemymalloc" in
+-'') usemymalloc='n' ;;
+-esac
+-
+-# Haiku generally supports hard links, but the default file system (BFS)
+-# doesn't. So better avoid using hard links.
+-d_link='undef'
+-dont_use_nlink='define'
+-
+-# The array syserrlst[] is useless for the most part.
+-# Large negative numbers really kind of suck in arrays.
+-d_syserrlst='undef'
+-
+-# Haiku uses gcc.
+-cc="gcc"
+-ld='gcc'
+-
+-ccflags="$ccflags -fno-stack-protector"
+-
+-# The runtime loader library path variable is LIBRARY_PATH.
+-case "$ldlibpthname" in
+-'') ldlibpthname=LIBRARY_PATH ;;
+-esac
+-
+-# as of alpha 4.1 (at the latest) some symbols are versioned,
+-# confusing the nm lookup
+-case "$usenm" in
+-'') usenm='undef' ;;
+-esac
+-
++# haiku sets all its specifics via Configure
+-- 
+2.51.0
+
+
+From 62aa1b8465ae41d5fa16e4e67d2d774219764992 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 14:54:15 +0200
+Subject: Tell perl that Haiku needs haikuish.h installed as well
+
+
+diff --git a/installperl b/installperl
+index 3c8af53..1bbbf5b 100755
+--- a/installperl
++++ b/installperl
+@@ -343,6 +343,11 @@ elsif ($Is_Cygwin) { # On Cygwin symlink it to CORE to make Makefile happy
+ 
+     # AIX needs perl.exp installed as well.
+     push(@corefiles,'perl.exp') if $^O eq 'aix';
++    if ($^O eq 'haiku') {
++	# Haiku needs haikuish.h installed as well.
++	mkpath("$installarchlib/CORE/haiku", $opts{verbose}, 0777);
++	push(@corefiles,'haiku/haikuish.h');
++    }
+ }
+ 
+ 
+-- 
+2.51.0
+
+
+From 5b21cfae4c7f09fdb17ec536c77b9ebe800e1615 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 22 Sep 2013 14:55:13 +0200
+Subject: Fix handling of exit codes on Haiku
+
+
+diff --git a/t/run/exit.t b/t/run/exit.t
+index ce3270e..cab9a79 100644
+--- a/t/run/exit.t
++++ b/t/run/exit.t
+@@ -55,18 +55,18 @@ is( ${^CHILD_ERROR_NATIVE}, $native_success,  'Normal exit ${^CHILD_ERROR_NATIVE
+ if (!$vms_exit_mode) {
+   my $posix_ok = eval { require POSIX; };
+   my $wait_macros_ok = defined &POSIX::WIFEXITED;
+-  eval { POSIX::WIFEXITED(${^CHILD_ERROR_NATIVE}) };
++  eval { POSIX::WIFEXITED($?) };
+   $wait_macros_ok = 0 if $@;
+   $exit = run('exit 42');
+   is( $exit >> 8, 42,             'Non-zero exit' );
+   is( $exit, $?,                  'Non-zero exit $?' );
+-  isnt( !${^CHILD_ERROR_NATIVE}, 0, 'Non-zero exit ${^CHILD_ERROR_NATIVE}' );
++  isnt( ${^CHILD_ERROR_NATIVE}, 0, 'Non-zero exit ${^CHILD_ERROR_NATIVE}' );
+   SKIP: {
+     skip("No POSIX", 3) unless $posix_ok;
+     skip("No POSIX wait macros", 3) unless $wait_macros_ok;
+-    ok(POSIX::WIFEXITED(${^CHILD_ERROR_NATIVE}), "WIFEXITED");
+-    ok(!POSIX::WIFSIGNALED(${^CHILD_ERROR_NATIVE}), "WIFSIGNALED");
+-    is(POSIX::WEXITSTATUS(${^CHILD_ERROR_NATIVE}), 42, "WEXITSTATUS");
++    ok(POSIX::WIFEXITED($?), "WIFEXITED");
++    ok(!POSIX::WIFSIGNALED($?), "WIFSIGNALED");
++    is(POSIX::WEXITSTATUS($?), 42, "WEXITSTATUS");
+   }
+ 
+   SKIP: {
+@@ -85,9 +85,9 @@ if (!$vms_exit_mode) {
+     SKIP: {
+       skip("No POSIX", 3) unless $posix_ok;
+       skip("No POSIX wait macros", 3) unless $wait_macros_ok;
+-      ok(!POSIX::WIFEXITED(${^CHILD_ERROR_NATIVE}), "WIFEXITED");
+-      ok(POSIX::WIFSIGNALED(${^CHILD_ERROR_NATIVE}), "WIFSIGNALED");
+-      is(POSIX::WTERMSIG(${^CHILD_ERROR_NATIVE}), 15, "WTERMSIG");
++      ok(!POSIX::WIFEXITED($?), "WIFEXITED");
++      ok(POSIX::WIFSIGNALED($?), "WIFSIGNALED");
++      is(POSIX::WTERMSIG($?), 15, "WTERMSIG");
+     }
+   }
+ 
+-- 
+2.51.0
+
+
+From ed2f3899404c36a7d1a0554665ef70999190a704 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sat, 28 Sep 2013 13:46:42 +0200
+Subject: Adjust ExtUtils::MakeMaker for PM-Haiku.
+
+* MakeMaker-projects trying to install into 'site-perl' while specifying
+  PREFIX would end up using a wrong 'site-perl' prefix.
+* Split MM_Haiku.pm off MM_BeOS.pm, implementing Haiku-specific overrides
+  for MakeMaker.
+
+diff --git a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM.pm b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM.pm
+index 44e76a9..401e2be 100644
+--- a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM.pm
++++ b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM.pm
+@@ -61,7 +61,8 @@ if( $^O eq 'MSWin32' ) {
+ $Is{UWIN}   = $^O =~ /^uwin(-nt)?$/;
+ $Is{Cygwin} = $^O eq 'cygwin';
+ $Is{NW5}    = $Config{osname} eq 'NetWare';  # intentional
+-$Is{BeOS}   = ($^O =~ /beos/i or $^O eq 'haiku');
++$Is{BeOS}   = $^O =~ /beos/i;
++$Is{Haiku}  = $^O eq 'haiku';
+ $Is{DOS}    = $^O eq 'dos';
+ if( $Is{NW5} ) {
+     $^O = 'NetWare';
+diff --git a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+new file mode 100644
+index 0000000..81e5f99
+--- /dev/null
++++ b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+@@ -0,0 +1,70 @@
++package ExtUtils::MM_Haiku;
++
++use strict;
++
++=head1 NAME
++
++ExtUtils::MM_Haiku - methods to override UN*X behaviour in ExtUtils::MakeMaker
++
++=head1 SYNOPSIS
++
++ use ExtUtils::MM_Haiku;	# Done internally by ExtUtils::MakeMaker if needed
++
++=head1 DESCRIPTION
++
++See ExtUtils::MM_Unix for a documentation of the methods provided
++there. This package overrides the implementation of these methods, not
++the semantics.
++
++=over 4
++
++=cut
++
++use ExtUtils::MakeMaker::Config;
++use File::Spec;
++require ExtUtils::MM_Any;
++require ExtUtils::MM_Unix;
++
++our @ISA = qw( ExtUtils::MM_Any ExtUtils::MM_Unix );
++our $VERSION = '6.66';
++
++
++=item os_flavor
++
++Haiku is Haiku.
++
++=cut
++
++sub os_flavor {
++    return('Haiku');
++}
++
++=head3 init_INSTALL_from_PREFIX
++
++  $mm->init_INSTALL_from_PREFIX;
++
++=cut
++
++sub init_INSTALL_from_PREFIX {
++    my $self = shift;
++
++	# If a prefix has been given from outside, the default implementation
++	# will set PERLPREFIX, SITEPREFIX and VENDORPREFIX to identical values,
++	# but due to the way how Haiku's package management works, PERLPREFIX
++	# and VENDORPREFIX are not writable at all (as they're being populated
++	# from installed packages via package-fs). SITEPREFIX, however needs to
++	# be set to a path which can be written to (since site packages are
++	# expected to be installed "manually") - so we make sure it points
++	# to a 'non-packaged'-folder:
++    my $prefixGiven = $self->{PREFIX};
++	$self->SUPER::init_INSTALL_from_PREFIX();
++	if ($prefixGiven) {
++        $self->{SITEPREFIX} = '$(PREFIX)/non-packaged';
++    } 
++}
++
++=back
++
++1;
++__END__
++
+-- 
+2.51.0
+
+
+From a122f1d99320be2bff2b065ff6e8cccffab4a39b Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Tue, 8 Oct 2013 22:16:37 +0200
+Subject: Avoid using -rpath for dynamic modules.
+
+
+diff --git a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+index 81e5f99..25ace13 100644
+--- a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
++++ b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+@@ -65,6 +65,33 @@ sub init_INSTALL_from_PREFIX {
+ 
+ =back
+ 
++=head3 init_others
++
++    $MM->init_others();
++
++Initializes the macro definitions having to do with compiling and
++linking used by tools_other() and places them in the $MM object.
++
++If there is no description, its the same as the parameter to
++WriteMakefile() documented in ExtUtils::MakeMaker.
++
++=cut
++
++sub init_others {
++    my $self = shift;
++
++	$self->SUPER::init_others();
++
++	# Don't use run-time paths for libraries required by dynamic
++	# modules on Haiku, as that wouldn't work should a library be moved
++	# (for instance because the package has been activated somewhere else).
++    $self->{LD_RUN_PATH} = "";
++
++    return;
++}
++
++=back
++
+ 1;
+ __END__
+ 
+-- 
+2.51.0
+
+
+From 090d92e092f369784c801171ec1aea09e7d9dac6 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Wed, 9 Oct 2013 20:29:38 +0200
+Subject: Fix initialization check for CPAN.
+
+* On Haiku, only the site-lib directories will ever be writable,
+  as the others read-only. This avoids CPAN asking for a way to
+  circumvent unwritable lib dirs.
+
+diff --git a/cpan/CPAN/lib/CPAN/FirstTime.pm b/cpan/CPAN/lib/CPAN/FirstTime.pm
+index 8934f4a..1716a55 100644
+--- a/cpan/CPAN/lib/CPAN/FirstTime.pm
++++ b/cpan/CPAN/lib/CPAN/FirstTime.pm
+@@ -2167,6 +2167,12 @@ sub _print_urllist {
+ }
+ 
+ sub _can_write_to_libdirs {
++    if ($^O eq 'haiku') {
++    	# on Haiku, the other dirs are never writable, as they are
++    	# being populated by packagefs
++        return -w $Config{installsitelib}
++            && -w $Config{installsitearch}
++    }
+     return -w $Config{installprivlib}
+         && -w $Config{installarchlib}
+         && -w $Config{installsitelib}
+-- 
+2.51.0
+
+
+From 3a7bc344a5aaaeefdbd64c635c581899a95be8a9 Mon Sep 17 00:00:00 2001
+From: Oliver Tappe <zooey@hirschkaefer.de>
+Date: Sun, 13 Oct 2013 17:32:50 +0200
+Subject: Add support for HAIKU_USE_VENDOR_DIRECTORIES.
+
+* Adjust MakeMaker to automatically switch to vendor directories if
+  requested via HAIKU_USE_VENDOR_DIRECTORIES.
+
+diff --git a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+index 25ace13..8a04ead 100644
+--- a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
++++ b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+@@ -29,21 +29,20 @@ our @ISA = qw( ExtUtils::MM_Any ExtUtils::MM_Unix );
+ our $VERSION = '6.66';
+ 
+ 
+-=item os_flavor
+-
+-Haiku is Haiku.
+-
+-=cut
+-
+ sub os_flavor {
+     return('Haiku');
+ }
+ 
+-=head3 init_INSTALL_from_PREFIX
++sub init_main {
++    my $self = shift;
+ 
+-  $mm->init_INSTALL_from_PREFIX;
++    # switch to vendor directories if requested.
++    if ($ENV{'HAIKU_USE_VENDOR_DIRECTORIES'}) {
++        $self->{INSTALLDIRS} ||= 'vendor';
++    }
+ 
+-=cut
++    $self->SUPER::init_main();
++}
+ 
+ sub init_INSTALL_from_PREFIX {
+     my $self = shift;
+@@ -63,20 +62,6 @@ sub init_INSTALL_from_PREFIX {
+     } 
+ }
+ 
+-=back
+-
+-=head3 init_others
+-
+-    $MM->init_others();
+-
+-Initializes the macro definitions having to do with compiling and
+-linking used by tools_other() and places them in the $MM object.
+-
+-If there is no description, its the same as the parameter to
+-WriteMakefile() documented in ExtUtils::MakeMaker.
+-
+-=cut
+-
+ sub init_others {
+     my $self = shift;
+ 
+@@ -90,8 +75,6 @@ sub init_others {
+     return;
+ }
+ 
+-=back
+-
+ 1;
+ __END__
+ 
+-- 
+2.51.0
+
+
+From 813b5a0782edb6d8cf9e4f6ae55385ee42a5c94e Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Fri, 9 Jun 2017 21:30:33 +0200
+Subject: disable fstack-protector for Haiku
+
+
+diff --git a/hints/haiku.sh b/hints/haiku.sh
+index 0f09f53..b76c7c1 100644
+--- a/hints/haiku.sh
++++ b/hints/haiku.sh
+@@ -1 +1,3 @@
+-# haiku sets all its specifics via Configure
++# haiku sets nearly all its specifics via Configure
++
++ccflags="$ccflags -fno-stack-protector"
+-- 
+2.51.0
+
+
+From 06b47219c6be470c347ade4318aff860c3fd57b0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Sat, 22 Jun 2024 22:24:38 +0200
+Subject: disable some reentrant variants of functions which we don't have
+
+
+diff --git a/reentr.h b/reentr.h
+index 90f6b6d..5fa312a 100644
+--- a/reentr.h
++++ b/reentr.h
+@@ -73,6 +73,10 @@
+ #    define NETDB_R_OBSOLETE
+ #  endif
+ 
++#  ifdef __HAIKU__
++#    define NETDB_R_OBSOLETE
++#  endif
++
+ #  if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 24))
+ #    undef HAS_READDIR_R
+ #    undef HAS_READDIR64_R
+diff --git a/regen/reentr.pl b/regen/reentr.pl
+index 4b13cc2..931eca2 100644
+--- a/regen/reentr.pl
++++ b/regen/reentr.pl
+@@ -121,6 +121,10 @@ print $h <<EOF;
+ #    define NETDB_R_OBSOLETE
+ #  endif
+ 
++#  ifdef __HAIKU__
++#    define NETDB_R_OBSOLETE
++#  endif
++
+ #  if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 24))
+ #    undef HAS_READDIR_R
+ #    undef HAS_READDIR64_R
+-- 
+2.51.0
+
+
+From 347ca2b983d641f3fea9cf5ecc2ad939a53984eb Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Sun, 28 Jul 2024 21:30:57 +0200
+Subject: Reinit mutexes after a fork()
+
+This is based on a patch by Niko Tyni <ntyni@debian.org> and Petr Salinger,
+but ported to the current version.
+
+See http://bugs.debian.org/628493. The Debian version of the patch was also
+submitted upstream at https://github.com/Perl/perl5/issues/13237 but is
+unlikely that it will eventually be accepted.
+
+diff --git a/embed.fnc b/embed.fnc
+index 5ddab55..191f24c 100644
+--- a/embed.fnc
++++ b/embed.fnc
+@@ -679,6 +679,7 @@ Adp	|OP *	|apply_builtin_cv_attributes				\
+ 				|NN CV *cv				\
+ 				|NULLOK OP *attrlist
+ CTp	|void	|atfork_lock
++CTp	|void	|atfork_reinit
+ CTp	|void	|atfork_unlock
+ Cop	|SV **	|av_arylen_p	|NN AV *av
+ Adp	|void	|av_clear	|NN AV *av
+diff --git a/embed.h b/embed.h
+index 9c5c2a8..f283a65 100644
+--- a/embed.h
++++ b/embed.h
+@@ -131,6 +131,7 @@
+ # define apply_attrs_string(a,b,c,d)            Perl_apply_attrs_string(aTHX_ a,b,c,d)
+ # define apply_builtin_cv_attributes(a,b)       Perl_apply_builtin_cv_attributes(aTHX_ a,b)
+ # define atfork_lock                            Perl_atfork_lock
++# define atfork_reinit                          Perl_atfork_reinit
+ # define atfork_unlock                          Perl_atfork_unlock
+ # define av_clear(a)                            Perl_av_clear(aTHX_ a)
+ # define av_count(a)                            Perl_av_count(aTHX_ a)
+diff --git a/ext/ExtUtils-Miniperl/lib/ExtUtils/Miniperl.pm b/ext/ExtUtils-Miniperl/lib/ExtUtils/Miniperl.pm
+index d7d4b71..8c5fa96 100644
+--- a/ext/ExtUtils-Miniperl/lib/ExtUtils/Miniperl.pm
++++ b/ext/ExtUtils-Miniperl/lib/ExtUtils/Miniperl.pm
+@@ -122,7 +122,7 @@ main(int argc, char **argv, char **env)
+      * --GSAR 2001-07-20 */
+     PTHREAD_ATFORK(Perl_atfork_lock,
+                    Perl_atfork_unlock,
+-                   Perl_atfork_unlock);
++                   Perl_atfork_reinit);
+ #endif
+ 
+     PERL_SYS_FPU_INIT;
+diff --git a/miniperlmain.c b/miniperlmain.c
+index 38951e0..c724d2f 100644
+--- a/miniperlmain.c
++++ b/miniperlmain.c
+@@ -96,7 +96,7 @@ main(int argc, char **argv, char **env)
+      * --GSAR 2001-07-20 */
+     PTHREAD_ATFORK(Perl_atfork_lock,
+                    Perl_atfork_unlock,
+-                   Perl_atfork_unlock);
++                   Perl_atfork_reinit);
+ #endif
+ 
+     PERL_SYS_FPU_INIT;
+diff --git a/proto.h b/proto.h
+index a7e81e0..278f057 100644
+--- a/proto.h
++++ b/proto.h
+@@ -214,6 +214,10 @@ PERL_CALLCONV void
+ Perl_atfork_lock(void);
+ #define PERL_ARGS_ASSERT_ATFORK_LOCK
+ 
++PERL_CALLCONV void
++Perl_atfork_reinit(void);
++#define PERL_ARGS_ASSERT_ATFORK_REINIT
++
+ PERL_CALLCONV void
+ Perl_atfork_unlock(void);
+ #define PERL_ARGS_ASSERT_ATFORK_UNLOCK
+diff --git a/util.c b/util.c
+index 7cf7a76..69a74ab 100644
+--- a/util.c
++++ b/util.c
+@@ -2847,7 +2847,7 @@ Perl_atfork_lock(void)
+ #endif
+ }
+ 
+-/* this is called in both parent and child after the fork() */
++/* this is called in parent after the fork() */
+ void
+ Perl_atfork_unlock(void)
+ #if defined(USE_ITHREADS)
+@@ -2872,6 +2872,21 @@ Perl_atfork_unlock(void)
+ #endif
+ }
+ 
++/* this is called in child after the fork() */
++void
++Perl_atfork_reinit(void)
++{
++#if defined(USE_ITHREADS)
++#  ifdef USE_PERLIO
++    MUTEX_INIT(&PL_perlio_mutex);
++#  endif
++#  ifdef MYMALLOC
++    MUTEX_INIT(&PL_malloc_mutex);
++#  endif
++    OP_REFCNT_INIT;
++#endif
++}
++
+ /*
+ =for apidoc_section $concurrency
+ =for apidoc my_fork
+@@ -2892,7 +2907,10 @@ Perl_my_fork(void)
+ #if defined(USE_ITHREADS) && !defined(HAS_PTHREAD_ATFORK)
+     atfork_lock();
+     pid = fork();
+-    atfork_unlock();
++    if (pid != 0)
++        atfork_unlock();
++    else
++        atfork_reinit();
+ #else
+     /* atfork_lock() and atfork_unlock() are installed as pthread_atfork()
+      * handlers elsewhere in the code */
+-- 
+2.51.0
+
+
+From e9e5628e72de1593e26cad3d9995a51cf319c86d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Sun, 4 Aug 2024 12:14:53 +0200
+Subject: fix the using of our custom shebang for installed scripts
+
+The generic Unix implementation doesn't match because our startperl setting
+doesn't contain '/perl'and it falls back to the full `/packages/` based path,
+which fails with every perl revision.
+
+diff --git a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+index 8a04ead..bd3d5fa 100644
+--- a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
++++ b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/MM_Haiku.pm
+@@ -21,6 +21,7 @@ the semantics.
+ =cut
+ 
+ use ExtUtils::MakeMaker::Config;
++use ExtUtils::MakeMaker qw($Verbose);
+ use File::Spec;
+ require ExtUtils::MM_Any;
+ require ExtUtils::MM_Unix;
+@@ -75,6 +76,59 @@ sub init_others {
+     return;
+ }
+ 
++# Override to fix replacing the shebang with our custom startperl setting.
++sub _fixin_replace_shebang {
++    my ( $self, $file, $line ) = @_;
++
++    # Now figure out the interpreter name.
++    my ( $origcmd, $arg ) = split ' ', $line, 2;
++    (my $cmd = $origcmd) =~ s!^.*/!!;
++
++    # Now look (in reverse) for interpreter in absolute PATH (unless perl).
++    my $interpreter;
++    if ( defined $ENV{PERL_MM_SHEBANG} && $ENV{PERL_MM_SHEBANG} eq "relocatable" ) {
++        # env isn't needed on Haiku
++        $interpreter = "perl";
++    }
++    elsif ( $cmd =~ m{^perl(?:\z|[^a-z])} ) {
++        # This was checking startperl in the original, we always assume a valid value
++        $interpreter = $Config{startperl};
++        $interpreter =~ s,^\#!,,;
++    }
++    else {
++        my (@absdirs)
++            = reverse grep { $self->file_name_is_absolute($_) } $self->path;
++        $interpreter = '';
++
++        foreach my $dir (@absdirs) {
++            my $maybefile = $self->catfile($dir,$cmd);
++            if ( $self->maybe_command($maybefile) ) {
++                warn "Ignoring $interpreter in $file\n"
++                    if $Verbose && $interpreter;
++                $interpreter = $maybefile;
++            }
++        }
++    }
++
++    # Figure out how to invoke interpreter on this machine.
++    # (Use sharpbang directly as we know that this is supported.)
++
++    my ($shb) = "";
++    if ($interpreter) {
++        print "Changing sharpbang in $file to $interpreter"
++            if $Verbose;
++        $shb .= "$Config{'sharpbang'}$interpreter";
++        $shb .= ' ' . $arg if defined $arg;
++        $shb .= "\n";
++    }
++    else {
++        warn "Can't find $cmd in PATH, $file unchanged"
++            if $Verbose;
++        return;
++    }
++    return $shb
++}
++
+ 1;
+ __END__
+ 
+-- 
+2.51.0
+
+
+From 9ed645a8996cb36d62ad6873119711c5d0734a1e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Sun, 18 Aug 2024 16:42:30 +0200
+Subject: don't install the site installation directories (non-packaged)
+
+They are created automatically by cpan on demand if needed.
+
+diff --git a/installperl b/installperl
+index 1bbbf5b..7191a44 100755
+--- a/installperl
++++ b/installperl
+@@ -296,8 +296,10 @@ $do_installprivlib = 0 if $versiononly && !($installprivlib =~ m/\Q$vershort/);
+ 
+ mkpath($installprivlib);
+ mkpath($installarchlib);
+-mkpath($installsitelib, $opts{verbose}, 0777) if ($installsitelib);
+-mkpath($installsitearch, $opts{verbose}, 0777) if ($installsitearch);
++unless ($^O eq 'haiku') {
++    mkpath($installsitelib, $opts{verbose}, 0777) if ($installsitelib);
++    mkpath($installsitearch, $opts{verbose}, 0777) if ($installsitearch);
++}
+ 
+ if (-d 'lib') {
+     find({no_chdir => 1, wanted => \&installlib}, 'lib')
+-- 
+2.51.0
+
+
+From 8e4e067aa1eabcd37bde3b18819f5737a4207d22 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Sun, 5 Jan 2025 21:35:27 +0100
+Subject: switch C standard to gnu99, we need _DEFAULT_SOURCE
+
+
+diff --git a/hints/haiku.sh b/hints/haiku.sh
+index b76c7c1..410eea5 100644
+--- a/hints/haiku.sh
++++ b/hints/haiku.sh
+@@ -1,3 +1,3 @@
+ # haiku sets nearly all its specifics via Configure
+ 
+-ccflags="$ccflags -fno-stack-protector"
++ccflags="$ccflags -std=gnu99 -fno-stack-protector"
+-- 
+2.51.0
+

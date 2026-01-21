@@ -1,0 +1,168 @@
+From 5c209306d11e0f996c9970e15a01c430031901bf Mon Sep 17 00:00:00 2001
+From: Danilo Spinella <danilo.spinella@suse.com>
+Date: Fri, 9 Jul 2021 16:57:35 +0200
+Subject: Add a switch to use system gtest and benchmark
+
+Allow to use the gtest and benchmark libraries from the system.
+Use pkg-config to check that the libraries are installed and to
+add the correct cflags/link flags.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index cd71a47..0ce9cdc 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -95,6 +95,14 @@ option(SNAPPY_BUILD_TESTS "Build Snappy's own tests." ON)
+ 
+ option(SNAPPY_BUILD_BENCHMARKS "Build Snappy's benchmarks" ON)
+ 
++if(UNIX)
++  option(SNAPPY_USE_BUNDLED_GTEST "Build test using bundled googletest library" ON)
++  option(SNAPPY_USE_BUNDLED_BENCHMARK_LIB "Build benchmarks using bundled benchmark library" ON)
++else(UNIX)
++  set(SNAPPY_USE_BUNDLED_GTEST ON)
++  set(SNAPPY_USE_BUNDLED_BENCHMARK_LIB ON)
++endif(UNIX)
++
+ option(SNAPPY_FUZZING_BUILD "Build Snappy for fuzzing." OFF)
+ 
+ option(SNAPPY_REQUIRE_AVX "Target processors with AVX support." OFF)
+@@ -323,34 +331,45 @@ endif(SNAPPY_BUILD_TESTS OR SNAPPY_BUILD_BENCHMARKS)
+ if(SNAPPY_BUILD_TESTS)
+   enable_testing()
+ 
+-  # Prevent overriding the parent project's compiler/linker settings on Windows.
+-  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+-  set(install_gtest OFF)
+-  set(install_gmock OFF)
+-  set(build_gmock ON)
+-
+-  # This project is tested using GoogleTest.
+-  add_subdirectory("third_party/googletest")
+-
+-  # GoogleTest triggers a missing field initializers warning.
+-  if(SNAPPY_HAVE_NO_MISSING_FIELD_INITIALIZERS)
+-    set_property(TARGET gtest
+-        APPEND PROPERTY COMPILE_OPTIONS -Wno-missing-field-initializers)
+-    set_property(TARGET gmock
+-        APPEND PROPERTY COMPILE_OPTIONS -Wno-missing-field-initializers)
+-  endif(SNAPPY_HAVE_NO_MISSING_FIELD_INITIALIZERS)
+-
+-  if(SNAPPY_HAVE_NO_IMPLICIT_INT_FLOAT_CONVERSION)
+-    set_property(TARGET gtest
+-        APPEND PROPERTY COMPILE_OPTIONS -Wno-implicit-int-float-conversion)
+-  endif(SNAPPY_HAVE_NO_IMPLICIT_INT_FLOAT_CONVERSION)
++  if(SNAPPY_USE_BUNDLED_GTEST)
++    # Prevent overriding the parent project's compiler/linker settings on Windows.
++    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
++    set(install_gtest OFF)
++    set(install_gmock OFF)
++    set(build_gmock ON)
++
++    # This project is tested using GoogleTest.
++    add_subdirectory("third_party/googletest")
++
++    # GoogleTest triggers a missing field initializers warning.
++    if(SNAPPY_HAVE_NO_MISSING_FIELD_INITIALIZERS)
++      set_property(TARGET gtest
++          APPEND PROPERTY COMPILE_OPTIONS -Wno-missing-field-initializers)
++      set_property(TARGET gmock
++          APPEND PROPERTY COMPILE_OPTIONS -Wno-missing-field-initializers)
++    endif(SNAPPY_HAVE_NO_MISSING_FIELD_INITIALIZERS)
++
++    if(SNAPPY_HAVE_NO_IMPLICIT_INT_FLOAT_CONVERSION)
++      set_property(TARGET gtest
++          APPEND PROPERTY COMPILE_OPTIONS -Wno-implicit-int-float-conversion)
++    endif(SNAPPY_HAVE_NO_IMPLICIT_INT_FLOAT_CONVERSION)
++  else(SNAPPY_USE_BUNDLED_GTEST)
++    find_package(PkgConfig)
++    pkg_search_module(GTEST REQUIRED gtest_main)
++  endif(SNAPPY_USE_BUNDLED_GTEST)
+ 
+   add_executable(snappy_unittest "")
+   target_sources(snappy_unittest
+     PRIVATE
+       "snappy_unittest.cc"
+   )
+-  target_link_libraries(snappy_unittest snappy_test_support gmock_main gtest)
++  target_link_libraries(snappy_unittest snappy_test_support)
++  if(SNAPPY_USE_BUNDLED_GTEST)
++    target_link_libraries(snappy_unittest gmock_main gtest)
++  else(SNAPPY_USE_BUNDLED_BENCHMARK_LIB)
++    target_link_libraries(snappy_unittest ${GTEST_LDFLAGS})
++    target_compile_options(snappy_unittest PUBLIC ${GTEST_CFLAGS})
++  endif(SNAPPY_USE_BUNDLED_GTEST)
+ 
+   add_test(
+     NAME snappy_unittest
+@@ -366,17 +385,28 @@ if(SNAPPY_BUILD_TESTS)
+ endif(SNAPPY_BUILD_TESTS)
+ 
+ if(SNAPPY_BUILD_BENCHMARKS)
++  if(NOT SNAPPY_USE_BUNDLED_BENCHMARK_LIB)
++    find_package(PkgConfig)
++    pkg_search_module(BENCHMARK REQUIRED benchmark)
++  endif(NOT SNAPPY_USE_BUNDLED_BENCHMARK_LIB)
++
+   add_executable(snappy_benchmark "")
+   target_sources(snappy_benchmark
+     PRIVATE
+       "snappy_benchmark.cc"
+   )
+   target_link_libraries(snappy_benchmark snappy_test_support benchmark_main)
++  if(NOT SNAPPY_USE_BUNDLED_BENCHMARK_LIB)
++    target_link_libraries(snappy_benchmark ${BENCHMARK_LDFLAGS})
++    target_compile_options(snappy_benchmark PUBLIC ${BENCHMARK_CFLAGS})
++  endif(NOT SNAPPY_USE_BUNDLED_BENCHMARK_LIB)
+ 
+   # This project uses Google benchmark for benchmarking.
+   set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+   set(BENCHMARK_ENABLE_EXCEPTIONS OFF CACHE BOOL "" FORCE)
+-  add_subdirectory("third_party/benchmark")
++  if(SNAPPY_USE_BUNDLED_BENCHMARK_LIB)
++    add_subdirectory("third_party/benchmark")
++  endif(SNAPPY_USE_BUNDLED_BENCHMARK_LIB)
+ endif(SNAPPY_BUILD_BENCHMARKS)
+ 
+ if(SNAPPY_FUZZING_BUILD)
+-- 
+2.52.0
+
+
+From fdd687866b8a236c551ab0f99a3bc63c6fe190d7 Mon Sep 17 00:00:00 2001
+From: Luc Schrijvers <begasus@gmail.com>
+Date: Sat, 27 Dec 2025 15:42:35 +0100
+Subject: Set ${CMAKE_INSTALL_INCLUDEDIR} for cmake targets
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0ce9cdc..57d45d8 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -271,19 +271,19 @@ target_sources(snappy
+     "${PROJECT_BINARY_DIR}/config.h"
+   PUBLIC
+     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/snappy-c.h>
+-    $<INSTALL_INTERFACE:include/snappy-c.h>
++    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/snappy-c.h>
+     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/snappy-sinksource.h>
+-    $<INSTALL_INTERFACE:include/snappy-sinksource.h>
++    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/snappy-sinksource.h>
+     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/snappy.h>
+-    $<INSTALL_INTERFACE:include/snappy.h>
++    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/snappy.h>
+     $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/snappy-stubs-public.h>
+-    $<INSTALL_INTERFACE:include/snappy-stubs-public.h>
++    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/snappy-stubs-public.h>
+ )
+ target_include_directories(snappy
+   PUBLIC
+     $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}>
+     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>
+-    $<INSTALL_INTERFACE:include>
++    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+ )
+ set_target_properties(snappy
+   PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
+-- 
+2.52.0
+
