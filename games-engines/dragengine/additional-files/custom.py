@@ -6,6 +6,7 @@
 with_tests = 'no'
 with_warnerrors = 'no'
 with_debug = 'no'
+with_debug_symbols = 'yes'
 with_verbose = 'no'
 
 # external library configuration
@@ -21,6 +22,8 @@ with_system_libtheora = 'yes'
 with_system_soundtouch = 'yes'
 with_system_libwebm = 'yes'
 with_system_libwebp = 'yes'
+with_system_freetype = 'yes'
+with_system_libvpx = 'yes'
 with_opengl = 'yes'
 with_dl = 'no'
 with_pthread = 'yes'
