@@ -1,0 +1,409 @@
+From ef8e8f13a83b1e7b120861d2915493e02d15ff19 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Tue, 9 Apr 2024 22:25:53 +1000
+Subject: Enable OpenAL (wasm) audio backend for Haiku
+
+
+diff --git a/src/multimedia/CMakeLists.txt b/src/multimedia/CMakeLists.txt
+index 9275e03..dba9dfc 100644
+--- a/src/multimedia/CMakeLists.txt
++++ b/src/multimedia/CMakeLists.txt
+@@ -412,7 +412,7 @@ set_source_files_properties(${source_with_init_guid} PROPERTIES
+ )
+ 
+ 
+-qt_internal_extend_target(Multimedia CONDITION WASM
++qt_internal_extend_target(Multimedia CONDITION WASM OR HAIKU
+     SOURCES
+         wasm/qwasmmediadevices.cpp wasm/qwasmmediadevices_p.h
+         wasm/qwasmaudiosource.cpp wasm/qwasmaudiosource_p.h
+diff --git a/src/multimedia/configure.cmake b/src/multimedia/configure.cmake
+index 7bb46ab..4d9d3ae 100644
+--- a/src/multimedia/configure.cmake
++++ b/src/multimedia/configure.cmake
+@@ -237,7 +237,7 @@ qt_feature("ffmpeg" PRIVATE
+     ENABLE INPUT_ffmpeg STREQUAL 'yes'
+     DISABLE INPUT_ffmpeg STREQUAL 'no'
+     CONDITION FFmpeg_FOUND
+-              AND (APPLE OR WIN32 OR ANDROID OR QNX OR QT_FEATURE_pulseaudio OR QT_FEATURE_pipewire)
++              AND (APPLE OR WIN32 OR ANDROID OR QNX OR HAIKU OR QT_FEATURE_pulseaudio OR QT_FEATURE_pipewire)
+               AND QT_FEATURE_thread
+ )
+ 
+@@ -284,7 +284,7 @@ qt_configure_add_report_entry(
+     TYPE WARNING
+     MESSAGE "No backend for low level audio found."
+     CONDITION NOT QT_FEATURE_alsa AND NOT QT_FEATURE_pulseaudio AND NOT QT_FEATURE_mmrenderer AND NOT QT_FEATURE_coreaudio
+-              AND NOT WIN32 AND NOT ANDROID AND NOT WASM AND NOT QT_FEATURE_pipewire
++              AND NOT WIN32 AND NOT ANDROID AND NOT WASM AND NOT HAIKU AND NOT QT_FEATURE_pipewire
+ )
+ 
+ qt_configure_add_report_entry(
+diff --git a/src/multimedia/platform/qplatformaudiodevices.cpp b/src/multimedia/platform/qplatformaudiodevices.cpp
+index 060552a..9596aa0 100644
+--- a/src/multimedia/platform/qplatformaudiodevices.cpp
++++ b/src/multimedia/platform/qplatformaudiodevices.cpp
+@@ -30,7 +30,7 @@
+ #if defined(Q_OS_QNX)
+ #  include <QtMultimedia/private/qqnxaudiodevices_p.h>
+ #endif
+-#if defined(Q_OS_WASM)
++#if defined(Q_OS_WASM) || defined(Q_OS_HAIKU)
+ #  include <QtMultimedia/private/qwasmmediadevices_p.h>
+ #endif
+ 
+@@ -89,7 +89,7 @@ std::unique_ptr<QPlatformAudioDevices> QPlatformAudioDevices::create()
+ #if defined(Q_OS_QNX)
+     return std::make_unique<QQnxAudioDevices>();
+ #endif
+-#if defined(Q_OS_WASM)
++#if defined(Q_OS_WASM) || defined(Q_OS_HAIKU)
+     return std::make_unique<QWasmMediaDevices>();
+ #endif
+     return std::make_unique<QPlatformAudioDevices>();
+diff --git a/src/multimedia/wasm/qwasmaudiodevice.cpp b/src/multimedia/wasm/qwasmaudiodevice.cpp
+index 53572f4..8cba6c1 100644
+--- a/src/multimedia/wasm/qwasmaudiodevice.cpp
++++ b/src/multimedia/wasm/qwasmaudiodevice.cpp
+@@ -2,9 +2,11 @@
+ // SPDX-License-Identifier: LicenseRef-Qt-Commercial OR LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
+ 
+ #include "qwasmaudiodevice_p.h"
++#ifndef Q_OS_HAIKU
+ #include <emscripten.h>
+ #include <emscripten/val.h>
+ #include <emscripten/bind.h>
++#endif
+ 
+ #include <AL/al.h>
+ #include <AL/alc.h>
+@@ -19,7 +21,7 @@ QWasmAudioDevice::QWasmAudioDevice(const char *device,
+ {
+     isDefault = isDef;
+     minimumChannelCount = 1;
+-    maximumChannelCount = 2;
++    maximumChannelCount = 8;
+     minimumSampleRate = 8000;
+     maximumSampleRate = 96000; // js AudioContext max according to docs
+ 
+@@ -36,6 +38,7 @@ QWasmAudioDevice::QWasmAudioDevice(const char *device,
+     // FIXME: firefox
+     // An AudioContext was prevented from starting automatically.
+     // It must be created or resumed after a user gesture on the page.
++#ifndef Q_OS_HAIKU
+     emscripten::val audioContext = emscripten::val::global("window")["AudioContext"].new_();
+     if (audioContext == emscripten::val::undefined())
+         audioContext = emscripten::val::global("window")["webkitAudioContext"].new_();
+@@ -46,6 +49,9 @@ QWasmAudioDevice::QWasmAudioDevice(const char *device,
+         audioContext.call<void>("close");
+         preferredFormat.setSampleRate(sRate);
+     }
++#else
++       preferredFormat.setSampleRate(48000);
++#endif
+ 
+     auto f = QAudioFormat::Float;
+ 
+diff --git a/src/multimedia/wasm/qwasmaudiosink.cpp b/src/multimedia/wasm/qwasmaudiosink.cpp
+index e15cdd2..afb9cd1 100644
+--- a/src/multimedia/wasm/qwasmaudiosink.cpp
++++ b/src/multimedia/wasm/qwasmaudiosink.cpp
+@@ -4,18 +4,23 @@
+ #include "qwasmaudiosink_p.h"
+ 
+ 
++#ifndef Q_OS_HAIKU
+ #include <emscripten.h>
++#endif
+ #include <AL/al.h>
++#include <AL/alext.h>
+ #include <AL/alc.h>
+ #include <QDebug>
+ #include <QtMath>
+ #include <QIODevice>
+ 
++#ifndef Q_OS_HAIKU
+ // non native al formats (AL_EXT_float32)
+ #define AL_FORMAT_MONO_FLOAT32                   0x10010
+ #define AL_FORMAT_STEREO_FLOAT32                 0x10011
++#endif
+ 
+-constexpr unsigned int DEFAULT_BUFFER_DURATION = 50'000;
++constexpr unsigned int DEFAULT_BUFFER_DURATION = 6'000;
+ 
+ class ALData {
+ public:
+@@ -99,6 +104,18 @@ void QWasmAudioSink::start(bool mode)
+         case 2:
+             aldata->format = AL_FORMAT_STEREO8;
+             break;
++        case 4:
++            aldata->format = AL_FORMAT_QUAD8;
++            break;
++        case 6:
++            aldata->format = AL_FORMAT_51CHN8;
++            break;
++        case 7:
++            aldata->format = AL_FORMAT_61CHN8;
++            break;
++        case 8:
++            aldata->format = AL_FORMAT_71CHN8;
++            break;
+         default:
+             return formatError();
+         }
+@@ -111,6 +128,18 @@ void QWasmAudioSink::start(bool mode)
+         case 2:
+             aldata->format = AL_FORMAT_STEREO16;
+             break;
++        case 4:
++            aldata->format = AL_FORMAT_QUAD16;
++            break;
++        case 6:
++            aldata->format = AL_FORMAT_51CHN16;
++            break;
++        case 7:
++            aldata->format = AL_FORMAT_61CHN16;
++            break;
++        case 8:
++            aldata->format = AL_FORMAT_71CHN16;
++            break;
+         default:
+             return formatError();
+         }
+@@ -123,6 +152,18 @@ void QWasmAudioSink::start(bool mode)
+         case 2:
+             aldata->format = AL_FORMAT_STEREO_FLOAT32;
+             break;
++        case 4:
++            aldata->format = AL_FORMAT_QUAD16;
++            break;
++        case 6:
++            aldata->format = AL_FORMAT_51CHN32;
++            break;
++        case 7:
++            aldata->format = AL_FORMAT_61CHN32;
++            break;
++        case 8:
++            aldata->format = AL_FORMAT_71CHN32;
++            break;
+         default:
+             return formatError();
+         }
+diff --git a/src/multimedia/wasm/qwasmaudiosource.cpp b/src/multimedia/wasm/qwasmaudiosource.cpp
+index 94fc78e..7cb92a7 100644
+--- a/src/multimedia/wasm/qwasmaudiosource.cpp
++++ b/src/multimedia/wasm/qwasmaudiosource.cpp
+@@ -3,7 +3,9 @@
+ 
+ #include "qwasmaudiosource_p.h"
+ 
++#ifndef Q_OS_HAIKU
+ #include <emscripten.h>
++#endif
+ #include <AL/al.h>
+ #include <AL/alc.h>
+ #include <QDataStream>
+diff --git a/src/multimedia/wasm/qwasmmediadevices_p.h b/src/multimedia/wasm/qwasmmediadevices_p.h
+index 3ccd211..37f33f4 100644
+--- a/src/multimedia/wasm/qwasmmediadevices_p.h
++++ b/src/multimedia/wasm/qwasmmediadevices_p.h
+@@ -19,16 +19,20 @@
+ 
+ #include <private/qplatformvideodevices_p.h>
+ 
++#ifndef __HAIKU__
+ #include <QtCore/private/qstdweb_p.h>
++#endif
+ #include <qaudio.h>
+ #include <qaudiodevice.h>
+ #include <qcameradevice.h>
+ #include <qset.h>
+ #include <QtCore/qloggingcategory.h>
+ 
++#ifndef __HAIKU__
+ #include <emscripten.h>
+ #include <emscripten/val.h>
+ #include <emscripten/bind.h>
++#endif
+ #include <QMapIterator>
+ QT_BEGIN_NAMESPACE
+ 
+@@ -78,19 +82,25 @@ private:
+     void updateCameraDevices();
+     void getMediaDevices();
+     void getOpenALAudioDevices();
++#ifndef __HAIKU__
+     void parseDevices(emscripten::val devices);
++#endif
+ 
+     QMap <std::string, QAudioDevice> m_audioOutputs;
+     QMap <std::string, QAudioDevice> m_audioInputs;
+     QMap <std::string, QCameraDevice> m_cameraDevices;
+ 
+ 
++#ifndef __HAIKU__
+     std::unique_ptr<qstdweb::EventCallback> m_deviceChangedCallback;
++#endif
+ 
+     bool m_videoInputsAdded = false;
+     bool m_audioInputsAdded = false;
+     bool m_audioOutputsAdded = false;
++#ifndef __HAIKU__
+     emscripten::val m_jsMediaDevicesInterface = emscripten::val::undefined();
++#endif
+     bool m_initDone = false;
+     bool m_firstInit = false;
+ };
+diff --git a/src/plugins/multimedia/ffmpeg/playbackengine/qffmpegmediadataholder.cpp b/src/plugins/multimedia/ffmpeg/playbackengine/qffmpegmediadataholder.cpp
+index c774f2a..a99d8d6 100644
+--- a/src/plugins/multimedia/ffmpeg/playbackengine/qffmpegmediadataholder.cpp
++++ b/src/plugins/multimedia/ffmpeg/playbackengine/qffmpegmediadataholder.cpp
+@@ -191,7 +191,11 @@ loadMedia(const QUrl &mediaUrl, QIODevice *stream, const QPlaybackOptions &playb
+     using std::chrono::microseconds;
+     using std::chrono::milliseconds;
+ 
++#ifndef Q_OS_HAIKU
+     const QByteArray url = mediaUrl.toString(QUrl::PreferLocalFile).toUtf8();
++#else
++    const QByteArray url = mediaUrl.isLocalFile() ? (mediaUrl.toString(QUrl::PreferLocalFile).toLocal8Bit()) : (mediaUrl.toEncoded());
++#endif
+ 
+     AVFormatContextUPtr context{ avformat_alloc_context() };
+ 
+-- 
+2.52.0
+
+
+From 623b9f5c468f55480aaeaf59a32e55028e210d16 Mon Sep 17 00:00:00 2001
+From: Luc Schrijvers <begasus@gmail.com>
+Date: Sat, 12 Jul 2025 11:15:53 +0200
+Subject: Patch* qwasmmediadevices.cpp (changed in 6.9.1)
+
+
+diff --git a/src/multimedia/wasm/qwasmmediadevices.cpp b/src/multimedia/wasm/qwasmmediadevices.cpp
+index 0ebd337..adad982 100644
+--- a/src/multimedia/wasm/qwasmmediadevices.cpp
++++ b/src/multimedia/wasm/qwasmmediadevices.cpp
+@@ -72,6 +72,7 @@ QPlatformAudioSink *QWasmMediaDevices::createAudioSink(const QAudioDevice &devic
+     return new QWasmAudioSink(deviceInfo, fmt, parent);
+ }
+ 
++#ifndef Q_OS_HAIKU
+ void QWasmMediaDevices::parseDevices(emscripten::val devices)
+ {
+     if (devices.isNull() || devices.isUndefined()) {
+@@ -185,9 +186,11 @@ void QWasmMediaDevices::parseDevices(emscripten::val devices)
+     m_firstInit = false;
+ 
+ }
++#endif
+ 
+ void QWasmMediaDevices::getMediaDevices()
+ {
++#ifndef Q_OS_HAIKU
+     emscripten::val navigator = emscripten::val::global("navigator");
+     m_jsMediaDevicesInterface = navigator["mediaDevices"];
+ 
+@@ -234,6 +237,7 @@ void QWasmMediaDevices::getMediaDevices()
+                                            std::move(enumerateDevicesCallback));
+                 });
+     }
++#endif
+ 
+ }
+ 
+@@ -244,10 +248,17 @@ void QWasmMediaDevices::getOpenALAudioDevices()
+     auto capture = alcGetString(nullptr, ALC_CAPTURE_DEFAULT_DEVICE_SPECIFIER);
+     // present even if there is no capture device
+     if (capture && !m_audioOutputs.contains(capture)) {
++#ifndef Q_OS_HAIKU
+         m_audioInputs.insert(
+                 capture,
+                 QAudioDevicePrivate::createQAudioDevice(std::make_unique<QWasmAudioDevice>(
+                         capture, "WebAssembly audio capture device", true, QAudioDevice::Input)));
++#else
++        m_audioInputs.insert(
++                capture,
++                QAudioDevicePrivate::createQAudioDevice(std::make_unique<QWasmAudioDevice>(
++                         capture, "Haiku audio capture device", true, QAudioDevice::Input)));
++#endif
+         m_audioInputsAdded = true;
+         onAudioInputsChanged();
+     }
+@@ -255,11 +266,19 @@ void QWasmMediaDevices::getOpenALAudioDevices()
+     auto playback = alcGetString(nullptr, ALC_DEFAULT_DEVICE_SPECIFIER);
+     // present even if there is no playback device
+     if (playback && !m_audioOutputs.contains(capture)) {
++#ifndef Q_OS_HAIKU
+         m_audioOutputs.insert(
+                 playback,
+                 QAudioDevicePrivate::createQAudioDevice(std::make_unique<QWasmAudioDevice>(
+                         playback, "WebAssembly audio playback device", true,
+                         QAudioDevice::Output)));
++#else
++        m_audioOutputs.insert(
++                playback,
++                QAudioDevicePrivate::createQAudioDevice(std::make_unique<QWasmAudioDevice>(
++                          playback, "Haiku audio playback device", true,
++                          QAudioDevice::Output)));
++#endif
+         onAudioOutputsChanged();
+     }
+     m_firstInit = true;
+-- 
+2.52.0
+
+
+From b74241e65092723f9a5fdcf2c37e2a05906c55a9 Mon Sep 17 00:00:00 2001
+From: Luc Schrijvers <begasus@gmail.com>
+Date: Thu, 12 Feb 2026 17:18:52 +0100
+Subject: FFmpeg: Add audio/ogg to the MIME type list
+
+https://codereview.qt-project.org/c/qt/qtmultimedia/+/712421
+
+diff --git a/src/plugins/multimedia/ffmpeg/qffmpegmediaformatinfo.cpp b/src/plugins/multimedia/ffmpeg/qffmpegmediaformatinfo.cpp
+index 9ac7852..e1f71b9 100644
+--- a/src/plugins/multimedia/ffmpeg/qffmpegmediaformatinfo.cpp
++++ b/src/plugins/multimedia/ffmpeg/qffmpegmediaformatinfo.cpp
+@@ -81,7 +81,8 @@ static constexpr struct
+     // WMA is the same as WMV
+     { QMediaFormat::FLAC, "audio/x-flac", nullptr },
+     { QMediaFormat::MP3, "audio/mpeg", "mp3" },
+-    { QMediaFormat::Wave, "audio/x-wav", nullptr }
++    { QMediaFormat::Wave, "audio/x-wav", nullptr },
++    { QMediaFormat::Wave, "audio/ogg", nullptr }
+ };
+ 
+ template <typename AVFormat>
+-- 
+2.52.0
+
+
+From 698ab68768b135ffaa9348fb795b39b61ed99e1d Mon Sep 17 00:00:00 2001
+From: Luc Schrijvers <begasus@gmail.com>
+Date: Fri, 13 Mar 2026 08:05:33 +0100
+Subject: QAudioFormat::Float unconditionally to the list of supported formats
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-authored-by: Máximo Castañeda <antiswen@yahoo.es>
+
+diff --git a/src/multimedia/wasm/qwasmaudiodevice.cpp b/src/multimedia/wasm/qwasmaudiodevice.cpp
+index 8cba6c1..d7afcec 100644
+--- a/src/multimedia/wasm/qwasmaudiodevice.cpp
++++ b/src/multimedia/wasm/qwasmaudiodevice.cpp
+@@ -30,7 +30,8 @@ QWasmAudioDevice::QWasmAudioDevice(const char *device,
+     supportedSampleFormats.append(QAudioFormat::Int16);
+ 
+     // Browsers use 32bit floats as native, but emscripten reccomends checking for the exension.
+-    if (alIsExtensionPresent("AL_EXT_float32"))
++    // FIXME Haiku
++    // if (alIsExtensionPresent("AL_EXT_float32"))
+         supportedSampleFormats.append(QAudioFormat::Float);
+ 
+     preferredFormat.setChannelCount(2);
+-- 
+2.52.0
+
