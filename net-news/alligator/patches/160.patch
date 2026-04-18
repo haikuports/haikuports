@@ -1,0 +1,252 @@
+From bd177c12add776c87891ed6d6031aca4b6b3bb86 Mon Sep 17 00:00:00 2001
+From: Roland Saur <lazyschildpad@mailbox.org>
+Date: Mon, 8 Dec 2025 01:09:32 +0100
+Subject: [PATCH] Make entries filterable by group
+
+Clicking on a group heading now provides
+all entries of that group.
+
+Sometimes, for instance, I want to view
+all feeds related to world or tech news.
+---
+ src/entriesmodel.cpp              | 65 +++++++++++++++++++++++++------
+ src/entriesmodel.h                |  7 +++-
+ src/fetcher.cpp                   | 11 ++++++
+ src/fetcher.h                     |  1 +
+ src/qml/AlligatorGlobalDrawer.qml | 13 +++++++
+ src/qml/EntryListPage.qml         | 16 +++++---
+ 6 files changed, 95 insertions(+), 18 deletions(-)
+
+diff --git a/src/entriesmodel.cpp b/src/entriesmodel.cpp
+index abf2104d..b9b3e86f 100644
+--- a/src/entriesmodel.cpp
++++ b/src/entriesmodel.cpp
+@@ -101,16 +101,40 @@ QHash<int, QByteArray> EntriesModel::roleNames() const
+     };
+ }
+ 
++QStringList EntriesModel::getFeeds() const
++{
++    QStringList feedList;
++    if (m_feedUrl.length() > 0) {
++        feedList += m_feedUrl;
++        return feedList;
++    }
++
++    QSqlQuery feedQuery;
++    if (m_groupName.length() > 0) {
++        feedQuery.prepare(QStringLiteral("SELECT url FROM Feeds WHERE groupName=:groupName;"));
++        feedQuery.bindValue(QStringLiteral(":groupName"), m_groupName);
++    } else {
++        feedQuery.prepare(QStringLiteral("SELECT url FROM Feeds;"));
++    }
++    Database::instance().execute(feedQuery);
++    while (feedQuery.next()) {
++        feedList += feedQuery.value(QStringLiteral("url")).toString();
++    }
++
++    return feedList;
++}
++
+ int EntriesModel::rowCount(const QModelIndex &parent) const
+ {
+     Q_UNUSED(parent)
+     QSqlQuery query;
+-    if (m_feedUrl.length() > 0) {
+-        query.prepare(QStringLiteral("SELECT COUNT() FROM Entries WHERE feed=:feed;"));
+-        query.bindValue(QStringLiteral(":feed"), m_feedUrl);
+-    } else {
+-        query.prepare(QStringLiteral("SELECT COUNT() FROM Entries;"));
++    QStringList feedList = getFeeds();
++    QStringList questionmarks(feedList.size(), QStringLiteral("?"));
++    query.prepare(QStringLiteral("SELECT COUNT() FROM Entries WHERE feed IN (%1);").arg(questionmarks.join(QStringLiteral(","))));
++    for (QString feed : feedList) {
++        query.addBindValue(feed);
+     }
++
+     Database::instance().execute(query);
+     if (!query.next()) {
+         qCWarning(ALLIGATOR) << "Failed to query feed count";
+@@ -123,19 +147,21 @@ void EntriesModel::loadEntries()
+     QSqlQuery entryQuery;
+     beginResetModel();
+     m_entries.clear();
+-    if (m_feedUrl.length() > 0) {
+-        entryQuery.prepare(QStringLiteral("SELECT * FROM Entries WHERE feed=:feed ORDER BY updated DESC"));
+-        entryQuery.bindValue(QStringLiteral(":feed"), m_feedUrl);
+-    } else {
+-        entryQuery.prepare(QStringLiteral("SELECT * FROM Entries ORDER BY updated DESC"));
++
++    QStringList feedList = getFeeds();
++    QStringList questionmarks(feedList.size(), QStringLiteral("?"));
++
++    entryQuery.prepare(QStringLiteral("SELECT * FROM Entries WHERE feed IN (%1) ORDER BY updated DESC;").arg(questionmarks.join(QStringLiteral(","))));
++    for (QString feed : feedList) {
++        entryQuery.addBindValue(feed);
+     }
+-    Database::instance().execute(entryQuery);
+ 
++    Database::instance().execute(entryQuery);
+     while (entryQuery.next()) {
+         Entry entry;
+         QSqlQuery authorQuery;
+         QStringList authorList;
+-        authorQuery.prepare(QStringLiteral("SELECT * FROM Authors WHERE id=:id"));
++        authorQuery.prepare(QStringLiteral("SELECT * FROM Authors WHERE id=:id;"));
+         authorQuery.bindValue(QStringLiteral(":id"), entryQuery.value(QStringLiteral("id")).toString());
+         Database::instance().execute(authorQuery);
+ 
+@@ -184,3 +210,18 @@ void EntriesModel::setFeedUrl(const QString &feedUrl)
+     Q_EMIT feedUrlChanged();
+     loadEntries();
+ }
++
++QString EntriesModel::groupName() const
++{
++    return m_groupName;
++}
++
++void EntriesModel::setGroupName(const QString &groupName)
++{
++    if (groupName == m_groupName) {
++        return;
++    }
++    m_groupName = groupName;
++    Q_EMIT groupNameChanged();
++    loadEntries();
++}
+diff --git a/src/entriesmodel.h b/src/entriesmodel.h
+index 93b96286..9edfcb45 100644
+--- a/src/entriesmodel.h
++++ b/src/entriesmodel.h
+@@ -32,6 +32,7 @@ class EntriesModel : public QAbstractListModel
+     QML_ELEMENT
+ 
+     Q_PROPERTY(QString feedUrl READ feedUrl WRITE setFeedUrl NOTIFY feedUrlChanged)
++    Q_PROPERTY(QString groupName READ groupName WRITE setGroupName NOTIFY groupNameChanged)
+ 
+ public:
+     enum Roles {
+@@ -55,12 +56,16 @@ public:
+ 
+     QString feedUrl() const;
+     void setFeedUrl(const QString &feedUrl);
+-
++    QString groupName() const;
++    void setGroupName(const QString &groupName);
++    QStringList getFeeds() const;
+ Q_SIGNALS:
+     void feedUrlChanged();
++    void groupNameChanged();
+ 
+ private:
+     void loadEntries();
+     QString m_feedUrl;
++    QString m_groupName;
+     QList<Entry> m_entries;
+ };
+diff --git a/src/fetcher.cpp b/src/fetcher.cpp
+index 2b9af727..32d72a60 100644
+--- a/src/fetcher.cpp
++++ b/src/fetcher.cpp
+@@ -63,6 +63,17 @@ void Fetcher::fetchAll()
+     }
+ }
+ 
++void Fetcher::fetchGroup(const QString &groupName)
++{
++    QSqlQuery query;
++    query.prepare(QStringLiteral("SELECT url FROM Feeds WHERE groupName=:groupName"));
++    query.bindValue(QStringLiteral(":groupName"), groupName);
++    Database::instance().execute(query);
++    while (query.next()) {
++        fetch(query.value(0).toString());
++    }
++}
++
+ void Fetcher::setFetchCount(int count)
+ {
+     m_fetchCount = count;
+diff --git a/src/fetcher.h b/src/fetcher.h
+index 418ead96..8814f293 100644
+--- a/src/fetcher.h
++++ b/src/fetcher.h
+@@ -34,6 +34,7 @@ public:
+     }
+     Q_INVOKABLE void fetch(const QString &url, const bool markEntriesRead = false);
+     Q_INVOKABLE void fetchAll();
++    Q_INVOKABLE void fetchGroup(const QString &groupName);
+     Q_INVOKABLE QString image(const QString &url);
+     void removeImage(const QString &url);
+     Q_INVOKABLE void download(const QString &url);
+diff --git a/src/qml/AlligatorGlobalDrawer.qml b/src/qml/AlligatorGlobalDrawer.qml
+index 12954c7e..5b00eabd 100644
+--- a/src/qml/AlligatorGlobalDrawer.qml
++++ b/src/qml/AlligatorGlobalDrawer.qml
+@@ -113,9 +113,22 @@ Kirigami.GlobalDrawer {
+                 property: "feed.groupName"
+                 criteria: ViewSection.FullString
+                 delegate: Kirigami.ListSectionHeader {
++
+                     label: section
+                     opacity: AlligatorSettings.sidebarCollapsed ? 0 : 1
+                     width: parent.width
++		    checkable: true
++                    onClicked: {
++                      	pageStack.layers.clear();
++			pageStack.clear();
++                   	pageStack.push(Qt.resolvedUrl("EntryListPage.qml"), {
++			    feed: null,
++                            groupname: section});
++		     	checked: true;
++              		if (root.modal) {
++                       	root.close();
++                       	}
++		    }
+ 
+                     Behavior on opacity {
+                         NumberAnimation {
+diff --git a/src/qml/EntryListPage.qml b/src/qml/EntryListPage.qml
+index 0994361a..f96ce775 100644
+--- a/src/qml/EntryListPage.qml
++++ b/src/qml/EntryListPage.qml
+@@ -16,6 +16,7 @@ Kirigami.ScrollablePage {
+     id: page
+ 
+     property Feed feed
++    property string groupname
+     property bool onlyUnread: false
+     property bool onlyFavorite: false
+ 
+@@ -23,11 +24,15 @@ Kirigami.ScrollablePage {
+ 
+     onRefreshingChanged: {
+         if (refreshing) {
+-            if (feed === null) {
+-                Fetcher.fetchAll();
+-            } else {
+-                feed.refresh();
+-            }
++	    if (groupname !== null) {
++		Fetcher.fetchGroup(groupname);
++	    }else{
++		if (feed === null) {
++                    Fetcher.fetchAll();
++		} else {
++                    feed.refresh();
++		}
++	    }
+         }
+     }
+ 
+@@ -154,6 +159,7 @@ Kirigami.ScrollablePage {
+     EntriesModel {
+         id: entriesModel
+         feedUrl: page.feed ? page.feed.url : ""
++	groupName: page.groupname ? page.groupname : ""
+     }
+ 
+     footer: Kirigami.NavigationTabBar {
+-- 
+GitLab
+
