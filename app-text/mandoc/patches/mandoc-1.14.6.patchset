@@ -1,4 +1,4 @@
-From 503340d0438c7738592ffe5ff3aaea16ff062bc2 Mon Sep 17 00:00:00 2001
+From 24f1e990424873a3a4b421238fa90cde55656770 Mon Sep 17 00:00:00 2001
 From: Leorize <alaviss@users.noreply.github.com>
 Date: Tue, 9 Jan 2018 13:26:14 +0700
 Subject: Introduce MANDOC_DB_DIR
@@ -11,30 +11,30 @@ mark certain folders as read-only (in this case, man directory). This
 allows mandocdb to work in such situation.
 
 diff --git a/configure b/configure
-index f9416ce..6e7c391 100755
+index 5cf4e08..ffbcb0a 100755
 --- a/configure
 +++ b/configure
-@@ -98,6 +98,7 @@ INCLUDEDIR=
+@@ -109,6 +109,7 @@ BIN_FROM_SBIN=
+ INCLUDEDIR=
  LIBDIR=
  MANDIR=
- HOMEBREWDIR=
 +DBDIR=
+ READ_ALLOWED_PATH=
  
  WWWPREFIX="/var/www"
- HTDOCDIR=
-@@ -365,6 +366,7 @@ echo "#define MANPATH_DEFAULT \"${MANPATH_DEFAULT}\""
+@@ -464,6 +465,7 @@ echo "#define MANPATH_DEFAULT \"${MANPATH_DEFAULT}\""
+ echo "#define OSENUM ${OSENUM}"
  [ -n "${OSNAME}" ] && echo "#define OSNAME \"${OSNAME}\""
  [ -n "${UTF8_LOCALE}" ] && echo "#define UTF8_LOCALE \"${UTF8_LOCALE}\""
- [ -n "${HOMEBREWDIR}" ] && echo "#define HOMEBREWDIR \"${HOMEBREWDIR}\""
 +[ -n "${DBDIR}" ] && echo "#define MANDOC_DB_DIR \"${DBDIR}\""
- [ ${HAVE_EFTYPE} -eq 0 ] && echo "#define EFTYPE EINVAL"
- [ ${HAVE_O_DIRECTORY} -eq 0 ] && echo "#define O_DIRECTORY 0"
- [ ${HAVE_PATH_MAX} -eq 0 ] && echo "#define PATH_MAX 4096"
+ [ -n "${READ_ALLOWED_PATH}" ] \
+ 	&& echo "#define READ_ALLOWED_PATH \"${READ_ALLOWED_PATH}\""
+ [ ${HAVE_ATTRIBUTE} -eq 0 ] && echo "#define __attribute__(x)"
 diff --git a/mandocdb.c b/mandocdb.c
-index 26117cf..8559b95 100644
+index a3360fe..f42c235 100644
 --- a/mandocdb.c
 +++ b/mandocdb.c
-@@ -34,6 +34,7 @@
+@@ -36,6 +36,7 @@
  #else
  #include "compat_fts.h"
  #endif
@@ -42,7 +42,7 @@ index 26117cf..8559b95 100644
  #include <limits.h>
  #if HAVE_SANDBOX_INIT
  #include <sandbox.h>
-@@ -164,6 +165,7 @@ static	int	 render_string(char **, size_t *);
+@@ -172,6 +173,7 @@ static	int	 render_string(char **, size_t *);
  static	void	 say(const char *, const char *, ...)
  			__attribute__((__format__ (__printf__, 2, 3)));
  static	int	 set_basedir(const char *, int);
@@ -50,10 +50,10 @@ index 26117cf..8559b95 100644
  static	int	 treescan(void);
  static	size_t	 utf8(unsigned int, char [7]);
  
-@@ -176,6 +178,12 @@ static	int		 write_utf8; /* write UTF-8 output; else ASCII */
- static	int		 exitcode; /* to be returned by main */
+@@ -185,6 +187,12 @@ static	int		 exitcode; /* to be returned by main */
  static	enum op		 op; /* operational mode */
  static	char		 basedir[PATH_MAX]; /* current base directory */
+ static	size_t		 basedir_len; /* strlen(basedir) */
 +/* path to mandoc.db */
 +#ifndef MANDOC_DB_DIR
 +static	const	char		 dbpath[] = MANDOC_DB;
@@ -63,13 +63,13 @@ index 26117cf..8559b95 100644
  static	struct mpage	*mpage_head; /* list of distinct manual pages */
  static	struct ohash	 mpages; /* table of distinct manual pages */
  static	struct ohash	 mlinks; /* table of directory entries */
-@@ -431,10 +439,11 @@ mandocdb(int argc, char *argv[])
+@@ -439,10 +447,11 @@ mandocdb(int argc, char *argv[])
  		 * Most of these deal with a specific directory.
  		 * Jump into that directory first.
  		 */
--		if (OP_TEST != op && 0 == set_basedir(path_arg, 1))
-+		if (OP_TEST != op && 0 == set_basedir(path_arg, 1) &&
-+		    0 == set_dbpath())
+-		if (op != OP_TEST && set_basedir(path_arg, 1) == 0)
++		if (op != OP_TEST && set_basedir(path_arg, 1) == 0 &&
++			set_dbpath() == 0)
  			goto out;
  
 -		dba = nodb ? dba_new(128) : dba_read(MANDOC_DB);
@@ -77,16 +77,16 @@ index 26117cf..8559b95 100644
  		if (dba != NULL) {
  			/*
  			 * The existing database is usable.  Process
-@@ -511,6 +520,8 @@ mandocdb(int argc, char *argv[])
+@@ -510,6 +519,8 @@ mandocdb(int argc, char *argv[])
  
- 			if ( ! set_basedir(conf.manpath.paths[j], argc > 0))
+ 			if (set_basedir(conf.manpath.paths[j], argc > 0) == 0)
  				continue;
-+			if ( ! set_dbpath())
-+				continue;
- 			if (0 == treescan())
++			if (set_dbpath() == 0)
++			    continue;
+ 			if (treescan() == 0)
  				continue;
  			dba = dba_new(128);
-@@ -637,8 +648,10 @@ treescan(void)
+@@ -638,8 +649,10 @@ treescan(void)
  		 * stored directory data and handling the filename.
  		 */
  		case FTS_F:
@@ -97,10 +97,10 @@ index 26117cf..8559b95 100644
  			if ( ! use_all && ff->fts_level < 2) {
  				if (warnings)
  					say(path, "Extraneous file");
-@@ -2120,6 +2133,13 @@ static void
- dbwrite(struct dba *dba)
- {
- 	char		 tfn[32];
+@@ -2206,6 +2219,15 @@ dbwrite(struct dba *dba)
+ 	char		 tfn[33], *cp1, *cp2;
+ 	off_t		 i;
+ 	int		 fd1, fd2;
 +#ifndef MANDOC_DB_DIR
 +	const char	 dbnew[] = MANDOC_DB "~";
 +#else
@@ -108,10 +108,12 @@ index 26117cf..8559b95 100644
 +	char		 dbcpy[PATH_MAX + NAME_MAX];
 +	char		 dbdir[PATH_MAX];
 +#endif
- 	int		 status;
- 	pid_t		 child;
++    int status;
++    pid_t child;
  
-@@ -2130,8 +2150,8 @@ dbwrite(struct dba *dba)
+ 	/*
+ 	 * Do not write empty databases, and delete existing ones
+@@ -2214,8 +2236,8 @@ dbwrite(struct dba *dba)
  
  	dba_array_start(dba->pages);
  	if (dba_array_next(dba->pages) == NULL) {
@@ -122,7 +124,7 @@ index 26117cf..8559b95 100644
  		return;
  	}
  
-@@ -2140,11 +2160,48 @@ dbwrite(struct dba *dba)
+@@ -2224,11 +2246,48 @@ dbwrite(struct dba *dba)
  	 * then atomically move it into place.
  	 */
  
@@ -175,19 +177,16 @@ index 26117cf..8559b95 100644
  		}
  		return;
  	}
-@@ -2188,8 +2245,9 @@ dbwrite(struct dba *dba)
- 		say("", "cmp died from signal %d", WTERMSIG(status));
- 	} else if (WEXITSTATUS(status)) {
- 		exitcode = (int)MANDOCLEVEL_SYSERR;
--		say(MANDOC_DB,
--		    "Data changed, but cannot replace database");
-+		say("",
-+		    "Data changed, but cannot replace database: %s",
-+		    dbpath);
- 	}
+@@ -2286,7 +2345,7 @@ dbwrite(struct dba *dba)
+ 
+ err:
+ 	exitcode = (int)MANDOCLEVEL_SYSERR;
+-	say(MANDOC_DB, "Data changed, but cannot replace database");
++	say("", "Data changed, but cannot replace database: %s", dbpath);
  
  out:
-@@ -2295,6 +2353,27 @@ set_basedir(const char *targetdir, int report_baddir)
+ 	if (cp1 != MAP_FAILED)
+@@ -2386,6 +2445,27 @@ set_basedir(const char *targetdir, int report_baddir)
  	return 1;
  }
  
@@ -212,78 +211,14 @@ index 26117cf..8559b95 100644
 +#endif
 +}
 +
- static void
- say(const char *file, const char *format, ...)
- {
-diff --git a/mansearch.c b/mansearch.c
-index 0d60c3b..287f943 100644
---- a/mansearch.c
-+++ b/mansearch.c
-@@ -88,6 +88,11 @@ mansearch(const struct mansearch *search,
- 		struct manpage **res, size_t *sz)
- {
- 	char		 buf[PATH_MAX];
-+#ifndef MANDOC_DB_DIR
-+	const char	 dbpath[] = MANDOC_DB;
-+#else
-+	char		 dbpath[PATH_MAX + NAME_MAX] = MANDOC_DB_DIR;
-+#endif
- 	struct dbm_res	*rp;
- 	struct expr	*e;
- 	struct dbm_page	*page;
-@@ -155,9 +160,22 @@ mansearch(const struct mansearch *search,
- 		}
- 		chdir_status = 1;
- 
--		if (dbm_open(MANDOC_DB) == -1) {
-+#ifdef MANDOC_DB_DIR
-+		if (strlcat(dbpath, paths->paths[i],
-+			    sizeof(dbpath)) >= sizeof(dbpath)) {
-+			warn("%s: &strlcat", paths->paths[i]);
-+			continue;
-+		}
-+		if (strlcat(dbpath, "/" MANDOC_DB,
-+			    sizeof(dbpath)) >= sizeof(dbpath)) {
-+			warn("%s: &strlcat", paths->paths[i]);
-+			continue;
-+		}
-+#endif
-+
-+		if (dbm_open(dbpath) == -1) {
- 			if (errno != ENOENT)
--				warn("%s/%s", paths->paths[i], MANDOC_DB);
-+				warn("%s", dbpath);
- 			continue;
- 		}
- 
+ #ifdef READ_ALLOWED_PATH
+ static int
+ read_allowed(const char *candidate)
 -- 
-2.15.0
+2.50.1
 
 
-From a6a12987a082ba6dbb2866a5177ef39804865366 Mon Sep 17 00:00:00 2001
-From: Leorize <alaviss@users.noreply.github.com>
-Date: Thu, 28 Dec 2017 20:35:14 +0700
-Subject: configure: preserve PATH
-
-
-diff --git a/configure b/configure
-index 6e7c391..379fdb9 100755
---- a/configure
-+++ b/configure
-@@ -40,7 +40,7 @@ MANPATH_DEFAULT="/usr/share/man:/usr/X11R6/man:/usr/local/man"
- OSNAME=
- UTF8_LOCALE=
- 
--CC=`printf "all:\\n\\t@echo \\\$(CC)\\n" | env -i make -sf -`
-+CC=`printf "all:\\n\\t@echo \\\$(CC)\\n" | env -i PATH="$PATH" make -sf -`
- CFLAGS="-g -W -Wall -Wmissing-prototypes -Wstrict-prototypes -Wwrite-strings"
- CFLAGS="${CFLAGS} -Wno-unused-parameter"
- LDADD=
--- 
-2.15.0
-
-
-From 5ea88bf54fbc5bbd6c213b75bff1bf43938f5d88 Mon Sep 17 00:00:00 2001
+From 43db3cf94f0211b2edda1bf08dbda58949602354 Mon Sep 17 00:00:00 2001
 From: Leorize <alaviss@users.noreply.github.com>
 Date: Tue, 9 Jan 2018 15:02:31 +0700
 Subject: configure: add SYSCONFDIR
@@ -291,18 +226,18 @@ Subject: configure: add SYSCONFDIR
 This allow changing the default /etc/man.conf path to SYSCONFDIR/man.conf
 
 diff --git a/configure b/configure
-index 379fdb9..6dbbfdd 100755
+index ffbcb0a..7a870b7 100755
 --- a/configure
 +++ b/configure
-@@ -99,6 +99,7 @@ LIBDIR=
+@@ -110,6 +110,7 @@ INCLUDEDIR=
+ LIBDIR=
  MANDIR=
- HOMEBREWDIR=
  DBDIR=
 +SYSCONFDIR="/etc"
+ READ_ALLOWED_PATH=
  
  WWWPREFIX="/var/www"
- HTDOCDIR=
-@@ -360,7 +361,7 @@ __HEREDOC__
+@@ -459,7 +460,7 @@ __HEREDOC__
  [ ${HAVE_GETLINE} -eq 0 ] && echo "#include <stdio.h>"
  
  echo
@@ -310,8 +245,8 @@ index 379fdb9..6dbbfdd 100755
 +echo "#define MAN_CONF_FILE \"${SYSCONFDIR}/${MANM_MANCONF}\""
  echo "#define MANPATH_BASE \"${MANPATH_BASE}\""
  echo "#define MANPATH_DEFAULT \"${MANPATH_DEFAULT}\""
- [ -n "${OSNAME}" ] && echo "#define OSNAME \"${OSNAME}\""
-@@ -510,6 +511,7 @@ BIN_FROM_SBIN	= ${BIN_FROM_SBIN}
+ echo "#define OSENUM ${OSENUM}"
+@@ -652,6 +653,7 @@ BIN_FROM_SBIN	= ${BIN_FROM_SBIN}
  INCLUDEDIR	= ${INCLUDEDIR}
  LIBDIR		= ${LIBDIR}
  MANDIR		= ${MANDIR}
@@ -320,25 +255,23 @@ index 379fdb9..6dbbfdd 100755
  HTDOCDIR	= ${HTDOCDIR}
  CGIBINDIR	= ${CGIBINDIR}
 -- 
-2.15.0
+2.50.1
 
 
-From c6024ec90171af35f91550d9e89211583806b4bc Mon Sep 17 00:00:00 2001
+From cfd0971efaf0ed67be6e97bfa1ee865120e116c8 Mon Sep 17 00:00:00 2001
 From: Leorize <alaviss@users.noreply.github.com>
 Date: Tue, 30 Jan 2018 19:44:52 +0700
 Subject: manpath: dynamically populate paths on Haiku
 
 
 diff --git a/configure b/configure
-index 6dbbfdd..7bf5428 100755
+index 7a870b7..ee28e33 100755
 --- a/configure
 +++ b/configure
-@@ -362,8 +362,13 @@ __HEREDOC__
- 
- echo
+@@ -463,6 +463,13 @@ echo
  echo "#define MAN_CONF_FILE \"${SYSCONFDIR}/${MANM_MANCONF}\""
--echo "#define MANPATH_BASE \"${MANPATH_BASE}\""
--echo "#define MANPATH_DEFAULT \"${MANPATH_DEFAULT}\""
+ echo "#define MANPATH_BASE \"${MANPATH_BASE}\""
+ echo "#define MANPATH_DEFAULT \"${MANPATH_DEFAULT}\""
 +cat << __HEREDOC__
 +#ifndef __HAIKU__
 +#define MANPATH_BASE "${MANPATH_BASE}"
@@ -346,14 +279,14 @@ index 6dbbfdd..7bf5428 100755
 +#endif
 +
 +__HEREDOC__
+ echo "#define OSENUM ${OSENUM}"
  [ -n "${OSNAME}" ] && echo "#define OSNAME \"${OSNAME}\""
  [ -n "${UTF8_LOCALE}" ] && echo "#define UTF8_LOCALE \"${UTF8_LOCALE}\""
- [ -n "${HOMEBREWDIR}" ] && echo "#define HOMEBREWDIR \"${HOMEBREWDIR}\""
 diff --git a/manpath.c b/manpath.c
-index 54f7a6b..76133b3 100644
+index 255d748..ae0198c 100644
 --- a/manpath.c
 +++ b/manpath.c
-@@ -29,6 +29,10 @@
+@@ -27,6 +27,10 @@
  #include <stdlib.h>
  #include <string.h>
  
@@ -362,15 +295,16 @@ index 54f7a6b..76133b3 100644
 +#endif
 +
  #include "mandoc_aux.h"
+ #include "mandoc.h"
  #include "manconf.h"
- 
-@@ -94,8 +98,26 @@ manconf_parse(struct manconf *conf, const char *file,
+@@ -93,8 +97,26 @@ manconf_parse(struct manconf *conf, const char *file,
  void
  manpath_base(struct manpaths *dirs)
  {
 +#ifndef __HAIKU__
  	char path_base[] = MANPATH_BASE;
- 	manpath_parseline(dirs, path_base, 0);
+-	manpath_parseline(dirs, path_base, '\0');
++	manpath_parseline(dirs, path_base, 0);
 +#else
 +	char path[PATH_MAX + NAME_MAX];
 +	int i;
@@ -391,12 +325,13 @@ index 54f7a6b..76133b3 100644
  }
  
  /*
-@@ -166,7 +188,20 @@ static void
+@@ -164,8 +186,20 @@ static void
  manconf_file(struct manconf *conf, const char *file)
  {
- 	const char *const toks[] = { "manpath", "output", "_whatdb" };
+ 	const char *const toks[] = { "manpath", "output" };
 +#ifndef __HAIKU__
  	char manpath_default[] = MANPATH_DEFAULT;
+-
 +#else
 +	int ignore_default = 0;
 +	int i;
@@ -409,13 +344,13 @@ index 54f7a6b..76133b3 100644
 +		B_SYSTEM_DOCUMENTATION_DIRECTORY
 +	};
 +#endif
- 
  	FILE		*stream;
  	char		*line, *cp, *ep;
-@@ -211,7 +246,11 @@ manconf_file(struct manconf *conf, const char *file)
- 			/* FALLTHROUGH */
+ 	size_t		 linesz, tok, toklen;
+@@ -202,7 +236,11 @@ manconf_file(struct manconf *conf, const char *file)
+ 		switch (tok) {
  		case 0:  /* manpath */
- 			manpath_add(&conf->manpath, cp, 0);
+ 			manpath_add(&conf->manpath, cp, '\0');
 +#ifndef __HAIKU__
  			*manpath_default = '\0';
 +#else
@@ -424,13 +359,13 @@ index 54f7a6b..76133b3 100644
  			break;
  		case 1:  /* output */
  			manconf_output(&conf->output, cp, 1);
-@@ -224,8 +263,21 @@ manconf_file(struct manconf *conf, const char *file)
+@@ -215,8 +253,21 @@ manconf_file(struct manconf *conf, const char *file)
  	fclose(stream);
  
  out:
 +#ifndef __HAIKU__
  	if (*manpath_default != '\0')
- 		manpath_parseline(&conf->manpath, manpath_default, 0);
+ 		manpath_parseline(&conf->manpath, manpath_default, '\0');
 +#else
 +	if (ignore_default)
 +		return;
@@ -447,5 +382,5 @@ index 54f7a6b..76133b3 100644
  
  int
 -- 
-2.15.0
+2.50.1
 
