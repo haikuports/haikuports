@@ -1,0 +1,147 @@
+From 2eb6a07f962855df3d494feecef743e08d1eeb6d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=B4me=20Duval?= <jerome.duval@gmail.com>
+Date: Wed, 13 May 2026 17:42:00 +0200
+Subject: haiku patch
+
+
+diff --git a/src/ioctl.c b/src/ioctl.c
+index 682d270..a9c81da 100644
+--- a/src/ioctl.c
++++ b/src/ioctl.c
+@@ -99,7 +99,7 @@
+  * Local prototypes, OS-specific
+  *****************************************************************************/
+ #if defined( __HAIKU__ )
+-static void BeInitRDC ( raw_device_command *, int );
++static void HaikuInitRDC ( raw_device_command *, int );
+ #elif defined( SOLARIS_USCSI )
+ static void SolarisInitUSCSI( struct uscsi_cmd *p_sc, int i_type );
+ static int SolarisSendUSCSI( int fd, struct uscsi_cmd *p_sc );
+@@ -1062,6 +1062,25 @@ int ioctl_ReadCPRMMediaId(int i_fd,int *p_agid, uint8_t *p_buffer)
+             p_buffer + 4,
+             CPRM_MEDIA_ID_SIZE);
+ 
++#elif defined( __HAIKU__ )
++	raw_device_command rdc = { 0 };
++    uint8_t dvdbs[CPRM_MEDIA_ID_SIZE + 4];
++    rdc.data = dvdbs;
++    rdc.data_length = sizeof(dvdbs); \
++    HaikuInitRDC( &rdc, GPCMD_READ_DVD_STRUCTURE );
++
++    rdc.command[ 7 ]  = CPRM_STRUCT_MEDIA_ID;
++    rdc.command[ 10 ] = *p_agid << 6;
++
++    i_ret = ioctl( i_fd, B_RAW_DEVICE_COMMAND, &rdc, sizeof(rdc) );
++
++    if( i_ret < 0 )
++    {
++        return i_ret;
++    }
++
++    memcpy( p_buffer, dvdbs + 4, CPRM_MEDIA_ID_SIZE);
++
+ #elif defined( DARWIN_DVD_IOCTL )
+     int h_dvd;
+     dk_dvd_read_structure_t dvd;
+@@ -1135,6 +1154,28 @@ int ioctl_ReadCPRMMKBPack(int i_fd, int *p_agid, int mkb_pack, uint8_t *p_mkb_pa
+     memcpy( p_mkb_pack, sptd_buf + 4, CPRM_MKB_PACK_SIZE );
+     free( sptd_buf );
+ 
++#elif defined( __HAIKU__ )
++	raw_device_command rdc = { 0 };
++	uint8_t *sptd_buf = malloc( CPRM_MKB_PACK_SIZE + 4 );
++    rdc.data = sptd_buf;
++    rdc.data_length = CPRM_MKB_PACK_SIZE + 4; \
++    HaikuInitRDC( &rdc, GPCMD_READ_DVD_STRUCTURE );
++
++    rdc.command[ 7 ]  = CPRM_STRUCT_MKB;
++    rdc.command[ 10 ] = *p_agid << 6;
++
++    i_ret = ioctl( i_fd, B_RAW_DEVICE_COMMAND, &rdc, sizeof(rdc) );
++
++    if( i_ret < 0 )
++    {
++        free(sptd_buf);
++        return i_ret;
++    }
++
++    *p_total_packs = sptd_buf[3];
++    memcpy( p_mkb_pack, sptd_buf + 4, CPRM_MKB_PACK_SIZE);
++    free(sptd_buf);
++
+ #elif defined( DARWIN_DVD_IOCTL )
+     int h_dvd;
+     dk_dvd_read_structure_t dvd;
+@@ -1535,12 +1576,12 @@ int ioctl_ReportRPC( int i_fd, int *p_type, int *p_mask, int *p_scheme )
+ 
+ #if defined( __HAIKU__ )
+ /*****************************************************************************
+- * BeInitRDC: initialize a RDC structure for the Haiku kernel
++ * HaikuInitRDC: initialize a RDC structure for the Haiku kernel
+  *****************************************************************************
+  * This function initializes a Haiku raw device command structure for future
+  * use, either a read command or a write command.
+  *****************************************************************************/
+-static void BeInitRDC( raw_device_command *p_rdc, int i_type )
++static void HaikuInitRDC( raw_device_command *p_rdc, int i_type )
+ {
+     memset( p_rdc->data, 0, p_rdc->data_length );
+ 
+diff --git a/src/ioctl.h b/src/ioctl.h
+index d81e7d8..88d0453 100644
+--- a/src/ioctl.h
++++ b/src/ioctl.h
+@@ -52,7 +52,7 @@ int ioctl_ReadCPRMMediaId   ( int, int *, uint8_t * );
+     uint8_t p_buffer[ (SIZE)+1 ]; \
+     rdc.data = (char *)p_buffer; \
+     rdc.data_length = (SIZE); \
+-    BeInitRDC( &rdc, (TYPE) );
++    HaikuInitRDC( &rdc, (TYPE) );
+ #elif defined( SOLARIS_USCSI )
+ #define INIT_USCSI( TYPE, SIZE ) \
+     struct uscsi_cmd sc = { 0 }; \
+-- 
+2.51.0
+
+
+From 593bbd9d726056aac7da1d9f6015665e5b144bc4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=B4me=20Duval?= <jerome.duval@gmail.com>
+Date: Wed, 13 May 2026 19:51:26 +0200
+Subject: Haiku: use directory API
+
+
+diff --git a/src/libdvdcss.c b/src/libdvdcss.c
+index 421764d..81ded31 100644
+--- a/src/libdvdcss.c
++++ b/src/libdvdcss.c
+@@ -120,6 +120,9 @@
+ #   include <windows.h>
+ #   include <shlobj.h>
+ #endif
++#ifdef __HAIKU__
++#   include <FindDirectory.h>
++#endif
+ 
+ #include "dvdcss/dvdcss.h"
+ 
+@@ -280,8 +283,17 @@ static int set_cache_directory( dvdcss_t dvdcss )
+                 }
+             }
+ #endif /* __OS2__ */
++#ifdef __HAIKU__
++            {
++                char buf[512];
++                find_directory(B_USER_CACHE_DIRECTORY, 0, false, buf, 512);
++                snprintf( dvdcss->psz_cachefile + home_pos, PATH_MAX - home_pos,
++                          "%s/dvdcss", buf );
++		    }
++#else
+             snprintf( dvdcss->psz_cachefile + home_pos, PATH_MAX - home_pos,
+                       "%s/.dvdcss", psz_home );
++#endif
+             dvdcss->psz_cachefile[PATH_MAX - 1] = '\0';
+             psz_cache = dvdcss->psz_cachefile;
+         }
+-- 
+2.51.0
+
