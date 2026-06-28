@@ -1,0 +1,149 @@
+From 9159104082565b6cebcb3973b575252eb157c0b6 Mon Sep 17 00:00:00 2001
+From: Luc Schrijvers <begasus@gmail.com>
+Date: Wed, 30 Apr 2025 08:59:19 +0200
+Subject: Fix build error for tests
+
+
+diff --git a/test/signal/test-signalhandler.cpp b/test/signal/test-signalhandler.cpp
+index 153ec95..14e5f85 100644
+--- a/test/signal/test-signalhandler.cpp
++++ b/test/signal/test-signalhandler.cpp
+@@ -54,7 +54,7 @@
+     ++*static_cast<int*>(nullptr); // NOLINT(clang-analyzer-core.NullDereference)
+ }
+ 
+-#if !defined(__APPLE__) && !defined(_AIX)
++#if !defined(__APPLE__) && !defined(_AIX) && !defined(__HAIKU__)
+ /*static*/ int my_fpe() // NOLINT(misc-use-internal-linkage)
+ {
+     if (feenableexcept(FE_ALL_EXCEPT) == -1)
+@@ -80,7 +80,7 @@ int main(int argc, const char * const argv[])
+         my_abort();
+     else if (strcmp(argv[1], "segv") == 0)
+         my_segv();
+-#if !defined(__APPLE__) && !defined(_AIX)
++#if !defined(__APPLE__) && !defined(_AIX) && !defined(__HAIKU__)
+     else if (strcmp(argv[1], "fpe") == 0)
+         return my_fpe();
+ #endif
+-- 
+2.54.0
+
+
+From 4cc669374baf6a391ca12598311c0bb88981b6ac Mon Sep 17 00:00:00 2001
+From: Joachim Reichel <reichel@debian.org>
+Date: Wed, 30 Apr 2025 10:58:42 +0200
+Subject: Install the translations in /lang instead of /usr/bin
+
+
+diff --git a/gui/CMakeLists.txt b/gui/CMakeLists.txt
+index d640c34..e1ba578 100644
+--- a/gui/CMakeLists.txt
++++ b/gui/CMakeLists.txt
+@@ -72,7 +72,7 @@ CheckOptions:
+     endif()
+ 
+     install(TARGETS cppcheck-gui RUNTIME DESTINATION ${CMAKE_INSTALL_FULL_BINDIR} COMPONENT applications)
+-    install(FILES ${qms} DESTINATION ${CMAKE_INSTALL_FULL_BINDIR} COMPONENT applications)
++    install(FILES ${qms} DESTINATION ${FILESDIR}/lang COMPONENT applications)
+ 
+     install(FILES cppcheck-gui.desktop DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
+ 
+-- 
+2.54.0
+
+
+From c0ab7f3b66528d75e1285bdc324eaf5af140950e Mon Sep 17 00:00:00 2001
+From: Joachim Reichel <reichel@debian.org>
+Date: Wed, 30 Apr 2025 11:00:26 +0200
+Subject: Set configuration directory and python version
+
+
+diff --git a/gui/main.cpp b/gui/main.cpp
+index c855b25..62976f8 100644
+--- a/gui/main.cpp
++++ b/gui/main.cpp
+@@ -54,6 +54,12 @@ int main(int argc, char *argv[])
+ 
+     auto* settings = new QSettings("Cppcheck", "Cppcheck-GUI", &app);
+ 
++    // Set some default settings
++    if( settings->value("DATADIR", QString()).toString().isEmpty())
++        settings->setValue("DATADIR", FILESDIR);
++    if( settings->value(SETTINGS_PYTHON_PATH, QString()).toString().isEmpty())
++        settings->setValue(SETTINGS_PYTHON_PATH, QString("/usr/bin/python3"));
++
+     // Set data dir..
+     const QStringList args = QApplication::arguments();
+     auto it = std::find_if(args.cbegin(), args.cend(), [](const QString& arg) {
+-- 
+2.54.0
+
+
+From adebce5c666b2c94602e602ff43cd7f70143dda1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=B4me=20Duval?= <jerome.duval@gmail.com>
+Date: Sun, 28 Jun 2026 18:09:20 +0200
+Subject: implement Path::getCurrentExecutablePath for Haiku
+
+
+diff --git a/Makefile b/Makefile
+index 7d2b451..0fc1d8e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -132,11 +132,9 @@ ifeq (clang++, $(findstring clang++,$(CXX)))
+     CPPCHK_GLIBCXX_DEBUG=
+ endif
+ ifndef CXXFLAGS
+-    CXXFLAGS=-O2 -Wall -Wno-sign-compare -Wno-multichar
++    CXXFLAGS=-pedantic -Wall -Wextra -Wcast-qual -Wfloat-equal -Wmissing-declarations -Wmissing-format-attribute -Wno-long-long -Wpacked -Wredundant-decls -Wundef -Wno-sign-compare -Wno-multichar -Woverloaded-virtual -g
+ endif
+ 
+-override CPPFLAGS += -DNDEBUG
+-
+ ifeq (g++, $(findstring g++,$(CXX)))
+     override CXXFLAGS += -pipe
+ endif
+@@ -398,7 +396,7 @@ dmake:	tools/dmake/dmake.o cli/filelister.o $(libcppdir)/pathmatch.o $(libcppdir
+ 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+ 
+ run-dmake: dmake
+-	./dmake --release
++	./dmake
+ 
+ clean:
+ 	rm -f build/*.cpp build/*.o lib/*.o cli/*.o frontend/*.o test/*.o tools/dmake/*.o externals/*/*.o testrunner dmake cppcheck cppcheck.exe cppcheck.1
+diff --git a/lib/path.cpp b/lib/path.cpp
+index c4758df..0195c8b 100644
+--- a/lib/path.cpp
++++ b/lib/path.cpp
+@@ -52,6 +52,9 @@
+ #if defined(__APPLE__)
+ #include <mach-o/dyld.h>
+ #endif
++#if defined(__HAIKU__)
++#include <image.h>
++#endif
+ 
+ 
+ /** Is the filesystem case insensitive? */
+@@ -158,6 +161,17 @@ std::string Path::getCurrentExecutablePath(const char* fallback)
+ #elif defined(__APPLE__)
+     uint32_t size = sizeof(buf);
+     success = (_NSGetExecutablePath(buf, &size) == 0);
++#elif defined(__HAIKU__)
++	int32 cookie = 0;
++	image_info info;
++	while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK)
++	{
++		if (info.type == B_APP_IMAGE)
++		{
++			break;
++		}
++	}
++	return std::string(info.name);
+ #else
+     const char* procPath =
+ #ifdef __SVR4 // Solaris
+-- 
+2.54.0
+
