@@ -1,0 +1,245 @@
+From 16a74728022d35a0be80262a5a86daeba7d3db53 Mon Sep 17 00:00:00 2001
+From: Sam James <sam@gentoo.org>
+Date: Fri, 24 Apr 2026 01:57:09 +0100
+Subject: [PATCH] mtest: support --exclude
+
+Support `--exclude name` where `name` is a full test name, optionally
+including the subproject name. Wildcards are not currently supported.
+
+Accept both `name` for the main project and `subproject:name`. We want `name`
+for convenience so users don't have to write out their project name when
+no subprojects are involved.
+
+Extended matching could be added in future, but the primary usecase for
+this is where distributions want to skip known-buggy or irrelevant tests,
+rather than developers working on their own project.
+
+The test changes are a bit noisy because needed to add a test with
+the same name in the main project and a subproject to check that --exclude
+w/ an unqualified name only affected the main parent, but adding 2 new failing
+tests required all the numbers to be adjusted.
+
+Closes: https://github.com/mesonbuild/meson/pull/11502
+Closes: https://github.com/mesonbuild/meson/issues/6999
+Signed-off-by: Sam James <sam@gentoo.org>
+---
+ docs/markdown/Unit-tests.md                   | 26 ++++++++++
+ docs/markdown/snippets/tests-exclude.md       |  6 +++
+ man/meson.1                                   |  3 ++
+ mesonbuild/mtest.py                           | 16 +++++-
+ test cases/unit/4 suite selection/meson.build |  4 ++
+ .../subprojects/subprjfail/meson.build        |  4 ++
+ unittests/allplatformstests.py                | 49 ++++++++++---------
+ 7 files changed, 83 insertions(+), 25 deletions(-)
+ create mode 100644 docs/markdown/snippets/tests-exclude.md
+
+diff --git a/docs/markdown/Unit-tests.md b/docs/markdown/Unit-tests.md
+index ab24d4b027e1..498ec4f9a18e 100644
+--- a/docs/markdown/Unit-tests.md
++++ b/docs/markdown/Unit-tests.md
+@@ -216,6 +216,32 @@ into `n` slices and execute the `ith` such slice. This allows you to distribute
+ a set of long-running tests across multiple machines to decrease the overall
+ runtime of tests.
+ 
++Since version *1.12.0*, you can pass `--exclude NAME` to skip processing
++of named tests:
++```console
++$ meson test --list
++m:basic
++m:buggy
++
++$ meson test
++...
++1/2 m:basic        OK              0.01s
++2/2 m:buggy        FAIL            0.00s ...
++
++Ok:                1
++Fail:              1
++
++$ meson test --exclude buggy
++...
++1/1 m:basic        OK              0.00s
++
++Ok:                1
++Fail:              0
++```
++
++For unqualified names (no subproject specified), `--exclude NAME` matches
++the main project.
++
+ ### Other test options
+ 
+ Sometimes you need to run the tests multiple times, which is done like this:
+diff --git a/docs/markdown/snippets/tests-exclude.md b/docs/markdown/snippets/tests-exclude.md
+new file mode 100644
+index 000000000000..daf282ef59a6
+--- /dev/null
++++ b/docs/markdown/snippets/tests-exclude.md
+@@ -0,0 +1,6 @@
++## `meson test` now accepts `--exclude`
++
++`meson test` has a new `--exclude` argument to allow skipping named
++tests. It takes a full test name and can be specified repeatedly. This
++should help distributions that need to skip tests irrelevant for them
++or known to be buggy.
+diff --git a/man/meson.1 b/man/meson.1
+index c00d90e9bfdd..b655e299d534 100644
+--- a/man/meson.1
++++ b/man/meson.1
+@@ -303,6 +303,9 @@ run tests in this suite
+ \fB\-\-no\-suite\fR
+ do not run tests in this suite
+ .TP
++\fB\-\-exclude\fR
++do not run named tests
++.TP
+ \fB\-\-no\-stdsplit\fR
+ do not split stderr and stdout in test logs
+ .TP
+diff --git a/mesonbuild/mtest.py b/mesonbuild/mtest.py
+index 18760eb51ecd..fb97f5beefc9 100644
+--- a/mesonbuild/mtest.py
++++ b/mesonbuild/mtest.py
+@@ -150,6 +150,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
+                         help='Only run tests belonging to the given suite.')
+     parser.add_argument('--no-suite', default=[], dest='exclude_suites', action='append', metavar='SUITE',
+                         help='Do not run tests belonging to the given suite.')
++    parser.add_argument('--exclude', default=[], dest='exclude', action='append',
++                        help='Exclude tests with the given name.')
+     parser.add_argument('--no-stdsplit', default=True, dest='split', action='store_false',
+                         help='Do not split stderr and stdout in test logs.')
+     parser.add_argument('--print-errorlogs', default=False, action='store_true',
+@@ -1970,10 +1972,18 @@ def test_in_suites(test: TestSerialisation, suites: T.List[str]) -> bool:
+                         return True
+         return False
+ 
+-    def test_suitable(self, test: TestSerialisation) -> bool:
++    def test_suitable(self, test: TestSerialisation, excluded_tests: set[str]) -> bool:
+         if TestHarness.test_in_suites(test, self.options.exclude_suites):
+             return False
+ 
++        # Accept both --exclude name and --exclude subproject:name.
++        # For the main project, we also accept 'name' without qualification
++        # for convenience.
++        if self.build_data.project_name == test.project_name and test.name in excluded_tests:
++            return False
++        if f'{test.project_name}:{test.name}' in excluded_tests:
++            return False
++
+         if self.options.include_suites:
+             # Both force inclusion (overriding add_test_setup) and exclude
+             # everything else
+@@ -2044,7 +2054,9 @@ def get_tests(self, errorfile: T.Optional[T.IO] = None) -> T.List[TestSerialisat
+             print('No tests defined.', file=errorfile)
+             return []
+ 
+-        tests = [t for t in self.tests if self.test_suitable(t)]
++        excluded_tests = set(self.options.exclude)
++        tests = [t for t in self.tests if self.test_suitable(t, excluded_tests)]
++
+         if self.options.args:
+             tests = list(self.tests_from_args(tests))
+         if self.options.slice:
+diff --git a/test cases/unit/4 suite selection/meson.build b/test cases/unit/4 suite selection/meson.build
+index ea6db923cb84..e65d16baae87 100644
+--- a/test cases/unit/4 suite selection/meson.build	
++++ b/test cases/unit/4 suite selection/meson.build	
+@@ -15,3 +15,7 @@ test('mainprj-successful_test',
+ test('mainprj-successful_test_no_suite',
+   executable('no_suite_test', 'successful_test.c'),
+   suite : [])
++
++test('buggy',
++  executable('failing_test_name_collision', 'failing_test.c'),
++  suite : 'fail')
+diff --git a/test cases/unit/4 suite selection/subprojects/subprjfail/meson.build b/test cases/unit/4 suite selection/subprojects/subprjfail/meson.build
+index e6270a8cf06c..ee6c6c2c03b4 100644
+--- a/test cases/unit/4 suite selection/subprojects/subprjfail/meson.build	
++++ b/test cases/unit/4 suite selection/subprojects/subprjfail/meson.build	
+@@ -7,3 +7,7 @@ test('subprjfail-failing_test',
+ test('subprjfail-failing_test_no_suite',
+   executable('failing_test_no_suite', 'failing_test.c'),
+   suite : [])
++
++test('buggy',
++  executable('failing_test_name_collision', 'failing_test.c'),
++  suite : 'fail')
+diff --git a/unittests/allplatformstests.py b/unittests/allplatformstests.py
+index 2769370bbfe4..4fdc9c04d6d1 100644
+--- a/unittests/allplatformstests.py
++++ b/unittests/allplatformstests.py
+@@ -906,48 +906,51 @@ def test_suite_selection(self):
+         self.init(testdir)
+         self.build()
+ 
+-        self.assertFailedTestCount(4, self.mtest_command)
++        self.assertFailedTestCount(6, self.mtest_command)
++        self.assertFailedTestCount(4, self.mtest_command + ['--exclude', 'mainprj-failing_test',
++                                                            '--exclude', 'subprjfail:subprjfail-failing_test_no_suite'])
++        self.assertFailedTestCount(5, self.mtest_command + ['--exclude', 'buggy'])
+ 
+         self.assertFailedTestCount(0, self.mtest_command + ['--suite', ':success'])
+-        self.assertFailedTestCount(3, self.mtest_command + ['--suite', ':fail'])
+-        self.assertFailedTestCount(4, self.mtest_command + ['--no-suite', ':success'])
++        self.assertFailedTestCount(5, self.mtest_command + ['--suite', ':fail'])
++        self.assertFailedTestCount(6, self.mtest_command + ['--no-suite', ':success'])
+         self.assertFailedTestCount(1, self.mtest_command + ['--no-suite', ':fail'])
+ 
+-        self.assertFailedTestCount(1, self.mtest_command + ['--suite', 'mainprj'])
++        self.assertFailedTestCount(2, self.mtest_command + ['--suite', 'mainprj'])
+         self.assertFailedTestCount(0, self.mtest_command + ['--suite', 'subprjsucc'])
+-        self.assertFailedTestCount(2, self.mtest_command + ['--suite', 'subprjfail'])
++        self.assertFailedTestCount(3, self.mtest_command + ['--suite', 'subprjfail'])
+         self.assertFailedTestCount(1, self.mtest_command + ['--suite', 'subprjmix'])
+-        self.assertFailedTestCount(3, self.mtest_command + ['--no-suite', 'mainprj'])
+-        self.assertFailedTestCount(4, self.mtest_command + ['--no-suite', 'subprjsucc'])
+-        self.assertFailedTestCount(2, self.mtest_command + ['--no-suite', 'subprjfail'])
+-        self.assertFailedTestCount(3, self.mtest_command + ['--no-suite', 'subprjmix'])
++        self.assertFailedTestCount(4, self.mtest_command + ['--no-suite', 'mainprj'])
++        self.assertFailedTestCount(6, self.mtest_command + ['--no-suite', 'subprjsucc'])
++        self.assertFailedTestCount(3, self.mtest_command + ['--no-suite', 'subprjfail'])
++        self.assertFailedTestCount(5, self.mtest_command + ['--no-suite', 'subprjmix'])
+ 
+-        self.assertFailedTestCount(1, self.mtest_command + ['--suite', 'mainprj:fail'])
++        self.assertFailedTestCount(2, self.mtest_command + ['--suite', 'mainprj:fail'])
+         self.assertFailedTestCount(0, self.mtest_command + ['--suite', 'mainprj:success'])
+-        self.assertFailedTestCount(3, self.mtest_command + ['--no-suite', 'mainprj:fail'])
+-        self.assertFailedTestCount(4, self.mtest_command + ['--no-suite', 'mainprj:success'])
++        self.assertFailedTestCount(4, self.mtest_command + ['--no-suite', 'mainprj:fail'])
++        self.assertFailedTestCount(6, self.mtest_command + ['--no-suite', 'mainprj:success'])
+ 
+-        self.assertFailedTestCount(1, self.mtest_command + ['--suite', 'subprjfail:fail'])
++        self.assertFailedTestCount(2, self.mtest_command + ['--suite', 'subprjfail:fail'])
+         self.assertFailedTestCount(0, self.mtest_command + ['--suite', 'subprjfail:success'])
+-        self.assertFailedTestCount(3, self.mtest_command + ['--no-suite', 'subprjfail:fail'])
+-        self.assertFailedTestCount(4, self.mtest_command + ['--no-suite', 'subprjfail:success'])
++        self.assertFailedTestCount(4, self.mtest_command + ['--no-suite', 'subprjfail:fail'])
++        self.assertFailedTestCount(6, self.mtest_command + ['--no-suite', 'subprjfail:success'])
+ 
+         self.assertFailedTestCount(0, self.mtest_command + ['--suite', 'subprjsucc:fail'])
+         self.assertFailedTestCount(0, self.mtest_command + ['--suite', 'subprjsucc:success'])
+-        self.assertFailedTestCount(4, self.mtest_command + ['--no-suite', 'subprjsucc:fail'])
+-        self.assertFailedTestCount(4, self.mtest_command + ['--no-suite', 'subprjsucc:success'])
++        self.assertFailedTestCount(6, self.mtest_command + ['--no-suite', 'subprjsucc:fail'])
++        self.assertFailedTestCount(6, self.mtest_command + ['--no-suite', 'subprjsucc:success'])
+ 
+         self.assertFailedTestCount(1, self.mtest_command + ['--suite', 'subprjmix:fail'])
+         self.assertFailedTestCount(0, self.mtest_command + ['--suite', 'subprjmix:success'])
+-        self.assertFailedTestCount(3, self.mtest_command + ['--no-suite', 'subprjmix:fail'])
+-        self.assertFailedTestCount(4, self.mtest_command + ['--no-suite', 'subprjmix:success'])
++        self.assertFailedTestCount(5, self.mtest_command + ['--no-suite', 'subprjmix:fail'])
++        self.assertFailedTestCount(6, self.mtest_command + ['--no-suite', 'subprjmix:success'])
+ 
+-        self.assertFailedTestCount(3, self.mtest_command + ['--suite', 'subprjfail', '--suite', 'subprjmix:fail'])
+-        self.assertFailedTestCount(4, self.mtest_command + ['--suite', 'subprjfail', '--suite', 'subprjmix', '--suite', 'mainprj'])
+-        self.assertFailedTestCount(3, self.mtest_command + ['--suite', 'subprjfail', '--suite', 'subprjmix', '--suite', 'mainprj', '--no-suite', 'subprjmix:fail'])
++        self.assertFailedTestCount(4, self.mtest_command + ['--suite', 'subprjfail', '--suite', 'subprjmix:fail'])
++        self.assertFailedTestCount(6, self.mtest_command + ['--suite', 'subprjfail', '--suite', 'subprjmix', '--suite', 'mainprj'])
++        self.assertFailedTestCount(5, self.mtest_command + ['--suite', 'subprjfail', '--suite', 'subprjmix', '--suite', 'mainprj', '--no-suite', 'subprjmix:fail'])
+         self.assertFailedTestCount(1, self.mtest_command + ['--suite', 'subprjfail', '--suite', 'subprjmix', '--suite', 'mainprj', '--no-suite', 'subprjmix:fail', 'mainprj-failing_test'])
+ 
+-        self.assertFailedTestCount(2, self.mtest_command + ['--no-suite', 'subprjfail:fail', '--no-suite', 'subprjmix:fail'])
++        self.assertFailedTestCount(3, self.mtest_command + ['--no-suite', 'subprjfail:fail', '--no-suite', 'subprjmix:fail'])
+ 
+     def test_mtest_reconfigure(self):
+         if self.backend is not Backend.ninja:
