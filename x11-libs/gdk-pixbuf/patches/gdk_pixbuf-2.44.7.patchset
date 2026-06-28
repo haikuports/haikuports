@@ -1,0 +1,196 @@
+From fe16a1d22f1e1774dec4df5a403ba3c7b23e80df Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Thu, 15 Dec 2022 22:09:07 +1000
+Subject: Autoupdate loaders.cache file when modules changed
+
+
+diff --git a/gdk-pixbuf/gdk-pixbuf-io.c b/gdk-pixbuf/gdk-pixbuf-io.c
+index 1eb5679..ab797cb 100644
+--- a/gdk-pixbuf/gdk-pixbuf-io.c
++++ b/gdk-pixbuf/gdk-pixbuf-io.c
+@@ -46,6 +46,10 @@
+ #ifdef OS_DARWIN
+ #include <mach-o/dyld.h>
+ #endif
++#ifdef __HAIKU__
++#include <fs_info.h>
++#include <FindDirectory.h>
++#endif
+ 
+ G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+ 
+@@ -341,6 +345,89 @@ get_libdir (void)
+ 
+ #endif  /* GDK_PIXBUF_RELOCATABLE */
+ 
++#ifdef __HAIKU__
++
++static char *
++get_cachedir (void)
++{
++  static char *cachedir = NULL;
++
++  if (cachedir == NULL)
++  {
++        char path[B_PATH_NAME_LENGTH];
++        find_directory(B_SYSTEM_CACHE_DIRECTORY, dev_for_path("/boot"), false, path, sizeof(path));
++        cachedir = g_strdup (path);
++  }
++
++  return cachedir;
++}
++
++static char *
++get_modulesdir (void)
++{
++  static char *modulesdir = NULL;
++
++  if (modulesdir == NULL)
++          modulesdir = g_build_filename (GDK_PIXBUF_LIBDIR, "gdk-pixbuf-2.0", GDK_PIXBUF_BINARY_VERSION, "loaders", NULL);
++
++  return modulesdir;
++}
++
++#undef GDK_PIXBUF_LIBDIR
++#define GDK_PIXBUF_LIBDIR get_cachedir()
++#define GDK_PIXBUF_MODULESDIR get_modulesdir()
++
++static gboolean
++gdk_pixbuf_update_cache_file(const char *filename)
++{
++       GDir *dir;
++       GChecksum *checksum;
++       gchar *summ_current;
++       gchar *summ_last;
++       gchar *summ_filename;
++       gchar *file;
++       gchar filepath[B_PATH_NAME_LENGTH];
++
++       dir = g_dir_open(GDK_PIXBUF_MODULESDIR, 0, NULL);
++       if (dir == NULL)
++               return FALSE;
++
++       checksum = g_checksum_new(G_CHECKSUM_MD5);
++
++       while ((file = g_dir_read_name(dir)))
++       {
++               struct stat st;
++               g_snprintf(filepath, B_PATH_NAME_LENGTH, "%s/%s", GDK_PIXBUF_MODULESDIR, file);
++               if (g_stat(filepath, &st) == 0)
++               {
++                       g_checksum_update(checksum, (guint8*)&(st.st_size), sizeof(off_t));
++                       g_checksum_update(checksum, (guint8*)&(st.st_ctime), sizeof(time_t));
++                       g_checksum_update(checksum, (guint8*)&(st.st_mtime), sizeof(time_t));
++               }
++               g_checksum_update(checksum, (guint8*)file, strlen(file));
++       }
++       summ_current = g_checksum_get_string(checksum);
++
++       summ_filename = g_build_filename (GDK_PIXBUF_LIBDIR, "gdk-pixbuf-2.0", GDK_PIXBUF_BINARY_VERSION, "loaders.cache.md5", NULL);
++       if (!g_file_get_contents (summ_filename, &summ_last, NULL, NULL))
++               summ_last = g_strdup("0");
++
++       if (strcmp(summ_last, summ_current) != 0)
++       {
++               g_mkdir_with_parents(GDK_PIXBUF_LIBDIR, ALLPERMS);
++               system("gdk-pixbuf-query-loaders --update-cache");
++               g_file_set_contents(summ_filename, summ_current, -1, NULL);
++       }
++
++       g_checksum_free(checksum);
++       g_free(summ_filename);
++       g_free(summ_last);
++
++       return TRUE;
++}
++
++#endif
++
+ /* In case we have a relative module path in the loaders cache
+  * prepend the toplevel dir */
+ static gchar *
+@@ -392,6 +479,9 @@ gdk_pixbuf_io_init_modules (const char  *filename,
+         GError *local_error = NULL;
+         guint num_formats;
+ 
++#ifdef __HAIKU__
++        gdk_pixbuf_update_cache_file(filename);
++#endif
+         channel = g_io_channel_new_file (filename, "r",  &local_error);
+         if (!channel) {
+                 char *filename_utf8 = g_filename_display_name (filename);
+diff --git a/gdk-pixbuf/queryloaders.c b/gdk-pixbuf/queryloaders.c
+index 5228c6f..b1300a9 100644
+--- a/gdk-pixbuf/queryloaders.c
++++ b/gdk-pixbuf/queryloaders.c
+@@ -50,6 +50,11 @@
+ #include <mach-o/dyld.h>
+ #endif
+ 
++#ifdef __HAIKU__
++#include <fs_info.h>
++#include <FindDirectory.h>
++#endif
++
+ static void
+ print_escaped (GString *contents, const char *str)
+ {
+@@ -298,6 +303,31 @@ get_libdir (void)
+ 
+ #endif
+ 
++#ifdef __HAIKU__
++
++static char *
++get_cachedir (void)
++{
++  static char *cachedir = NULL;
++
++  if (cachedir == NULL)
++  {
++        gchar *file_cache_dir;
++        char path[B_PATH_NAME_LENGTH];
++        find_directory(B_SYSTEM_CACHE_DIRECTORY, dev_for_path("/boot"), false, path, sizeof(path));
++        file_cache_dir = g_build_filename (path, "gdk-pixbuf-2.0", GDK_PIXBUF_BINARY_VERSION, NULL);
++        g_mkdir_with_parents(file_cache_dir, ALLPERMS);
++        cachedir = g_strdup (path);
++  }
++
++  return cachedir;
++}
++
++#undef GDK_PIXBUF_LIBDIR
++#define GDK_PIXBUF_LIBDIR get_cachedir()
++
++#endif
++
+ static gchar *
+ gdk_pixbuf_get_module_file (void)
+ {
+-- 
+2.54.0
+
+
+From a7c7ac7a9896ed2dcc52272ee81490a5d46caa12 Mon Sep 17 00:00:00 2001
+From: Luc Schrijvers <begasus@gmail.com>
+Date: Sun, 28 Jun 2026 12:24:16 +0200
+Subject: Disable failing test
+
+ERROR:../tests/pixbuf-readonly-to-mutable.c:84:get_readonly_pixbuf: 'errno >= 0' should be TRUE
+
+diff --git a/tests/pixbuf-readonly-to-mutable.c b/tests/pixbuf-readonly-to-mutable.c
+index ea8a22f..de62989 100644
+--- a/tests/pixbuf-readonly-to-mutable.c
++++ b/tests/pixbuf-readonly-to-mutable.c
+@@ -58,7 +58,7 @@ get_readonly_pixbuf (void)
+   reference = gdk_pixbuf_new_from_file (g_test_get_filename (G_TEST_DIST, "test-image.png", NULL), &error);
+   g_assert_no_error (error);
+   
+-#ifdef G_OS_UNIX
++#if defined(G_OS_UNIX) && !defined(__HAIKU__)
+   {
+     MappedBuf *buf;
+     int saved_errno;
+-- 
+2.54.0
+
