@@ -1,0 +1,111 @@
+diff --git a/src/adw-style-manager.c b/src/adw-style-manager.c
+index c9f35c3..fa53e9c 100644
+--- a/src/adw-style-manager.c
++++ b/src/adw-style-manager.c
+@@ -70,6 +70,7 @@ struct _AdwStyleManager
+   GtkCssProvider *fonts_provider;
+ 
+   AdwColorScheme color_scheme;
++  GSettings *interface_settings;
+   gboolean dark;
+   char *document_font_name;
+   char *monospace_font_name;
+@@ -134,6 +135,56 @@ unregister_display (GdkDisplay *display)
+   g_hash_table_remove (display_style_managers, display);
+ }
+ 
++static void
++adw_style_manager_theme_changed (GSettings       *settings,
++                                 const char      *key,
++                                 AdwStyleManager *self)
++{
++  char *user_theme = NULL;
++  char *color_scheme = NULL;
++  char *user_icon_theme = NULL;
++  const char *selected = NULL;
++
++  if (!self->display || !self->gtk_settings)
++    return;
++
++  user_theme = g_settings_get_string (settings, "gtk-theme");
++  if (user_theme && *user_theme) {
++    selected = user_theme;
++  } else {
++    selected = "Adwaita-empty";
++  }
++
++  self->changing_gtk_settings = TRUE;
++  g_object_set (self->gtk_settings, "gtk-theme-name", selected, NULL);
++  self->changing_gtk_settings = FALSE;
++
++  user_icon_theme = g_settings_get_string (settings, "icon-theme");
++  if (user_icon_theme && *user_icon_theme) {
++    self->changing_gtk_settings = TRUE;
++    g_object_set (self->gtk_settings, "gtk-icon-theme-name", user_icon_theme, NULL);
++    self->changing_gtk_settings = FALSE;
++  }
++
++  g_setenv ("GTK_THEME", selected, TRUE);
++
++  color_scheme = g_settings_get_string (settings, "color-scheme");
++  if (color_scheme && *color_scheme) {
++    if (g_strcmp0 (color_scheme, "prefer-dark") == 0)
++      adw_style_manager_set_color_scheme (self, ADW_COLOR_SCHEME_PREFER_DARK);
++    else if (g_strcmp0 (color_scheme, "force-dark") == 0)
++      adw_style_manager_set_color_scheme (self, ADW_COLOR_SCHEME_FORCE_DARK);
++    else if (g_strcmp0 (color_scheme, "force-light") == 0)
++      adw_style_manager_set_color_scheme (self, ADW_COLOR_SCHEME_FORCE_LIGHT);
++    else
++      adw_style_manager_set_color_scheme (self, ADW_COLOR_SCHEME_PREFER_LIGHT);
++  }
++
++  g_free (user_theme);
++  g_free (user_icon_theme);
++  g_free (color_scheme);
++}
++
+ static void
+ register_display (GdkDisplayManager *display_manager,
+                   GdkDisplay        *display)
+@@ -495,11 +546,8 @@ adw_style_manager_constructed (GObject *object)
+                              G_CONNECT_SWAPPED);
+ #endif
+ 
+-    if (!adw_is_granite_present () && !g_getenv ("GTK_THEME")) {
+-      g_object_set (self->gtk_settings,
+-                    "gtk-theme-name", "Adwaita-empty",
+-                    NULL);
+-
++    if (!adw_is_granite_present ()) {
++      /* Providers: keep upstream setup */
+       self->provider = gtk_css_provider_new ();
+       gtk_css_provider_load_from_resource (self->provider,
+                                            "/org/gnome/Adwaita/styles/gtk.css");
+@@ -518,6 +566,19 @@ adw_style_manager_constructed (GObject *object)
+                                                   GTK_STYLE_PROVIDER_PRIORITY_THEME);
+     }
+ 
++    {
++      GSettingsSchemaSource *src = g_settings_schema_source_get_default ();
++      GSettingsSchema *schema = g_settings_schema_source_lookup (src, "org.gnome.desktop.interface", TRUE);
++      if (schema) {
++        self->interface_settings = g_settings_new_full (schema, NULL, NULL);
++        adw_style_manager_theme_changed (self->interface_settings, "gtk-theme", self);
++        g_signal_connect (self->interface_settings,
++                          "changed",
++                          G_CALLBACK (adw_style_manager_theme_changed),
++                          self);
++      }
++    }
++
+     self->animations_provider = gtk_css_provider_new ();
+     gtk_css_provider_load_from_string (self->animations_provider,
+                                        "* { transition: none; }");
+@@ -587,6 +648,7 @@ adw_style_manager_dispose (GObject *object)
+   g_clear_object (&self->animations_provider);
+   g_clear_object (&self->accent_provider);
+   g_clear_object (&self->fonts_provider);
++  g_clear_object (&self->interface_settings);
+   g_clear_pointer (&self->document_font_name, g_free);
+   g_clear_pointer (&self->monospace_font_name, g_free);
+ 
