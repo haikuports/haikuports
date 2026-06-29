@@ -11880,3 +11880,238 @@ index 2bac8b1..d4dc8a1 100644
 -- 
 2.54.0
 
+
+From bb6c1004100deb6fe1d43b9fb4b561d9cb607401 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?M=C3=A1ximo=20Casta=C3=B1eda?= <antiswen@yahoo.es>
+Date: Fri, 26 Jun 2026 18:58:48 +0200
+Subject: Fix OOM by splitting big data array into different compilation units
+
+
+diff --git a/Telegram/cmake/generate_lang.cmake b/Telegram/cmake/generate_lang.cmake
+index 0a13cd3..bbd2eac 100644
+--- a/Telegram/cmake/generate_lang.cmake
++++ b/Telegram/cmake/generate_lang.cmake
+@@ -14,6 +14,12 @@ function(generate_lang target_name lang_file)
+         ${gen_dst}/lang_auto.h
+     )
+ 
++    set(TDESKTOP_LANG_DATA_BINS 10 CACHE STRING "Number of bins in which to split the lang data array. Make it bigger than 1.")
++    math(EXPR range_max "${TDESKTOP_LANG_DATA_BINS} - 1")
++    foreach(i RANGE 0 ${range_max})
++        list(APPEND gen_files ${gen_dst}/lang_auto_data${i}.cpp)
++    endforeach()
++
+     add_custom_command(
+     OUTPUT
+         ${gen_timestamp}
+@@ -22,6 +28,7 @@ function(generate_lang target_name lang_file)
+     COMMAND
+         codegen_lang
+         -o${gen_dst}
++        -n${TDESKTOP_LANG_DATA_BINS}
+         ${lang_file}
+     COMMENT "Generating lang (${target_name})"
+     DEPENDS
+diff --git a/Telegram/codegen/codegen/lang/generator.cpp b/Telegram/codegen/codegen/lang/generator.cpp
+index c12de72..aee2a23 100644
+--- a/Telegram/codegen/codegen/lang/generator.cpp
++++ b/Telegram/codegen/codegen/lang/generator.cpp
+@@ -16,11 +16,13 @@
+ namespace codegen {
+ namespace lang {
+ 
+-Generator::Generator(const LangPack &langpack, const QString &destBasePath, const common::ProjectInfo &project)
++Generator::Generator(const LangPack &langpack, int databins, const QString &destBasePath, const common::ProjectInfo &project)
+ : langpack_(langpack)
+ , basePath_(destBasePath)
+ , baseName_(QFileInfo(basePath_).baseName())
+-, project_(project) {
++, project_(project)
++, databins_(databins)
++{
+ }
+ 
+ bool Generator::writeHeader() {
+@@ -204,29 +206,63 @@ inline constexpr phrase<" << tags.join(", ") << "> " << (isPlural ? entry.keyBas
+ bool Generator::writeSource() {
+ 	source_ = std::make_unique<common::CppFile>(basePath_ + ".cpp", project_);
+ 
+-	source_->include("lang/lang_keys.h").pushNamespace("Lang").pushNamespace();
++	source_->include("lang/lang_keys.h").pushNamespace("Lang");
+ 
+-	source_->stream() << "\
+-QChar DefaultData[] = {";
++	for (int i = 0; i < databins_; i++)
++		source_->stream() << "\nextern const QChar* DefaultData" << i << ";";
++
++	source_->newline().pushNamespace();
++
++	const int entriesPerBin = langpack_.entries.size() / databins_ + 1;
++	int charsInBin[databins_ - 1];
++
++	std::unique_ptr<common::CppFile> source_data = nullptr;
++	int entriesLeft = 0;
++	int currentBin = 0;
+ 	auto count = 0;
+ 	auto fulllength = 0;
+ 	for (auto &entry : langpack_.entries) {
++		if (entriesLeft == 0) {
++			entriesLeft = entriesPerBin;
++			if (source_data != nullptr) {
++				source_data->stream() << " };\n}\n";
++				if (!source_data->finalize())
++					return false;
++				charsInBin[currentBin] = fulllength;
++				currentBin++;
++				fulllength = 0;
++				count = 0;
++			}
++
++			// Write an empty header because the builder includes it from the cpp file
++			if(!std::make_unique<common::CppFile>(basePath_ + "_data" + QString::number(currentBin) + ".h", project_)->finalize())
++				return false;
++
++			source_data = std::make_unique<common::CppFile>(basePath_ + "_data" + QString::number(currentBin) + ".cpp", project_);
++			source_data->stream() << "#include <QChar>\nnamespace Lang {\nQChar DefaultData" << currentBin << "[] = {";
++		}
++
+ 		for (auto ch : entry.value) {
+-			if (fulllength > 0) source_->stream() << ",";
++			if (fulllength > 0) source_data->stream() << ",";
+ 			if (!count++) {
+-				source_->stream() << "\n";
++				source_data->stream() << "\n";
+ 			} else {
+ 				if (count == 12) {
+ 					count = 0;
+ 				}
+-				source_->stream() << " ";
++				source_data->stream() << " ";
+ 			}
+-			source_->stream() << "QChar(0x" << QString::number(ch.unicode(), 16) << ")";
++			source_data->stream() << "QChar(0x" << QString::number(ch.unicode(), 16) << ")";
+ 			++fulllength;
+ 		}
++		--entriesLeft;
+ 	}
+-	source_->stream() << " };\n\
+-\n\
++	source_data->stream() << " };\n}\n";
++	if (!source_data->finalize())
++		return false;
++
++	source_->stream() << "\
++\n\n\
+ int Offsets[] = {";
+ 	count = 0;
+ 	auto offset = 0;
+@@ -353,8 +389,16 @@ bool IsTagReplaced(ushort key, ushort tag) {\n\
+ QString GetOriginalValue(ushort key) {\n\
+ 	Expects(key < kKeysCount);\n\
+ \n\
+-	const auto offset = Offsets[key];\n\
+-	return QString::fromRawData(DefaultData + offset, Offsets[key + 1] - offset);\n\
++	auto offset = Offsets[key];\n\
++	auto size = Offsets[key + 1] - offset;\n";
++	for (int i = 0; i < databins_ - 1; i++) {
++		source_->stream() << "\
++	if (offset < " << charsInBin[i] << ")\n\
++		return QString::fromRawData(DefaultData" << i << " + offset, size);\n\
++	offset -= " << charsInBin[i] << ";\n";
++	}
++	source_->stream() << "\
++	return QString::fromRawData(DefaultData" << (databins_ - 1) << " + offset, size);\n\
+ }\n\
+ \n";
+ 
+diff --git a/Telegram/codegen/codegen/lang/generator.h b/Telegram/codegen/codegen/lang/generator.h
+index f666d35..6b8f3b0 100644
+--- a/Telegram/codegen/codegen/lang/generator.h
++++ b/Telegram/codegen/codegen/lang/generator.h
+@@ -20,7 +20,7 @@ namespace lang {
+ 
+ class Generator {
+ public:
+-	Generator(const LangPack &langpack, const QString &destBasePath, const common::ProjectInfo &project);
++	Generator(const LangPack &langpack, int databins, const QString &destBasePath, const common::ProjectInfo &project);
+ 	Generator(const Generator &other) = delete;
+ 	Generator &operator=(const Generator &other) = delete;
+ 
+@@ -44,6 +44,7 @@ private:
+ 	const LangPack &langpack_;
+ 	QString basePath_, baseName_;
+ 	const common::ProjectInfo &project_;
++	const int databins_;
+ 	std::unique_ptr<common::CppFile> source_, header_;
+ 
+ };
+diff --git a/Telegram/codegen/codegen/lang/options.cpp b/Telegram/codegen/codegen/lang/options.cpp
+index 2237fa3..6f3b843 100644
+--- a/Telegram/codegen/codegen/lang/options.cpp
++++ b/Telegram/codegen/codegen/lang/options.cpp
+@@ -19,6 +19,8 @@ constexpr int kErrorOutputPathExpected      = 902;
+ constexpr int kErrorInputPathExpected       = 903;
+ constexpr int kErrorSingleInputPathExpected = 904;
+ constexpr int kErrorWorkingPathExpected     = 905;
++constexpr int kErrorDataBinsExpected        = 906;
++constexpr int kErrorNotEnoughDataBins       = 907;
+ 
+ } // namespace
+ 
+@@ -52,6 +54,17 @@ Options parseOptions() {
+ 		} else if (arg.startsWith("-w")) {
+ 			common::logSetWorkingPath(arg.mid(2));
+ 
++		// Data split
++		} else if (arg == "-n") {
++			if (++i == count) {
++				logError(kErrorDataBinsExpected, "Command Line") << "number of data bins expected after -n";
++				return Options();
++			} else {
++				result.dataBins = args.at(i).toInt();
++			}
++		} else if (arg.startsWith("-n")) {
++			result.dataBins = arg.mid(2).toInt();
++
+ 		// Input path
+ 		} else {
+ 			if (result.inputPath.isEmpty()) {
+@@ -66,6 +79,10 @@ Options parseOptions() {
+ 		logError(kErrorInputPathExpected, "Command Line") << "input path expected";
+ 		return Options();
+ 	}
++	if (result.dataBins <= 1) {
++		logError(kErrorNotEnoughDataBins, "Command Line") << "insufficient data bins";
++		return Options();
++	}
+ 	return result;
+ }
+ 
+diff --git a/Telegram/codegen/codegen/lang/options.h b/Telegram/codegen/codegen/lang/options.h
+index a0cec21..6454b36 100644
+--- a/Telegram/codegen/codegen/lang/options.h
++++ b/Telegram/codegen/codegen/lang/options.h
+@@ -15,6 +15,7 @@ namespace lang {
+ struct Options {
+ 	QString outputPath = ".";
+ 	QString inputPath;
++	int dataBins = 0;
+ };
+ 
+ // Parsing failed if inputPath is empty in the result.
+diff --git a/Telegram/codegen/codegen/lang/processor.cpp b/Telegram/codegen/codegen/lang/processor.cpp
+index 3c4ced2..e900fd4 100644
+--- a/Telegram/codegen/codegen/lang/processor.cpp
++++ b/Telegram/codegen/codegen/lang/processor.cpp
+@@ -54,7 +54,7 @@ bool Processor::write(const LangPack &langpack) const {
+ 		forceReGenerate
+ 	};
+ 
+-	Generator generator(langpack, dstFilePath, project);
++	Generator generator(langpack, options_.dataBins, dstFilePath, project);
+ 	if (!generator.writeHeader()
+ 		|| !generator.writeSource()
+ 		|| !common::TouchTimestamp(dstFilePath)) {
+-- 
+2.54.0
+
