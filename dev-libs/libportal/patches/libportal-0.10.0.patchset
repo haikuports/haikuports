@@ -1,0 +1,108 @@
+From 35d082812618b53c8bc21f5c2d12ca3e05bc0edb Mon Sep 17 00:00:00 2001
+From: Luc Schrijvers <begasus@gmail.com>
+Date: Sat, 30 May 2026 15:21:37 +0200
+Subject: Fix build for memfd_create
+
+
+diff --git a/libportal/notification.c b/libportal/notification.c
+index 1cd67b2..df62b5f 100644
+--- a/libportal/notification.c
++++ b/libportal/notification.c
+@@ -27,6 +27,8 @@
+ #define _GNU_SOURCE
+ #include <sys/mman.h>
+ #include <fcntl.h>
++#include <unistd.h>
++#include <stdio.h>
+ 
+ #include <glib/gstdio.h>
+ #include <gio/gunixfdlist.h>
+@@ -35,6 +37,14 @@
+ #include "notification.h"
+ #include "portal-private.h"
+ 
++#ifndef MFD_CLOEXEC
++#define MFD_CLOEXEC 0x0001
++#endif
++
++#ifndef MFD_ALLOW_SEALING
++#define MFD_ALLOW_SEALING 0x0002
++#endif
++
+ static void
+ action_invoked (GDBusConnection *bus,
+                 const char *sender_name,
+@@ -82,6 +92,26 @@ bytes_to_memfd (const gchar  *name,
+   gpointer shm;
+   gsize bytes_len;
+ 
++#ifdef __HAIKU__
++char shm_name[64];
++snprintf(shm_name, sizeof(shm_name), "/haiku-memfd-%s-%d", name, getpid());
++
++fd = shm_open(shm_name, O_RDWR | O_CREAT | O_EXCL, 0600);
++if (fd >= 0) {
++    shm_unlink(shm_name);
++}
++
++if (fd == -1)
++  {
++    int saved_errno = errno;
++
++    g_set_error (error,
++                 G_IO_ERROR,
++                 g_io_error_from_errno (saved_errno),
++                 "shm_open: %s", g_strerror (saved_errno));
++    return -1;
++  }
++#else
+   fd = memfd_create (name, MFD_ALLOW_SEALING);
+   if (fd == -1)
+     {
+@@ -93,6 +123,7 @@ bytes_to_memfd (const gchar  *name,
+                    "memfd_create: %s", g_strerror (saved_errno));
+       return -1;
+     }
++#endif
+ 
+   bytes_data = g_bytes_get_data (bytes, &bytes_len);
+ 
+@@ -328,6 +359,27 @@ parse_media (GVariant            *media,
+         {
+           g_autofd int fd = -1;
+ 
++#ifdef __HAIKU__
++          char shm_name[64];
++          snprintf(shm_name, sizeof(shm_name), "/haiku-shm-%d", getpid());
++
++          fd = shm_open(shm_name, O_RDWR | O_CREAT | O_EXCL, 0600);
++          if (fd >= 0)
++            {
++              shm_unlink(shm_name);
++            }
++
++          if (fd == -1)
++            {
++              int saved_errno = errno;
++
++              g_task_return_new_error (task,
++                                       G_IO_ERROR,
++                                       g_io_error_from_errno (saved_errno),
++                                       "shm_open: %s", g_strerror (saved_errno));
++              return;
++            }
++#else
+           fd = memfd_create ("notification-media", MFD_ALLOW_SEALING);
+           if (fd == -1)
+             {
+@@ -339,6 +391,7 @@ parse_media (GVariant            *media,
+                                        "memfd_create: %s", g_strerror (saved_errno));
+               return;
+             }
++#endif
+ 
+           stream_out = g_unix_output_stream_new (g_steal_fd (&fd), FALSE);
+         }
+-- 
+2.54.0
+
