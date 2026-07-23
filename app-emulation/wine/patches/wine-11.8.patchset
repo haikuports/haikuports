@@ -2016,3 +2016,206 @@ index f584491..1aee258 100644
  #include "ntstatus.h"
 -- 
 2.52.0
+From 61c2534c0fbc415ed7e3cbc6513a9e960f402b3f Mon Sep 17 00:00:00 2001
+From: wine-haiku <ehqcar@proton.me>
+Date: Sun, 19 Jul 2026 22:04:22 +1000
+Subject: Run static initializers in Winelib modules on Haiku
+
+Haikus libroot has neither dladdr1() nor dlinfo(), so __wine_init_so_dll()
+compiled to an empty function and no static constructor in any Winelib module
+was ever run. C++ modules then faulted on first use of a statically
+initialized object, before main() produced any output.
+
+winebuild renames DT_INIT_ARRAY and friends to private tags so the system
+loader will not run them and Wine can run them itself once the PE environment
+exists, so nothing else covered for this.
+
+Locate the current module with get_next_image_info() and walk its dynamic
+section from the program headers, which runtime_loader maps at the start of
+the text segment.
+
+diff --git a/libs/winecrt0/dll_soinit.c b/libs/winecrt0/dll_soinit.c
+index 88d00d1..f4ab87b 100644
+--- a/libs/winecrt0/dll_soinit.c
++++ b/libs/winecrt0/dll_soinit.c
+@@ -46,6 +46,9 @@
+ #ifdef HAVE_LINK_H
+ # include <link.h>
+ #endif
++#ifdef __HAIKU__
++# include <kernel/image.h>
++#endif
+ #include "windef.h"
+ 
+ 
+@@ -126,5 +129,77 @@ void __wine_init_so_dll(void)
+     if (init_array)
+         for (i = 0; i < init_arraysz / sizeof(*init_array); i++)
+             init_array[i]( 0, NULL, NULL );
++
++#elif defined(__HAIKU__)
++
++    /* Haiku's libroot has neither `dladdr1()` nor `dlinfo()`, so without this
++     * branch the function above is empty and no static constructor in a Winelib
++     * module ever runs -- C++ modules then fault on the first use of any
++     * statically initialized object.  Nothing else picks up the slack, because
++     * winebuild deliberately renames `DT_INIT_ARRAY` and friends to the private
++     * tags below so that the system loader leaves them alone and Wine can run
++     * them itself once the PE environment is ready.
++     *
++     * `get_next_image_info()` enumerates the loaded images; the one whose text
++     * segment contains this function is the module to initialize.  Haiku's
++     * runtime_loader maps the ELF header at the start of that text segment,
++     * which is what lets us reach the program headers from there -- the same
++     * assumption Haiku's own `dl_iterate_phdr()` implementation makes.
++     */
++    image_info info;
++    int32 cookie = 0;
++    void (*init_func)(int, char **, char **) = NULL;
++    void (**init_array)(int, char **, char **) = NULL;
++    long i, init_arraysz = 0;
++#ifdef _WIN64
++    const Elf64_Ehdr *ehdr;
++    const Elf64_Phdr *phdr;
++    const Elf64_Dyn *dyn = NULL;
++#else
++    const Elf32_Ehdr *ehdr;
++    const Elf32_Phdr *phdr;
++    const Elf32_Dyn *dyn = NULL;
++#endif
++
++    while (get_next_image_info( 0, &cookie, &info ) == B_OK)
++    {
++        const char *base = (const char *)info.text;
++        const char *self = (const char *)(void *)__wine_init_so_dll;
++        unsigned int j;
++
++        if (self < base || self >= base + info.text_size) continue;
++
++        /* Guard against images whose header is not mapped, and against the
++         * commpage, which is not an ELF image at all. */
++        ehdr = (void *)base;
++        if (ehdr->e_ident[0] != 0x7f || ehdr->e_ident[1] != 'E' ||
++            ehdr->e_ident[2] != 'L'  || ehdr->e_ident[3] != 'F') return;
++
++        phdr = (void *)(base + ehdr->e_phoff);
++        for (j = 0; j < ehdr->e_phnum; j++)
++        {
++            if (phdr[j].p_type != PT_DYNAMIC) continue;
++            dyn = (void *)(base + phdr[j].p_vaddr);
++            break;
++        }
++        if (!dyn) return;
++
++        for ( ; dyn->d_tag; dyn++)
++        {
++            switch (dyn->d_tag)
++            {
++            case 0x60009994: init_array = (void *)(base + dyn->d_un.d_val); break;
++            case 0x60009995: init_arraysz = dyn->d_un.d_val; break;
++            case 0x60009996: init_func = (void *)(base + dyn->d_un.d_val); break;
++            }
++        }
++
++        if (init_func) init_func( 0, NULL, NULL );
++
++        if (init_array)
++            for (i = 0; i < init_arraysz / sizeof(*init_array); i++)
++                init_array[i]( 0, NULL, NULL );
++        return;
++    }
+ #endif
+ }
+-- 
+2.47.3
+
+
+From ecbf4228ce28fb1e962046936272d2fc15a56430 Mon Sep 17 00:00:00 2001
+From: Yourself <user@shredder.lan>
+Date: Mon, 20 Jul 2026 00:23:17 +1000
+Subject: Do not block in the SIGSEGV handler on Haiku
+
+The Haiku port left an interactive debug hook in segv_handler: after
+printing the fault it called fgetc(stdin) and waited for a keypress, with
+the _exit(1) below it commented out.
+
+Any process without a usable stdin -- a DAW, a GUI application, anything
+launched from the Deskbar -- therefore hangs instead of crashing.  Worse,
+when stdin is at EOF the read returns immediately, the handler falls
+through, the faulting instruction re-executes and faults again, spinning
+a core indefinitely.  Every crash became an unkillable freeze that hid
+the actual fault, and left orphaned wine sessions behind because the
+faulting process never exited.
+
+Keep the diagnostics, drop the wait, and let execution continue into the
+normal exception dispatch as upstream does.
+
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 38d75da..932ee86 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2383,7 +2383,14 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
+     printf("  FP: %#" PRIx64 "\n", RBP_sig(sigcontext));
+     printf("  address: %#" PRIx64 "\n", siginfo->si_addr);
+     WriteModuleName(RIP_sig(sigcontext));
+-    fgetc(stdin);
++    /* The Haiku port stopped here with a blocking fgetc(stdin) so a developer
++     * could inspect the fault interactively.  Anything without a usable stdin
++     * -- a DAW, any GUI app, anything started from the Deskbar -- then turns
++     * every SIGSEGV into a hang instead of a crash: the handler either blocks
++     * forever, or gets EOF straight back, falls through, re-executes the
++     * faulting instruction and faults again in a tight loop, pinning a core.
++     * The diagnostics above are kept; execution now continues into the normal
++     * exception dispatch below, which is what upstream does. */
+     //_exit(1);
+ #endif
+ 
+-- 
+2.47.3
+
+
+From 04632e090d85653ee21ba11d5adab1069a551182 Mon Sep 17 00:00:00 2001
+From: vstbridge-haiku <ehqcar@proton.me>
+Date: Mon, 20 Jul 2026 17:47:27 +1000
+Subject: loader: find the loader path via find_path() on Haiku
+
+Haiku has no /proc, so get_self_exe() returned NULL and the loader fell
+back to resolving argv[0]. That works for any invocation carrying a
+slash, but a bare "wine" picked up from PATH was resolved relative to
+the current directory and failed with "could not load ntdll.so".
+
+find_path() with B_FIND_PATH_IMAGE_PATH maps a pointer back to the image
+containing it, which for a pointer into the loader gives the loader path.
+
+diff --git a/loader/main.c b/loader/main.c
+index f8b113f..0a70c0c 100644
+--- a/loader/main.c
++++ b/loader/main.c
+@@ -37,6 +37,9 @@
+ #ifdef __APPLE__
+ # include <mach-o/dyld.h>
+ #endif
++#ifdef __HAIKU__
++# include <FindDirectory.h>
++#endif
+ 
+ #include "main.h"
+ 
+@@ -143,6 +146,14 @@ static const char *get_self_exe(void)
+     if (path && !_NSGetExecutablePath( path, &path_size ))
+         return path;
+     free( path );
++#elif defined(__HAIKU__)
++    /* Haiku has no /proc; find_path() maps a pointer back to the image
++     * containing it, which for a pointer into the loader is the loader. */
++    char *path = malloc( PATH_MAX );
++    if (path && find_path( (const void *)get_self_exe, B_FIND_PATH_IMAGE_PATH,
++                           NULL, path, PATH_MAX ) == B_OK)
++        return path;
++    free( path );
+ #endif
+     return NULL;
+ }
+-- 
+2.47.3
+
