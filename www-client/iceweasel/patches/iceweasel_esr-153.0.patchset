@@ -6001,3 +6001,185 @@ index f1e059d67e..5e5d43f6d5 100644
 -- 
 2.54.0
 
+
+From 66ee3033774d041f86bdf0693fd4365dab0ce535 Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 26 Jul 2026 10:28:38 +1000
+Subject: Fall back to monotonic clock in NowIncludingSuspendMs when
+ CLOCK_BOOTTIME is unavailable
+
+
+diff --git a/mozglue/misc/Now.cpp b/mozglue/misc/Now.cpp
+index cc3780ed607..6f08cbd5da7 100644
+--- a/mozglue/misc/Now.cpp
++++ b/mozglue/misc/Now.cpp
+@@ -89,8 +89,8 @@ Maybe<uint64_t> NowExcludingSuspendMs() {
+ }
+ 
+ Maybe<uint64_t> NowIncludingSuspendMs() {
+-#  ifndef CLOCK_BOOTTIME
+-  return Nothing();
++#  if defined(XP_HAIKU) || !defined(CLOCK_BOOTTIME)
++  return NowExcludingSuspendMs();
+ #  else
+   struct timespec ts = {0};
+ 
+-- 
+2.54.0
+
+
+From c4fc5c2cf18036c73691060e14ba6495bbcbd8fa Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Sun, 26 Jul 2026 22:47:37 +1000
+Subject: More CPU and system information
+
+
+diff --git a/xpcom/base/nsSystemInfo.cpp b/xpcom/base/nsSystemInfo.cpp
+index a1493dab04..98cc49dc0b 100644
+--- a/xpcom/base/nsSystemInfo.cpp
++++ b/xpcom/base/nsSystemInfo.cpp
+@@ -85,6 +85,7 @@
+ 
+ #ifdef XP_HAIKU
+ #  include <kernel/OS.h>
++#  include <sys/utsname.h>
+ #endif
+ 
+ // Slot for NS_InitXPCOM to pass information to nsSystemInfo::Init.
+@@ -1326,7 +1327,102 @@ nsresult CollectProcessInfo(ProcessInfo& info) {
+     }
+     return cores;
+   }();
++#elif defined(XP_HAIKU)
++  {
++    system_info sysInfo;
++    if (get_system_info(&sysInfo) == B_OK) {
++      logicalCPUs = sysInfo.cpu_count;
++    }
++
++    int physicalCoresCount = 0;
++    uint32 topologyNodeCount = 0;
++    get_cpu_topology_info(nullptr, &topologyNodeCount);
++    if (topologyNodeCount != 0) {
++      auto* topology = new cpu_topology_node_info[topologyNodeCount];
++      if (get_cpu_topology_info(topology, &topologyNodeCount) == B_OK) {
++        for (uint32 i = 0; i < topologyNodeCount; i++) {
++          if (topology[i].type == B_TOPOLOGY_CORE) {
++            physicalCoresCount++;
++            if (cpuSpeed < 0 && topology[i].data.core.default_frequency > 0) {
++              cpuSpeed = static_cast<int>(topology[i].data.core.default_frequency / 1000000);
++            }
++          }
++        }
++      }
++      delete[] topology;
++    }
++
++    if (physicalCoresCount > 0) {
++      physicalCPUs = physicalCoresCount;
++    } else {
++      physicalCPUs = logicalCPUs;
++    }
++
++    if (cpuSpeed < 0) {
++      cpu_info frequencyInfo;
++      if (get_cpu_info(0, 1, &frequencyInfo) == B_OK && frequencyInfo.current_frequency != 0) {
++        cpuSpeed = static_cast<int>(frequencyInfo.current_frequency / 1000000);
++      }
++    }
++
++    cpuid_info baseInfo;
++    if (get_cpuid(&baseInfo, 0, 0) == B_OK) {
++      char vendor[13];
++      memcpy(vendor, baseInfo.eax_0.vendor_id, 12);
++      vendor[12] = '\0';
++      cpuVendor.Assign(vendor);
++
++      uint32_t maxStandardFunction = baseInfo.eax_0.max_eax;
++
++      if (maxStandardFunction >= 1) {
++        cpuid_info cpuInfo;
++        if (get_cpuid(&cpuInfo, 1, 0) == B_OK) {
++          cpuStepping = cpuInfo.eax_1.stepping;
++
++          uint32_t family = cpuInfo.eax_1.family;
++          uint32_t model = cpuInfo.eax_1.model;
++
++          if (family == 0xf) {
++            family += cpuInfo.eax_1.extended_family;
++          }
++          if (family == 0xf || family == 0x6) {
++            model += (cpuInfo.eax_1.extended_model << 4);
++          }
+ 
++          cpuFamily = family;
++          cpuModel = model;
++        }
++      }
++    }
++
++    cpuid_info extInfo;
++    if (get_cpuid(&extInfo, 0x80000000, 0) == B_OK) {
++      if (extInfo.eax_0.max_eax >= 0x80000004) {
++        char brand[49];
++        char* name = brand;
++        memset(brand, 0, sizeof(brand));
++
++        for (int32_t i = 0; i < 3; i++) {
++          cpuid_info nameInfo;
++          if (get_cpuid(&nameInfo, 0x80000002 + i, 0) == B_OK) {
++            memcpy(name, &nameInfo.regs.eax, 4);
++            memcpy(name + 4, &nameInfo.regs.ebx, 4);
++            memcpy(name + 8, &nameInfo.regs.ecx, 4);
++            memcpy(name + 12, &nameInfo.regs.edx, 4);
++            name += 16;
++          }
++        }
++
++        name = brand;
++        while (*name == ' ') {
++          name++;
++        }
++        if (*name) {
++          cpuName.Assign(name);
++        }
++      }
++    }
++  }
+ #else
+   info.cpuCount = PR_GetNumberOfProcessors();
+   if (XRE_IsParentProcess()) {
+@@ -1560,15 +1656,7 @@ nsresult nsSystemInfo::Init() {
+   SetInt32Property(u"pagesize"_ns, PR_GetPageSize());
+   SetInt32Property(u"pageshift"_ns, PR_GetPageShift());
+   SetInt32Property(u"memmapalign"_ns, PR_GetMemMapAlignment());
+-#ifdef XP_HAIKU
+-  { // workaround
+-    system_info info;
+-    get_system_info(&info);
+-    SetUint64Property(u"memsize"_ns, info.max_pages * B_PAGE_SIZE);
+-  }
+-#else
+   SetUint64Property(u"memsize"_ns, PR_GetPhysicalMemorySize());
+-#endif
+   SetUint32Property(u"umask"_ns, nsSystemInfo::gUserUmask);
+ 
+ #ifdef HAVE_64BIT_BUILD
+@@ -1815,6 +1903,15 @@ nsresult nsSystemInfo::Init() {
+   }
+ #endif  // XP_LINUX && MOZ_SANDBOX
+ 
++#if defined(XP_HAIKU)
++  SetPropertyAsACString(u"distro"_ns, "Haiku"_ns);
++
++  struct utsname uts;
++  if (uname(&uts) == 0) {
++    SetPropertyAsACString(u"distroVersion"_ns, nsDependentCString(uts.version));
++  }
++#endif
++
+   return NS_OK;
+ }
+ 
+-- 
+2.54.0
