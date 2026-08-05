@@ -1,0 +1,212 @@
+SUMMARY="A fast, private and open-source web browser"
+DESCRIPTION="Firefox is a free and open-source web browser developed by the \
+Mozilla Foundation. It is a flagship open-web client built with a strong focus \
+on privacy, performance, and standards compliance.
+
+Firefox utilizes the Gecko layout engine and SpiderMonkey JavaScript engine to \
+render the web accurately and securely.
+
+Key features:
+* Built-in Enhanced Tracking Protection for privacy-focused browsing
+* Full support for modern web standards, including HTML5, CSS3, and WebAssembly
+* Rich ecosystem of WebExtensions and customizable themes
+* Flexible user profile management and tabbed browsing interface
+* Built from official upstream source code with Haiku-specific patches"
+HOMEPAGE="https://www.firefox.com/"
+COPYRIGHT="1995-2026 Mozilla Developers and Contributors"
+LICENSE="MPL v2.0"
+REVISION="1"
+SOURCE_URI="https://ftp.mozilla.org/pub/firefox/releases/${portVersion}/source/firefox-${portVersion}.source.tar.xz"
+CHECKSUM_SHA256="471468648b815088734142f67b46c6040334d5b73e645fdd0936426e28ccbc25"
+SOURCE_DIR="firefox-$portVersion"
+PATCHES="
+	firefox-$portVersion.patchset
+	firefox_launcher-$portVersion.patchset
+	"
+
+ADDITIONAL_FILES="
+	firefox.rdef.in
+	firefox_launcher.rdef.in
+	mozconfig
+	"
+
+ARCHITECTURES="x86_64"
+
+PROVIDES="
+	firefox= $portVersion
+	app:Firefox= $portVersion
+	"
+CONFLICTS="
+	firefox_bin
+	"
+REQUIRES="
+	haiku
+	lib:libatk_1.0
+	lib:libcairo
+	lib:libcairo_gobject
+	lib:libdbus_1
+	lib:libevent_2.1
+	lib:libgdk_3
+	lib:libgdk_pixbuf_2.0
+	lib:libglib_2.0
+	lib:libgtk_3
+	lib:libharfbuzz
+	lib:libintl
+	lib:libjpeg
+	lib:libmediahelpers
+	lib:libnotify
+	lib:libnspr4
+	lib:libnss3
+	lib:libpango_1.0
+	lib:libpangocairo_1.0
+	lib:libpng16
+	lib:libvpx
+	lib:libwebp
+	lib:libzstd
+	lib:libz
+	"
+
+BUILD_REQUIRES="
+	haiku_devel
+	devel:libdbus_1
+	devel:libdbus_glib_1
+	devel:libevent
+	devel:libglib_2.0
+	devel:libgtk_3
+	devel:libjpeg
+	devel:libmediahelpers
+	devel:libnotify
+	devel:libnspr4
+	devel:libnss3
+	devel:libpng16
+	devel:libvpx >= 8
+	devel:libwebp
+	devel:libzstd
+	devel:libz
+	"
+BUILD_PREREQUIRES="
+	llvm21
+	nodejs20
+	rust_bin
+	cmd:autoconf_2.13
+	cmd:cbindgen
+	cmd:clang++
+	cmd:gawk
+	cmd:gcc
+	cmd:git
+	cmd:gn
+	cmd:lld >= 21
+	cmd:m4
+	cmd:make
+	cmd:nasm
+	cmd:perl
+	cmd:pkg_config
+	cmd:python3
+	cmd:tar
+	cmd:unzip
+	cmd:xargs
+	cmd:zip
+	"
+
+PATCH ()
+{
+	find "$sourceDir/third_party/rust/" -name ".cargo-checksum.json" | while read -r file; do
+		printf '{"files":{}}' > "$file"
+	done
+
+	sed -i '/^checksum =/d' $sourceDir/Cargo.lock
+}
+
+BUILD()
+{
+	chmod +x \
+		build/cargo-linker \
+		mach
+
+	rm -f mozconfig
+	cp -f $portDir/additional-files/mozconfig mozconfig
+
+	export MOZBUILD_STATE_PATH="$sourceDir/.mozconfig"
+	export RUSTFLAGS="-C link-arg=-Wl,--no-gc-sections"
+	
+	export CARGO_NET_OFFLINE=true
+	export PIP_NETWORK_INSTALL_RESTRICTED_VIRTUALENVS=mach
+	export MACH_BUILD_PYTHON_NATIVE_PACKAGE_SOURCE="none"
+	export PIP_DISABLE_PIP_VERSION_CHECK=1
+	export PIP_NO_INDEX=1
+
+	python3 -m ensurepip --default-pip
+
+	./mach -vv \
+		--no-interactive bootstrap \
+		--application-choice="Firefox for Desktop" \
+		--exclude=sysroot-wasm32-wasi
+
+	./mach python build/gn_processor.py dom/media/webrtc/third_party_build/gn-configs/webrtc.json
+
+	./mach build
+
+	cd tools/haiku-launcher
+	gcc -o "Firefox Browser" launcher.cpp -lbe
+}
+
+INSTALL()
+{
+	export MOZBUILD_STATE_PATH="$sourceDir/.mozconfig"
+
+	export CARGO_NET_OFFLINE=true
+	export PIP_NETWORK_INSTALL_RESTRICTED_VIRTUALENVS=mach
+	export MACH_BUILD_PYTHON_NATIVE_PACKAGE_SOURCE="none"
+	export PIP_DISABLE_PIP_VERSION_CHECK=1
+	export PIP_NO_INDEX=1
+
+	./mach install
+
+	./mach package
+
+	mkdir -p $appsDir
+
+	mv /usr/local/lib/Firefox $appsDir/Firefox
+
+	cp "tools/haiku-launcher/Firefox Browser" $appsDir/Firefox
+
+	mkdir -p $appsDir/Firefox/lib
+
+	# arranging the files in lib directories
+	cd $appsDir/Firefox
+	mv \
+		libgkcodecs.so       \
+		liblgpllibs.so       \
+		libmozavcodec.so     \
+		libmozavutil.so      \
+		libmozgtk.so         \
+		libmozsqlite3.so     \
+		libmozwayland.so     \
+		libxul.so            \
+		lib
+
+	local APP_SIGNATURE="application/x-vnd.Mozilla-Firefox"
+	local MAJOR="`echo "$portVersion" | cut -d. -f1`"
+	local MIDDLE="`echo "$portVersion" | cut -d. -f2`"
+	local MINOR="`echo "$portVersion" | cut -d. -f3`"
+	local LONG_INFO="$SUMMARY"
+	sed \
+		-e "s|@APP_SIGNATURE@|$APP_SIGNATURE|" \
+		-e "s|@MAJOR@|$MAJOR|" \
+		-e "s|@MIDDLE@|$MIDDLE|" \
+		-e "s|@MINOR@|$MINOR|" \
+		-e "s|@LONG_INFO@|$LONG_INFO|" \
+		$portDir/additional-files/firefox.rdef.in > firefox.rdef
+
+	sed \
+		-e "s|@MAJOR@|$MAJOR|" \
+		-e "s|@MIDDLE@|$MIDDLE|" \
+		-e "s|@MINOR@|$MINOR|" \
+		-e "s|@LONG_INFO@|$LONG_INFO|" \
+		$portDir/additional-files/firefox_launcher.rdef.in > firefox_launcher.rdef
+
+	addResourcesToBinaries firefox.rdef "$appsDir/Firefox/Firefox"
+	addResourcesToBinaries firefox_launcher.rdef "$appsDir/Firefox/Firefox Browser"
+
+	addAppDeskbarSymlink $appsDir/Firefox/Firefox
+}
