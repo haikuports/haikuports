@@ -1,0 +1,870 @@
+From d97984f5152e731cd087e1e5c3971f88bb775b4c Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Mon, 10 Aug 2026 07:48:37 +1000
+Subject: Fix build for Haiku
+
+
+diff --git a/Source/JavaScriptCore/API/glib/JSCOptions.cpp b/Source/JavaScriptCore/API/glib/JSCOptions.cpp
+index c418bb59..c2870c8b 100644
+--- a/Source/JavaScriptCore/API/glib/JSCOptions.cpp
++++ b/Source/JavaScriptCore/API/glib/JSCOptions.cpp
+@@ -73,7 +73,7 @@ static void valueToGValue(int32_t value, GValue* gValue)
+     g_value_set_int(gValue, value);
+ }
+ 
+-#if CPU(ADDRESS64)
++#if CPU(ADDRESS64) || OS(HAIKU)
+ static bool valueFromGValue(const GValue* gValue, unsigned& value)
+ {
+     value = g_value_get_uint(gValue);
+@@ -560,7 +560,7 @@ static JSCOptionType jscOptionsType(int)
+     return JSC_OPTION_INT;
+ }
+ 
+-#if CPU(ADDRESS64)
++#if CPU(ADDRESS64) || OS(HAIKU)
+ static JSCOptionType jscOptionsType(unsigned)
+ {
+     return JSC_OPTION_UINT;
+diff --git a/Source/JavaScriptCore/inspector/remote/Socket.cmake b/Source/JavaScriptCore/inspector/remote/Socket.cmake
+index e52143c4..4ac504c1 100644
+--- a/Source/JavaScriptCore/inspector/remote/Socket.cmake
++++ b/Source/JavaScriptCore/inspector/remote/Socket.cmake
+@@ -33,3 +33,9 @@ else ()
+         wsock32
+     )
+ endif ()
++
++if (HAIKU)
++    list(APPEND JavaScriptCore_LIBRARIES
++        network
++    )
++endif ()
+diff --git a/Source/JavaScriptCore/runtime/MachineContext.h b/Source/JavaScriptCore/runtime/MachineContext.h
+index 50353c75..10e28cfa 100644
+--- a/Source/JavaScriptCore/runtime/MachineContext.h
++++ b/Source/JavaScriptCore/runtime/MachineContext.h
+@@ -667,6 +667,10 @@ inline void* wasmInstancePointer(const mcontext_t& machineContext)
+ {
+ #if OS(DARWIN)
+     return wasmInstancePointer(machineContext->__ss);
++#elif OS(HAIKU)
++#if CPU(X86_64)
++    return reinterpret_cast<void*&>((uintptr_t&) machineContext.rbx);
++#endif
+ #elif OS(FREEBSD)
+ 
+ #if CPU(X86_64)
+diff --git a/Source/JavaScriptCore/wasm/WasmFaultSignalHandler.cpp b/Source/JavaScriptCore/wasm/WasmFaultSignalHandler.cpp
+index e2bd05d8..7a9572fd 100644
+--- a/Source/JavaScriptCore/wasm/WasmFaultSignalHandler.cpp
++++ b/Source/JavaScriptCore/wasm/WasmFaultSignalHandler.cpp
+@@ -64,7 +64,7 @@ static constexpr bool verbose = false;
+ static SignalAction trapHandler(Signal signal, SigInfo& sigInfo, PlatformRegisters& context)
+ {
+     RELEASE_ASSERT(signal == Signal::AccessFault);
+-
++#if HAVE(MACHINE_CONTEXT)
+     auto instructionPointer = MachineContext::instructionPointer(context);
+     if (!instructionPointer)
+         return SignalAction::NotHandled;
+@@ -128,6 +128,7 @@ static SignalAction trapHandler(Signal signal, SigInfo& sigInfo, PlatformRegiste
+             }
+         }
+     }
++#endif
+     return SignalAction::NotHandled;
+ }
+ 
+diff --git a/Source/ThirdParty/ANGLE/src/common/SimpleMutex.h b/Source/ThirdParty/ANGLE/src/common/SimpleMutex.h
+index 84ffa1a1..0116ef86 100644
+--- a/Source/ThirdParty/ANGLE/src/common/SimpleMutex.h
++++ b/Source/ThirdParty/ANGLE/src/common/SimpleMutex.h
+@@ -32,7 +32,7 @@
+ // - Windows 8+
+ //
+ // There is no TSAN support for futex currently, so it is disabled in that case
+-#if !defined(ANGLE_WITH_TSAN)
++#if !defined(ANGLE_WITH_TSAN) && !defined(__HAIKU__)
+ #    if defined(ANGLE_PLATFORM_LINUX) || defined(ANGLE_PLATFORM_ANDROID)
+ // Linux has had futexes for a very long time.  Assume support.
+ #        define ANGLE_USE_FUTEX 1
+diff --git a/Source/ThirdParty/ANGLE/src/common/system_utils_posix.cpp b/Source/ThirdParty/ANGLE/src/common/system_utils_posix.cpp
+index 1caeb18a..12a3702e 100644
+--- a/Source/ThirdParty/ANGLE/src/common/system_utils_posix.cpp
++++ b/Source/ThirdParty/ANGLE/src/common/system_utils_posix.cpp
+@@ -214,10 +214,12 @@ void *OpenSystemLibraryWithExtensionAndGetError(const char *libraryName,
+     }
+ 
+     int extraFlags = 0;
++#ifndef __HAIKU__
+     if (searchType == SearchType::AlreadyLoaded)
+     {
+         extraFlags = RTLD_NOLOAD;
+     }
++#endif
+ 
+     std::string fullPath = directory + libraryName;
+     return OpenPosixLibrary(fullPath, extraFlags, errorOut);
+diff --git a/Source/ThirdParty/ANGLE/src/libANGLE/Context.cpp b/Source/ThirdParty/ANGLE/src/libANGLE/Context.cpp
+index d184f910..a3ee5b59 100644
+--- a/Source/ThirdParty/ANGLE/src/libANGLE/Context.cpp
++++ b/Source/ThirdParty/ANGLE/src/libANGLE/Context.cpp
+@@ -642,7 +642,7 @@ void SetCurrentValidContextTLS(Context *context)
+     gCurrentValidContext = context;
+ }
+ #else
+-thread_local Context *gCurrentValidContext = nullptr;
++__thread Context *gCurrentValidContext = nullptr;
+ #endif
+ 
+ // Handle setting the current context in TLS on different platforms
+diff --git a/Source/ThirdParty/ANGLE/src/libANGLE/Context.h b/Source/ThirdParty/ANGLE/src/libANGLE/Context.h
+index 668f8a72..e0473b84 100644
+--- a/Source/ThirdParty/ANGLE/src/libANGLE/Context.h
++++ b/Source/ThirdParty/ANGLE/src/libANGLE/Context.h
+@@ -1177,7 +1177,7 @@ class [[nodiscard]] ScopedContextRef
+ extern Context *GetCurrentValidContextTLS();
+ extern void SetCurrentValidContextTLS(Context *context);
+ #else
+-extern thread_local Context *gCurrentValidContext;
++extern __thread Context *gCurrentValidContext;
+ #endif
+ 
+ extern void SetCurrentValidContext(Context *context);
+diff --git a/Source/ThirdParty/ANGLE/src/libGLESv2/global_state.cpp b/Source/ThirdParty/ANGLE/src/libGLESv2/global_state.cpp
+index 527e981d..393997d8 100644
+--- a/Source/ThirdParty/ANGLE/src/libGLESv2/global_state.cpp
++++ b/Source/ThirdParty/ANGLE/src/libGLESv2/global_state.cpp
+@@ -124,7 +124,7 @@ void SetCurrentThreadTLS(Thread *thread)
+     gCurrentThread = thread;
+ }
+ #else
+-thread_local Thread *gCurrentThread = nullptr;
++__thread Thread *gCurrentThread = nullptr;
+ #endif
+ 
+ gl::Context *GetGlobalLastContext()
+diff --git a/Source/ThirdParty/ANGLE/src/libGLESv2/global_state.h b/Source/ThirdParty/ANGLE/src/libGLESv2/global_state.h
+index 32c9921d..13ae9d5a 100644
+--- a/Source/ThirdParty/ANGLE/src/libGLESv2/global_state.h
++++ b/Source/ThirdParty/ANGLE/src/libGLESv2/global_state.h
+@@ -36,7 +36,7 @@ class Thread;
+ extern Thread *GetCurrentThreadTLS();
+ extern void SetCurrentThreadTLS(Thread *thread);
+ #else
+-extern thread_local Thread *gCurrentThread;
++extern __thread Thread *gCurrentThread;
+ #endif
+ 
+ gl::Context *GetGlobalLastContext();
+diff --git a/Source/ThirdParty/libsysprof-capture/CMakeLists.txt b/Source/ThirdParty/libsysprof-capture/CMakeLists.txt
+index 7ea8f046..f3749dc8 100644
+--- a/Source/ThirdParty/libsysprof-capture/CMakeLists.txt
++++ b/Source/ThirdParty/libsysprof-capture/CMakeLists.txt
+@@ -44,6 +44,13 @@ target_link_libraries(SysProfCapture
+     Threads::Threads
+ )
+ 
++if (HAIKU)
++target_link_libraries(SysProfCapture
++    PRIVATE
++    network
++)
++endif ()
++
+ WEBKIT_ADD_TARGET_C_FLAGS(SysProfCapture
+     -Wno-implicit-function-declaration
+     -Wno-sign-compare
+diff --git a/Source/ThirdParty/libsysprof-capture/sysprof-collector.c b/Source/ThirdParty/libsysprof-capture/sysprof-collector.c
+index c4aa593e..e2c50203 100644
+--- a/Source/ThirdParty/libsysprof-capture/sysprof-collector.c
++++ b/Source/ThirdParty/libsysprof-capture/sysprof-collector.c
+@@ -70,7 +70,9 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/socket.h>
++#ifndef __HAIKU__
+ #include <sys/syscall.h>
++#endif
+ #include <sys/types.h>
+ #include <unistd.h>
+ 
+diff --git a/Source/ThirdParty/libsysprof-capture/sysprof-macros-internal.h b/Source/ThirdParty/libsysprof-capture/sysprof-macros-internal.h
+index 92772e42..736d0dec 100644
+--- a/Source/ThirdParty/libsysprof-capture/sysprof-macros-internal.h
++++ b/Source/ThirdParty/libsysprof-capture/sysprof-macros-internal.h
+@@ -64,6 +64,8 @@
+ #ifdef __APPLE__
+ # include <libkern/OSByteOrder.h>
+ # include <architecture/byte_order.h>
++#elif __HAIKU__
++# include <endian.h>
+ #else
+ # include <byteswap.h>
+ # include <endian.h>
+diff --git a/Source/ThirdParty/libsysprof-capture/sysprof-platform.c b/Source/ThirdParty/libsysprof-capture/sysprof-platform.c
+index fa868a2d..13535ada 100644
+--- a/Source/ThirdParty/libsysprof-capture/sysprof-platform.c
++++ b/Source/ThirdParty/libsysprof-capture/sysprof-platform.c
+@@ -58,7 +58,9 @@
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
++#ifndef __HAIKU__
+ #include <sys/syscall.h>
++#endif
+ #include <unistd.h>
+ 
+ #include "sysprof-capture-util-private.h"
+@@ -129,7 +131,7 @@ sysprof_memfd_create (const char *name)
+ 
+   snprintf (template, template_len, "%s/sysprof-XXXXXX", tmpdir);
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__HAIKU__)
+   flags = 0;
+ #else
+   flags = O_BINARY | O_CLOEXEC;
+diff --git a/Source/ThirdParty/xdgmime/CMakeLists.txt b/Source/ThirdParty/xdgmime/CMakeLists.txt
+index 43374cae..bf5c3108 100644
+--- a/Source/ThirdParty/xdgmime/CMakeLists.txt
++++ b/Source/ThirdParty/xdgmime/CMakeLists.txt
+@@ -16,8 +16,10 @@ set(XDGMIME_SOURCES
+     ${XDGMIME_DIR}/src/xdgmimeglob.c
+ )
+ 
++set(XDGMIME_BYTE_ORDER $<STREQUAL:${CMAKE_C_BYTE_ORDER},LITTLE_ENDIAN>)
++
+ include_directories("${XDGMIME_INCLUDE_DIRECTORIES}")
+-add_definitions(-DXDG_PREFIX=_wk_xdg)
++add_definitions(-DXDG_PREFIX=_wk_xdg -DLITTLE_ENDIAN=${XDGMIME_BYTE_ORDER})
+ add_library(xdgmime STATIC ${XDGMIME_SOURCES})
+ 
+ if (CMAKE_CXX_BYTE_ORDER STREQUAL "LITTLE_ENDIAN")
+diff --git a/Source/WTF/wtf/CMakeLists.txt b/Source/WTF/wtf/CMakeLists.txt
+index c841bd6c..f0763e94 100644
+--- a/Source/WTF/wtf/CMakeLists.txt
++++ b/Source/WTF/wtf/CMakeLists.txt
+@@ -790,6 +790,10 @@ if (ATOMICS_REQUIRE_LIBATOMIC)
+     list(APPEND WTF_LIBRARIES atomic)
+ endif ()
+ 
++if (HAIKU)
++    list(APPEND WTF_LIBRARIES execinfo)
++endif ()
++
+ if (COMPILER_IS_GCC_OR_CLANG)
+     if (HAVE_STD_EXPERIMENTAL_FILESYSTEM)
+         list(APPEND WTF_LIBRARIES stdc++fs)
+diff --git a/Source/WTF/wtf/CheckedArithmetic.h b/Source/WTF/wtf/CheckedArithmetic.h
+index c60a8423..6074122b 100644
+--- a/Source/WTF/wtf/CheckedArithmetic.h
++++ b/Source/WTF/wtf/CheckedArithmetic.h
+@@ -35,7 +35,7 @@
+ /* On Linux with clang, libgcc is usually used instead of compiler-rt, and it does
+  * not provide the __mulodi4 symbol used by clang for __builtin_mul_overflow
+  */
+-#if COMPILER(GCC) || (COMPILER(CLANG) && !(CPU(ARM) && OS(LINUX))) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if COMPILER(GCC) || (COMPILER(CLANG) && !(CPU(ARM) && OS(LINUX)) && !OS(HAIKU)) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+ #define USE_MUL_OVERFLOW 1
+ #endif
+ 
+diff --git a/Source/WTF/wtf/CurrentTime.cpp b/Source/WTF/wtf/CurrentTime.cpp
+index fae2b78e..1756a6d4 100644
+--- a/Source/WTF/wtf/CurrentTime.cpp
++++ b/Source/WTF/wtf/CurrentTime.cpp
+@@ -306,7 +306,7 @@ MonotonicTime MonotonicTime::now()
+     return fromMachAbsoluteTime(mach_absolute_time());
+ #elif OS(FUCHSIA)
+     return fromRawSeconds(zx_clock_get_monotonic() / static_cast<double>(ZX_SEC(1)));
+-#elif OS(LINUX) || OS(FREEBSD) || OS(OPENBSD) || OS(NETBSD)
++#elif OS(LINUX) || OS(FREEBSD) || OS(OPENBSD) || OS(NETBSD) || OS(HAIKU)
+     struct timespec ts { };
+     clock_gettime(CLOCK_MONOTONIC, &ts);
+     return fromRawSeconds(static_cast<double>(ts.tv_sec) + ts.tv_nsec / 1.0e9);
+diff --git a/Source/WTF/wtf/FileSystem.cpp b/Source/WTF/wtf/FileSystem.cpp
+index 43e0aece..b45fa4ee 100644
+--- a/Source/WTF/wtf/FileSystem.cpp
++++ b/Source/WTF/wtf/FileSystem.cpp
+@@ -594,9 +594,13 @@ bool createSymbolicLink(const String& targetPath, const String& symbolicLinkPath
+ 
+ bool hardLink(const String& targetPath, const String& linkPath)
+ {
++#if OS(HAIKU)
++	return hardLinkOrCopyFile(targetPath, linkPath);
++#else
+     std::error_code ec;
+     std::filesystem::create_hard_link(toStdFileSystemPath(targetPath), toStdFileSystemPath(linkPath), ec);
+     return !ec;
++#endif
+ }
+ 
+ bool hardLinkOrCopyFile(const String& targetPath, const String& linkPath)
+diff --git a/Source/WTF/wtf/InlineASM.h b/Source/WTF/wtf/InlineASM.h
+index 2937c456..90a7927b 100644
+--- a/Source/WTF/wtf/InlineASM.h
++++ b/Source/WTF/wtf/InlineASM.h
+@@ -88,6 +88,7 @@
+     || OS(OPENBSD)             \
+     || OS(HAIKU)               \
+     || OS(HURD)                \
++    || OS(HAIKU)               \
+     || OS(NETBSD)              \
+     || OS(QNX)                 \
+     || OS(WINDOWS)
+diff --git a/Source/WTF/wtf/Packed.h b/Source/WTF/wtf/Packed.h
+index a8eea077..9a19046d 100644
+--- a/Source/WTF/wtf/Packed.h
++++ b/Source/WTF/wtf/Packed.h
+@@ -154,7 +154,7 @@ public:
+         if (isAlignmentShiftProfitable)
+             value <<= alignmentShiftSize;
+ 
+-#if CPU(X86_64) && !(OS(DARWIN) || OS(LINUX) || OS(WINDOWS))
++#if CPU(X86_64) && !(OS(DARWIN) || OS(LINUX) || OS(HAIKU) || OS(WINDOWS))
+         // The AMD specification requires that the most significant 16
+         // bits of any virtual address, bits 48 through 63, must be
+         // copies of bit 47 (in a manner akin to sign extension).
+diff --git a/Source/WTF/wtf/PlatformGTK.cmake b/Source/WTF/wtf/PlatformGTK.cmake
+index 46c42cba..a60bf54f 100644
+--- a/Source/WTF/wtf/PlatformGTK.cmake
++++ b/Source/WTF/wtf/PlatformGTK.cmake
+@@ -72,6 +72,12 @@ elseif (CMAKE_SYSTEM_NAME MATCHES "FreeBSD" OR CMAKE_SYSTEM_NAME MATCHES "QNX")
+ 
+         unix/MemoryPressureHandlerUnix.cpp
+     )
++elseif (CMAKE_SYSTEM_NAME MATCHES "Haiku")
++    list(APPEND WTF_SOURCES
++        haiku/MemoryFootprintHaiku.cpp
++		haiku/CurrentProcessMemoryStatus.cpp
++        unix/MemoryPressureHandlerUnix.cpp
++    )
+ else ()
+     list(APPEND WTF_SOURCES
+         generic/MemoryFootprintGeneric.cpp
+diff --git a/Source/WTF/wtf/PlatformHave.h b/Source/WTF/wtf/PlatformHave.h
+index 223592fc..213eb51a 100644
+--- a/Source/WTF/wtf/PlatformHave.h
++++ b/Source/WTF/wtf/PlatformHave.h
+@@ -424,7 +424,7 @@
+ #define HAVE_STACK_BOUNDS_FOR_NEW_THREAD 1
+ #endif
+ 
+-#if !OS(WINDOWS) && !PLATFORM(PLAYSTATION)
++#if !OS(WINDOWS) && !PLATFORM(PLAYSTATION) && !OS(HAIKU)
+ #define HAVE_MEMMEM 1
+ #endif
+ 
+diff --git a/Source/WTF/wtf/PlatformOS.h b/Source/WTF/wtf/PlatformOS.h
+index e3184e90..1d4cd2ed 100644
+--- a/Source/WTF/wtf/PlatformOS.h
++++ b/Source/WTF/wtf/PlatformOS.h
+@@ -140,6 +140,7 @@
+     || OS(HAIKU)            \
+     || OS(HURD)             \
+     || OS(LINUX)            \
++    || OS(HAIKU)            \
+     || OS(NETBSD)           \
+     || OS(OPENBSD)          \
+     || defined(unix)        \
+diff --git a/Source/WTF/wtf/PlatformRegisters.h b/Source/WTF/wtf/PlatformRegisters.h
+index 37efb86d..fbe81bfd 100644
+--- a/Source/WTF/wtf/PlatformRegisters.h
++++ b/Source/WTF/wtf/PlatformRegisters.h
+@@ -35,6 +35,8 @@
+ #include <signal.h>
+ #elif OS(WINDOWS)
+ #include <windows.h>
++#elif OS(HAIKU)
++#include <signal.h>
+ #elif OS(OPENBSD)
+ typedef ucontext_t mcontext_t;
+ #elif OS(QNX)
+diff --git a/Source/WTF/wtf/StackBounds.cpp b/Source/WTF/wtf/StackBounds.cpp
+index d928bed8..b96bb7fa 100644
+--- a/Source/WTF/wtf/StackBounds.cpp
++++ b/Source/WTF/wtf/StackBounds.cpp
+@@ -46,6 +46,12 @@
+ #include <sys/storage.h>
+ #endif
+ 
++#if OS(HAIKU)
++extern "C" {
++	int pthread_attr_get_np(pthread_t thread, pthread_attr_t *_attr);
++}
++#endif
++
+ #endif
+ 
+ namespace WTF {
+@@ -117,7 +123,7 @@ StackBounds StackBounds::newThreadStackBounds(PlatformThreadHandle thread)
+ 
+     pthread_attr_t sattr;
+     pthread_attr_init(&sattr);
+-#if HAVE(PTHREAD_NP_H) || OS(NETBSD)
++#if HAVE(PTHREAD_NP_H) || OS(NETBSD) || OS(HAIKU)
+     // e.g. on FreeBSD 5.4, neundorf@kde.org
+     pthread_attr_get_np(thread, &sattr);
+ #else
+diff --git a/Source/WebCore/inspector/InspectorFrontendHost.cpp b/Source/WebCore/inspector/InspectorFrontendHost.cpp
+index f3b730d5..7c1321ff 100644
+--- a/Source/WebCore/inspector/InspectorFrontendHost.cpp
++++ b/Source/WebCore/inspector/InspectorFrontendHost.cpp
+@@ -408,6 +408,8 @@ String InspectorFrontendHost::platform() const
+     return "mac"_s;
+ #elif OS(WINDOWS)
+     return "windows"_s;
++#elif OS(HAIKU)
++    return "haiku"_s;
+ #elif OS(LINUX)
+     return "linux"_s;
+ #elif OS(FREEBSD)
+diff --git a/Source/WebCore/loader/DocumentLoader.cpp b/Source/WebCore/loader/DocumentLoader.cpp
+index 0002b2a5..9fb7140c 100644
+--- a/Source/WebCore/loader/DocumentLoader.cpp
++++ b/Source/WebCore/loader/DocumentLoader.cpp
+@@ -41,6 +41,7 @@
+ #include "CustomHeaderFields.h"
+ #include "DNS.h"
+ #include "DeprecatedGlobalSettings.h"
++#include "DocumentEventLoop.h"
+ #include "DocumentInlines.h"
+ #include "DocumentPage.h"
+ #include "DocumentParser.h"
+diff --git a/Source/WebCore/page/NavigatorBase.cpp b/Source/WebCore/page/NavigatorBase.cpp
+index 93720ea1..73a7a7a2 100644
+--- a/Source/WebCore/page/NavigatorBase.cpp
++++ b/Source/WebCore/page/NavigatorBase.cpp
+@@ -106,6 +106,8 @@ String NavigatorBase::platform() const
+     return PAL::deviceName();
+ #elif OS(MACOS)
+     return "MacIntel"_s;
++#elif OS(HAIKU)
++    return "Haiku"_s;
+ #elif OS(WINDOWS)
+     return "Win32"_s;
+ #elif OS(HAIKU)
+diff --git a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+index ae14d494..90feba17 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+@@ -571,6 +571,8 @@ bool MediaPlayerPrivateGStreamer::paused() const
+             gst_element_state_get_name(state), gst_element_state_get_name(pending));
+         ASSERT_NOT_REACHED_WITH_MESSAGE("pipeline and player states are not synchronized");
+     }
++#elif defined(__HAIKU__)
++	GUniquePtr<char> mediaDiskCachePath(g_build_filename(G_DIR_SEPARATOR_S, "system", "cache", "tmp", nullptr));
+ #else
+     UNUSED_VARIABLE(stateChange);
+ #endif
+diff --git a/Source/WebKit/CMakeLists.txt b/Source/WebKit/CMakeLists.txt
+index 842ab560..0f3b4d9d 100644
+--- a/Source/WebKit/CMakeLists.txt
++++ b/Source/WebKit/CMakeLists.txt
+@@ -798,6 +798,10 @@ if (ATOMICS_REQUIRE_LIBATOMIC)
+     list(APPEND WebKit_PRIVATE_LIBRARIES atomic)
+ endif ()
+ 
++if (HAIKU)
++    list(APPEND WebKit_PRIVATE_LIBRARIES network)
++endif ()
++
+ macro(ADD_WEBKIT_PREFIX_HEADER _target)
+     if (WebKit_USE_PREFIX_HEADER)
+         target_compile_options(${_target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-include>" "$<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:${WEBKIT_DIR}/WebKit2Prefix.h>")
+diff --git a/Source/WebKit/Platform/IPC/Connection.cpp b/Source/WebKit/Platform/IPC/Connection.cpp
+index d88f888b..a2f3e8e1 100644
+--- a/Source/WebKit/Platform/IPC/Connection.cpp
++++ b/Source/WebKit/Platform/IPC/Connection.cpp
+@@ -1340,8 +1340,11 @@ void Connection::didFailToSendSyncMessage(Error)
+ {
+     if (!m_shouldExitOnSyncMessageSendFailure)
+         return;
+-
++#if OS(HAIKU)
++	kill(::getpid(), SIGKILL);
++#else
+     exitProcess(0);
++#endif
+ }
+ 
+ void Connection::enqueueIncomingMessage(UniqueRef<Decoder> incomingMessage)
+diff --git a/Source/WebKit/Platform/IPC/glib/ConnectionGLib.cpp b/Source/WebKit/Platform/IPC/glib/ConnectionGLib.cpp
+index 54e1532f..0d4aca76 100644
+--- a/Source/WebKit/Platform/IPC/glib/ConnectionGLib.cpp
++++ b/Source/WebKit/Platform/IPC/glib/ConnectionGLib.cpp
+@@ -463,12 +463,28 @@ IGNORE_CLANG_WARNINGS_END
+ 
+ std::optional<Connection::ConnectionIdentifierPair> Connection::createConnectionIdentifierPair()
+ {
++#if OS(HAIKU)
++    SocketPair socketPair = createPlatformConnection(SOCK_DGRAM);
++#else
+     SocketPair socketPair = createPlatformConnection(SOCK_SEQPACKET);
++#endif
++
++#if OS(HAIKU)
++    int bufsize = 2 * 1024 * 1024;
++    setsockopt(socketPair.server.value(), SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
++    setsockopt(socketPair.server.value(), SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
++    setsockopt(socketPair.client.value(), SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
++    setsockopt(socketPair.client.value(), SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
++#endif
++
+     return { { Identifier { WTF::move(socketPair.server) }, ConnectionHandle { WTF::move(socketPair.client) } } };
+ }
+ 
+ void Connection::sendCredentials() const
+ {
++#if OS(HAIKU)
++    return;
++#else
+     ASSERT(m_socket);
+     g_socket_set_blocking(m_socket.get(), TRUE);
+     GRefPtr<GUnixConnection> connection = adoptGRef(G_UNIX_CONNECTION(g_object_new(G_TYPE_UNIX_CONNECTION, "socket", m_socket.get(), nullptr)));
+@@ -480,10 +496,14 @@ void Connection::sendCredentials() const
+         g_error("Connection: Failed to send credentials: %s", error->message);
+     }
+     g_socket_set_blocking(m_socket.get(), FALSE);
++#endif
+ }
+ 
+ pid_t Connection::remoteProcessID(GSocket* socket)
+ {
++#if OS(HAIKU)
++    return 0;
++#else
+     GRefPtr<GUnixConnection> connection = adoptGRef(G_UNIX_CONNECTION(g_object_new(G_TYPE_UNIX_CONNECTION, "socket", socket, nullptr)));
+     GUniqueOutPtr<GError> error;
+     GRefPtr<GCredentials> credentials = adoptGRef(g_unix_connection_receive_credentials(connection.get(), nullptr, &error.outPtr()));
+@@ -495,6 +515,7 @@ pid_t Connection::remoteProcessID(GSocket* socket)
+         g_error("Connection: failed to get pid from credentials: %s", error->message);
+ 
+     return processID;
++#endif
+ }
+ 
+ #if OS(ANDROID)
+diff --git a/Source/WebKit/Shared/AuxiliaryProcess.cpp b/Source/WebKit/Shared/AuxiliaryProcess.cpp
+index bb98ef37..541841f6 100644
+--- a/Source/WebKit/Shared/AuxiliaryProcess.cpp
++++ b/Source/WebKit/Shared/AuxiliaryProcess.cpp
+@@ -232,6 +232,12 @@ void AuxiliaryProcess::stopRunLoop()
+ void AuxiliaryProcess::platformStopRunLoop()
+ {
+     RunLoop::mainSingleton().stop();
++#if OS(HAIKU)
++#if USE(GSTREAMER)
++    gst_deinit();
++#endif
++    _exit(EXIT_SUCCESS);
++#endif
+ }
+ #endif
+ 
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitProtocolHandler.cpp b/Source/WebKit/UIProcess/API/glib/WebKitProtocolHandler.cpp
+index 970d7622..e38ded69 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitProtocolHandler.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitProtocolHandler.cpp
+@@ -130,6 +130,8 @@ static ASCIILiteral hardwareAccelerationPolicy(WebKitURISchemeRequest* request)
+ {
+ #if PLATFORM(WPE)
+     return "always"_s;
++#elif defined(__HAIKU__)
++	return "never"_s;
+ #elif PLATFORM(GTK)
+     auto* webView = webkit_uri_scheme_request_get_web_view(request);
+     ASSERT(webView);
+@@ -177,9 +179,13 @@ static bool uiProcessContextIsEGL()
+ 
+ static const char* openGLAPI()
+ {
++#if defined(__HAIKU__)
++	return "OpenGL";
++#else
+     if (epoxy_is_desktop_gl())
+         return "OpenGL (libepoxy)";
+     return "OpenGL ES 2 (libepoxy)";
++#endif
+ }
+ 
+ #if PLATFORM(GTK) || (PLATFORM(WPE) && ENABLE(WPE_PLATFORM))
+diff --git a/Source/WebKit/WebProcess/WebCoreSupport/WebWorkerClient.cpp b/Source/WebKit/WebProcess/WebCoreSupport/WebWorkerClient.cpp
+index e40b73ee..1f21856f 100644
+--- a/Source/WebKit/WebProcess/WebCoreSupport/WebWorkerClient.cpp
++++ b/Source/WebKit/WebProcess/WebCoreSupport/WebWorkerClient.cpp
+@@ -45,6 +45,8 @@
+ #include <WebCore/GraphicsContextGL.h>
+ #endif
+ 
++#include <WebPage/WebPage.h>
++
+ namespace WebKit {
+ using namespace WebCore;
+ 
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.cpp
+index 1d26cae5..ea3da564 100644
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.cpp
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.cpp
+@@ -471,7 +471,7 @@ void DrawingAreaCoordinatedGraphics::dispatchPendingCallbacksAfterEnsuringDrawin
+ }
+ #endif
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+ void DrawingAreaCoordinatedGraphics::adjustTransientZoom(double scale, FloatPoint origin)
+ {
+     if (!m_transientZoom) {
+@@ -563,7 +563,7 @@ void DrawingAreaCoordinatedGraphics::resumePainting()
+ 
+ void DrawingAreaCoordinatedGraphics::enterAcceleratedCompositingMode(GraphicsLayer* graphicsLayer)
+ {
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     if (!m_alwaysUseCompositing) {
+         m_webPage->corePage()->settings().setForceCompositingMode(true);
+         m_alwaysUseCompositing = true;
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.h
+index 32bda541..a024d4d1 100644
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.h
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/DrawingAreaCoordinatedGraphics.h
+@@ -110,7 +110,7 @@ private:
+     void foreachRegionInDamageHistoryForTesting(Function<void(const WebCore::Region&)>&&) const override;
+ #endif
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     void adjustTransientZoom(double scale, WebCore::FloatPoint origin) override;
+     void commitTransientZoom(double scale, WebCore::FloatPoint origin, CompletionHandler<void()>&&) override;
+ #endif
+@@ -172,7 +172,7 @@ private:
+ 
+     RunLoop::Timer m_displayTimer;
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     bool m_transientZoom { false };
+     WebCore::FloatPoint m_transientZoomInitialOrigin;
+ #endif
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
+index b15976c9..e90985f5 100644
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
+@@ -201,7 +201,7 @@ void LayerTreeHost::updateRendering()
+         m_overlayCompositingLayer->flushCompositingState(visibleContentsRect());
+ 
+     OptionSet<FinalizeRenderingUpdateFlags> flags;
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     if (!m_transientZoom)
+         flags.add(FinalizeRenderingUpdateFlags::ApplyScrollingTreeLayerPositions);
+ #else
+@@ -216,7 +216,7 @@ void LayerTreeHost::updateRendering()
+         rootLayer.setSize(page->size());
+     }
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     // If we have an active transient zoom, we want the zoom to win over any changes
+     // that WebCore makes to the relevant layers, so re-apply our changes after flushing.
+     if (m_transientZoom)
+@@ -494,7 +494,7 @@ void LayerTreeHost::requestCompositionForRenderingUpdate()
+     WTFEmitSignpost(this, RequestCompositionForRenderingUpdate);
+ }
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+ FloatPoint LayerTreeHost::constrainTransientZoomOrigin(double scale, FloatPoint origin) const
+ {
+     auto* frameView = m_webPage.localMainFrameView();
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h
+index c78dc0d0..b14d2e10 100644
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.h
+@@ -100,7 +100,7 @@ public:
+     void willRenderFrame();
+     void didRenderFrame();
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     void adjustTransientZoom(double, WebCore::FloatPoint);
+     void commitTransientZoom(double, WebCore::FloatPoint);
+ #endif
+@@ -149,7 +149,7 @@ private:
+     // GraphicsLayerFactory
+     Ref<WebCore::GraphicsLayer> createGraphicsLayer(WebCore::GraphicsLayer::Type, WebCore::GraphicsLayerClient&) override;
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     WebCore::FloatPoint constrainTransientZoomOrigin(double, WebCore::FloatPoint) const;
+     WebCore::CoordinatedPlatformLayer* layerForTransientZoom() const;
+     void applyTransientZoomToLayers(double, WebCore::FloatPoint);
+@@ -186,7 +186,7 @@ private:
+ #endif
+     HashMap<uint64_t, Ref<WebCore::CoordinatedImageBackingStore>> m_imageBackingStores;
+ 
+-#if PLATFORM(GTK)
++#if PLATFORM(GTK) && !OS(HAIKU)
+     bool m_transientZoom { false };
+     double m_transientZoomScale { 1 };
+     WebCore::FloatPoint m_transientZoomOrigin;
+diff --git a/Source/WebKit/WebProcess/WebProcess.cpp b/Source/WebKit/WebProcess/WebProcess.cpp
+index 4d2aa71c..9fdce89c 100644
+--- a/Source/WebKit/WebProcess/WebProcess.cpp
++++ b/Source/WebKit/WebProcess/WebProcess.cpp
+@@ -438,7 +438,7 @@ void WebProcess::initializeConnection(IPC::Connection* connection)
+ #endif
+     connection->setDidCloseOnConnectionWorkQueueCallback(callExitCallback);
+ 
+-#if !PLATFORM(GTK) && !PLATFORM(WPE) && !ENABLE(IPC_TESTING_API)
++#if (!PLATFORM(GTK) && !PLATFORM(WPE) && !ENABLE(IPC_TESTING_API)) || OS(HAIKU)
+     connection->setShouldExitOnSyncMessageSendFailure(true);
+ #endif
+ 
+diff --git a/Source/WebKit/WebProcess/glib/WebProcessGLib.cpp b/Source/WebKit/WebProcess/glib/WebProcessGLib.cpp
+index 8e88b4bb..e690c88a 100644
+--- a/Source/WebKit/WebProcess/glib/WebProcessGLib.cpp
++++ b/Source/WebKit/WebProcess/glib/WebProcessGLib.cpp
+@@ -147,6 +147,9 @@ void WebProcess::platformInitializeProcess(const AuxiliaryProcessInitializationP
+ 
+ void WebProcess::initializePlatformDisplayIfNeeded() const
+ {
++#if OS(HAIKU)
++	return;
++#endif
+     if (PlatformDisplay::sharedDisplayIfExists())
+         return;
+ 
+diff --git a/Source/bmalloc/bmalloc/AvailableMemory.cpp b/Source/bmalloc/bmalloc/AvailableMemory.cpp
+index c89de568..c342e710 100644
+--- a/Source/bmalloc/bmalloc/AvailableMemory.cpp
++++ b/Source/bmalloc/bmalloc/AvailableMemory.cpp
+@@ -47,6 +47,9 @@
+ #if BOS(FREEBSD) || BOS(LINUX)
+ #include <sys/sysinfo.h>
+ #endif
++#if BOS(HAIKU)
++#include <OS.h>
++#endif
+ #if BOS(LINUX)
+ #include <algorithm>
+ #include <fcntl.h>
+@@ -166,6 +169,11 @@ static size_t computeAvailableMemory()
+     if (!sysinfo(&info))
+         return info.totalram * info.mem_unit;
+     return availableMemoryGuess;
++#elif BOS(HAIKU)
++	system_info info;
++	if (get_system_info(&info) != B_OK)
++		return availableMemoryGuess;
++	return info.max_pages * B_PAGE_SIZE;
+ #elif BOS(UNIX)
+     long pages = sysconf(_SC_PHYS_PAGES);
+     long pageSize = sysconf(_SC_PAGE_SIZE);
+diff --git a/Source/bmalloc/bmalloc/BPlatform.h b/Source/bmalloc/bmalloc/BPlatform.h
+index ce799ec3..0e7e5709 100644
+--- a/Source/bmalloc/bmalloc/BPlatform.h
++++ b/Source/bmalloc/bmalloc/BPlatform.h
+@@ -66,6 +66,10 @@
+ #define BOS_LINUX 1
+ #endif
+ 
++#ifdef __HAIKU__
++#define BOS_HAIKU 1
++#endif
++
+ #if defined(__FreeBSD__) || defined(__DragonFly__) || defined(__FreeBSD_kernel__)
+ #define BOS_FREEBSD 1
+ #endif
+diff --git a/Source/bmalloc/bmalloc/Scavenger.cpp b/Source/bmalloc/bmalloc/Scavenger.cpp
+index 92f564cf..aa32d7ff 100644
+--- a/Source/bmalloc/bmalloc/Scavenger.cpp
++++ b/Source/bmalloc/bmalloc/Scavenger.cpp
+@@ -44,6 +44,10 @@
+ #include <pthread_np.h>
+ #endif
+ 
++#if BOS(HAIKU)
++#include <OS.h>
++#endif
++
+ #if !BUSE(LIBPAS)
+ 
+ namespace bmalloc {
+@@ -363,6 +367,8 @@ void Scavenger::setThreadName(const char* name)
+     BUNUSED(name);
+ #if BOS(DARWIN) || BPLATFORM(PLAYSTATION)
+     pthread_setname_np(name);
++#elif BOS(HAIKU)
++	rename_thread(find_thread(NULL), name);
+ #elif BOS(LINUX)
+     // Truncate the given name since Linux limits the size of the thread name 16 including null terminator.
+     std::array<char, 16> buf;
+diff --git a/Source/bmalloc/bmalloc/VMAllocate.h b/Source/bmalloc/bmalloc/VMAllocate.h
+index f16990d8..11c94c94 100644
+--- a/Source/bmalloc/bmalloc/VMAllocate.h
++++ b/Source/bmalloc/bmalloc/VMAllocate.h
+@@ -58,13 +58,17 @@
+ 
+ BALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+ 
++#if BOS(HAIKU)
++#include <OS.h>
++#endif
++
+ namespace bmalloc {
+ 
+ #ifndef BMALLOC_VM_TAG
+ #define BMALLOC_VM_TAG VM_TAG_FOR_TCMALLOC_MEMORY
+ #endif
+ 
+-#if BOS(LINUX)
++#if BOS(LINUX) || BOS(HAIKU)
+ #define BMALLOC_NORESERVE MAP_NORESERVE
+ #else
+ #define BMALLOC_NORESERVE 0
+@@ -224,6 +228,9 @@ inline void vmAllocatePhysicalPagesSloppy(void* p, size_t size)
+ // POSIX
+ inline size_t vmPageSize()
+ {
++#if BOS(HAIKU)
++	return B_PAGE_SIZE;
++#else
+     static size_t cached;
+     if (!cached) {
+         long pageSize = sysconf(_SC_PAGESIZE);
+@@ -232,12 +239,15 @@ inline size_t vmPageSize()
+         cached = pageSize;
+     }
+     return cached;
++#endif
+ }
+ 
+ inline size_t vmPageSizePhysical()
+ {
+ #if BOS(DARWIN) && (BCPU(ARM64) || BCPU(ARM))
+     return vm_kernel_page_size;
++#elif BOS(HAIKU)
++	return B_PAGE_SIZE;
+ #else
+     static size_t cached;
+     if (!cached)
+diff --git a/Source/cmake/WebKitCommon.cmake b/Source/cmake/WebKitCommon.cmake
+index 639b7e5d..3090c87e 100644
+--- a/Source/cmake/WebKitCommon.cmake
++++ b/Source/cmake/WebKitCommon.cmake
+@@ -171,7 +171,9 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
+     set(WebKit_LIBRARY_TYPE SHARED)
+     set(WebCoreTestSupport_LIBRARY_TYPE STATIC)
+ 
+-    set(CMAKE_POSITION_INDEPENDENT_CODE True)
++	if (NOT HAIKU)
++    	set(CMAKE_POSITION_INDEPENDENT_CODE True)
++    endif ()
+ 
+     # -----------------------------------------------------------------------------
+     # Install JavaScript shell
+-- 
+2.54.0
+
