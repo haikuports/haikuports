@@ -1,0 +1,144 @@
+From d76eb6408fce9a1a70a0b2b07e5d2a6212f05b8b Mon Sep 17 00:00:00 2001
+From: PulkoMandy <pulkomandy@pulkomandy.tk>
+Date: Wed, 19 Aug 2026 18:26:56 +0200
+Subject: Port remaining patches from 1.2
+
+Other parts were upstreamed or are not needed anymorePort remaining
+patches from 1.2
+
+Other parts were upstreamed or are not needed anymore..
+
+diff --git a/data/CMakeLists.txt b/data/CMakeLists.txt
+index 2be4e6b..b5e09b3 100644
+--- a/data/CMakeLists.txt
++++ b/data/CMakeLists.txt
+@@ -1,5 +1,7 @@
+ 
++if(NOT HAIKU)
+ include(Icons)
++endif()
+ 
+ set(ICON_BINARY_DIR "${PROJECT_BINARY_DIR}/data.generated/icons")
+ set(ICON_SOURCE_DIRS "${PROJECT_SOURCE_DIR}/data/icons")
+@@ -107,6 +109,7 @@ set(overview_sizes
+ 	512
+ )
+ 
++if(NOT HAIKU)
+ add_icon(arx-libertatis
+ 	arx-libertatis.svg    1024
+ 	arx-libertatis-32.svg 32@2x 512
+@@ -120,6 +123,7 @@ add_icon(arx-libertatis
+ )
+ 
+ add_icon(TARGET arx-libertatis-logo arx-libertatis-logo.svg 58 3080x512)
++endif()
+ 
+ add_custom_target(data DEPENDS
+ 	arx-libertatis-icon
+diff --git a/src/audio/openal/OpenALSource.cpp b/src/audio/openal/OpenALSource.cpp
+index de0f8e2..879246b 100644
+--- a/src/audio/openal/OpenALSource.cpp
++++ b/src/audio/openal/OpenALSource.cpp
+@@ -311,13 +311,15 @@ aalError OpenALSource::fillBuffer(size_t i, size_t size) {
+ 	
+ 	TraceAL("filling buffer " << m_buffers[i] << " with " << size << " bytes");
+ 	
+-	char data[StreamLimitBytes * NBUFFERS];
+-	
+-	arx_assert(size <= sizeof(data));
++	char * data = new char[size];
++	if(!data) {
++		return AAL_ERROR_MEMORY;
++	}
+ 	
+ 	size_t read;
+ 	m_stream->read(data, left, read);
+ 	if(read != left) {
++		delete[] data;
+ 		return AAL_ERROR_SYSTEM;
+ 	}
+ 	m_written += read;
+@@ -332,6 +334,7 @@ aalError OpenALSource::fillBuffer(size_t i, size_t size) {
+ 			if(size > left) {
+ 				m_stream->read(data + left, size - left, read);
+ 				if(read != size - left) {
++					delete[] data;
+ 					return AAL_ERROR_SYSTEM;
+ 				}
+ 				m_written += read;
+@@ -343,6 +346,7 @@ aalError OpenALSource::fillBuffer(size_t i, size_t size) {
+ 	const PCMFormat & f = m_sample->getFormat();
+ 	if((f.channels != 1 && f.channels != 2) || (f.quality != 8 && f.quality != 16)) {
+ 		LogError << "Unsupported audio format: quality=" << f.quality << " channels=" << f.channels;
++		delete[] data;
+ 		return AAL_ERROR_SYSTEM;
+ 	}
+ 	
+@@ -359,6 +363,7 @@ aalError OpenALSource::fillBuffer(size_t i, size_t size) {
+ 	}
+ 	
+ 	alBufferData(m_buffers[i], alformat, data, alsize, f.frequency);
++	delete[] data;
+ 	AL_CHECK_ERROR("setting buffer data")
+ 	
+ 	m_bufferSizes[i] = size;
+-- 
+2.54.0
+
+
+From 8fe8aa4e1cde09cbf45df06f721acecaed0e1ce3 Mon Sep 17 00:00:00 2001
+From: PulkoMandy <pulkomandy@pulkomandy.tk>
+Date: Wed, 19 Aug 2026 18:45:18 +0200
+Subject: More Haiku build fixes
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d7f9759..053233e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -647,7 +647,7 @@ if(NOT CXX_STD_VERSION LESS 2011)
+ 	check_cxx11("noexcept"               ARX_HAVE_CXX11_NOEXCEPT           1900)
+ 	check_cxx11("static_assert"          ARX_HAVE_CXX11_STATIC_ASSERT      1600)
+ 	check_cxx11("variadic templates"     ARX_HAVE_CXX11_VARIADIC_TEMPLATES 1800)
+-	check_cxx11("thread_local"           ARX_HAVE_CXX11_THREADLOCAL        1900)
++#	check_cxx11("thread_local"           ARX_HAVE_CXX11_THREADLOCAL        1900)
+ 	check_cxx11("default"                ARX_HAVE_CXX11_DEFAULT            1800)
+ 	check_cxx11("final"                  ARX_HAVE_CXX11_FINAL              1700)
+ 	check_cxx11("[[noreturn]]"           ARX_HAVE_CXX11_NORETURN           1900)
+@@ -887,7 +887,7 @@ else(MSVC)
+ 		endif()
+ 		
+ 		check_include_file("sys/stat.h" ARX_HAVE_SYS_STAT_H)
+-		check_include_file("sys/errno.h" ARX_HAVE_SYS_ERRNO_H)
++		check_include_file("errno.h" ARX_HAVE_SYS_ERRNO_H)
+ 		check_include_file("dirent.h" ARX_HAVE_DIRENT_H)
+ 		
+ 		check_symbol_exists(dirfd "dirent.h" ARX_HAVE_DIRFD)
+diff --git a/src/platform/Thread.cpp b/src/platform/Thread.cpp
+index 243fe55..56e9007 100644
+--- a/src/platform/Thread.cpp
++++ b/src/platform/Thread.cpp
+@@ -68,6 +68,10 @@ void Thread::setThreadName(const std::string & threadName) {
+ #include <pthread_np.h>
+ #endif
+ 
++#if ARX_PLATFORM == ARX_PLATFORM_HAIKU
++#include <OS.h> // rename_thread
++#endif
++
+ Thread::Thread()
+ 	: m_thread()
+ 	, m_priority()
+@@ -132,7 +136,7 @@ void * Thread::entryPoint(void * param) {
+ 	Thread & thread = *static_cast<Thread *>(param);
+ 	
+ 	// Set the thread name.
+-	#if ARX_HAVE_PTHREAD_SETNAME_NP && ARX_PLATFORM != ARX_PLATFORM_MACOS
++	#if ARX_HAVE_PTHREAD_SETNAME_NP && ARX_PLATFORM != ARX_PLATFORM_MACOS && ARX_PLATFORM != ARX_PLATFORM_HAIKU
+ 	// Linux
+ 	pthread_setname_np(thread.m_thread, thread.m_threadName.c_str());
+ 	#elif ARX_HAVE_PTHREAD_SETNAME_NP && ARX_PLATFORM == ARX_PLATFORM_MACOS
+-- 
+2.54.0
+
