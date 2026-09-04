@@ -1,0 +1,334 @@
+From 68276215d72f5d7edfda78b015f7c6772362e28d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Tue, 18 Aug 2026 21:29:48 +0200
+Subject: Haiku build fix
+
+Use gnu++17 as the C++ standard instead of c++17 for netdb error codes
+used by Boost ASIO.
+
+Use gnu99 C standard for usrsctp and arc4random like BSD and Apple.
+
+Build with the shared library version of openssl.
+
+Include the timingsafe_bcmp implementation.
+
+Make the installation paths adjustable (includedir, libdir and datadir).
+
+Remove unneeded boost include paths.
+
+diff --git a/Jamfile b/Jamfile
+index 9abd8b5..139af2d 100644
+--- a/Jamfile
++++ b/Jamfile
+@@ -37,8 +37,6 @@ if $(BOOST_ROOT)
+ else
+ {
+ 	local boost-include-path =
+-		<include>/usr/local/opt/boost/include
+-		<include>/opt/homebrew/include
+ 		;
+ 
+ 	alias boost_system : : : : $(boost-include-path) ;
+@@ -146,7 +144,7 @@ rule linking ( properties * )
+ 
+ 	if <target-os>haiku in $(properties)
+ 	{
+-		result += <library>libnetwork <library>gcc ;
++		result += <library>libnetwork <library>libbsd <library>gcc ;
+ 	}
+ 
+ 
+@@ -801,6 +799,7 @@ lib dl : : <link>shared <name>dl ;
+ lib libsocket : : <use>libnsl <name>socket <link>shared <search>/usr/sfw/lib <link>shared ;
+ lib libnsl : : <name>nsl <link>shared <search>/usr/sfw/lib <link>shared ;
+ lib libnetwork : : <name>network <link>shared ;
++lib libbsd : : <name>bsd <link>shared ;
+ 
+ # socket libraries on windows
+ lib wsock32 : : <name>wsock32 <link>shared ;
+@@ -1052,6 +1051,7 @@ lib torrent
+ 	: # default build
+ 	<threading>multi
+ 	<cxxstd>17
++	<cxxstd-dialect>gnu
+ 	<c++-template-depth>512
+ 
+ 	: # usage requirements
+@@ -1211,10 +1211,10 @@ rule install-pkg-config ( target-name : data * : requirements * )
+ 	}
+ }
+ 
+-headers = [ path.glob-tree include/libtorrent : *.hpp ] ;
++headers = [ path.glob-tree include : *.hpp ] ;
+ 
+ package.install install-torrent-lib
+-	: <install-source-root>libtorrent
++	: <install-source-root>include
+ 	:
+ 	: torrent
+ 	: $(headers)
+diff --git a/Makefile b/Makefile
+index 75c20c2..2d0c86f 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,6 +1,6 @@
+ VERSION=2.1.1
+ 
+-BUILD_CONFIG=release link=shared crypto=openssl warnings=off address-model=64
++BUILD_CONFIG=release link=shared crypto=openssl-shared warnings=off address-model=64
+ 
+ ifneq (${CXXFLAGS},)
+ BUILD_CONFIG += cxxflags="${CXXFLAGS}"
+@@ -14,6 +14,18 @@ ifeq (${PREFIX},)
+ PREFIX=/usr/local/
+ endif
+ 
++ifeq (${LIBDIR},)
++LIBDIR=${PREFIX}/lib
++endif
++
++ifeq (${INCLUDEDIR},)
++INCLUDEDIR=${PREFIX}/include
++endif
++
++ifeq (${DATADIR},)
++DATADIR=${PREFIX}/share
++endif
++
+ ALL: FORCE
+ 	BOOST_ROOT="" b2 ${BUILD_CONFIG}
+ 
+@@ -27,7 +39,7 @@ tools: FORCE
+ 	(cd tools; BOOST_ROOT="" b2 ${BUILD_CONFIG})
+ 
+ install: FORCE
+-	BOOST_ROOT="" b2 ${BUILD_CONFIG} install --prefix=${PREFIX}
++	BOOST_ROOT="" b2 ${BUILD_CONFIG} install --prefix=${PREFIX} --libdir=${LIBDIR} --includedir=${INCLUDEDIR} --datarootdir=${DATADIR}
+ 
+ sim: FORCE
+ 	(cd simulation; BOOST_ROOT="" b2 $(filter-out crypto=openssl,${BUILD_CONFIG}) crypto=built-in)
+diff --git a/deps/libdatachannel/Jamfile b/deps/libdatachannel/Jamfile
+index 9c74046..caf22d4 100644
+--- a/deps/libdatachannel/Jamfile
++++ b/deps/libdatachannel/Jamfile
+@@ -30,8 +30,8 @@ lib libdatachannel
+ 	<library>/libdatachannel//juice
+ 	<library>/libdatachannel//plog
+ 	<gnutls>on:<library>gnutls/<link>shared
+-	<gnutls>off:<library>ssl
+-	<gnutls>off:<library>crypto
++	<gnutls>off:<library>ssl/<link>shared
++	<gnutls>off:<library>crypto/<link>shared
+ 	: # default build
+ 	<link>static
+ 	: # usage requirements
+diff --git a/deps/libdatachannel/deps/usrsctp/CMakeLists.txt b/deps/libdatachannel/deps/usrsctp/CMakeLists.txt
+index c3467f2..35ef6b5 100644
+--- a/deps/libdatachannel/deps/usrsctp/CMakeLists.txt
++++ b/deps/libdatachannel/deps/usrsctp/CMakeLists.txt
+@@ -200,7 +200,7 @@ if (C_COMPILER_IS_MSVC_LIKE)
+ 	endif ()
+ # SETTINGS FOR UNIX COMPILER
+ elseif (CMAKE_C_COMPILER_ID MATCHES "Clang" OR CMAKE_C_COMPILER_ID MATCHES "AppleClang" OR CMAKE_C_COMPILER_ID MATCHES "GNU")
+-	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99 -pedantic -Wall -Wextra")
++	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu99 -pedantic -Wall -Wextra")
+ 
+ 	check_c_compiler_flag(-Wfloat-equal has_wfloat_equal)
+ 	if (has_wfloat_equal)
+diff --git a/deps/libdatachannel/deps/usrsctp/usrsctplib/netinet/sctp_os_userspace.h b/deps/libdatachannel/deps/usrsctp/usrsctplib/netinet/sctp_os_userspace.h
+index 066fd40..03071dc 100755
+--- a/deps/libdatachannel/deps/usrsctp/usrsctplib/netinet/sctp_os_userspace.h
++++ b/deps/libdatachannel/deps/usrsctp/usrsctplib/netinet/sctp_os_userspace.h
+@@ -1152,7 +1152,7 @@ in_broadcast(struct in_addr in)
+ 	        in.s_addr == htonl(INADDR_ANY));
+ }
+ 
+-#if defined(__APPLE__) || defined(__DragonFly__) || defined(__linux__) || defined(__native_client__) || defined(__NetBSD__) || defined(_WIN32) || defined(__Fuchsia__) || defined(__EMSCRIPTEN__)
++#if defined(__APPLE__) || defined(__DragonFly__) || defined(__linux__) || defined(__native_client__) || defined(__NetBSD__) || defined(_WIN32) || defined(__Fuchsia__) || defined(__EMSCRIPTEN__) || defined(__HAIKU__)
+ int
+ timingsafe_bcmp(const void *, const void *, size_t);
+ #endif
+diff --git a/deps/libdatachannel/deps/usrsctp/usrsctplib/netinet/sctp_userspace.c b/deps/libdatachannel/deps/usrsctp/usrsctplib/netinet/sctp_userspace.c
+index 7188890..ca64fb0 100755
+--- a/deps/libdatachannel/deps/usrsctp/usrsctplib/netinet/sctp_userspace.c
++++ b/deps/libdatachannel/deps/usrsctp/usrsctplib/netinet/sctp_userspace.c
+@@ -137,7 +137,7 @@ sctp_userspace_get_mtu_from_ifn(uint32_t if_index)
+ }
+ #endif
+ 
+-#if defined(__APPLE__) || defined(__DragonFly__) || defined(__linux__) || defined(__native_client__) || defined(__NetBSD__) || defined(__QNX__) || defined(_WIN32) || defined(__Fuchsia__) || defined(__EMSCRIPTEN__)
++#if defined(__APPLE__) || defined(__DragonFly__) || defined(__linux__) || defined(__native_client__) || defined(__NetBSD__) || defined(__QNX__) || defined(_WIN32) || defined(__Fuchsia__) || defined(__EMSCRIPTEN__) || defined(__HAIKU__)
+ int
+ timingsafe_bcmp(const void *b1, const void *b2, size_t n)
+ {
+diff --git a/deps/libdatachannel/deps/usrsctp/usrsctplib/user_environment.c b/deps/libdatachannel/deps/usrsctp/usrsctplib/user_environment.c
+index ea52f0a..2d41325 100755
+--- a/deps/libdatachannel/deps/usrsctp/usrsctplib/user_environment.c
++++ b/deps/libdatachannel/deps/usrsctp/usrsctplib/user_environment.c
+@@ -120,7 +120,7 @@ finish_random(void)
+ {
+ 	return;
+ }
+-#elif defined(__FreeBSD__) || defined(__DragonFly__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__APPLE__) || defined(__Bitrig__)
++#elif defined(__FreeBSD__) || defined(__DragonFly__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__APPLE__) || defined(__Bitrig__) || defined(__HAIKU__)
+ #include <stdlib.h>
+ 
+ void
+diff --git a/deps/libdatachannel/deps/usrsctp/usrsctplib/user_socket.c b/deps/libdatachannel/deps/usrsctp/usrsctplib/user_socket.c
+index d1e091a..4a22107 100755
+--- a/deps/libdatachannel/deps/usrsctp/usrsctplib/user_socket.c
++++ b/deps/libdatachannel/deps/usrsctp/usrsctplib/user_socket.c
+@@ -579,7 +579,7 @@ copyiniov(struct iovec *iovp, u_int iovcnt, struct iovec **iov, int error)
+ 	u_int iovlen;
+ 
+ 	*iov = NULL;
+-	if (iovcnt > UIO_MAXIOV)
++	if (iovcnt > IOV_MAX)
+ 		return (error);
+ 	iovlen = iovcnt * sizeof (struct iovec);
+ 	*iov = malloc(iovlen); /*, M_IOV, M_WAITOK); */
+@@ -1020,7 +1020,7 @@ userspace_sctp_recvmsg(struct socket *so,
+ 	if (error) {
+ 		if ((auio.uio_resid != ulen) &&
+ 		    (error == EINTR ||
+-#if !defined(__NetBSD__)
++#if !defined(__NetBSD__) && !defined(__HAIKU__)
+ 		     error == ERESTART ||
+ #endif
+ 		     error == EWOULDBLOCK)) {
+@@ -1113,7 +1113,7 @@ usrsctp_recvv(struct socket *so,
+ 	if (errno) {
+ 		if ((auio.uio_resid != ulen) &&
+ 		    (errno == EINTR ||
+-#if !defined(__NetBSD__)
++#if !defined(__NetBSD__) && !defined(__HAIKU__)
+ 		     errno == ERESTART ||
+ #endif
+ 		     errno == EWOULDBLOCK)) {
+@@ -1929,7 +1929,7 @@ int user_connect(struct socket *so, struct sockaddr *sa)
+ 		error = pthread_cond_wait(SOCK_COND(so), SOCK_MTX(so));
+ #endif
+ 		if (error) {
+-#if defined(__NetBSD__)
++#if defined(__NetBSD__) || defined(__HAIKU__)
+ 			if (error == EINTR) {
+ #else
+ 			if (error == EINTR || error == ERESTART) {
+@@ -1949,7 +1949,7 @@ bad:
+ 	if (!interrupted) {
+ 		so->so_state &= ~SS_ISCONNECTING;
+ 	}
+-#if !defined(__NetBSD__)
++#if !defined(__NetBSD__) && !defined(__HAIKU__)
+ 	if (error == ERESTART) {
+ 		error = EINTR;
+ 	}
+diff --git a/src/enum_net.cpp b/src/enum_net.cpp
+index c91da73..fe04e87 100644
+--- a/src/enum_net.cpp
++++ b/src/enum_net.cpp
+@@ -191,7 +191,7 @@ namespace {
+ 	}
+ #endif
+ 
+-#if TORRENT_USE_NETLINK || TORRENT_USE_SYSCTL || TORRENT_USE_GETADAPTERSADDRESSES
++#if TORRENT_USE_NETLINK || TORRENT_USE_SYSCTL || TORRENT_USE_GETADAPTERSADDRESSES || TORRENT_USE_IFCONF
+ 	bool valid_addr_family(int family)
+ 	{
+ 		return (family == AF_INET
+-- 
+2.54.0
+
+
+From b544f0965bd6e4cea147a5149c9f44a7bcc2bef7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Wed, 2 Sep 2026 18:23:05 +0200
+Subject: fix test build
+
+Some tests still fail, probably because they need the network.
+
+diff --git a/Makefile b/Makefile
+index 2d0c86f..a69ef8e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -45,7 +45,7 @@ sim: FORCE
+ 	(cd simulation; BOOST_ROOT="" b2 $(filter-out crypto=openssl,${BUILD_CONFIG}) crypto=built-in)
+ 
+ check: FORCE
+-	(cd test; BOOST_ROOT="" b2 crypto=openssl warnings=off)
++	(cd test; BOOST_ROOT="" b2 crypto=openssl-shared warnings=off)
+ 
+ clean: FORCE
+ 	rm -rf \
+diff --git a/test/Jamfile b/test/Jamfile
+index 1727155..5e7e967 100644
+--- a/test/Jamfile
++++ b/test/Jamfile
+@@ -34,6 +34,7 @@ lib libtorrent_test
+ 	: # default build
+ 	<link>shared
+ 	<cxxstd>17
++	<cxxstd-dialect>gnu
+ 
+ 	: # user-requirements
+ 	<link>shared:<define>TORRENT_LINK_TEST_SHARED
+@@ -52,6 +53,7 @@ local default-build =
+ 	<picker-debugging>on
+ 	<logging>on
+ 	<cxxstd>17
++	<cxxstd-dialect>gnu
+ 	<variant>debug-mode
+ # default to 64 bit address model as it's required by mmap-disk-io.
+ 	<address-model>64
+diff --git a/test/test_copy_file.cpp b/test/test_copy_file.cpp
+index 33977c0..be8db75 100644
+--- a/test/test_copy_file.cpp
++++ b/test/test_copy_file.cpp
+@@ -18,7 +18,7 @@ see LICENSE file.
+ #include <fstream>
+ #include <set>
+ 
+-#ifndef TORRENT_WINDOWS
++#if !defined(TORRENT_WINDOWS) && !defined(TORRENT_BEOS)
+ #include <sys/mount.h>
+ #endif
+ 
+diff --git a/test/test_utils.cpp b/test/test_utils.cpp
+index 2717cb3..299bcc8 100644
+--- a/test/test_utils.cpp
++++ b/test/test_utils.cpp
+@@ -27,7 +27,7 @@ see LICENSE file.
+ #include <linux/magic.h>
+ #endif
+ 
+-#ifndef TORRENT_WINDOWS
++#if !defined(TORRENT_WINDOWS) && !defined(TORRENT_BEOS)
+ #include <sys/mount.h>
+ #endif
+ 
+@@ -167,6 +167,13 @@ bool fs_supports_sparse_files()
+ 	return (fs_flags & FILE_SUPPORTS_SPARSE_FILES) != 0;
+ }
+ 
++#elif defined(TORRENT_BEOS)
++
++bool fs_supports_sparse_files()
++{
++	return false;
++}
++
+ #else
+ 
+ bool fs_supports_sparse_files()
+@@ -202,7 +209,7 @@ bool fs_supports_sparse_files()
+ #endif
+ bool fs_supports_prealloc()
+ {
+-#ifdef TORRENT_WINDOWS
++#if defined(TORRENT_WINDOWS) || defined(TORRENT_BEOS)
+ 	return true;
+ #else
+ 	int test = ::open("__test__", O_RDWR | O_CREAT, 0755);
+-- 
+2.54.0
+
