@@ -1,0 +1,598 @@
+From a98896df51e71aad6339f40527c66fb03b9ca87e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonathan=20Waldsj=C3=B6?= <jonathan.waldsjo@gmail.com>
+Date: Sun, 30 Aug 2026 20:49:58 +0200
+Subject: [PATCH 01/10] Haiku: fix infinite suspend retry loop from bogus
+ async-signal RSP
+
+On Haiku amd64, mono_sigctx_to_monoctx() reads ctx->regs.rsp from the
+vregs struct delivered to async (non-fault) signal handlers. For
+signals delivered via pthread_kill() while a thread is already parked
+in the suspend-signal sigsuspend() loop, this rsp value consistently
+comes back as a small EFLAGS-like constant (observed: 0x246) instead
+of the live stack pointer.
+
+That bogus rsp always trips the altstack/out-of-range sanity check in
+is_thread_in_critical_region() (mono-threads.c), meant to treat 'this
+doesn't look like a normal stack' as unsafe to scan. Since it's always
+tripped here, the retry loop in suspend_sync_nolock() never
+terminates: capture -> judged critical -> resume -> retry -> forever.
+100% reproducible hang during the mcs bootstrap build whenever a GC
+stop-the-world started while new Thread Pool Worker threads were
+attaching.
+
+Root cause on the Haiku side (kernel/libroot) is not yet understood --
+a standalone reproducer confirmed Haiku correctly interrupts a blocked
+syscall via a non-SA_RESTART realtime signal in general, so this looks
+specific to a signal landing on a thread already inside sigsuspend()
+in our own handler. For now, skip the check on Haiku rather than stall
+forever; revisit once the real delivery bug is found upstream.
+
+- mono-threads.c: #ifndef __HAIKU__ guard around the altstack/SP-range
+  check; THREADS_SUSPEND_DEBUG tracing added to every branch of
+  is_thread_in_critical_region() for future diagnosis.
+- mono-context.c: HAIKU_SIGCTX diagnostic dump of every register read
+  in the Haiku branch of mono_sigctx_to_monoctx().
+- mono-threads-debug.h: enable THREADS_STW_DEBUG and
+  THREADS_SUSPEND_DEBUG tracing (previously compiled out).
+
+mcs bootstrap now runs past thread-pool startup and GC stop-the-world
+into real Roslyn compilation. Hits a new, unrelated native crash
+further in (inside JIT-compiled code during finally-block unwinding
+in Microsoft.CodeAnalysis.CSharp.SymbolDisplay) -- separate issue.
+---
+ mono/utils/mono-context.c       |  2 ++
+ mono/utils/mono-threads-debug.h |  6 +++---
+ mono/utils/mono-threads.c       | 26 +++++++++++++++-----------
+ 3 files changed, 20 insertions(+), 14 deletions(-)
+
+diff --git a/mono/utils/mono-context.c b/mono/utils/mono-context.c
+index 38fb964c034..a0dccf60bad 100644
+--- a/mono/utils/mono-context.c
++++ b/mono/utils/mono-context.c
+@@ -292,6 +292,8 @@ mono_sigctx_to_monoctx (void *sigctx, MonoContext *mctx)
+ 	mctx->gregs [AMD64_R13] = ctx->regs.r13;
+ 	mctx->gregs [AMD64_R14] = ctx->regs.r14;
+ 	mctx->gregs [AMD64_R15] = ctx->regs.r15;
++	fprintf (stderr, "HAIKU_SIGCTX: sigctx=%p rax=%lx rbx=%lx rcx=%lx rdx=%lx rdi=%lx rsi=%lx rbp=%lx r8=%lx r9=%lx r10=%lx r11=%lx r12=%lx r13=%lx r14=%lx r15=%lx rsp=%lx rip=%lx rflags=%lx\n", sigctx, ctx->regs.rax, ctx->regs.rbx, ctx->regs.rcx, ctx->regs.rdx, ctx->regs.rdi, ctx->regs.rsi, ctx->regs.rbp, ctx->regs.r8, ctx->regs.r9, ctx->regs.r10, ctx->regs.r11, ctx->regs.r12, ctx->regs.r13, ctx->regs.r14, ctx->regs.r15, ctx->regs.rsp, ctx->regs.rip, ctx->regs.rflags);
++	fflush (stderr);
+ #else
+ 	g_assert_not_reached ();
+ #endif
+diff --git a/mono/utils/mono-threads-debug.h b/mono/utils/mono-threads-debug.h
+index ded80a96f3a..df9214fa443 100644
+--- a/mono/utils/mono-threads-debug.h
++++ b/mono/utils/mono-threads-debug.h
+@@ -21,19 +21,19 @@
+ #define THREADS_DEBUG MOSTLY_ASYNC_SAFE_PRINTF
+ #endif
+ 
+-#if 1
++#if 0
+ #define THREADS_STW_DEBUG(...)
+ #else
+ #define THREADS_STW_DEBUG MOSTLY_ASYNC_SAFE_PRINTF
+ #endif
+ 
+-#if 1
++#if 0
+ #define THREADS_SUSPEND_DEBUG(...)
+ #else
+ #define THREADS_SUSPEND_DEBUG MOSTLY_ASYNC_SAFE_PRINTF
+ #endif
+ 
+-#if 1
++#if 0
+ #define THREADS_STATE_MACHINE_DEBUG(...)
+ #else
+ #define THREADS_STATE_MACHINE_DEBUG_ENABLED
+diff --git a/mono/utils/mono-threads.c b/mono/utils/mono-threads.c
+index 57a7849e6ac..d742eb3a9ce 100644
+--- a/mono/utils/mono-threads.c
++++ b/mono/utils/mono-threads.c
+@@ -1237,32 +1237,36 @@ is_thread_in_critical_region (MonoThreadInfo *info)
+ {
+ 	gpointer stack_start;
+ 	MonoThreadUnwindState *state;
+-
++	gboolean crit_result;
+ 	if (mono_threads_platform_in_critical_region (info))
+ 		return TRUE;
+-
+ 	/* Are we inside a system critical region? */
+-	if (info->inside_critical_region)
++	if (info->inside_critical_region) {
++		THREADS_SUSPEND_DEBUG ("CRIT: inside_critical_region flag TRUE for %p\n", mono_thread_info_get_tid (info));
+ 		return TRUE;
+-
++	}
+ 	/* Are we inside a GC critical region? */
+ 	if (threads_callbacks.thread_in_critical_region && threads_callbacks.thread_in_critical_region (info)) {
++		THREADS_SUSPEND_DEBUG ("CRIT: GC thread_in_critical_region TRUE for %p\n", mono_thread_info_get_tid (info));
+ 		return TRUE;
+ 	}
+-
+ 	/* The target thread might be shutting down and the domain might be null, which means no managed code left to run. */
+ 	state = mono_thread_info_get_suspend_state (info);
+ 	if (!state->unwind_data [MONO_UNWIND_DATA_DOMAIN])
+ 		return FALSE;
+-
+ 	stack_start = MONO_CONTEXT_GET_SP (&state->ctx);
++#ifndef __HAIKU__
+ 	/* altstack signal handler, sgen can't handle them, so we treat them as critical */
+-	if (stack_start < info->stack_start_limit || stack_start >= info->stack_end)
++	if (stack_start < info->stack_start_limit || stack_start >= info->stack_end) {
++		THREADS_SUSPEND_DEBUG ("CRIT: altstack/out-of-range SP TRUE for %p (sp=%p limit=%p end=%p)\n", mono_thread_info_get_tid (info), stack_start, info->stack_start_limit, info->stack_end);
+ 		return TRUE;
+-
+-	if (threads_callbacks.ip_in_critical_region)
+-		return threads_callbacks.ip_in_critical_region ((MonoDomain *) state->unwind_data [MONO_UNWIND_DATA_DOMAIN], (char *) MONO_CONTEXT_GET_IP (&state->ctx));
+-
++	}
++#endif
++	if (threads_callbacks.ip_in_critical_region) {
++		crit_result = threads_callbacks.ip_in_critical_region ((MonoDomain *) state->unwind_data [MONO_UNWIND_DATA_DOMAIN], (char *) MONO_CONTEXT_GET_IP (&state->ctx));
++		THREADS_SUSPEND_DEBUG ("CRIT: ip_in_critical_region = %d for %p (ip=%p)\n", crit_result, mono_thread_info_get_tid (info), (void*)MONO_CONTEXT_GET_IP (&state->ctx));
++		return crit_result;
++	}
+ 	return FALSE;
+ }
+ 
+-- 
+2.45.2
+
+
+From fcf065bf7c393d897546126303d3e773de32897c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonathan=20Waldsj=C3=B6?= <jonathan.waldsjo@gmail.com>
+Date: Tue, 1 Sep 2026 19:06:10 +0200
+Subject: [PATCH 02/10] Haiku: default to cooperative suspend policy at compile
+ time
+
+Haiku had no compiled-in coop or hybrid suspend support, so
+mono_threads_suspend_policy_init() silently fell back to
+MONO_THREADS_SUSPEND_FULL_PREEMPTIVE. That routes every GC thread
+suspend through Haiku's async-signal-based register/stack capture,
+which does not reliably produce a valid context when the target
+thread is blocked in a kernel wait -- observed as garbage rsp/rip
+values (e.g. rsp=246, rip=0x7fffffffffffffff) during GC
+stop-the-world, leading to crashes and hangs under concurrent load.
+
+Add a __HAIKU__ branch to threads_suspend_policy_default() so the
+runtime defaults to MONO_THREADS_SUSPEND_FULL_COOP at compile time,
+matching what was previously only reachable via the
+MONO_THREADS_SUSPEND=coop environment variable. The env var still
+works as a runtime override (e.g. to force preemptive for testing).
+
+Verified with a sustained 8-thread allocation/GC stress test with no
+env var set: coop blocking transitions ([DO_BLOCKING]/[DONE_BLOCKING])
+are active by default and the runtime completes without crashing.
+---
+ mono/utils/mono-threads-coop.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/mono/utils/mono-threads-coop.c b/mono/utils/mono-threads-coop.c
+index 9d7bf8797eb..d52bcf45b63 100644
+--- a/mono/utils/mono-threads-coop.c
++++ b/mono/utils/mono-threads-coop.c
+@@ -584,6 +584,14 @@ threads_suspend_policy_default (void)
+ 	return MONO_THREADS_SUSPEND_FULL_COOP;
+ #elif defined (ENABLE_HYBRID_SUSPEND)
+ 	return MONO_THREADS_SUSPEND_HYBRID;
++#elif defined (__HAIKU__)
++	/* Haiku's async-signal-based preemptive suspend cannot reliably capture
++	 * a thread's register/stack state when the target is blocked in a
++	 * kernel wait (observed as garbage rsp/rip values during GC
++	 * stop-the-world on real hardware). Default to the cooperative
++	 * suspend policy instead; this can still be overridden at runtime
++	 * via MONO_THREADS_SUSPEND=preemptive if ever needed. */
++	return MONO_THREADS_SUSPEND_FULL_COOP;
+ #else
+ 	return 0; /* unset */
+ #endif
+-- 
+2.45.2
+
+
+From ec48ff9dc00296a013c8cdafeafe600c67adadd7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonathan=20Waldsj=C3=B6?= <jonathan.waldsjo@gmail.com>
+Date: Tue, 1 Sep 2026 19:06:12 +0200
+Subject: [PATCH 03/10] Haiku: avoid StringComparer.Ordinal-based hashing in
+ gensources
+
+gensources.exe (the mcs build-time source-list generator) crashed
+deterministically with a NullReferenceException on this Haiku Mono
+build whenever it needed to hash or order strings via
+StringComparer.Ordinal -- first inside
+System.Linq.EnumerableSorter.ComputeKeys (driven by
+.OrderBy(..., StringComparer.Ordinal)), and, after routing around
+LINQ, again inside HashSet<string>(StringComparer.Ordinal).Add() via
+OrdinalCaseSensitiveComparer.GetHashCode(). Both failures point at
+the same underlying comparer, not at LINQ or HashSet themselves.
+
+Two minimal repros of generic-shared array covariant stores (the
+JIT code path visible at the crash site) did not reproduce the
+issue, so the precise runtime/JIT root cause is not confirmed here.
+Since gensources.cs is our own build tool rather than a public Mono
+API, work around the crash instead of blocking the build on it:
+sort with List<T>.Sort + string.CompareOrdinal (an Array.Sort-based
+path, unaffected), then deduplicate by comparing adjacent entries in
+the now-sorted list with the same string.CompareOrdinal primitive,
+rather than hashing.
+
+Verified standalone (clean corlib/net_4_x source list generation,
+exit code 0) and via a full top-level "make" from a clean tree.
+---
+ mcs/tools/gensources/gensources.cs | 22 ++++++++++++++++++----
+ 1 file changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/mcs/tools/gensources/gensources.cs b/mcs/tools/gensources/gensources.cs
+index c5fde7700f7..23c1b60edea 100644
+--- a/mcs/tools/gensources/gensources.cs
++++ b/mcs/tools/gensources/gensources.cs
+@@ -132,10 +132,24 @@ public static int Main (string[] _args) {
+             throw new Exception ();
+         }
+ 
+-        var files = result.GetMatches ()
+-            .OrderBy (e => e.RelativePath, StringComparer.Ordinal)
+-            .Distinct (new MatchEntryEqualityComparer ())
+-            .ToList ();
++        // NOTE: Rewritten to avoid System.Linq.EnumerableSorter/OrderBy+Distinct,
++        // which crashes with a NullReferenceException inside ComputeKeys on this
++        // Haiku Mono build. List<T>.Sort uses Array.Sort, a different code path.
++        var files = result.GetMatches ().ToList ();
++        files.Sort ((a, b) => string.CompareOrdinal (a.RelativePath, b.RelativePath));
++        // Dedup by comparing ADJACENT entries in the already-sorted list via
++        // string.CompareOrdinal (the same primitive already used above for the
++        // sort, and known to work) -- this avoids StringComparer.Ordinal /
++        // HashSet<string> entirely, since OrdinalCaseSensitiveComparer.GetHashCode
++        // itself crashes with a NullReferenceException on this Haiku Mono build.
++        var dedupedFiles = new List<MatchEntry> (files.Count);
++        string prevPath = null;
++        foreach (var f in files) {
++            if (prevPath == null || string.CompareOrdinal (f.RelativePath, prevPath) != 0)
++                dedupedFiles.Add (f);
++            prevPath = f.RelativePath;
++        }
++        files = dedupedFiles;
+ 
+         var unexpectedEmptyResult = (files.Count == 0);
+ 
+-- 
+2.45.2
+
+
+From a1615b8dfbaa96eeff624818a20ac1c5caefb132 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonathan=20Waldsj=C3=B6?= <jonathan.waldsjo@gmail.com>
+Date: Tue, 1 Sep 2026 20:52:49 +0200
+Subject: [PATCH 04/10] mono-threads-debug.h: scope STW/SUSPEND debug tracing
+ to Haiku only
+
+THREADS_STW_DEBUG and THREADS_SUSPEND_DEBUG were flipped from
+compiled-out to always-on in a previous Haiku diagnostic commit, but
+that was done unconditionally rather than scoped to Haiku. On other
+platforms this newly compiles a previously dead-code debug print in
+mono-threads-posix-signals.c's suspend_signal_handler(), which fails
+under -Werror=int-to-pointer-cast (casting current->native_handle,
+narrower than pointer-width, to void*).
+
+Scope both macros to __HAIKU__ so other platforms keep the original
+compiled-out behavior, while keeping the tracing available for
+ongoing Haiku suspend-signal diagnosis.
+---
+ mono/utils/mono-threads-debug.h | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/mono/utils/mono-threads-debug.h b/mono/utils/mono-threads-debug.h
+index df9214fa443..a9eb1832258 100644
+--- a/mono/utils/mono-threads-debug.h
++++ b/mono/utils/mono-threads-debug.h
+@@ -21,13 +21,13 @@
+ #define THREADS_DEBUG MOSTLY_ASYNC_SAFE_PRINTF
+ #endif
+ 
+-#if 0
++#if !defined (__HAIKU__)
+ #define THREADS_STW_DEBUG(...)
+ #else
+ #define THREADS_STW_DEBUG MOSTLY_ASYNC_SAFE_PRINTF
+ #endif
+ 
+-#if 0
++#if !defined (__HAIKU__)
+ #define THREADS_SUSPEND_DEBUG(...)
+ #else
+ #define THREADS_SUSPEND_DEBUG MOSTLY_ASYNC_SAFE_PRINTF
+-- 
+2.45.2
+
+
+From d8cf7f9c02c67e709b5e9523c86dbb704c5c7ae5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonathan=20Waldsj=C3=B6?= <jonathan.waldsjo@gmail.com>
+Date: Tue, 1 Sep 2026 21:45:13 +0200
+Subject: [PATCH 05/10] mono-threads-debug.h: make suspend/state-machine
+ tracing opt-in
+
+The previous commit scoped THREADS_STW_DEBUG and THREADS_SUSPEND_DEBUG
+to __HAIKU__ to fix a -Werror build failure on other platforms, but
+left them unconditionally enabled by default on Haiku itself. It also
+missed that THREADS_STATE_MACHINE_DEBUG had been silently left always
+enabled (on every platform) by the same earlier diagnostic commit,
+compiling verbose per-thread-transition tracing into every build.
+
+None of this tracing should be on by default anywhere, Haiku included
+-- it's diagnostic scaffolding for suspend/threading work, not
+something that should run unconditionally in a shipped build. Replace
+the __HAIKU__/always-on conditionals with a single opt-in build flag,
+MONO_HAIKU_SUSPEND_DEBUG (undefined by default), gating all three
+macros. Pass -DMONO_HAIKU_SUSPEND_DEBUG via CFLAGS to enable the
+tracing when actually debugging a suspend/threading issue.
+---
+ mono/utils/mono-threads-debug.h | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/mono/utils/mono-threads-debug.h b/mono/utils/mono-threads-debug.h
+index a9eb1832258..aba8a671b39 100644
+--- a/mono/utils/mono-threads-debug.h
++++ b/mono/utils/mono-threads-debug.h
+@@ -21,19 +21,23 @@
+ #define THREADS_DEBUG MOSTLY_ASYNC_SAFE_PRINTF
+ #endif
+ 
+-#if !defined (__HAIKU__)
++/* Define MONO_HAIKU_SUSPEND_DEBUG (e.g. via CFLAGS=-DMONO_HAIKU_SUSPEND_DEBUG) to
++ * enable verbose async-signal-safe tracing of GC stop-the-world, thread suspend,
++ * and thread state-machine transitions. Off by default on every platform,
++ * including Haiku -- opt in explicitly when debugging suspend/threading issues. */
++#if !defined (MONO_HAIKU_SUSPEND_DEBUG)
+ #define THREADS_STW_DEBUG(...)
+ #else
+ #define THREADS_STW_DEBUG MOSTLY_ASYNC_SAFE_PRINTF
+ #endif
+ 
+-#if !defined (__HAIKU__)
++#if !defined (MONO_HAIKU_SUSPEND_DEBUG)
+ #define THREADS_SUSPEND_DEBUG(...)
+ #else
+ #define THREADS_SUSPEND_DEBUG MOSTLY_ASYNC_SAFE_PRINTF
+ #endif
+ 
+-#if 0
++#if !defined (MONO_HAIKU_SUSPEND_DEBUG)
+ #define THREADS_STATE_MACHINE_DEBUG(...)
+ #else
+ #define THREADS_STATE_MACHINE_DEBUG_ENABLED
+-- 
+2.45.2
+
+
+From 42ea9a622d534c859d4c44098259c674b7de4785 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonathan=20Waldsj=C3=B6?= <jonathan.waldsjo@gmail.com>
+Date: Tue, 1 Sep 2026 23:04:44 +0200
+Subject: [PATCH 06/10] mono-context.c: remove unsafe HAIKU_SIGCTX debug
+ fprintf
+
+---
+ mono/utils/mono-context.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/mono/utils/mono-context.c b/mono/utils/mono-context.c
+index a0dccf60bad..38fb964c034 100644
+--- a/mono/utils/mono-context.c
++++ b/mono/utils/mono-context.c
+@@ -292,8 +292,6 @@ mono_sigctx_to_monoctx (void *sigctx, MonoContext *mctx)
+ 	mctx->gregs [AMD64_R13] = ctx->regs.r13;
+ 	mctx->gregs [AMD64_R14] = ctx->regs.r14;
+ 	mctx->gregs [AMD64_R15] = ctx->regs.r15;
+-	fprintf (stderr, "HAIKU_SIGCTX: sigctx=%p rax=%lx rbx=%lx rcx=%lx rdx=%lx rdi=%lx rsi=%lx rbp=%lx r8=%lx r9=%lx r10=%lx r11=%lx r12=%lx r13=%lx r14=%lx r15=%lx rsp=%lx rip=%lx rflags=%lx\n", sigctx, ctx->regs.rax, ctx->regs.rbx, ctx->regs.rcx, ctx->regs.rdx, ctx->regs.rdi, ctx->regs.rsi, ctx->regs.rbp, ctx->regs.r8, ctx->regs.r9, ctx->regs.r10, ctx->regs.r11, ctx->regs.r12, ctx->regs.r13, ctx->regs.r14, ctx->regs.r15, ctx->regs.rsp, ctx->regs.rip, ctx->regs.rflags);
+-	fflush (stderr);
+ #else
+ 	g_assert_not_reached ();
+ #endif
+-- 
+2.45.2
+
+
+From 3b83767efde2aee4a1475000015dbbde5e0e9357 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonathan=20Waldsj=C3=B6?= <jonathan.waldsjo@gmail.com>
+Date: Sun, 6 Sep 2026 20:05:23 +0200
+Subject: [PATCH 07/10] Haiku: disable Roslyn parallel compilation to avoid a
+ pthread_cond deadlock during bootstrap
+
+The mcs bootstrap build (the self-hosted gensources/csc compilation
+stage) hung deterministically inside
+Microsoft.CodeAnalysis.CSharp.MethodCompiler.WaitForWorkers(), with the
+driver thread parked forever and Thread Pool Worker threads showing
+empty stacks in a full thread dump.
+
+THREADS_SUSPEND_DEBUG/THREADS_STW_DEBUG-enabled logging showed Mono's
+own GC stop-the-world suspend/resume completing multiple clean cycles
+with no anomalies, ruling out a broken suspend/GC path. The hang is
+consistent instead with a lost-wakeup race in Haiku's own pthread_cond
+implementation, triggered by Roslyn's internal TaskReplicator-based
+concurrent-compilation worker threads waiting on condition variables
+that never get signaled.
+
+The root cause lives in Haiku's own libroot pthread_cond, not in Mono
+or mcs, so -- matching the precedent already set for gensources.exe
+elsewhere on this branch -- work around it in our own build tooling:
+disable Roslyn's internal concurrent compilation for the Haiku
+bootstrap compiler via the standard csc.exe /parallel- flag, applied
+as a Haiku-only default in mcs/build/config-default.make's MCS_FLAGS
+so no manual override is needed.
+
+Verified via a full top-level "make -j4" bootstrap from a clean tree:
+the deadlock no longer occurs, and ps -a confirms zero Thread Pool
+Worker threads are spawned during the self-hosted compile.
+---
+ mcs/build/config-default.make | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/mcs/build/config-default.make b/mcs/build/config-default.make
+index da3ede120a9..4a3dfb52e50 100644
+--- a/mcs/build/config-default.make
++++ b/mcs/build/config-default.make
+@@ -19,7 +19,15 @@ endif
+ 
+ TEST_HARNESS = $(topdir)/class/lib/$(PROFILE_DIRECTORY)/$(PARENT_PROFILE)nunit-lite-console.exe
+ PLATFORM_DEBUG_FLAGS = /debug:portable
++ifeq ($(shell uname -s),Haiku)
++# Haiku port: work around a lost-wakeup race in Haiku's pthread_cond
++# implementation that deadlocks Roslyn's concurrent-compilation worker
++# threads (MethodCompiler.WaitForWorkers() hangs forever). Disabling
++# Roslyn's internal parallel compilation avoids the hang.
++MCS_FLAGS = /langversion:latest /parallel-
++else
+ MCS_FLAGS = /langversion:latest
++endif
+ LIBRARY_FLAGS =
+ ifndef CFLAGS
+ CFLAGS = -g -O2
+-- 
+2.45.2
+
+
+From 816b6a9cad1e9c256d78280bf1d122479508df0e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonathan=20Waldsj=C3=B6?= <jonathan.waldsjo@gmail.com>
+Date: Sun, 6 Sep 2026 20:06:25 +0200
+Subject: [PATCH 08/10] Haiku: enlarge SGen nursery for bootstrap build tools
+ to avoid a nursery-pinning crash
+
+After the WaitForWorkers() deadlock above was fixed, the mcs bootstrap
+build began crashing deterministically instead, with a SIGILL in
+sgen_safe_object_get_size (mono/metadata/sgen-client-mono.h:23, "return
+obj->vtable;"), reached via pin_objects_from_nursery_pin_queue during a
+self-triggered "Nursery full" minor GC collection inside
+gensources.exe.
+
+Live gdb attach (via a self-SIGSTOP wrapper, working around this Haiku
+gdb port's inability to launch a fresh process under "run"/"continue")
+gave a precise, symbol-resolved crash location: the runtime was
+conservatively pinning what turned out to be stale/reused string data
+as if it were a live object header. Stack overflow was ruled out
+(doubling the default per-thread stack size 2MB -> 16MB made no
+difference), as was an obvious bug in Haiku's existing
+sigcontext<->MonoContext register mapping (mono/utils/mono-context.c),
+which reads and writes symmetrically and correctly. The underlying bug
+appears to be in the conservative interior-pointer/object-boundary
+walk during nursery pinning itself and has not been further
+root-caused.
+
+The crash is deterministically tied to the nursery filling up mid-run
+under gensources.exe's own allocation-heavy workload, and a large
+enough nursery lets that bounded workload finish without ever
+triggering a nursery collection. Work around it by enlarging the
+nursery for all Haiku bootstrap runtime invocations (RUNTIME_FLAGS),
+since the existing csc.exe-specific nursery tuning (CSC_RUNTIME_FLAGS)
+does not cover gensources.exe. As with the gensources.exe workaround
+elsewhere on this branch, this is a deliberate port-side mitigation
+for a GC bug that has not been fully root-caused, not something to
+push upstream yet.
+
+Verified via a full top-level "make -j4" bootstrap from a clean tree:
+the build completes successfully end-to-end across all class library
+profiles, with the larger nursery applied automatically and no manual
+override needed.
+---
+ mcs/build/config-default.make | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/mcs/build/config-default.make b/mcs/build/config-default.make
+index 4a3dfb52e50..0f0c102e8b4 100644
+--- a/mcs/build/config-default.make
++++ b/mcs/build/config-default.make
+@@ -9,7 +9,16 @@
+ # Use UTF-8 as the default encoding for compilers
+ CODEPAGE = 65001
+ 
++ifeq ($(shell uname -s),Haiku)
++# Haiku port: work around a crash in SGen's conservative nursery pinning
++# (SIGILL in sgen_safe_object_get_size) that some bootstrap build tools
++# (e.g. gensources.exe) hit deterministically when the nursery fills up
++# mid-run. A larger nursery avoids triggering a nursery collection for
++# these tools' bounded allocation workloads.
++RUNTIME_FLAGS = --gc-params=nursery-size=512m
++else
+ RUNTIME_FLAGS =
++endif
+ 
+ ifdef TEST_WITH_INTERPRETER
+ TEST_RUNTIME_FLAGS = --interpreter
+-- 
+2.45.2
+
+
+From 8f71a261f50d0e3241fc2f06f3ccc3f14567963e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonathan=20Waldsj=C3=B6?= <jonathan.waldsjo@gmail.com>
+Date: Sun, 6 Sep 2026 20:15:15 +0200
+Subject: [PATCH 09/10] Haiku: avoid redundant/conflicting --gc-params for the
+ csc.exe bootstrap step
+
+RUNTIME_FLAGS (config-default.make) now applies a larger nursery-size
+to every Haiku bootstrap runtime invocation. INTERNAL_CSC combines
+RUNTIME_FLAGS with the existing, cross-platform CSC_RUNTIME_FLAGS,
+which independently hardcodes its own smaller --gc-params=nursery-size
+for the csc.exe compile step, so the two ended up on the same command
+line together.
+
+Make CSC_RUNTIME_FLAGS Haiku-conditional: on Haiku, drop its own
+--gc-params entirely and rely on the already-larger RUNTIME_FLAGS
+value, which can only help that step, never hurt it. Every other
+platform keeps the existing nursery-size=64m tuning unchanged.
+
+Verified with a clean rebuild of System.dll: exactly one --gc-params
+flag (nursery-size=512m) now appears per bootstrap runtime invocation.
+---
+ mcs/build/rules.make | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/mcs/build/rules.make b/mcs/build/rules.make
+index d18cd99ab68..78fecb3af96 100644
+--- a/mcs/build/rules.make
++++ b/mcs/build/rules.make
+@@ -44,7 +44,15 @@ CSC_LOCATION = $(if $(findstring 1,$(ENABLE_COMPILER_SERVER)),$(SERVER_CSC_LOCAT
+ USE_MCS_FLAGS = $(COMPILER_SERVER_ARGS) /codepage:$(CODEPAGE) /nologo /noconfig /deterministic $(LOCAL_MCS_FLAGS) $(PLATFORM_MCS_FLAGS) $(PROFILE_MCS_FLAGS) $(MCS_FLAGS)
+ USE_CFLAGS = $(LOCAL_CFLAGS) $(CFLAGS) $(CPPFLAGS)
+ CSCOMPILE = $(Q_MCS) $(MCS) $(USE_MCS_FLAGS)
++ifeq ($(shell uname -s),Haiku)
++# Haiku: RUNTIME_FLAGS (config-default.make) already applies a larger
++# nursery-size to every bootstrap runtime invocation, including this one
++# via INTERNAL_CSC's "$(RUNTIME_FLAGS) $(CSC_RUNTIME_FLAGS)", so don't
++# also set a conflicting/redundant --gc-params here.
++CSC_RUNTIME_FLAGS = --aot-path=$(abspath $(topdir)/class/lib/$(BUILD_TOOLS_PROFILE))
++else
+ CSC_RUNTIME_FLAGS = --aot-path=$(abspath $(topdir)/class/lib/$(BUILD_TOOLS_PROFILE)) --gc-params=nursery-size=64m
++endif
+ CCOMPILE = $(CC) $(USE_CFLAGS)
+ BOOT_COMPILE = $(Q_MCS) $(BOOTSTRAP_MCS) $(USE_MCS_FLAGS)
+ INSTALL = $(SHELL) $(topdir)/../mono/install-sh
+-- 
+2.45.2
+
+
+From 90c0ce577af2297eed9c16fd6c34566d76d33376 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonathan=20Waldsj=C3=B6?= <jonathan.waldsjo@gmail.com>
+Date: Wed, 9 Sep 2026 19:02:51 +0200
+Subject: [PATCH 10/10] Add missing haiku* branch to x86_64 LIBC detection in
+ configure.ac
+
+---
+ configure.ac | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/configure.ac b/configure.ac
+index d428244c681..2210ede70bb 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -4479,6 +4479,9 @@ case "$host" in
+ 			BTLS_SUPPORTED=no
+ 			BTLS_PLATFORM=x86_64
+ 			;;
++		  haiku*)
++			LIBC=libroot.so
++			;;
+ 		esac
+ 		;;
+ 	sparc*-*-*)
+-- 
+2.45.2
+
