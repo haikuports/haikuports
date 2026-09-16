@@ -8,20 +8,32 @@ compression / speed trade-off, while being backed by a very fast decoder. It \
 also offers a special mode for small data, called dictionary compression, and \
 can create dictionaries from any sample set."
 HOMEPAGE="https://facebook.github.io/zstd/"
-COPYRIGHT="2016-2024 Facebook, Inc.
+COPYRIGHT="2016-2025 Facebook, Inc.
 	Meta Platforms, Inc. and affiliates"
 LICENSE="BSD (2-clause)
 	GNU GPL v2"
-REVISION="2"
+REVISION="1"
 SOURCE_URI="https://github.com/facebook/zstd/archive/v$portVersion.tar.gz"
-CHECKSUM_SHA256="30f35f71c1203369dc979ecde0400ffea93c27391bfd2ac5a9715d2173d92ff7"
+CHECKSUM_SHA256="37d7284556b20954e56e1ca85b80226768902e2edabd3b649e9e72c0c9012ee3"
 SOURCE_FILENAME="zstd-v$portVersion.tar.gz"
 PATCHES="zstd-$portVersion.patchset"
+
+# DEPFLAGS and CFLAGS are overridden to drop flags unrecognized by GCC2
+zstdFeatures=(HAVE_THREAD=1 HAVE_ZLIB=1 HAVE_LZ4=1)
 if [ "$effectiveTargetArchitecture" = x86_gcc2 ]; then
 PATCHES="$PATCHES
 	zstd-$portVersion-gcc2.patchset
 	"
+zstdFeatures+=(HAVE_LZMA=0 DEPFLAGS= "CFLAGS=-O3 -fPIC")
+else
+zstdFeatures+=(HAVE_LZMA=1)
 fi
+
+ADDITIONAL_FILES="
+	zstdConfig.cmake
+	zstdTargets.cmake.in
+	zstdConfigVersion.cmake.in
+	"
 
 ARCHITECTURES="all"
 SECONDARY_ARCHITECTURES="x86"
@@ -45,7 +57,6 @@ REQUIRES="
 	haiku$secondaryArchSuffix
 	"
 
-SUMMARY_bin="Command line tools to compress/decompress .zst files"
 PROVIDES_bin="
 	zstd${secondaryArchSuffix}_bin = $portVersion
 	cmd:unzstd$commandSuffix = $portVersion
@@ -99,7 +110,6 @@ BUILD_REQUIRES="$BUILD_REQUIRES
 fi
 BUILD_PREREQUIRES="
 	cmd:gcc$secondaryArchSuffix
-	cmd:cmake
 	cmd:make
 	cmd:sed
 	cmd:find
@@ -109,39 +119,47 @@ TEST_REQUIRES="
 	cmd:python3
 	"
 
-PATCH()
-{
-	# avoid error on tests without static libs, we use LD_LIBRARY_PATH
-	sed '/build static library to build tests/d' -i build/cmake/CMakeLists.txt
-	sed 's/libzstd_static/libzstd_shared/g' -i build/cmake/tests/CMakeLists.txt
-}
 
 BUILD()
 {
-	cmake -B bld -S build/cmake -DCMAKE_BUILD_TYPE=Release \
-		$cmakeDirArgs \
-		-DCMAKE_INSTALL_BINDIR=$commandBinDir \
-		-DZSTD_BUILD_STATIC=OFF \
-		-DZSTD_BUILD_TESTS=ON \
-		-DZSTD_PROGRAMS_LINK_SHARED=ON
-	make -C bld $jobArgs
+	make prefix="$prefix" \
+		includedir="$includeDir" \
+		libdir="$libDir" \
+		bindir="$binDir" \
+		mandir="$manDir" \
+		$jobArgs \
+		"${zstdFeatures[@]}"
 }
 
 INSTALL()
 {
-	make -C bld install
+	make prefix="$prefix" \
+		includedir="$includeDir" \
+		libdir="$libDir" \
+		bindir="$commandBinDir" \
+		mandir="$manDir" \
+		"${zstdFeatures[@]}" \
+		install
 
 	mkdir -p $docDir
 	cp doc/zstd_manual.html $docDir
 
+	# Remove static library
+	rm $libDir/libzstd.a
 	prepareInstalledDevelLib libzstd
 	fixPkgconfig
-	fixCMake
 
-	sed "s|$libDir|$developLibDir|g" \
-		-i $developLibDir/cmake/zstd/zstdTargets-release.cmake
-	sed "/INTERFACE_INCLUDE_DIRECTORIES/c INTERFACE_INCLUDE_DIRECTORIES \"$includeDir;\"" \
-		-i $developLibDir/cmake/zstd/zstdTargets.cmake
+	# Install cmake manifest
+	install -Dm644 $portDir/additional-files/zstdConfig.cmake \
+		$developLibDir/cmake/zstd/zstdConfig.cmake
+	for f in zstdTargets zstdConfigVersion; do
+		sed -e "s|@DEVELOP_LIB_DIR@|$developLibDir|g" \
+			-e "s|@INCLUDE_DIR@|$includeDir|g" \
+			-e "s|@VERSION@|$portVersion|g" \
+			-e "s|@VERSION_MAJOR@|${portVersion%%.*}|g" \
+			$portDir/additional-files/$f.cmake.in \
+			> $developLibDir/cmake/zstd/$f.cmake
+	done
 
 	packageEntries bin \
 		$commandBinDir \
@@ -158,5 +176,5 @@ INSTALL()
 
 TEST()
 {
-	make -C bld test
+	make -C tests fullbench "${zstdFeatures[@]}" $jobArgs
 }
