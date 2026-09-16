@@ -1,0 +1,163 @@
+From 2b97fd096b42adc52b3bbba3b196711cf7fad0cc Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Thu, 29 Jun 2017 17:06:55 +0200
+Subject: import fix from previous version
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-authored-by: Joachim Mairböck <j.mairboeck@gmail.com>
+
+diff --git a/cmdbuf.c b/cmdbuf.c
+index 9f13473..1deedff 100644
+--- a/cmdbuf.c
++++ b/cmdbuf.c
+@@ -1481,12 +1481,19 @@ static char * histfile_find(lbool must_exist)
+ 	name = dirfile(lgetenv("XDG_STATE_HOME"), &LESSHISTFILE[1], must_exist);
+ 	if (name == NULL)
+ 	{
++#ifdef __HAIKU__
++		char dir[B_PATH_NAME_LENGTH+B_FILE_NAME_LENGTH];
++		dev_t volume = dev_for_path("/boot");
++		if (find_directory(B_USER_VAR_DIRECTORY, volume, true, dir, sizeof(dir)) == B_OK)
++			name = dirfile(dir, &LESSHISTFILE[1], must_exist);
++#else
+ 		char *dir = dirfile(home, ".local/state", 1);
+ 		if (dir != NULL)
+ 		{
+ 			name = dirfile(dir, &LESSHISTFILE[1], must_exist);
+ 			free(dir);
+ 		}
++#endif
+ 	}
+ 	if (name == NULL)
+ 		name = dirfile(lgetenv("XDG_DATA_HOME"), &LESSHISTFILE[1], must_exist);
+diff --git a/configure.ac b/configure.ac
+index 1dbe057..040ee0f 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -629,9 +629,15 @@ AH_TOP([
+  * LESSHISTFILE is the filename of the history file
+  * (in the HOME directory).
+  */
++#ifdef __HAIKU__
++# define	LESSKEYFILE		"less"
++# define	LESSKEYFILE_SYS		SYSDIR "/sysless"
++# define	DEF_LESSKEYINFILE	"lesskey"
++#else
+ #define LESSKEYFILE             ".less"
+ #define LESSKEYFILE_SYS         SYSDIR "/sysless"
+ #define DEF_LESSKEYINFILE       ".lesskey"
++#endif
+ #define LESSKEYINFILE_SYS       SYSDIR "/syslesskey"
+ #define LESSHISTFILE            ".lesshst"
+ 
+diff --git a/filename.c b/filename.c
+index 0c7f32f..b7d3d0c 100644
+--- a/filename.c
++++ b/filename.c
+@@ -278,10 +278,21 @@ public char * homefile(constant char *filename)
+ {
+ 	char *pathname;
+ 
++#ifdef __HAIKU__
++	char path[B_PATH_NAME_LENGTH+B_FILE_NAME_LENGTH];
++	dev_t volume = dev_for_path("/boot");
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, volume, true, path, sizeof(path)) != B_OK)
++		return (NULL);
++
++	pathname = dirfile(path, filename, 1);
++	if (pathname != NULL)
++		return (pathname);
++#else
+ 	/* Try $HOME/filename. */
+ 	pathname = dirfile(lgetenv("HOME"), filename, 1);
+ 	if (pathname != NULL)
+ 		return (pathname);
++#endif
+ #if OS2
+ 	/* Try $INIT/filename. */
+ 	pathname = dirfile(lgetenv("INIT"), filename, 1);
+diff --git a/less.h b/less.h
+index 1624eb2..e6f7937 100644
+--- a/less.h
++++ b/less.h
+@@ -99,6 +99,11 @@ typedef unsigned long uintmax;
+ #include <floss.h>
+ #endif
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#include <StorageDefs.h>
++#endif
++
+ #if MSDOS_COMPILER==WIN32C || OS2
+ #include <io.h>
+ #endif
+diff --git a/lesskey.c b/lesskey.c
+index a808707..d1e9f57 100644
+--- a/lesskey.c
++++ b/lesskey.c
+@@ -87,6 +87,11 @@
+ #include "lesskey.h"
+ #include "cmd.h"
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#include <StorageDefs.h>
++#endif
++
+ constant char fileheader[] = {
+ 	C0_LESSKEY_MAGIC, 
+ 	C1_LESSKEY_MAGIC, 
+@@ -159,8 +164,19 @@ char * homefile(constant char *filename)
+ 	constant char *p;
+ 	char *pathname;
+ 
++#ifdef __HAIKU__
++	char path[B_PATH_NAME_LENGTH+B_FILE_NAME_LENGTH];
++	dev_t volume = dev_for_path("/boot");
++	if (find_directory(B_USER_SETTINGS_DIRECTORY, volume, true, path, sizeof(path)) != B_OK)
++		return (NULL);
++
++	pathname = mkpathname(path, filename);
++	if (pathname != NULL)
++		return (pathname);
++#else
+ 	if ((p = getenv("HOME")) != NULL && *p != '\0')
+ 		pathname = mkpathname(p, filename);
++#endif
+ #if OS2
+ 	else if ((p = getenv("INIT")) != NULL && *p != '\0')
+ 		pathname = mkpathname(p, filename);
+-- 
+2.54.0
+
+
+From 98b2f1e02b1df3a713231ee719a09e60ebdf65f8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=B4me=20Duval?= <jerome.duval@gmail.com>
+Date: Sun, 1 Dec 2024 19:24:35 +0100
+Subject: gcc2 build fix
+
+
+diff --git a/line.c b/line.c
+index 00535a2..a8c5b8d 100644
+--- a/line.c
++++ b/line.c
+@@ -1586,9 +1586,11 @@ static void col_vs_pos(POSITION linepos, mutable struct col_pos *cp, POSITION sa
+ 			utf8_buf[utf8_len++] = ch;
+ 			if (is_utf8_well_formed(utf8_buf, utf8_len))
+ 			{
+-				LWCHAR wch = get_wchar(utf8_buf);
+-				int attr = 0; /* {{ ignoring attribute is not correct for magic cookie terminals }} */
++				int attr;
++				LWCHAR wch;
+ 				utf8_len = 0;
++				attr = 0; /* {{ ignoring attribute is not correct for magic cookie terminals }} */
++				wch = get_wchar(utf8_buf);
+ 				if (is_omit_char(wch))
+ 				{
+ 					if (bs_mode == BS_CONTROL)
+-- 
+2.54.0
+
