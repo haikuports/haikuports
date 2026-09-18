@@ -1,0 +1,150 @@
+From ba2369c44453db51efd1c8bec16446cc2c680c71 Mon Sep 17 00:00:00 2001
+From: Ken Mays <kmays2000@gmail.com>
+Date: Mon, 15 Dec 2025 20:03:42 +0600
+Subject: Fix installation
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9e8737b..5ef8aae 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -448,7 +448,7 @@ configure_file (
+ enable_testing()
+ include(AddSimGearTest) # helper to setup a test
+ 
+-install (FILES ${PROJECT_BINARY_DIR}/simgear/simgear_config.h  DESTINATION include/simgear/)
++install (FILES ${PROJECT_BINARY_DIR}/simgear/simgear_config.h  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/simgear/)
+ 
+ add_subdirectory(3rdparty)
+ add_subdirectory(simgear)
+diff --git a/simgear/CMakeLists.txt b/simgear/CMakeLists.txt
+index f3a17d0..03526da 100644
+--- a/simgear/CMakeLists.txt
++++ b/simgear/CMakeLists.txt
+@@ -115,7 +115,7 @@ endif(SIMGEAR_SHARED)
+ 
+ target_include_directories(SimGearCore BEFORE PUBLIC
+     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>
+-    $<INSTALL_INTERFACE:include>)
++    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+         
+ # for simgear_config.h
+ target_include_directories(SimGearCore PRIVATE ${PROJECT_BINARY_DIR}/simgear)
+diff --git a/simgear/canvas/ShivaVG/src/shConfig.h b/simgear/canvas/ShivaVG/src/shConfig.h
+index 77be46a..0d01cfa 100644
+--- a/simgear/canvas/ShivaVG/src/shConfig.h
++++ b/simgear/canvas/ShivaVG/src/shConfig.h
+@@ -31,7 +31,7 @@
+     // FreeBSD
+     #define VG_API_FREEBSD
+ 
+-#elif defined(__OpenBSD__)
++#elif defined(__OpenBSD__) || defined(__HAIKU__)
+ 
+     // FreeBSD
+     #define VG_API_OPENBSD
+diff --git a/simgear/canvas/ShivaVG/src/shDefs.h b/simgear/canvas/ShivaVG/src/shDefs.h
+index f4355b1..609161f 100644
+--- a/simgear/canvas/ShivaVG/src/shDefs.h
++++ b/simgear/canvas/ShivaVG/src/shDefs.h
+@@ -161,7 +161,9 @@ SHfloat getMaxFloat();
+ 
+ /* OpenGL headers */
+ 
+-#if defined(VG_API_LINUX) || defined(VG_API_FREEBSD) || defined(VG_API_OPENBSD)
++#if defined (__HAIKU__)
++	#include <GL/gl.h>
++#elif defined(VG_API_LINUX) || defined(VG_API_FREEBSD) || defined(VG_API_OPENBSD)
+     #include <GL/gl.h>
+     #include <GL/glx.h>
+ #elif defined(VG_API_MACOSX)
+@@ -174,6 +176,7 @@ SHfloat getMaxFloat();
+     #include <GL/glx.h>
+ #endif
+ 
++
+ #include "shExtensions.h"
+ 
+ 
+diff --git a/simgear/canvas/ShivaVG/src/shExtensions.c b/simgear/canvas/ShivaVG/src/shExtensions.c
+index 8e87fa4..56f299b 100644
+--- a/simgear/canvas/ShivaVG/src/shExtensions.c
++++ b/simgear/canvas/ShivaVG/src/shExtensions.c
+@@ -24,6 +24,10 @@
+ #include "shContext.h"
+ #include <stdio.h>
+ #include <string.h>
++#ifdef __HAIKU__
++#include <dlfcn.h>
++#endif
++
+ 
+ /*-----------------------------------------------------
+  * Extensions check
+@@ -74,6 +78,13 @@ PFVOID shGetProcAddress(const char *name)
+   #elif defined(__APPLE__)
+   /* TODO: Mac OS glGetProcAddress implementation */
+   return (PFVOID)NULL;
++  #elif defined(__HAIKU__)
++    static void *glHandle = NULL;
++
++    if (glHandle == NULL)
++        glHandle = dlopen("libGL.so", RTLD_LAZY | RTLD_GLOBAL);
++
++    return glHandle != NULL ? (PFVOID)dlsym(glHandle, name) : NULL;
+   #else
+   return (PFVOID)glXGetProcAddress((const unsigned char *)name);
+   #endif
+diff --git a/simgear/misc/strutils.cxx b/simgear/misc/strutils.cxx
+index 1d3c4ae..7bb15fb 100644
+--- a/simgear/misc/strutils.cxx
++++ b/simgear/misc/strutils.cxx
+@@ -1169,7 +1169,7 @@ std::string error_string(int errnum)
+   retcode = strerror_s(buf, sizeof(buf), errnum);
+ #elif defined(_GNU_SOURCE)
+   return std::string(strerror_r(errnum, buf, sizeof(buf)));
+-#elif (_POSIX_C_SOURCE >= 200112L) || defined(SG_MAC) || defined(__FreeBSD__) || defined(__OpenBSD__)
++#elif (_POSIX_C_SOURCE >= 200112L) || defined(SG_MAC) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__HAIKU__)
+   int retcode;
+   // POSIX.1-2001 and POSIX.1-2008
+   retcode = strerror_r(errnum, buf, sizeof(buf));
+diff --git a/simgear/package/md5.h b/simgear/package/md5.h
+index 22c4209..328ba33 100644
+--- a/simgear/package/md5.h
++++ b/simgear/package/md5.h
+@@ -26,22 +26,26 @@ typedef unsigned __int64 u_int64_t;
+ #else
+ #include <sys/types.h>
+ #endif
++
++#if defined(__HAIKU__)
++#include <stdint.h>
++#endif
+      
+ #define	MD5_BLOCK_LENGTH		64
+ #define	MD5_DIGEST_LENGTH		16
+ #define	MD5_DIGEST_STRING_LENGTH	(MD5_DIGEST_LENGTH * 2 + 1)
+ 
+ typedef struct MD5Context {
+-	u_int32_t state[4];			/* state */
+-	u_int64_t count;			/* number of bits, mod 2^64 */
+-	u_int8_t buffer[MD5_BLOCK_LENGTH];	/* input buffer */
++	uint32_t state[4];			/* state */
++	uint64_t count;			/* number of bits, mod 2^64 */
++	uint8_t buffer[MD5_BLOCK_LENGTH];	/* input buffer */
+ } SG_MD5_CTX;
+ 
+ void	 SG_MD5Init(SG_MD5_CTX *);
+-void	 SG_MD5Update(SG_MD5_CTX *, const u_int8_t *, size_t);
++void	 SG_MD5Update(SG_MD5_CTX *, const uint8_t *, size_t);
+ void	 SG_MD5Pad(SG_MD5_CTX *);
+-void	 SG_MD5Final(u_int8_t [MD5_DIGEST_LENGTH], SG_MD5_CTX *);
+-void	 SG_MD5Transform(u_int32_t [4], const u_int8_t [MD5_BLOCK_LENGTH]);
++void	 SG_MD5Final(uint8_t [MD5_DIGEST_LENGTH], SG_MD5_CTX *);
++void	 SG_MD5Transform(uint32_t [4], const uint8_t [MD5_BLOCK_LENGTH]);
+ 
+ #ifdef __cplusplus
+ } // of extern C
+-- 
+2.54.0
+
