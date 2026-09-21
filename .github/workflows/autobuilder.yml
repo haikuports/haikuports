@@ -1,0 +1,410 @@
+name: Build HaikuPorts packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ development ]
+  pull_request:
+    branches: [ main, master, development ]
+
+jobs:
+  prepare-build:
+    runs-on: ubuntu-latest
+    outputs:
+      changed_recipes_space_separated: ${{ steps.detect-changes.outputs.changed_recipes_space_separated }}
+      has_changed_recipes: ${{ steps.detect-changes.outputs.has_changed_recipes }}
+    steps:
+      - name: Checkout HaikuPorts repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python for HaikuPorter
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install HaikuPorter
+        run: |
+          git clone https://github.com/haikuports/haikuporter.git ~/haikuporter
+          sudo ln -s "$HOME/haikuporter/haikuporter" /usr/local/bin/haikuporter
+          echo "HaikuPorter installed. Version:"
+          haikuporter --version
+        shell: bash
+
+      - name: Set up HaikuPorter configuration
+        run: |
+          echo "TREE_PATH=\"${{ github.workspace }}\"" > "${{ github.workspace }}/haikuports.conf"
+          echo "PACKAGER=\"CI Builder <ci@example.com>\"" >> "${{ github.workspace }}/haikuports.conf"
+          echo "TARGET_ARCHITECTURE=\"x86_64\"" >> "${{ github.workspace }}/haikuports.conf"
+          echo "HaikuPorter configuration created at ${{ github.workspace }}/haikuports.conf:"
+          cat "${{ github.workspace }}/haikuports.conf"
+        shell: bash
+
+      - name: Download Haiku Licenses
+        run: |
+          wget https://github.com/waddlesplash/haiku-licenses/archive/master.zip -O haiku-licenses.zip
+          unzip -q haiku-licenses.zip
+          echo "Haiku Licenses downloaded and unzipped. Found directories:"
+          ls -d ${{ github.workspace }}/haiku-licenses-*/
+        shell: bash
+
+      - name: Detect modified recipes
+        id: detect-changes
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          GIT_PRIMARY_BRANCH_REF=""
+          if git rev-parse --verify origin/main >/dev/null 2>&1; then
+            GIT_PRIMARY_BRANCH_REF="origin/main"
+          elif git rev-parse --verify origin/master >/dev/null 2>&1; then
+            GIT_PRIMARY_BRANCH_REF="origin/master"
+          fi
+
+          if [ -z "$GIT_PRIMARY_BRANCH_REF" ]; then
+            echo "::warning::No main or master branch found at origin to compare against. Assuming all recipes need checking."
+            CHANGED_RECIPES=$(find . -name '*.recipe' -printf '%h\n' | sed 's|^\./||' | cut -d "/" -f 2 | sort -u | tr '\n' ' ')
+            echo "build_all_flag=true" >> $GITHUB_OUTPUT
+          else
+            echo "Primary branch for comparison: $GIT_PRIMARY_BRANCH_REF"
+            if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
+              TARGET_REF="origin/$GITHUB_BASE_REF"
+              git fetch origin "$GITHUB_BASE_REF" --depth=1
+              MERGE_BASE=$(git merge-base HEAD "$TARGET_REF")
+              echo "Pull Request: Diffing from merge base $MERGE_BASE to HEAD ($GITHUB_SHA)"
+              CHANGED_RECIPES=$(git diff --name-only "$MERGE_BASE" HEAD -- '*/*.recipe' | sed 's|/[^/]*\.recipe$||g' | cut -d "/" -f 2 | sort -u | tr '\n' ' ')
+            else
+              echo "Push/Manual Trigger: Diffing from $GIT_PRIMARY_BRANCH_REF to HEAD ($GITHUB_SHA)"
+              CHANGED_RECIPES=$(git diff --name-only "$GIT_PRIMARY_BRANCH_REF...HEAD" -- '*/*.recipe' | sed 's|/[^/]*\.recipe$||g' | cut -d "/" -f 2 | sort -u | tr '\n' ' ')
+            fi
+            echo "build_all_flag=false" >> $GITHUB_OUTPUT
+          fi
+          CHANGED_RECIPES=$(echo "$CHANGED_RECIPES" | sed 's/ *$//')
+
+          if [ -z "$CHANGED_RECIPES" ]; then
+            echo "No recipes changed."
+            echo "changed_recipes_space_separated=" >> $GITHUB_OUTPUT
+            echo "has_changed_recipes=false" >> $GITHUB_OUTPUT
+          else
+            echo "Changed recipes found (space separated list):"
+            echo "$CHANGED_RECIPES"
+            echo "changed_recipes_space_separated=$CHANGED_RECIPES" >> $GITHUB_OUTPUT
+            echo "has_changed_recipes=true" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      - name: Update Repository and Stage Dependency Infos
+        id: generate-deps
+        if: steps.detect-changes.outputs.has_changed_recipes == 'true'
+        run: |
+          echo "Updating HaikuPorter repository to generate/update all .DependencyInfo files..."
+          echo "Working on commit: ${{ github.sha }}"
+          git log --oneline -n 3
+
+          LICENSES_DIR_NAME=$(ls -d ${{ github.workspace }}/haiku-licenses-*/ | head -n 1 | xargs basename)
+          echo "Using licenses directory: $LICENSES_DIR_NAME at ${{ github.workspace }}/$LICENSES_DIR_NAME"
+
+          echo "Generating .DependencyInfo files for current commit state..."
+          haikuporter -q --config="${{ github.workspace }}/haikuports.conf" --licenses="${{ github.workspace }}/$LICENSES_DIR_NAME" --repository-update
+
+          echo "Repository update completed. Generated .DependencyInfo files:"
+        shell: bash
+
+      - name: Package changed ports
+        id: package-ports
+        if: steps.detect-changes.outputs.has_changed_recipes == 'true'
+        run: |
+          echo "Packaging changed ports directories..."
+          CHANGED_RECIPES='${{ steps.detect-changes.outputs.changed_recipes_space_separated }}'
+          echo "Changed recipes: $CHANGED_RECIPES"
+
+          mkdir -p changed_ports_temp
+
+          CHANGED_PATHS=$(git diff --name-only origin/master HEAD -- '*-*/*' | xargs echo )
+          # place the file in the same location but in the temp directory
+          for path in $CHANGED_PATHS; do
+            cp -aRv --parents $path changed_ports_temp/ || true
+          done
+
+          if [ -d "changed_ports_temp" ] && [ "$(ls -A changed_ports_temp)" ]; then
+            tar -czf changed_ports.tar.gz -C changed_ports_temp .
+            echo "Created changed_ports.tar.gz with contents:"
+            tar -tzf changed_ports.tar.gz
+          else
+            echo "No port directories found to package"
+            tar -czf changed_ports.tar.gz --files-from /dev/null
+          fi
+
+          rm -rf changed_ports_temp
+        shell: bash
+
+      - name: Cache .DependencyInfo files and changed ports
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            repository/*
+            changed_ports.tar.gz
+          key: ${{ runner.os }}-haiku-deps-${{ github.sha }}
+
+
+  build-haikuports:
+    runs-on: ubuntu-latest
+    needs: prepare-build
+    if: needs.prepare-build.outputs.has_changed_recipes == 'true'
+
+    steps:
+      - name: Restore cached DependencyInfo files and changed ports
+        id: restore-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            repository/*
+            changed_ports.tar.gz
+          key: ${{ runner.os }}-haiku-deps-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-haiku-deps-${{ github.sha }}
+
+      - name: Debug cache restore results
+        run: |
+          echo "=== DEBUG: Cache restore results ==="
+          echo "Cache hit result: ${{ steps.restore-cache.outputs.cache-hit }}"
+          echo "Cache key used: ${{ runner.os }}-haiku-deps-${{ github.sha }}"
+          echo "Files in current directory:"
+          ls -la
+          echo "Looking for repository directory:"
+          if [ -d "repository" ]; then
+            echo "✓ repository directory found"
+          else
+            echo "✗ repository directory NOT found"
+          fi
+          echo "Looking for changed_ports.tar.gz:"
+          if [ -f "changed_ports.tar.gz" ]; then
+            echo "✓ changed_ports.tar.gz found"
+            echo "Size: $(du -h changed_ports.tar.gz | cut -f1)"
+            echo "Contents preview:"
+            tar -tzf changed_ports.tar.gz
+          else
+            echo "✗ changed_ports.tar.gz NOT found"
+          fi
+
+      - name: Start Haiku VM container
+        env:
+          VM_CPU: 4
+          VM_RAM: 15G
+        run: |
+          echo "Starting Haiku VM container..."
+          docker run -d --name haiku-vm \
+            -e VM_CPU="$VM_CPU" \
+            -e VM_RAM="$VM_RAM" \
+            docker.io/hectorm/qemu-haiku:latest
+
+          echo "Waiting for container to be ready..."
+          timeout 600 docker exec haiku-vm sh -c 'container-init & timeout 600 vmshell exit 0'
+          echo "Container should be ready."
+
+      - name: Install build dependencies and compilation tools in VM
+        run: |
+          echo "Installing basic build tools in VM (dependencies will be calculated later)..."
+          docker exec haiku-vm vmshell pkgman install -y \
+            haikuporter
+          echo "Basic build tools installation completed."
+
+      - name: Transfer changed ports to VM
+        run: |
+          echo "Creating base haikuports directory structure in VM..."
+          docker exec haiku-vm vmshell "mkdir -p /boot/home/haikuports"
+
+          if [ -f "changed_ports.tar.gz" ]; then
+            echo "Transferring changed_ports.tar.gz to VM..."
+            cat changed_ports.tar.gz | docker exec -i haiku-vm vmshell "cat > /boot/home/haikuports/changed_ports.tar.gz"
+            echo "Extracting changed ports in VM..."
+            docker exec haiku-vm vmshell "cd /boot/home/haikuports && tar -xzf changed_ports.tar.gz"
+            echo "Transferred and extracted changed ports to /boot/home/haikuports in VM."
+            docker exec haiku-vm vmshell "echo 'Contents of /boot/home/haikuports:'; find /boot/home/haikuports/"
+          else
+            echo "✗ changed_ports.tar.gz not found on runner. Cannot transfer ports."
+            exit 1
+          fi
+
+      - name: Setup HaikuPorter and place .DependencyInfo files in VM
+        run: |
+          docker exec haiku-vm vmshell "mkdir -p /boot/home/config/settings"
+          docker exec haiku-vm vmshell "echo 'TREE_PATH=\"/boot/home/haikuports\"' > /boot/home/config/settings/haikuports.conf"
+          docker exec haiku-vm vmshell "echo 'PACKAGER=\"GitHub Actions Builder <actions@github.com>\"' >> /boot/home/config/settings/haikuports.conf"
+          docker exec haiku-vm vmshell "echo 'TARGET_ARCHITECTURE=\"x86_64\"' >> /boot/home/config/settings/haikuports.conf"
+          docker exec haiku-vm vmshell "echo 'RecipeFormatVersion=1' > ~/haikuports/FormatVersions"
+
+          echo "--- Transferring cached dependency files to VM ---"
+          if [ -d "repository" ]; then
+            echo "Creating dependency-infos.tar.gz on runner..."
+            tar -czf dependency-infos.tar.gz -C repository .
+            echo "Transferring dependency-infos.tar.gz to VM..."
+            cat dependency-infos.tar.gz | docker exec -i haiku-vm vmshell "mkdir -p /boot/home/haikuports/repository && cat > /boot/home/haikuports/dependency-infos.tar.gz"
+            docker exec haiku-vm vmshell "cd /boot/home/haikuports && tar -xzf dependency-infos.tar.gz -C repository"
+            echo "Transferred and extracted dependency-infos.tar.gz to /boot/home/haikuports/repository in VM."
+          else
+            echo "✗ repository directory not found on runner. No .DependencyInfo files to transfer."
+            docker exec haiku-vm vmshell "mkdir -p /boot/home/haikuports/repository"
+          fi
+
+      - name: Calculate and install build dependencies in VM
+        run: |
+          echo "Calculating build dependencies for changed recipes in VM..."
+          CHANGED_RECIPES='${{ needs.prepare-build.outputs.changed_recipes_space_separated }}'
+          echo "Changed recipes: $CHANGED_RECIPES"
+
+          echo "Using HaikuPorter in VM to calculate dependencies..."
+          # Get all dependencies first
+          ALL_DEPENDENCIES=$(docker exec haiku-vm vmshell "cd /boot/home/haikuports && haikuporter --no-repository-update --list-dependencies $CHANGED_RECIPES" | grep ">" | cut -d "-" -f 1 | sort -u | xargs echo)
+
+          if [ -z "$ALL_DEPENDENCIES" ]; then
+            echo "No dependencies found by HaikuPorter, using minimal base set"
+            DEPENDENCIES=""
+          else
+            echo "All dependencies found: $ALL_DEPENDENCIES"
+
+            # Filter out conflicting versions (keep only highest version)
+            echo "Filtering conflicting package versions..."
+            declare -A package_versions
+            FILTERED_DEPS=""
+
+            for dep in $ALL_DEPENDENCIES; do
+              # Extract base package name and version
+              if [[ "$dep" =~ ^([a-zA-Z_]+)([0-9]+)(_.*)?$ ]]; then
+                base_name="${BASH_REMATCH[1]}"
+                version="${BASH_REMATCH[2]}"
+                suffix="${BASH_REMATCH[3]}"
+                full_base="${base_name}${suffix}"
+
+                echo "Found versioned package: $dep (base: $base_name, version: $version, suffix: $suffix)"
+
+                # Check if we already have this base package
+                if [[ -n "${package_versions[$full_base]}" ]]; then
+                  current_version="${package_versions[$full_base]}"
+                  if [[ "$version" -gt "$current_version" ]]; then
+                    echo "  Replacing ${base_name}${current_version}${suffix} with $dep (higher version)"
+                    package_versions[$full_base]="$version"
+                    # Remove old version from filtered deps and add new one
+                    FILTERED_DEPS=$(echo "$FILTERED_DEPS" | sed "s/${base_name}${current_version}${suffix}//g")
+                    FILTERED_DEPS="$FILTERED_DEPS $dep"
+                  else
+                    echo "  Keeping ${base_name}${current_version}${suffix} (higher than $dep)"
+                  fi
+                else
+                  echo "  Adding $dep (first occurrence of $full_base)"
+                  package_versions[$full_base]="$version"
+                  FILTERED_DEPS="$FILTERED_DEPS $dep"
+                fi
+              else
+                # No version number detected, add as-is
+                FILTERED_DEPS="$FILTERED_DEPS $dep"
+              fi
+            done
+
+            # Clean up extra spaces
+            ALL_DEPENDENCIES=$(echo "$FILTERED_DEPS" | xargs)
+            echo "After version filtering: $ALL_DEPENDENCIES"
+
+            echo "Fetching list of all available packages from repositories..."
+            ALL_AVAILABLE_PACKAGES_OUTPUT=$(docker exec haiku-vm vmshell "pkgman search -a | sed s/^........//g | cut -d \" \" -f 1")
+            declare -A all_available_packages_map
+            while IFS= read -r pkg_name; do
+                # Trim whitespace from package name, just in case
+                trimmed_pkg_name=$(echo "$pkg_name" | xargs)
+                if [ -n "$trimmed_pkg_name" ]; then
+                    all_available_packages_map["$trimmed_pkg_name"]=1
+                fi
+            done <<< "$ALL_AVAILABLE_PACKAGES_OUTPUT"
+            echo "Found ${#all_available_packages_map[@]} available packages in repositories."
+
+            # Filter dependencies not available in repositories
+            DEPENDENCIES=""
+            for dep in $ALL_DEPENDENCIES; do
+              # Check if this dependency is available in the map
+              if [[ -n "${all_available_packages_map[$dep]}" ]]; then
+                DEPENDENCIES="$DEPENDENCIES $dep"
+              else
+                echo "Warning: Dependency '$dep' not found in available packages, skipping."
+              fi
+            done
+            DEPENDENCIES=$(echo "$DEPENDENCIES" | xargs)  # Clean up extra spaces
+            echo "Calculated dependencies to install: $DEPENDENCIES"
+          fi
+
+          if [ -z "$DEPENDENCIES" ]; then
+            echo "No external dependencies to install (all dependencies are being built or none found)"
+          else
+            echo "Final filtered dependency list: $DEPENDENCIES"
+            echo "Installing calculated dependencies in VM..."
+            docker exec haiku-vm vmshell "pkgman install -y $DEPENDENCIES" || {
+              echo "Warning: Some dependencies failed to install, continuing with build..."
+            }
+          fi
+          echo "Dependencies installation step completed."
+
+      - name: Build modified packages with haikuporter
+        id: build-packages
+        run: |
+          docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
+            echo 'Reading list of changed packages' && \
+            RECIPE_ARGS='${{ needs.prepare-build.outputs.changed_recipes_space_separated }}' && \
+            echo \"Changed packages: \$RECIPE_ARGS\" && \
+            if haikuporter \$RECIPE_ARGS -j4 -G --no-repository-update --missing-dependencies; then \
+              echo \"✓ HaikuPorter build completed successfully.\" ; \
+            else \
+              BUILD_FAILURE_CODE=$? ; \
+              echo \"✗ HaikuPorter build failed with exit code $BUILD_FAILURE_CODE.\" ; \
+              exit $BUILD_FAILURE_CODE ; \
+            fi ; \
+            \
+            echo \"Build summary:\" ; \
+            NUM_PACKAGES=$(echo \"$RECIPE_ARGS\" | wc -w) ; \
+            echo \"- Packages attempted: $NUM_PACKAGES\" ; \
+            if [ -d packages ] && ls packages/*.hpkg >/dev/null 2>&1; then \
+              echo \"- Built packages: \$(ls packages/*.hpkg | wc -l)\" ; \
+              echo \"- Package files: \$(ls packages/*.hpkg | xargs basename -a | tr '\n' ' ')\" ; \
+            else \
+              echo \"- Built packages: 0\" ; \
+            fi"
+
+      - name: Collect build artifacts
+        run: |
+          mkdir -p build-artifacts
+          docker exec haiku-vm vmshell "cd /boot/home/haikuports && \
+            if [ -d packages ] && ls packages/*.hpkg >/dev/null 2>&1; then
+              echo 'Collecting built packages:'
+              ls -la packages/*.hpkg
+              tar -czf /boot/home/haikuports/built-packages.tar.gz packages/*.hpkg
+            else
+              echo 'No packages were built'
+              tar -czf /boot/home/haikuports/built-packages.tar.gz --files-from /dev/null
+            fi
+            if [ -d work ]; then
+              find work -name '*.log' -type f | head -n 20 | tar -czf /boot/home/haikuports/build-logs.tar.gz -T - 2>/dev/null || \
+              tar -czf /boot/home/haikuports/build-logs.tar.gz --files-from /dev/null
+            fi"
+          docker exec haiku-vm vmshell cat /boot/home/haikuports/built-packages.tar.gz > build-artifacts/built-packages.tar.gz || true
+          docker exec haiku-vm vmshell cat /boot/home/haikuports/build-logs.tar.gz > build-artifacts/build-logs.tar.gz || true
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: haikuports-build-${{ github.run_number }}
+          path: build-artifacts/
+          retention-days: 30
+
+      - name: Display build summary
+        if: always()
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Workflow:** ${{ github.workflow }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Run Number:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          PACKAGES_STRING='${{ needs.prepare-build.outputs.changed_recipes_space_separated }}'
+          echo "**Packages processed:** $PACKAGES_STRING" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Artifacts:** Check the uploaded build artifacts for built packages and logs." >> $GITHUB_STEP_SUMMARY
