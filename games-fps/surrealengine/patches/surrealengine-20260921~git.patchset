@@ -1,0 +1,340 @@
+From ba8626e23068fbd139027942dfb25cd0604bfbfe Mon Sep 17 00:00:00 2001
+From: zeldakatze <mail@zeldakatze.de>
+Date: Mon, 21 Sep 2026 03:35:26 +0000
+Subject: fix build for haiku
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fba3c5e..65648d4 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1113,6 +1113,12 @@ elseif(APPLE)
+ 	set(SURREALCOMMON_LIBS ${SURREALCOMMON_LIBS} ${CMAKE_DL_LIBS} OpenAL::OpenAL)
+ 	add_definitions(-DUNIX -D_UNIX)
+ 	add_link_options(-pthread)
++elseif(HAIKU)
++	set(SURREALCOMMON_SOURCES ${SURREALCOMMON_SOURCES})
++	set(SURREALCOMMON_LIBS ${SURREALCOMMON_LIBS} ${SURREALCOMMON_UNIX_LIBS} -lbe -lnetwork)
++	set(THIRDPARTY_SOURCES ${THIRDPARTY_SOURCES} ${THIRDPARTY_UNIX_SOURCES})
++	add_definitions(-DUNIX -D_UNIX)
++	add_link_options(-pthread)
+ else()
+ 	set(SURREALCOMMON_SOURCES ${SURREALCOMMON_SOURCES})
+ 	set(SURREALCOMMON_LIBS ${SURREALCOMMON_LIBS} ${SURREALCOMMON_UNIX_LIBS} ${CMAKE_DL_LIBS} -lasound)
+diff --git a/SurrealEngine/UI/WidgetResourceData.cpp b/SurrealEngine/UI/WidgetResourceData.cpp
+index abb6260..cb016ea 100644
+--- a/SurrealEngine/UI/WidgetResourceData.cpp
++++ b/SurrealEngine/UI/WidgetResourceData.cpp
+@@ -8,6 +8,10 @@
+ #include <string>
+ #include <surrealwidgets/core/theme.h>
+ #include <surrealwidgets/window/window.h>
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#include <fs_info.h>
++#endif
+ 
+ class ResourceLoaderPK3 : public ResourceLoader
+ {
+@@ -16,7 +20,20 @@ public:
+ 	{
+ 		const auto pk3PathStr = (fs::path{ OS::executable_path() } / "SurrealEngine.pk3").string();
+ 		mz_bool result = mz_zip_reader_init_file(&widgetResources, pk3PathStr.c_str(), 0);
+-#ifndef WIN32
++#if defined(WIN32)
++
++#elif defined(__HAIKU__)
++		if(!result) {
++			dev_t volume = dev_for_path("/boot");
++			char buffer[B_PATH_NAME_LENGTH+B_FILE_NAME_LENGTH];
++			status_t r;
++	    	r = find_directory(B_SYSTEM_DATA_DIRECTORY, volume, false, buffer, sizeof(buffer));
++	    	strcat(buffer, "/SurrealEngine/SurrealEngine.pk3");
++			if(r != B_OK)
++				throw std::runtime_error("Could not find system data directory... somehow");
++			result = mz_zip_reader_init_file(&widgetResources, buffer, 0);
++		}	
++#else
+ 		// On Linux, SurrealEngine.pk3 can additionally be put in some other folders given below.
+ 		if (!result)
+ 			result = mz_zip_reader_init_file(&widgetResources, "/usr/share/surrealengine/SurrealEngine.pk3", 0);
+diff --git a/SurrealEngine/Utils/Exception.cpp b/SurrealEngine/Utils/Exception.cpp
+index 2d483d7..278b63d 100644
+--- a/SurrealEngine/Utils/Exception.cpp
++++ b/SurrealEngine/Utils/Exception.cpp
+@@ -35,7 +35,7 @@ struct InitDbgHelp
+ 	bool bHasSymbols;
+ };
+ 
+-#elif defined __linux__ || defined __APPLE__
++#elif defined __linux__ || defined __APPLE__ || defined __HAIKU__
+ 
+ #include <execinfo.h>
+ #include <cxxabi.h>
+diff --git a/SurrealEngine/Utils/File.cpp b/SurrealEngine/Utils/File.cpp
+index 77fe8d8..b580e07 100644
+--- a/SurrealEngine/Utils/File.cpp
++++ b/SurrealEngine/Utils/File.cpp
+@@ -28,6 +28,13 @@ extern const char* __progname;
+ #include <sstream>
+ #include <cstdio>
+ 
++#ifdef __HAIKU__
++#include <FindDirectory.h>
++#include <fs_info.h>
++#include <image.h>
++#include <Path.h>
++#endif
++
+ #ifdef WIN32
+ 
+ class FileImpl : public File
+@@ -367,6 +374,20 @@ void Directory::create(const std::string& dirname)
+ 	Exception::Throw("Could not create directory " + dirname);
+ }
+ 
++
++#ifdef __HAIKU__
++fs::path Directory::localAppData()
++{
++	dev_t volume = dev_for_path("/boot");
++	char buffer[B_PATH_NAME_LENGTH+B_FILE_NAME_LENGTH];
++	status_t result;
++    result = find_directory(B_USER_SETTINGS_DIRECTORY, volume, false, buffer, sizeof(buffer));
++	if(result != B_OK)
++		throw std::runtime_error("Could not find user settings directory... somehow");
++	
++	return fs::path(buffer);
++}	
++#else
+ fs::path Directory::localAppData()
+ {
+ 	// We're trying to find "~/.config" here
+@@ -377,6 +398,7 @@ fs::path Directory::localAppData()
+ 
+ 	return fs::path(homeDir) / ".config";
+ }
++#endif
+ 
+ #endif
+ 
+@@ -410,6 +432,20 @@ std::string OS::executable_path()
+ 	}
+ 
+ 	Exception::Throw("get_exe_path failed");
++#elif defined(__HAIKU__)
++	BPath binPath;
++	image_info info;
++	int32 cookie = 0;
++
++	while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
++		if (info.type == B_APP_IMAGE) {
++			binPath.SetTo(info.name);
++			binPath.GetParent(&binPath);
++			break;
++		}
++	}
++	
++	return std::string(binPath.Path());
+ #else
+ 	#ifndef PROC_EXE_PATH
+ 	#define PROC_EXE_PATH "/proc/self/exe"
+@@ -493,6 +529,30 @@ std::string OS::get_default_font_name()
+ 
+ std::string OS::find_truetype_font(const std::string& font_name_and_extension)
+ {
++#ifdef __HAIKU__
++	const Array<directory_which> folder_constants =  {
++		B_SYSTEM_FONTS_DIRECTORY,
++		B_SYSTEM_NONPACKAGED_FONTS_DIRECTORY,
++		B_USER_FONTS_DIRECTORY,
++		B_USER_NONPACKAGED_FONTS_DIRECTORY
++	};
++	
++	dev_t volume = dev_for_path("/boot");
++	char buffer[B_PATH_NAME_LENGTH+B_FILE_NAME_LENGTH];
++	status_t result;
++	for (auto& current_constant : folder_constants) {
++		result = find_directory(current_constant, volume, false, buffer, sizeof(buffer));
++		if(result != B_OK)
++			throw std::runtime_error("Could not find font directory... somehow");
++
++		auto final_path = fs::path(buffer) / font_name_and_extension;
++
++		if (File::try_open_existing(final_path.string()))
++			return final_path.string();
++	}
++	
++	return "";
++#else	
+ #ifdef WIN32
+ 	const Array<std::string> possible_fonts_folders = {
+ 		"C:\\Windows\\Fonts"
+@@ -525,4 +585,6 @@ std::string OS::find_truetype_font(const std::string& font_name_and_extension)
+ 
+ 	// We couldn't find the font in any of the folders, bail out
+ 	return "";
+-}
+\ No newline at end of file
++#endif
++}
++
+diff --git a/SurrealGPU/CMakeLists.txt b/SurrealGPU/CMakeLists.txt
+index 067ff7f..e3c06fc 100644
+--- a/SurrealGPU/CMakeLists.txt
++++ b/SurrealGPU/CMakeLists.txt
+@@ -210,6 +210,11 @@ include_directories(include include/surrealgpu src)
+ if(WIN32)
+ 	set(SURREALGPU_SOURCES ${SURREALGPU_SOURCES} ${SURREALGPU_WIN32_SOURCES})
+ 	add_definitions(-DUNICODE -D_UNICODE)
++elseif(HAIKU)
++	set(SURREALGPU_SOURCES ${SURREALGPU_SOURCES} ${SURREALGPU_UNIX_SOURCES})
++	set(SURREALGPU_LIBS ${CMAKE_DL_LIBS})
++	add_definitions(-DUNIX -D_UNIX)
++	add_link_options(-pthread)
+ else()
+ 	set(SURREALGPU_SOURCES ${SURREALGPU_SOURCES} ${SURREALGPU_UNIX_SOURCES})
+ 	set(SURREALGPU_LIBS ${CMAKE_DL_LIBS} -ldl)
+diff --git a/SurrealWidgets/CMakeLists.txt b/SurrealWidgets/CMakeLists.txt
+index 909eced..763359e 100644
+--- a/SurrealWidgets/CMakeLists.txt
++++ b/SurrealWidgets/CMakeLists.txt
+@@ -14,20 +14,22 @@ endif()
+ 
+ if (UNIX AND NOT APPLE)
+ 	include(FindPkgConfig)
+-	pkg_check_modules(DBUS dbus-1)
+-	if (!DBUS_FOUND)
+-		pkg_check_modules(DBUS REQUIRED dbus) # Fedora Linux looks for dbus instead
++	if (NOT HAIKU)
++		pkg_check_modules(DBUS dbus-1)
++		if (!DBUS_FOUND)
++			pkg_check_modules(DBUS REQUIRED dbus) # Fedora Linux looks for dbus instead
++		endif()
++		find_package(OpenGL REQUIRED COMPONENTS EGL)
++		pkg_check_modules(WAYLANDPP
++			wayland-client
++			wayland-client++
++			wayland-client-extra++
++			wayland-client-unstable++
++			wayland-cursor++
++			wayland-egl++
++			xkbcommon>=0.5.0
++		)
+ 	endif()
+-	find_package(OpenGL REQUIRED COMPONENTS EGL)
+-	pkg_check_modules(WAYLANDPP
+-		wayland-client
+-		wayland-client++
+-		wayland-client-extra++
+-		wayland-client-unstable++
+-		wayland-cursor++
+-		wayland-egl++
+-		xkbcommon>=0.5.0
+-	)
+ 	pkg_check_modules(GLIB glib-2.0)
+ 	pkg_check_modules(FONTCONFIG fontconfig)
+ endif()
+@@ -361,6 +363,12 @@ elseif(HAIKU)
+ 	set(SURREALWIDGETS_LIBS ${CMAKE_DL_LIBS})
+ 	set(SURREALWIDGETS_DEFINES -DUNIX -D_UNIX)
+ 	set(SURREALWIDGETS_LINK_OPTIONS -pthread)
++	
++	set(SURREALWIDGETS_INCLUDE_DIRS ${SURREALWIDGETS_INCLUDE_DIRS} ${GLIB_INCLUDE_DIRS})
++	set(SURREALWIDGETS_LIBS ${SURREALWIDGETS_LIBS} ${GLIB_LDFLAGS} -lgio-2.0)
++
++	set(SURREALWIDGETS_INCLUDE_DIRS ${SURREALWIDGETS_INCLUDE_DIRS} ${FONTCONFIG_INCLUDE_DIRS})
++	set(SURREALWIDGETS_LIBS ${SURREALWIDGETS_LIBS} ${FONTCONFIG_LDFLAGS})
+ else()
+ 	set(SURREALWIDGETS_SOURCES ${SURREALWIDGETS_SOURCES} ${SURREALWIDGETS_UNIX_SOURCES})
+ 	set(SURREALWIDGETS_SOURCES ${SURREALWIDGETS_SOURCES} ${SURREALWIDGETS_X11_SOURCES})
+-- 
+2.54.0
+
+
+From a866caf1470c6465619f31e0fa27a0fc0cac8206 Mon Sep 17 00:00:00 2001
+From: zeldakatze <mail@zeldakatze.de>
+Date: Mon, 21 Sep 2026 19:34:20 +0000
+Subject: Make libSurrealCommon a shared library
+
+This greatly reduces the size of the binaries whist not really affecting
+performance.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 65648d4..8250ca5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -945,6 +945,7 @@ set(SURREALCOMMON_WIN32_LIBS
+ 
+ set(SURREALCOMMON_UNIX_LIBS
+ 	openal
++	vulkan
+ )
+ 
+ set(SURREALENGINE_SOURCES
+@@ -1141,20 +1142,21 @@ target_include_directories(SurrealVideo PRIVATE SurrealVideo)
+ set_target_properties(SurrealVideo PROPERTIES CXX_STANDARD 20)
+ set_target_properties(SurrealVideo PROPERTIES C_STANDARD 17)
+ 
+-add_library(SurrealCommon STATIC ${SURREALCOMMON_SOURCES} ${THIRDPARTY_SOURCES})
++add_library(SurrealCommon SHARED ${SURREALCOMMON_SOURCES} ${THIRDPARTY_SOURCES})
++target_link_libraries(SurrealCommon ${SURREALCOMMON_LIBS})
+ set_target_properties(SurrealCommon PROPERTIES CXX_STANDARD 20)
+ target_precompile_headers(SurrealCommon PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/SurrealEngine/Precomp.h>)
+ 
+ add_executable(SurrealEngine WIN32 MACOSX_BUNDLE ${SURREALENGINE_SOURCES})
+-target_link_libraries(SurrealEngine SurrealCommon ${SURREALCOMMON_LIBS})
++target_link_libraries(SurrealEngine SurrealCommon)
+ set_target_properties(SurrealEngine PROPERTIES CXX_STANDARD 20)
+ 
+ add_executable(SurrealEditor WIN32 MACOSX_BUNDLE ${SURREALEDITOR_SOURCES})
+-target_link_libraries(SurrealEditor SurrealCommon ${SURREALCOMMON_LIBS})
++target_link_libraries(SurrealEditor SurrealCommon)
+ set_target_properties(SurrealEditor PROPERTIES CXX_STANDARD 20)
+ 
+ add_executable(SurrealDebugger ${SURREALDEBUGGER_SOURCES})
+-target_link_libraries(SurrealDebugger SurrealCommon ${SURREALCOMMON_LIBS})
++target_link_libraries(SurrealDebugger SurrealCommon)
+ set_target_properties(SurrealDebugger PROPERTIES CXX_STANDARD 20)
+ 
+ function( create_zip_source_groups FOLDER_NAME ZIP_DIR )
+diff --git a/SurrealGPU/CMakeLists.txt b/SurrealGPU/CMakeLists.txt
+index e3c06fc..25296ae 100644
+--- a/SurrealGPU/CMakeLists.txt
++++ b/SurrealGPU/CMakeLists.txt
+@@ -230,7 +230,7 @@ if(MSVC)
+ 	#set_source_files_properties(${SURREALGPU_SOURCES} PROPERTIES COMPILE_FLAGS "/wd4244 /wd4267 /wd4005 /wd4018 -D_CRT_SECURE_NO_WARNINGS")
+ endif()
+ 
+-add_library(surrealgpu STATIC ${SURREALGPU_SOURCES} ${SURREALGPU_INCLUDES} ${VULKAN_INCLUDES})
++add_library(surrealgpu SHARED ${SURREALGPU_SOURCES} ${SURREALGPU_INCLUDES} ${VULKAN_INCLUDES})
+ target_link_libraries(surrealgpu ${SURREALGPU_LIBS})
+ set_target_properties(surrealgpu PROPERTIES CXX_STANDARD 17)
+ 
+-- 
+2.54.0
+
+
+From 8997462702beba4407c1bb6e69a8b259e97b16a5 Mon Sep 17 00:00:00 2001
+From: zeldakatze <mail@zeldakatze.de>
+Date: Tue, 22 Sep 2026 22:27:15 +0000
+Subject: fix build on x86_32
+
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8250ca5..7064f50 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1115,6 +1115,10 @@ elseif(APPLE)
+        add_definitions(-DUNIX -D_UNIX)
+        add_link_options(-pthread)
+ elseif(HAIKU)
++       # SSE2 is not part of the system baseline on 32 bit x86 (BePC)
++       if(CMAKE_SYSTEM_PROCESSOR STREQUAL "BePC")
++               add_compile_definitions(PFFFT_SIMD_DISABLE)
++       endif()
+        set(SURREALCOMMON_SOURCES ${SURREALCOMMON_SOURCES})
+        set(SURREALCOMMON_LIBS ${SURREALCOMMON_LIBS} ${SURREALCOMMON_UNIX_LIBS} -lbe -lnetwork)
+        set(THIRDPARTY_SOURCES ${THIRDPARTY_SOURCES} ${THIRDPARTY_UNIX_SOURCES})
+-- 
+2.54.0
