@@ -1,0 +1,162 @@
+From a54123abc1bb213004b503eee451229bb52df7ef Mon Sep 17 00:00:00 2001
+From: Gerasim Troeglazov <3dEyes@gmail.com>
+Date: Wed, 30 Sep 2026 18:53:24 +1000
+Subject: Add simple launcher app
+
+
+diff --git a/tools/haiku-launcher/launcher.cpp b/tools/haiku-launcher/launcher.cpp
+new file mode 100644
+index 0000000000..12811e5ebf
+--- /dev/null
++++ b/tools/haiku-launcher/launcher.cpp
+@@ -0,0 +1,148 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include <cstdlib>
++#include <cstring>
++#include <vector>
++
++#include <app/Application.h>
++#include <app/Roster.h>
++#include <kernel/image.h>
++#include <kernel/OS.h>
++#include <storage/Entry.h>
++#include <storage/File.h>
++#include <storage/Node.h>
++#include <storage/Path.h>
++#include <support/String.h>
++#include <support/StringList.h>
++#include <fs_attr.h>
++
++static const char* const kLauncherSignature = "application/x-vnd.librewolf-launcher";
++static const char* const kTargetBinaryName  = "LibreWolf";
++
++class BrowserLauncherApp : public BApplication {
++ public:
++  BrowserLauncherApp();
++  virtual ~BrowserLauncherApp() = default;
++
++  void RefsReceived(BMessage* pmsg) override;
++  void ArgvReceived(int32 argc, char** argv) override;
++  void ReadyToRun() override;
++
++ private:
++  BString GetBinPath() const;
++  void AddArgument(const char* arg);
++
++  BStringList fArguments;
++};
++
++BrowserLauncherApp::BrowserLauncherApp()
++    : BApplication(kLauncherSignature) {}
++
++BString BrowserLauncherApp::GetBinPath() const {
++  BPath binPath;
++  image_info info;
++  int32 cookie = 0;
++
++  while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
++    if (info.type == B_APP_IMAGE) {
++      binPath.SetTo(info.name);
++      binPath.GetParent(&binPath);
++      break;
++    }
++  }
++
++  binPath.Append(kTargetBinaryName);
++  return binPath.Path();
++}
++
++void BrowserLauncherApp::AddArgument(const char* arg) {
++  if (arg && arg[0] != '\0') {
++    fArguments.Add(arg);
++  }
++}
++
++void BrowserLauncherApp::RefsReceived(BMessage* pmsg) {
++  entry_ref ref;
++  for (int32 i = 0; pmsg->FindRef("refs", i, &ref) == B_OK; i++) {
++    BNode node(&ref);
++    if (node.InitCheck() == B_OK) {
++      char urlBuf[2048];
++      ssize_t bytes = node.ReadAttr("META:url", B_STRING_TYPE, 0, urlBuf, sizeof(urlBuf) - 1);
++      if (bytes > 0) {
++        urlBuf[bytes] = '\0';
++        AddArgument(urlBuf);
++        continue;
++      }
++    }
++
++    BPath file(&ref);
++    if (file.InitCheck() == B_OK) {
++      BString fileUrl = "file://";
++      fileUrl += file.Path();
++      AddArgument(fileUrl.String());
++    }
++  }
++
++  BString url;
++  for (int32 i = 0; pmsg->FindString("url", i, &url) == B_OK; i++) {
++    AddArgument(url.String());
++  }
++}
++
++void BrowserLauncherApp::ArgvReceived(int32 argc, char** argv) {
++  for (int32 i = 1; i < argc; i++) {
++    BEntry entry(argv[i], true);
++    BPath path;
++    if (entry.Exists() && entry.GetPath(&path) == B_OK) {
++      entry_ref ref;
++      if (entry.GetRef(&ref) == B_OK) {
++        BNode node(&ref);
++        if (node.InitCheck() == B_OK) {
++          char urlBuf[2048];
++          ssize_t bytes = node.ReadAttr("META:url", B_STRING_TYPE, 0, urlBuf, sizeof(urlBuf) - 1);
++          if (bytes > 0) {
++            urlBuf[bytes] = '\0';
++            AddArgument(urlBuf);
++            continue;
++          }
++        }
++      }
++      BString fileUrl = "file://";
++      fileUrl += path.Path();
++      AddArgument(fileUrl.String());
++    } else {
++      AddArgument(argv[i]);
++    }
++  }
++}
++
++void BrowserLauncherApp::ReadyToRun() {
++  BString binPath = GetBinPath();
++
++  std::vector<const char*> args;
++  args.push_back(binPath.String());
++
++  for (int32 i = 0; i < fArguments.CountStrings(); i++) {
++    args.push_back(fArguments.StringAt(i).String());
++  }
++  args.push_back(nullptr);
++
++  thread_id thread = load_image(
++      args.size() - 1,
++      args.data(),
++      const_cast<const char**>(environ));
++
++  if (thread >= B_OK) {
++    resume_thread(thread);
++  }
++
++  Quit();
++}
++
++int main(int /*argc*/, char** /*argv*/) {
++  BrowserLauncherApp app;
++  app.Run();
++  return 0;
++}
+-- 
+2.54.0

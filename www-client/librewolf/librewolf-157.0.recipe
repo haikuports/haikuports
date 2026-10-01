@@ -11,47 +11,52 @@ HOMEPAGE="https://librewolf.net/"
 COPYRIGHT="1995-2026 Mozilla Developers and Contributors"
 LICENSE="MPL v2.0"
 REVISION="1"
-SOURCE_URI="https://codeberg.org/api/packages/librewolf/generic/librewolf-source/${portVersion}-1/librewolf-${portVersion}-1.source.tar.gz"
-CHECKSUM_SHA256="ab4283ce8eb6765e9df0f4586b2f4fb0a05de186398f2b944f6f5c791541321f"
+SOURCE_URI="https://librewolf.dev/api/packages/librewolf/generic/librewolf-source/${portVersion}-1/librewolf-${portVersion}-1.source.tar.gz"
+CHECKSUM_SHA256="bea3cc7c57f3fb8928d583a0603b0f40130b02f662e032746345a51e0f55ffb3"
 SOURCE_DIR="librewolf-${portVersion}-1"
 PATCHES="
 	librewolf-$portVersion.patchset
 	librewolf_launcher-$portVersion.patchset
 	"
+
+# UI backend: "NATIVE" (cairo-haiku) or "GTK" (cairo-gtk3-wayland-only)
+UI_BACKEND="NATIVE"
+
 ADDITIONAL_FILES="
 	librewolf.rdef.in
 	librewolf_launcher.rdef.in
-	mozconfig
+	gfxtest.rdef.in
+	mozconfig_gtk
+	mozconfig_native
 	"
 
-ARCHITECTURES="!x86_64"
+ARCHITECTURES="x86_64"
 
 PROVIDES="
-	librewolf= $portVersion
-	app:LibreWolf= $portVersion
+	librewolf = $portVersion
+	app:LibreWolf = $portVersion
+	cmd:librewolf = $portVersion
 	"
 CONFLICTS="
 	librewolf_bin
 	"
+REPLACES="
+	librewolf_bin
+	"
 REQUIRES="
 	haiku
-	lib:libatk_1.0
 	lib:libcairo
-	lib:libcairo_gobject
-	lib:libdbus_1
 	lib:libevent_2.1
-	lib:libgdk_3
-	lib:libgdk_pixbuf_2.0
-	lib:libglib_2.0
-	lib:libgtk_3
+	lib:libffi
+	lib:libfontconfig
+	lib:libfreetype
+	lib:libgl
 	lib:libharfbuzz
 	lib:libintl
+	lib:libjpeg
 	lib:libmediahelpers
-	lib:libnotify
 	lib:libnspr4
 	lib:libnss3
-	lib:libpango_1.0
-	lib:libpangocairo_1.0
 	lib:libpng16
 	lib:libvpx
 	lib:libwebp
@@ -59,15 +64,30 @@ REQUIRES="
 	lib:libz
 	"
 
+if [ "$UI_BACKEND" = "GTK" ]; then
+	REQUIRES+="
+		lib:libatk_1.0
+		lib:libcairo_gobject
+		lib:libdbus_1
+		lib:libgdk_3
+		lib:libgdk_pixbuf_2.0
+		lib:libglib_2.0
+		lib:libgtk_3
+		lib:libnotify
+		lib:libpango_1.0
+		lib:libpangocairo_1.0
+		"
+fi
+
 BUILD_REQUIRES="
 	haiku_devel
-	devel:libdbus_1
-	devel:libdbus_glib_1
 	devel:libevent
-	devel:libglib_2.0
-	devel:libgtk_3
+	devel:libffi
+	devel:libfontconfig
+	devel:libfreetype
+	devel:libgl
+	devel:libjpeg
 	devel:libmediahelpers
-	devel:libnotify
 	devel:libnspr4
 	devel:libnss3
 	devel:libpng16
@@ -76,6 +96,17 @@ BUILD_REQUIRES="
 	devel:libzstd
 	devel:libz
 	"
+
+if [ "$UI_BACKEND" = "GTK" ]; then
+	BUILD_REQUIRES+="
+		devel:libdbus_1
+		devel:libdbus_glib_1
+		devel:libglib_2.0
+		devel:libgtk_3
+		devel:libnotify
+		"
+fi
+
 BUILD_PREREQUIRES="
 	llvm21
 	nodejs20
@@ -86,7 +117,7 @@ BUILD_PREREQUIRES="
 	cmd:gawk
 	cmd:gcc
 	cmd:git
-	cmd:gn
+	cmd:gn >= 0.2385
 	cmd:lld >= 21
 	cmd:m4
 	cmd:make
@@ -100,25 +131,41 @@ BUILD_PREREQUIRES="
 	cmd:zip
 	"
 
-PATCH ()
+PATCH()
 {
 	find "$sourceDir/third_party/rust/" -name ".cargo-checksum.json" | while read -r file; do
 		printf '{"files":{}}' > "$file"
 	done
 
 	sed -i '/^checksum =/d' $sourceDir/Cargo.lock
+
+	chmod +x \
+		$sourceDir/build/cargo-linker \
+		$sourceDir/mach
 }
 
 BUILD()
 {
-	chmod +x \
-		build/cargo-linker \
-		mach
-
-	cp -f $portDir/additional-files/mozconfig mozconfig
+	rm -f mozconfig
+	if [ "$UI_BACKEND" = "GTK" ]; then
+		cp -f $portDir/additional-files/mozconfig_gtk mozconfig
+	else
+		cp -f $portDir/additional-files/mozconfig_native mozconfig
+	fi
 
 	export MOZBUILD_STATE_PATH="$sourceDir/.mozconfig"
-	export RUSTFLAGS="-C link-arg=-Wl,--no-gc-sections"
+
+	export RUSTFLAGS="-C link-arg=-Wl,--no-gc-sections -C force-unwind-tables=no -C codegen-units=1"
+	export RUST_BACKTRACE=full
+	export RUST_MIN_STACK=33554432
+	export CARGO_NET_OFFLINE=true
+	export CARGO_BUILD_JOBS=1
+	export CARGO_INCREMENTAL=0
+
+	export PIP_NETWORK_INSTALL_RESTRICTED_VIRTUALENVS=mach
+	export MACH_BUILD_PYTHON_NATIVE_PACKAGE_SOURCE="none"
+	export PIP_DISABLE_PIP_VERSION_CHECK=1
+	export PIP_NO_INDEX=1
 
 	python3 -m ensurepip --default-pip
 
@@ -129,45 +176,59 @@ BUILD()
 
 	./mach python build/gn_processor.py dom/media/webrtc/third_party_build/gn-configs/webrtc.json
 
-	./mach build
+	./mach build -j4
 
 	cd tools/haiku-launcher
-	gcc -o "LibreWolf Browser" launcher.cpp -lbe
+	g++ -O2 -o "LibreWolf Browser" launcher.cpp -lbe
 }
 
 INSTALL()
 {
 	export MOZBUILD_STATE_PATH="$sourceDir/.mozconfig"
 
+	export CARGO_NET_OFFLINE=true
+	export PIP_NETWORK_INSTALL_RESTRICTED_VIRTUALENVS=mach
+	export MACH_BUILD_PYTHON_NATIVE_PACKAGE_SOURCE="none"
+	export PIP_DISABLE_PIP_VERSION_CHECK=1
+	export PIP_NO_INDEX=1
+
 	./mach install
 
-	./mach package
-
-	mkdir -p $appsDir
+	mkdir -p $appsDir $binDir
 
 	mv /usr/local/lib/librewolf $appsDir/LibreWolf
 	mv $appsDir/LibreWolf/librewolf $appsDir/LibreWolf/LibreWolf
+	ln -s "$appsDir/LibreWolf/LibreWolf" $binDir/librewolf
 	cp "tools/haiku-launcher/LibreWolf Browser" $appsDir/LibreWolf
 
-	# arranging the files in lib directories
+	# arranging the files in lib directory
 	mkdir -p $appsDir/LibreWolf/lib
-	cd $appsDir/LibreWolf
-	mv \
+
+	pushd $appsDir/LibreWolf
+	mv -f \
 		libgkcodecs.so       \
 		liblgpllibs.so       \
 		libmozavcodec.so     \
 		libmozavutil.so      \
-		libmozgtk.so         \
+		libmozinference.so   \
 		libmozsqlite3.so     \
-		libmozwayland.so     \
 		libxul.so            \
-		lib
+		lib/ 2>/dev/null || true
+
+	if [ "$UI_BACKEND" = "GTK" ]; then
+		mv -f \
+			libmozgtk.so     \
+			libmozwayland.so \
+			lib/ 2>/dev/null || true
+	fi
+	popd
 
 	local APP_SIGNATURE="application/x-vnd.librewolf"
 	local MAJOR="`echo "$portVersion" | cut -d. -f1`"
 	local MIDDLE="`echo "$portVersion" | cut -d. -f2`"
-	local MINOR="`echo "$portVersion" | cut -d. -f3`"
+	local MINOR="0"
 	local LONG_INFO="$SUMMARY"
+
 	sed \
 		-e "s|@APP_SIGNATURE@|$APP_SIGNATURE|" \
 		-e "s|@MAJOR@|$MAJOR|" \
@@ -183,8 +244,17 @@ INSTALL()
 		-e "s|@LONG_INFO@|$LONG_INFO|" \
 		$portDir/additional-files/librewolf_launcher.rdef.in > librewolf_launcher.rdef
 
-	addResourcesToBinaries librewolf.rdef $appsDir/LibreWolf/LibreWolf
+	addResourcesToBinaries librewolf.rdef "$appsDir/LibreWolf/LibreWolf"
 	addResourcesToBinaries librewolf_launcher.rdef "$appsDir/LibreWolf/LibreWolf Browser"
+
+	if [ "$UI_BACKEND" = "GTK" ] && [ -f "$appsDir/LibreWolf/gfxtest" ]; then
+		sed \
+			-e "s|@MAJOR@|$MAJOR|" \
+			-e "s|@MIDDLE@|$MIDDLE|" \
+			-e "s|@MINOR@|$MINOR|" \
+			$portDir/additional-files/gfxtest.rdef.in > gfxtest.rdef
+		addResourcesToBinaries gfxtest.rdef "$appsDir/LibreWolf/gfxtest"
+	fi
 
 	addAppDeskbarSymlink $appsDir/LibreWolf/LibreWolf
 }
