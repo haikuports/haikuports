@@ -7,78 +7,86 @@ COPYRIGHT="1995-2026 Mozilla Developers and Contributors"
 LICENSE="MPL v2.0"
 REVISION="1"
 SOURCE_URI="https://ftp.mozilla.org/pub/firefox/releases/${portVersion}/source/firefox-${portVersion}.source.tar.xz"
-CHECKSUM_SHA256="9cbe191fc74b46108376b1d9bf607c0a40288074e0f2333671253789d6ebbd15"
+CHECKSUM_SHA256="259c564dd4bbd56bbe8a9a6cf001fc8812853567fd3a78e77c9ddf10d7d4e982"
 SOURCE_DIR="firefox-$portVersion"
 PATCHES="
 	iceweasel-$portVersion.patchset
 	iceweasel_launcher-$portVersion.patchset
 	"
 
+# UI backend: "NATIVE" (cairo-haiku) or "GTK" (cairo-gtk3-wayland-only)
+UI_BACKEND="NATIVE"
+
 ADDITIONAL_FILES="
 	iceweasel.rdef.in
 	iceweasel_launcher.rdef.in
+	gfxtest.rdef.in
 	branding.zip
-	mozconfig_gcc
+	mozconfig_gtk
+	mozconfig_native
 	policies.json
 	"
 
 ARCHITECTURES="x86_64"
 
 PROVIDES="
-	iceweasel= $portVersion
-	app:Iceweasel= $portVersion
+	iceweasel = $portVersion
+	app:Iceweasel = $portVersion
+	cmd:iceweasel = $portVersion
 	"
 CONFLICTS="
 	iceweasel_bin
 	iceweasel_esr
 	iceweasel_esr_bin
 	"
+REPLACES="
+	iceweasel_bin
+	"
 REQUIRES="
 	haiku
-	lib:libatk_1.0
 	lib:libcairo
-	lib:libcairo_gobject
-	lib:libdbus_1
 	lib:libevent_2.1
 	lib:libffi
 	lib:libfontconfig
 	lib:libfreetype
-	lib:libgdk_3
-	lib:libgdk_pixbuf_2.0
-	lib:libglib_2.0
-	lib:libgtk_3
+	lib:libgl
 	lib:libharfbuzz
 	lib:libintl
 	lib:libjpeg
 	lib:libmediahelpers
-	lib:libnotify
 	lib:libnspr4
 	lib:libnss3
-	lib:libpango_1.0
-	lib:libpangocairo_1.0
 	lib:libpng16
 	lib:libvpx
 	lib:libwebp
 	lib:libzstd
 	lib:libz
 	"
-REPLACES="
-	iceweasel_bin
-	"
+
+if [ "$UI_BACKEND" = "GTK" ]; then
+	REQUIRES+="
+		lib:libatk_1.0
+		lib:libcairo_gobject
+		lib:libdbus_1
+		lib:libgdk_3
+		lib:libgdk_pixbuf_2.0
+		lib:libglib_2.0
+		lib:libgtk_3
+		lib:libnotify
+		lib:libpango_1.0
+		lib:libpangocairo_1.0
+		"
+fi
 
 BUILD_REQUIRES="
 	haiku_devel
-	devel:libdbus_1
-	devel:libdbus_glib_1
 	devel:libevent
 	devel:libffi
 	devel:libfontconfig
 	devel:libfreetype
-	devel:libglib_2.0
-	devel:libgtk_3
+	devel:libgl
 	devel:libjpeg
 	devel:libmediahelpers
-	devel:libnotify
 	devel:libnspr4
 	devel:libnss3
 	devel:libpng16
@@ -87,6 +95,17 @@ BUILD_REQUIRES="
 	devel:libzstd
 	devel:libz
 	"
+
+if [ "$UI_BACKEND" = "GTK" ]; then
+	BUILD_REQUIRES+="
+		devel:libdbus_1
+		devel:libdbus_glib_1
+		devel:libglib_2.0
+		devel:libgtk_3
+		devel:libnotify
+		"
+fi
+
 BUILD_PREREQUIRES="
 	llvm21
 	nodejs20
@@ -111,7 +130,7 @@ BUILD_PREREQUIRES="
 	cmd:zip
 	"
 
-PATCH ()
+PATCH()
 {
 	# extract browser branding for iceweasel
 	unzip -o $sourceDir/../../additional-files/branding.zip -o -d $sourceDir/browser/branding
@@ -121,21 +140,30 @@ PATCH ()
 	done
 
 	sed -i '/^checksum =/d' $sourceDir/Cargo.lock
+
+	chmod +x \
+		$sourceDir/build/cargo-linker \
+		$sourceDir/mach
 }
 
 BUILD()
 {
-	chmod +x \
-		build/cargo-linker \
-		mach
-
 	rm -f mozconfig
-	cp -f $portDir/additional-files/mozconfig_gcc mozconfig
+	if [ "$UI_BACKEND" = "GTK" ]; then
+		cp -f $portDir/additional-files/mozconfig_gtk mozconfig
+	else
+		cp -f $portDir/additional-files/mozconfig_native mozconfig
+	fi
 
 	export MOZBUILD_STATE_PATH="$sourceDir/.mozconfig"
-	export RUSTFLAGS="-C link-arg=-Wl,--no-gc-sections"
 
+	export RUSTFLAGS="-C link-arg=-Wl,--no-gc-sections -C force-unwind-tables=no -C codegen-units=1"
+	export RUST_BACKTRACE=full
+	export RUST_MIN_STACK=33554432
 	export CARGO_NET_OFFLINE=true
+	export CARGO_BUILD_JOBS=1
+	export CARGO_INCREMENTAL=0
+
 	export PIP_NETWORK_INSTALL_RESTRICTED_VIRTUALENVS=mach
 	export MACH_BUILD_PYTHON_NATIVE_PACKAGE_SOURCE="none"
 	export PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -150,15 +178,16 @@ BUILD()
 
 	./mach python build/gn_processor.py dom/media/webrtc/third_party_build/gn-configs/webrtc.json
 
-	./mach build -j2
+	./mach build -j4
 
 	cd tools/haiku-launcher
-	gcc -o "Iceweasel Browser" launcher.cpp -lbe
+	g++ -O2 -o "Iceweasel Browser" launcher.cpp -lbe
 }
 
 INSTALL()
 {
 	export MOZBUILD_STATE_PATH="$sourceDir/.mozconfig"
+
 	export CARGO_NET_OFFLINE=true
 	export PIP_NETWORK_INSTALL_RESTRICTED_VIRTUALENVS=mach
 	export MACH_BUILD_PYTHON_NATIVE_PACKAGE_SOURCE="none"
@@ -167,37 +196,45 @@ INSTALL()
 
 	./mach install
 
-	./mach package
-
-	mkdir -p $appsDir
+	mkdir -p $appsDir $binDir
 
 	mv /usr/local/lib/Iceweasel $appsDir/Iceweasel
 
 	cp "tools/haiku-launcher/Iceweasel Browser" $appsDir/Iceweasel
+	ln -s "$appsDir/Iceweasel/Iceweasel" $binDir/iceweasel
 
 	# disable telemetry
 	mkdir -p $appsDir/Iceweasel/distribution
 	cp -f $portDir/additional-files/policies.json $appsDir/Iceweasel/distribution
 
-	# arranging the files in lib directories
+	# arranging the files in lib directory
 	mkdir -p $appsDir/Iceweasel/lib
-	cd $appsDir/Iceweasel
-	mv \
+
+	pushd $appsDir/Iceweasel
+	mv -f \
 		libgkcodecs.so       \
 		liblgpllibs.so       \
 		libmozavcodec.so     \
 		libmozavutil.so      \
-		libmozgtk.so         \
+		libmozinference.so   \
 		libmozsqlite3.so     \
-		libmozwayland.so     \
 		libxul.so            \
-		lib
+		lib/ 2>/dev/null || true
+
+	if [ "$UI_BACKEND" = "GTK" ]; then
+		mv -f \
+			libmozgtk.so     \
+			libmozwayland.so \
+			lib/ 2>/dev/null || true
+	fi
+	popd
 
 	local APP_SIGNATURE="application/x-vnd.iceweasel"
 	local MAJOR="`echo "$portVersion" | cut -d. -f1`"
 	local MIDDLE="`echo "$portVersion" | cut -d. -f2`"
-	local MINOR="`echo "$portVersion" | cut -d. -f3`"
+	local MINOR="0"
 	local LONG_INFO="$SUMMARY"
+
 	sed \
 		-e "s|@APP_SIGNATURE@|$APP_SIGNATURE|" \
 		-e "s|@MAJOR@|$MAJOR|" \
@@ -215,6 +252,15 @@ INSTALL()
 
 	addResourcesToBinaries iceweasel.rdef "$appsDir/Iceweasel/Iceweasel"
 	addResourcesToBinaries iceweasel_launcher.rdef "$appsDir/Iceweasel/Iceweasel Browser"
+
+	if [ "$UI_BACKEND" = "GTK" ] && [ -f "$appsDir/Iceweasel/gfxtest" ]; then
+		sed \
+			-e "s|@MAJOR@|$MAJOR|" \
+			-e "s|@MIDDLE@|$MIDDLE|" \
+			-e "s|@MINOR@|$MINOR|" \
+			$portDir/additional-files/gfxtest.rdef.in > gfxtest.rdef
+		addResourcesToBinaries gfxtest.rdef "$appsDir/Iceweasel/gfxtest"
+	fi
 
 	addAppDeskbarSymlink $appsDir/Iceweasel/Iceweasel
 }
