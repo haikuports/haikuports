@@ -1,0 +1,731 @@
+From f3dcf789be5dc970338bbd9ad229012680298a00 Mon Sep 17 00:00:00 2001
+From: Calvin Hill <calvin@hakobaito.co.uk>
+Date: Wed, 22 May 2019 11:23:37 +0000
+Subject: Initial support for Node.js
+
+Rebased onto v22.23.3:
+- os.cpus(): dropped the change that commented out GetCPUInfo and left
+  os.cpus() returning undefined. libuv 1.51+ implements uv_cpu_info() for
+  Haiku, and many npm packages call os.cpus().length.
+- ResetSignalHandlers(): instead of commenting out both sigaction() checks
+  (which read an uninitialized struct and skipped every reset), skip only
+  the signal numbers Haiku rejects and keep resetting the rest.
+- common.gypi/configure.py/node.gypi/node_report.cc/rand_unix.c: same
+  changes, moved to new anchors (openharmony was added to the OS lists,
+  max_memory_size_kbytes became max_memory_size_bytes, OpenSSL 3.5 restyle).
+
+diff --git a/common.gypi b/common.gypi
+index 704eacfc..2aa07853 100644
+--- a/common.gypi
++++ b/common.gypi
+@@ -294,6 +294,9 @@
+           '_target_name!="<(node_core_target_name)")', {
+         'cflags!': ['-Werror'],
+       }],
++      ['OS=="haiku"', {
++        'clang%': 0,
++      }],
+     ],
+     'msvs_settings': {
+       'VCCLCompilerTool': {
+@@ -348,6 +351,10 @@
+           ['target_arch=="arm64"', {
+             'TargetMachine' : 0,              # NotSet. MACHINE:ARM64 is inferred from the input files.
+           }],
++          ['OS == "haiku"', {
++            'cflags': [ '-fPIC' ],
++            'ldflags': [ '-fPIC']
++          }],
+           ['control_flow_guard=="true"', {
+             'AdditionalOptions': [
+               '/guard:cf',                        # Control Flow Guard
+@@ -436,6 +443,10 @@
+           ['_type!="static_library"', {
+             'xcode_settings': {'OTHER_LDFLAGS': ['-fsanitize=undefined']},
+           }],
++          ['OS == "haiku"', {
++            'cflags': [ '-fPIC' ],
++            'ldflags': [ '-fPIC']
++          }],
+         ],
+       }],
+       # The defines bellow must include all things from the external_v8_defines
+@@ -505,7 +516,7 @@
+         'cflags': [ '-pthread' ],
+         'ldflags': [ '-pthread' ],
+       }],
+-      [ 'OS in "linux freebsd openbsd solaris android aix os400 cloudabi openharmony"', {
++      [ 'OS in "linux freebsd openbsd solaris android aix os400 cloudabi openharmony haiku"', {
+         'cflags': [ '-Wall', '-Wextra', '-Wno-unused-parameter', ],
+         'cflags_cc': [
+           '-fno-rtti',
+@@ -524,6 +535,10 @@
+             'cflags': [ '-I/usr/local/include' ],
+             'ldflags': [ '-Wl,-z,wxneeded' ],
+           }],
++          ['OS=="haiku"', {
++            'cflags': [ '-fPIC' ],
++            'ldflags': [ '-fPIC' ],
++          }],
+           ['_toolset=="host"', {
+             'conditions': [
+               [ 'host_arch=="ia32"', {
+@@ -714,6 +729,12 @@
+           'OPENSSL_NO_PINSHARED'
+         ],
+       }],
++      ['OS=="haiku"', {
++          'ldflags': [ '-lroot', '-lbsd', '-lstdc++', '-lnetwork', '-Wl,-Bsymbolic', '-Wl,--export-dynamic', '-fPIC' ],
++          'ldflags!': [ '-pthreads', '-pthread', '-rdynamic' ],
++          'clang%': 0,
++          '%v8_use_snapshot':0,
++      }],
+       ['node_shared_openssl!="true"', {
+         # `OPENSSL_THREADS` is defined via GYP for openSSL for all architectures.
+         'defines': [
+diff --git a/configure.py b/configure.py
+index 77c87f5a..95bd8bc3 100755
+--- a/configure.py
++++ b/configure.py
+@@ -46,7 +46,7 @@ from utils import SearchFiles
+ parser = argparse.ArgumentParser()
+ 
+ valid_os = ('win', 'mac', 'solaris', 'freebsd', 'openbsd', 'linux',
+-            'android', 'aix', 'cloudabi', 'os400', 'ios', 'openharmony')
++            'android', 'aix', 'cloudabi', 'os400', 'ios', 'openharmony', 'haiku')
+ valid_arch = ('arm', 'arm64', 'ia32', 'mips', 'mipsel', 'mips64el', 'ppc',
+               'ppc64', 'x64', 'x86', 'x86_64', 's390x', 'riscv64', 'loong64')
+ valid_arm_float_abi = ('soft', 'softfp', 'hard')
+diff --git a/deps/openssl/config/archs/linux-x86_64/no-asm/openssl-cl.gypi b/deps/openssl/config/archs/linux-x86_64/no-asm/openssl-cl.gypi
+index db9a77c5..19880b25 100644
+--- a/deps/openssl/config/archs/linux-x86_64/no-asm/openssl-cl.gypi
++++ b/deps/openssl/config/archs/linux-x86_64/no-asm/openssl-cl.gypi
+@@ -9,11 +9,9 @@
+     ],
+     'openssl_cflags_linux-x86_64': [
+       '-Wall -O3',
+-      '-pthread -m64',
+-      '-Wall -O3',
++      '-m64',
+     ],
+     'openssl_ex_libs_linux-x86_64': [
+-      '-ldl -pthread',
+     ],
+     'openssl_cli_srcs_linux-x86_64': [
+       'openssl/apps/lib/cmp_mock_srv.c',
+diff --git a/deps/openssl/config/archs/linux-x86_64/no-asm/openssl.gypi b/deps/openssl/config/archs/linux-x86_64/no-asm/openssl.gypi
+index 0ca2902f..72f6b32d 100644
+--- a/deps/openssl/config/archs/linux-x86_64/no-asm/openssl.gypi
++++ b/deps/openssl/config/archs/linux-x86_64/no-asm/openssl.gypi
+@@ -1119,11 +1119,10 @@
+     ],
+     'openssl_cflags_linux-x86_64': [
+       '-Wall -O3',
+-      '-pthread -m64',
++      '-m64',
+       '-Wall -O3',
+     ],
+-    'openssl_ex_libs_linux-x86_64': [
+-      '-ldl -pthread',
++    'openssl_ex_libs_linux-x86_64': [ 
+     ],
+   },
+   'include_dirs': [
+diff --git a/deps/openssl/openssl/providers/implementations/rands/seeding/rand_unix.c b/deps/openssl/openssl/providers/implementations/rands/seeding/rand_unix.c
+index 0b8a9ec3..97008890 100644
+--- a/deps/openssl/openssl/providers/implementations/rands/seeding/rand_unix.c
++++ b/deps/openssl/openssl/providers/implementations/rands/seeding/rand_unix.c
+@@ -352,7 +352,7 @@ static ssize_t syscall_random(void *buf, size_t buflen)
+      * internally. So we need to check errno for ENOSYS
+      */
+ #if !defined(__DragonFly__) && !defined(__NetBSD__) && !defined(__FreeBSD__)
+-#if defined(__GNUC__) && __GNUC__ >= 2 && defined(__ELF__) && !defined(__hpux)
++#if defined(__GNUC__) && __GNUC__ >= 2 && defined(__ELF__) && !defined(__hpux) && !defined(__HAIKU__)
+     extern int getentropy(void *buffer, size_t length) __attribute__((weak));
+ 
+     if (getentropy != NULL) {
+diff --git a/deps/openssl/openssl_common.gypi b/deps/openssl/openssl_common.gypi
+index 0650cdc8..06b23c36 100644
+--- a/deps/openssl/openssl_common.gypi
++++ b/deps/openssl/openssl_common.gypi
+@@ -59,7 +59,14 @@
+         'ENGINESDIR="/dev/null"',
+         '__EXTENSIONS__'
+       ],
+-    }, {
++    },'OS=="haiku"', {
++      '!ldflags': ['-pthread', '-pthreads'],
++            'defines': [
++        'OPENSSLDIR="/boot/system/data/ssl/"',
++        'ENGINESDIR="/dev/null"',
++        'TERMIOS',
++      ],
++    },{
+       # linux and others
+       'cflags': ['-Wno-missing-field-initializers',],
+       'defines': [
+diff --git a/node.gypi b/node.gypi
+index bb002412..8a650732 100644
+--- a/node.gypi
++++ b/node.gypi
+@@ -313,6 +313,16 @@
+         'NODE_PLATFORM="sunos"',
+       ],
+     }],
++    [ 'OS=="haiku"', {
++      'libraries': [
++        '-lroot',
++        '-lnetwork',
++        '-lbsd',
++      ],
++      'defines': [
++        'NODE_PLATFORM="haiku"',
++      ],
++    }],
+     [ '(OS=="freebsd" or OS=="linux" or OS=="openharmony") and node_shared=="false"'
+         ' and force_load=="true"', {
+       'ldflags': [
+diff --git a/src/node.cc b/src/node.cc
+index db0011b4..1db99f33 100644
+--- a/src/node.cc
++++ b/src/node.cc
+@@ -560,10 +560,20 @@ void ResetSignalHandlers() {
+       // library) has set up own signal handler for own purposes
+       // (e.g. profiling). If that's the case, we want to keep it intact.
+       struct sigaction old;
++#ifdef __HAIKU__
++      // Haiku rejects some numbers below kMaxSignal with EINVAL. Skip them
++      // instead of aborting, and keep resetting the signals it does support.
++      if (sigaction(nr, nullptr, &old) != 0) continue;
++#else
+       CHECK_EQ(0, sigaction(nr, nullptr, &old));
++#endif
+       if ((old.sa_flags & SA_SIGINFO) || old.sa_handler != SIG_IGN) continue;
+     }
++#ifdef __HAIKU__
++    sigaction(nr, &act, nullptr);
++#else
+     CHECK_EQ(0, sigaction(nr, &act, nullptr));
++#endif
+   }
+ #endif  // __POSIX__
+ }
+diff --git a/src/node_report.cc b/src/node_report.cc
+index ead720dd..5fbfb7bb 100644
+--- a/src/node_report.cc
++++ b/src/node_report.cc
+@@ -734,16 +734,16 @@ static void PrintSystemInformation(JSONWriter* writer) {
+     {"core_file_size_blocks", RLIMIT_CORE},
+     {"data_seg_size_bytes", RLIMIT_DATA},
+     {"file_size_blocks", RLIMIT_FSIZE},
+-#if !(defined(_AIX) || defined(__sun))
++#if !(defined(_AIX) || defined(__sun) || defined(__HAIKU__))
+     {"max_locked_memory_bytes", RLIMIT_MEMLOCK},
+ #endif
+-#ifndef __sun
++#if !(defined(__sun) || defined(__HAIKU__))
+     {"max_memory_size_bytes", RLIMIT_RSS},
+ #endif
+     {"open_files", RLIMIT_NOFILE},
+     {"stack_size_bytes", RLIMIT_STACK},
+     {"cpu_time_seconds", RLIMIT_CPU},
+-#ifndef __sun
++#if !(defined(__sun) || defined(__HAIKU__))
+     {"max_user_processes", RLIMIT_NPROC},
+ #endif
+ #ifndef __OpenBSD__
+diff --git a/tools/utils.py b/tools/utils.py
+index f0172b3c..d7cb21a0 100644
+--- a/tools/utils.py
++++ b/tools/utils.py
+@@ -59,6 +59,8 @@ def GuessOS():
+     return 'win32'
+   elif id == 'FreeBSD':
+     return 'freebsd'
++  elif id == 'Haiku':
++    return 'haiku'
+   elif id == 'OpenBSD':
+     return 'openbsd'
+   elif id == 'SunOS':
+-- 
+2.54.0
+
+
+From 97a869b2c04d7eb3260be27927b52734eebbc0f3 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 27 Mar 2021 14:01:44 +0100
+Subject: Haiku v8 patches
+
+Rebased onto V8 12.4 (Node v22.23.3): libbase sources, the toolchain clang
+guard and the v8_fuzzers guard close moved to new anchors; the POSIX
+ObtainCurrentThreadStackStart() exclusion moved with its #if.
+
+platform-haiku.cc: ObtainCurrentThreadStackStart() now returns
+thread_info.stack_end instead of stack_base. V8 expects the high address
+of the stack, and the stack grows down on Haiku. The function also returns
+nullptr when get_thread_info() fails.
+
+diff --git a/deps/v8/BUILD.gn b/deps/v8/BUILD.gn
+index 3929a9f9..bdb2fb94 100644
+--- a/deps/v8/BUILD.gn
++++ b/deps/v8/BUILD.gn
+@@ -477,7 +477,7 @@ if (v8_enable_snapshot_native_code_counters == "") {
+ }
+ if (v8_enable_pointer_compression == "") {
+   v8_enable_pointer_compression =
+-      v8_current_cpu == "arm64" || v8_current_cpu == "x64"
++      (v8_current_cpu == "arm64" || v8_current_cpu == "x64") && !is_haiku
+ }
+ 
+ # Toggle pointer compression for correctness fuzzing when building the
+@@ -1500,7 +1500,7 @@ config("toolchain") {
+     }
+   }
+ 
+-  if (is_clang) {
++  if (is_clang && !is_haiku) {
+     cflags += [
+       "-Wunreachable-code",
+ 
+@@ -6520,6 +6520,11 @@ v8_component("v8_libbase") {
+       "//third_party/fuchsia-sdk/sdk/pkg/component_incoming_cpp",
+       "//third_party/fuchsia-sdk/sdk/pkg/zx",
+     ]
++  } else if (is_haiku) {
++    sources += [
++      "src/base/debug/stack_trace_posix.cc",
++      "src/base/platform/platform-haiku.cc",
++    ]
+   } else if (is_mac) {
+     sources += [
+       "src/base/debug/stack_trace_posix.cc",
+@@ -7359,6 +7364,13 @@ if (is_fuchsia && !build_with_chromium) {
+ 
+ group("v8_fuzzers") {
+   testonly = true
++
++  if(host_os == "haiku"){
++    data_deps = []
++  }
++
++  if (host_os != "haiku") {
++
+   data_deps = [
+     ":v8_simple_inspector_fuzzer",
+     ":v8_simple_json_fuzzer",
+@@ -7378,6 +7390,7 @@ group("v8_fuzzers") {
+       ":v8_simple_wasm_streaming_fuzzer",
+     ]
+   }
++  }
+ }
+ 
+ if (is_component_build) {
+diff --git a/deps/v8/include/v8config.h b/deps/v8/include/v8config.h
+index 31d9421e..6b647a65 100644
+--- a/deps/v8/include/v8config.h
++++ b/deps/v8/include/v8config.h
+@@ -70,6 +70,7 @@ path. Add it with -I<path> to the command line
+ //  V8_OS_CYGWIN        - Cygwin
+ //  V8_OS_DRAGONFLYBSD  - DragonFlyBSD
+ //  V8_OS_FREEBSD       - FreeBSD
++//  V8_OS_HAIKU         - Haiku
+ //  V8_OS_FUCHSIA       - Fuchsia
+ //  V8_OS_LINUX         - Linux (Android, ChromeOS, Linux, ...)
+ //  V8_OS_DARWIN        - Darwin (macOS, iOS)
+@@ -132,6 +133,11 @@ path. Add it with -I<path> to the command line
+ # define V8_OS_POSIX 1
+ # define V8_OS_STRING "freebsd"
+ 
++#elif defined(__HAIKU__)
++# define V8_OS_HAIKU 1
++# define V8_OS_POSIX 1
++# define V8_OS_STRING "haiku"
++
+ #elif defined(__Fuchsia__)
+ # define V8_OS_FUCHSIA 1
+ # define V8_OS_POSIX 1
+diff --git a/deps/v8/src/base/debug/stack_trace_posix.cc b/deps/v8/src/base/debug/stack_trace_posix.cc
+index 0a22cc8a..59c375c4 100644
+--- a/deps/v8/src/base/debug/stack_trace_posix.cc
++++ b/deps/v8/src/base/debug/stack_trace_posix.cc
+@@ -25,14 +25,15 @@
+ #include <string>
+ #include <vector>
+ 
+-#if V8_LIBC_GLIBC || V8_LIBC_BSD || V8_LIBC_UCLIBC || V8_OS_SOLARIS
++#if V8_LIBC_GLIBC || V8_LIBC_BSD || V8_LIBC_UCLIBC || V8_OS_SOLARIS || V8_OS_HAIKU
+ #define HAVE_EXECINFO_H 1
+ #endif
+ 
+-#if HAVE_EXECINFO_H
++#if defined(HAVE_EXECINFO_H)
+ #include <cxxabi.h>
+ #include <execinfo.h>
+ #endif
++
+ #if V8_OS_DARWIN
+ #include <AvailabilityMacros.h>
+ #endif
+diff --git a/deps/v8/src/base/export-template.h b/deps/v8/src/base/export-template.h
+index 861cfe40..e1e90a4b 100644
+--- a/deps/v8/src/base/export-template.h
++++ b/deps/v8/src/base/export-template.h
+@@ -83,6 +83,7 @@
+ // definition sites instead.
+ #define EXPORT_TEMPLATE_DECLARE_MSVC_HACK(export, _)
+ #define EXPORT_TEMPLATE_DEFINE_MSVC_HACK(export, _) export
++#define EXPORT_TEMPLATE_TEST_MSVC_HACK_DEFAULT(...) true
+ 
+ // EXPORT_TEMPLATE_STYLE is an internal helper macro that identifies which
+ // export style needs to be used for the provided FOO_EXPORT macro definition.
+@@ -159,5 +160,6 @@ EXPORT_TEMPLATE_TEST(DEFAULT, __declspec(dllimport));
+ #undef EXPORT_TEMPLATE_TEST
+ #undef EXPORT_TEMPLATE_TEST_DEFAULT_DEFAULT
+ #undef EXPORT_TEMPLATE_TEST_MSVC_HACK_MSVC_HACK
++#undef EXPORT_TEMPLATE_TEST_MSVC_HACK_DEFAULT
+ 
+ #endif  // V8_BASE_EXPORT_TEMPLATE_H_
+diff --git a/deps/v8/src/base/platform/memory.h b/deps/v8/src/base/platform/memory.h
+index 77e3fe9d..ae819e9b 100644
+--- a/deps/v8/src/base/platform/memory.h
++++ b/deps/v8/src/base/platform/memory.h
+@@ -23,9 +23,9 @@
+ #include <malloc.h>
+ #endif  // !V8_OS_DARWIN
+ 
+-#if (V8_OS_POSIX && !V8_OS_AIX && !V8_OS_SOLARIS) || V8_OS_WIN
++#if (V8_OS_POSIX && !V8_OS_AIX && !V8_OS_SOLARIS && !V8_OS_HAIKU) || V8_OS_WIN
+ #define V8_HAS_MALLOC_USABLE_SIZE 1
+-#endif  // (V8_OS_POSIX && !V8_OS_AIX && !V8_OS_SOLARIS) || V8_OS_WIN
++#endif  // (V8_OS_POSIX && !V8_OS_AIX && !V8_OS_SOLARIS && !V8_OS_HAIKU)) || V8_OS_WIN
+ 
+ namespace v8::base {
+ 
+diff --git a/deps/v8/src/base/platform/platform-haiku.cc b/deps/v8/src/base/platform/platform-haiku.cc
+new file mode 100644
+index 00000000..87985553
+--- /dev/null
++++ b/deps/v8/src/base/platform/platform-haiku.cc
+@@ -0,0 +1,66 @@
++// Copyright 2012 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Platform-specific code for Haiku goes here. For the POSIX-compatible
++// parts, the implementation is in platform-posix.cc.
++
++#include <pthread.h>
++#include <semaphore.h>
++#include <signal.h>
++#include <stdlib.h>
++#include <sys/resource.h>
++#include <sys/time.h>
++#include <sys/types.h>
++
++#include <fcntl.h>  // open
++#include <sys/mman.h>   // mmap & munmap
++#include <sys/stat.h>   // open
++#include <unistd.h>     // sysconf
++#include <errno.h>
++#include <limits.h>
++#include <stdarg.h>
++#include <strings.h>    // index
++
++#include <cmath>
++
++#include <OS.h>
++
++#undef MAP_TYPE
++
++#include "src/base/macros.h"
++#include "src/base/platform/platform-posix-time.h"
++#include "src/base/platform/platform-posix.h"
++#include "src/base/platform/platform.h"
++
++namespace v8 {
++namespace base {
++
++TimezoneCache* OS::CreateTimezoneCache() {
++  return new PosixDefaultTimezoneCache();
++}
++
++std::vector<OS::SharedLibraryAddress> OS::GetSharedLibraryAddresses() {
++  return std::vector<SharedLibraryAddress>();
++}
++
++void OS::SignalCodeMovingGC() {}
++
++void OS::AdjustSchedulingParams() {}
++
++std::vector<OS::MemoryRange> OS::GetFreeMemoryRangesWithin(
++    OS::Address boundary_start, OS::Address boundary_end, size_t minimum_size,
++    size_t alignment) {
++  return {};
++}
++
++// static
++Stack::StackSlot Stack::ObtainCurrentThreadStackStart() {
++  thread_info threadInfo;
++  if (get_thread_info(find_thread(NULL), &threadInfo) != B_OK)
++    return nullptr;
++  return threadInfo.stack_end;
++}
++
++}  // namespace base
++}  // namespace v8
+diff --git a/deps/v8/src/base/platform/platform-posix.cc b/deps/v8/src/base/platform/platform-posix.cc
+index 8e43f94e..4b737fb3 100644
+--- a/deps/v8/src/base/platform/platform-posix.cc
++++ b/deps/v8/src/base/platform/platform-posix.cc
+@@ -68,7 +68,7 @@
+ #include <sys/resource.h>
+ #endif
+ 
+-#if !defined(_AIX) && !defined(V8_OS_FUCHSIA)
++#if !defined(_AIX) && !defined(V8_OS_FUCHSIA) && !defined(__HAIKU__)
+ #include <sys/syscall.h>
+ #endif
+ 
+@@ -96,6 +96,14 @@ extern int madvise(caddr_t, size_t, int);
+ #endif
+ #endif
+ 
++#if defined(__HAIKU__)
++extern "C" int posix_madvise(void*, size_t, int);
++#endif
++
++#if defined(__HAIKU__)
++#define MADV_FREE POSIX_MADV_DONTNEED
++#endif
++
+ #ifndef MADV_FREE
+ #define MADV_FREE MADV_DONTNEED
+ #endif
+@@ -583,6 +591,8 @@ bool OS::DiscardSystemPages(void* address, size_t size) {
+   if (ret != 0 && errno == EINVAL) {
+     ret = madvise(reinterpret_cast<caddr_t>(address), size, MADV_DONTNEED);
+   }
++#elif defined(__HAIKU__)
++  int ret = posix_madvise(address, size, MADV_FREE);
+ #else
+   int ret = madvise(address, size, MADV_DONTNEED);
+ #endif
+@@ -1316,7 +1326,7 @@ void Thread::SetThreadLocal(LocalStorageKey key, void* value) {
+ // keep this version in POSIX as most Linux-compatible derivatives will
+ // support it. MacOS and FreeBSD are different here.
+ #if !defined(V8_OS_FREEBSD) && !defined(V8_OS_DARWIN) && !defined(_AIX) && \
+-    !defined(V8_OS_SOLARIS)
++    !defined(V8_OS_SOLARIS) && !defined(V8_OS_HAIKU)
+ 
+ namespace {
+ #if DEBUG
+diff --git a/deps/v8/src/libsampler/sampler.cc b/deps/v8/src/libsampler/sampler.cc
+index 0164cbbf..cd3872c8 100644
+--- a/deps/v8/src/libsampler/sampler.cc
++++ b/deps/v8/src/libsampler/sampler.cc
+@@ -16,7 +16,7 @@
+ #include <sys/time.h>
+ #include <atomic>
+ 
+-#if !V8_OS_QNX && !V8_OS_AIX
++#if !V8_OS_QNX && !V8_OS_AIX && !V8_OS_HAIKU
+ #include <sys/syscall.h>
+ #endif
+ 
+@@ -28,7 +28,7 @@
+ #include <mach/mach.h>
+ // OpenBSD doesn't have <ucontext.h>. ucontext_t lives in <signal.h>
+ // and is a typedef for struct sigcontext. There is no uc_mcontext.
+-#elif !V8_OS_OPENBSD
++#elif !V8_OS_OPENBSD && !V8_OS_HAIKU
+ #include <ucontext.h>
+ #endif
+ 
+@@ -514,6 +514,16 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
+   state->sp = reinterpret_cast<void*>(mcontext.__gregs[_REG_SP]);
+   state->fp = reinterpret_cast<void*>(mcontext.__gregs[_REG_FP]);
+ #endif  // V8_HOST_ARCH_*
++#elif V8_OS_HAIKU
++#if V8_HOST_ARCH_IA32
++  state->pc = reinterpret_cast<void*>(mcontext.eip);
++  state->sp = reinterpret_cast<void*>(mcontext.esp);
++  state->fp = reinterpret_cast<void*>(mcontext.ebp);
++#elif V8_HOST_ARCH_X64
++  state->pc = reinterpret_cast<void*>(mcontext.rip);
++  state->sp = reinterpret_cast<void*>(mcontext.rsp);
++  state->fp = reinterpret_cast<void*>(mcontext.rbp);
++#endif  // V8_HOST_ARCH_*
+ #elif V8_OS_NETBSD
+ #if V8_HOST_ARCH_IA32
+   state->pc = reinterpret_cast<void*>(mcontext.__gregs[_REG_EIP]);
+diff --git a/deps/v8/tools/mb/mb.py b/deps/v8/tools/mb/mb.py
+index 0761e878..7861a184 100755
+--- a/deps/v8/tools/mb/mb.py
++++ b/deps/v8/tools/mb/mb.py
+@@ -837,12 +837,15 @@ class MetaBuildWrapper():
+       subdir, exe = 'linux64', 'gn'
+     elif self.platform == 'darwin':
+       subdir, exe = 'mac', 'gn'
++    elif self.platform == 'haiku1':
++      subdir, exe = 'haiku','gn'
++      gn_path = "/bin/gn"
+     else:
+       subdir, exe = 'win', 'gn.exe'
+ 
+     arch = platform.machine()
+     if (arch.startswith('s390') or arch.startswith('ppc') or
+-        self.platform.startswith('aix')):
++        self.platform.startswith('aix') or self.platform.startswith('haiku')):
+       # use gn in PATH
+       gn_path = 'gn'
+     else:
+-- 
+2.54.0
+
+
+From 135e8e2bdbb7adc5d059bcbe698f86589563a220 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Sat, 27 Mar 2021 18:23:32 +0100
+Subject: v8 gyp build for Haiku
+
+
+diff --git a/tools/v8_gypfiles/features.gypi b/tools/v8_gypfiles/features.gypi
+index 215b9297..368d0e19 100644
+--- a/tools/v8_gypfiles/features.gypi
++++ b/tools/v8_gypfiles/features.gypi
+@@ -46,6 +46,11 @@
+       }, {
+         'is_fuchsia': 0,
+       }],
++      ['OS == "haiku"', {
++        'is_haiku': 1,
++      }, {
++        'is_haiku': 0,
++      }],
+       ['OS=="android"', { # GYP reverts OS to linux so use `-D OS=android`
+         'is_android': 1,
+       }, {
+diff --git a/tools/v8_gypfiles/v8.gyp b/tools/v8_gypfiles/v8.gyp
+index cb82d4f1..81f9ddf7 100644
+--- a/tools/v8_gypfiles/v8.gyp
++++ b/tools/v8_gypfiles/v8.gyp
+@@ -1521,6 +1521,17 @@
+             '<(V8_ROOT)/src/base/platform/platform-fuchsia.cc',
+           ]
+         }],
++        ['is_haiku', {
++          'link_settings': {
++            'libraries': [
++              '-lexecinfo',
++            ]
++          },
++          'sources': [
++            '<(V8_ROOT)/src/base/debug/stack_trace_posix.cc',
++            '<(V8_ROOT)/src/base/platform/platform-haiku.cc',
++          ]
++        }],
+         ['OS == "mac" or (_toolset=="host" and host_os=="mac")', {
+           'sources': [
+             '<(V8_ROOT)/src/base/debug/stack_trace_posix.cc',
+-- 
+2.54.0
+
+
+From d4a5bc3b77028285c262e2028003e7f2edfdf937 Mon Sep 17 00:00:00 2001
+From: Jerome Duval <jerome.duval@gmail.com>
+Date: Fri, 15 Oct 2021 22:06:57 +0200
+Subject: ares compat
+
+
+diff --git a/deps/v8/src/trap-handler/trap-handler.h b/deps/v8/src/trap-handler/trap-handler.h
+index 4bf95b8c..08064e26 100644
+--- a/deps/v8/src/trap-handler/trap-handler.h
++++ b/deps/v8/src/trap-handler/trap-handler.h
+@@ -147,7 +147,7 @@ inline bool IsTrapHandlerEnabled() {
+   return g_is_trap_handler_enabled;
+ }
+ 
+-#if defined(V8_OS_AIX)
++#if defined(V8_OS_AIX) || defined(V8_OS_HAIKU)
+ // `thread_local` does not link on AIX:
+ // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=100641
+ extern __thread int g_thread_in_wasm_code;
+diff --git a/src/cares_wrap.h b/src/cares_wrap.h
+index dd62c2f6..2060c9ba 100644
+--- a/src/cares_wrap.h
++++ b/src/cares_wrap.h
+@@ -23,7 +23,11 @@
+ # include <netdb.h>
+ #endif  // __POSIX__
+ 
++#ifdef __HAIKU__
++# include <arpa/nameser.h>
++#else
+ # include <ares_nameser.h>
++#endif
+ 
+ namespace node {
+ namespace cares_wrap {
+-- 
+2.54.0
+
+
+From 4aa9c3f85bc6dd565ae20b42c73a1b488ebba88e Mon Sep 17 00:00:00 2001
+From: Duncan McQueen <dwmcqueen@gmail.com>
+Date: Fri, 2 Oct 2026 12:05:38 +0000
+Subject: Add Haiku C++20 and pthread_t fixes for V8 12.4
+
+common_node.gypi: include haiku in the OS list that overrides the C++
+standard to gnu++20, required by deps/ncrypto (operator<=>) and V8 12.4.
+
+abseil sysinfo.cc: Haiku pthread_t is a pointer, so use find_thread(NULL)
+instead of casting the handle to pid_t.
+
+diff --git a/common_node.gypi b/common_node.gypi
+index 0bfbf728..f0e1b641 100644
+--- a/common_node.gypi
++++ b/common_node.gypi
+@@ -2,7 +2,7 @@
+   'target_defaults': {
+     'conditions': [
+       # Override common.gypi config to use C++20 for Node.js core only.
+-      ['OS in "linux freebsd openbsd solaris android aix os400 cloudabi"', {
++      ['OS in "linux freebsd openbsd solaris android aix os400 cloudabi haiku"', {
+         'cflags_cc!': ['-std=gnu++17'],
+         'cflags_cc': ['-std=gnu++20'],
+       }],
+diff --git a/deps/v8/third_party/abseil-cpp/absl/base/internal/sysinfo.cc b/deps/v8/third_party/abseil-cpp/absl/base/internal/sysinfo.cc
+index 79eaba3e..7641ca6a 100644
+--- a/deps/v8/third_party/abseil-cpp/absl/base/internal/sysinfo.cc
++++ b/deps/v8/third_party/abseil-cpp/absl/base/internal/sysinfo.cc
+@@ -42,6 +42,10 @@
+ #include <lwp.h>
+ #endif
+ 
++#if defined(__HAIKU__)
++#include <OS.h>
++#endif
++
+ #if defined(__myriad2__)
+ #include <rtems.h>
+ #endif
+@@ -465,9 +469,15 @@ pid_t GetTID() {
+ 
+ // Fallback implementation of `GetTID` using `pthread_self`.
+ pid_t GetTID() {
++#if defined(__HAIKU__)
++  // On Haiku `pthread_t` is a pointer; `find_thread` returns the integer
++  // thread id, so use that instead of casting the handle.
++  return static_cast<pid_t>(find_thread(nullptr));
++#else
+   // `pthread_t` need not be arithmetic per POSIX; platforms where it isn't
+   // should be handled above.
+   return static_cast<pid_t>(pthread_self());
++#endif
+ }
+ 
+ #endif
+-- 
+2.54.0
+
