@@ -1,6 +1,6 @@
-From 595be7c160a299d0156452a3d1ee0b0a0b3f8ef4 Mon Sep 17 00:00:00 2001
+From 395cc3fdab77f8fae3a8ae1b14db2b79ae5e145c Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Wed, 30 Sep 2026 18:50:08 +1000
+Date: Tue, 6 Oct 2026 10:53:19 +1000
 Subject: Add Haiku platform support with dual-backend build
 
 Based on patches sourced from https://github.com/kenz-gelsoft/gecko-dev/
@@ -715,6 +715,39 @@ index 3655594d57..5486f403b0 100644
  @depends(target)
  def target_is_solaris(target):
      if target.kernel == "SunOS":
+diff --git a/config/makefiles/rust.mk b/config/makefiles/rust.mk
+index 0a7413d3ee..f9d88b3df4 100644
+--- a/config/makefiles/rust.mk
++++ b/config/makefiles/rust.mk
+@@ -81,6 +81,7 @@ endif
+ # These flags are passed via `cargo rustc` and only apply to the final rustc
+ # invocation (i.e., only the top-level crate, not its dependencies).
+ cargo_rustc_flags = $(CARGO_RUSTCFLAGS)
++ifdef MOZ_LTO
+ ifndef DEVELOPER_OPTIONS
+ ifndef MOZ_DEBUG_RUST
+ # Enable link-time optimization for release builds, but not when linking
+@@ -100,6 +101,7 @@ endif
+ endif
+ endif
+ endif
++endif
+ 
+ ifdef CARGO_INCREMENTAL
+ export CARGO_INCREMENTAL
+diff --git a/dom/base/Navigator.cpp b/dom/base/Navigator.cpp
+index 498f48138c..fecec36697 100644
+--- a/dom/base/Navigator.cpp
++++ b/dom/base/Navigator.cpp
+@@ -2051,6 +2051,8 @@ nsresult Navigator::GetPlatform(nsAString& aPlatform, Document* aCallerDoc,
+ #elif defined(XP_MACOSX)
+   // Always return "MacIntel", even on ARM64 macOS like Safari does.
+   aPlatform.AssignLiteral("MacIntel");
++#elif defined(XP_HAIKU)
++  aPlatform.AssignLiteral("Haiku x86_64");
+ #elif defined(ANDROID)
+   aPlatform.AssignLiteral("Linux armv81");
+ #else
 diff --git a/dom/canvas/WebGLContext.cpp b/dom/canvas/WebGLContext.cpp
 index 31ee303f13..f0ec9ee711 100644
 --- a/dom/canvas/WebGLContext.cpp
@@ -2024,10 +2057,25 @@ index 5ce0885c70..4b7d48497b 100644
  #endif
    bool mFixedPitch;
 diff --git a/gfx/thebes/gfxFcPlatformFontList.cpp b/gfx/thebes/gfxFcPlatformFontList.cpp
-index e4a99a13e9..ff9b6448b7 100644
+index e4a99a13e9..0e55018b8d 100644
 --- a/gfx/thebes/gfxFcPlatformFontList.cpp
 +++ b/gfx/thebes/gfxFcPlatformFontList.cpp
-@@ -1771,9 +1771,9 @@ nsresult gfxFcPlatformFontList::InitFontListForPlatform() {
+@@ -48,6 +48,14 @@
+ #  include "mozilla/WidgetUtilsGtk.h"
+ #endif
+ 
++#ifdef MOZ_WIDGET_HAIKU
++#  pragma GCC visibility push(default)
++#  include <app/Application.h>
++#  include <interface/Font.h>
++#  pragma GCC visibility pop
++#  include "nsReadableUtils.h"
++#endif
++
+ #ifdef MOZ_X11
+ #  include "mozilla/X11Util.h"
+ #endif
+@@ -1771,9 +1779,9 @@ nsresult gfxFcPlatformFontList::InitFontListForPlatform() {
  
    mLocalNames.Clear();
    mFcSubstituteCache.Clear();
@@ -2039,7 +2087,7 @@ index e4a99a13e9..ff9b6448b7 100644
    mAlwaysUseFontconfigGenerics = PrefFontListsUseOnlyGenerics();
    mOtherFamilyNamesInitialized = true;
  
-@@ -1811,9 +1811,9 @@ nsresult gfxFcPlatformFontList::InitFontListForPlatform() {
+@@ -1811,9 +1819,9 @@ nsresult gfxFcPlatformFontList::InitFontListForPlatform() {
      fontList.entries().Clear();
      return NS_OK;
    }
@@ -2051,7 +2099,96 @@ index e4a99a13e9..ff9b6448b7 100644
    UniquePtr<SandboxPolicy> policy;
  
  #if defined(MOZ_SANDBOX) && defined(XP_LINUX)
-@@ -3221,7 +3221,9 @@ bool gfxFcPlatformFontList::UpdateSystemFontOptions() {
+@@ -2406,9 +2414,15 @@ FontFamily gfxFcPlatformFontList::GetDefaultFontForPlatform(
+     nsAtom* aLanguage) {
+   // Get the default font by using a fake name to retrieve the first
+   // scalable font that fontconfig suggests for the given language.
++#ifdef MOZ_WIDGET_HAIKU
++  PrefFontList* prefFonts =
++      FindGenericFamilies(aFontVisibilityProvider, "sans-serif"_ns,
++                          aLanguage ? aLanguage : nsGkAtoms::x_western);
++#else
+   PrefFontList* prefFonts =
+       FindGenericFamilies(aFontVisibilityProvider, "-moz-default"_ns,
+                           aLanguage ? aLanguage : nsGkAtoms::x_western);
++#endif
+   NS_ASSERTION(prefFonts, "null list of generic fonts");
+   if (prefFonts && !prefFonts->IsEmpty()) {
+     return (*prefFonts)[0];
+@@ -2825,6 +2839,72 @@ gfxPlatformFontList::PrefFontList* gfxFcPlatformFontList::FindGenericFamilies(
+         if (!entry) {
+           // if not found, ask fontconfig to pick the appropriate font
+           RefPtr<FcPattern> genericPattern = dont_AddRef(FcPatternCreate());
++#ifdef MOZ_WIDGET_HAIKU
++          if (be_app) {
++            if (aGeneric.EqualsLiteral("sans-serif") ||
++                aGeneric.EqualsLiteral("-moz-default")) {
++              if (be_plain_font) {
++                font_family plainFamily;
++                font_style plainStyle;
++                be_plain_font->GetFamilyAndStyle(&plainFamily, &plainStyle);
++                FcPatternAddString(genericPattern, FC_FAMILY,
++                                   ToFcChar8Ptr(plainFamily));
++              }
++            } else if (aGeneric.EqualsLiteral("monospace")) {
++              if (be_fixed_font) {
++                font_family fixedFamily;
++                font_style fixedStyle;
++                be_fixed_font->GetFamilyAndStyle(&fixedFamily, &fixedStyle);
++                FcPatternAddString(genericPattern, FC_FAMILY,
++                                   ToFcChar8Ptr(fixedFamily));
++              }
++            } else if (aGeneric.EqualsLiteral("serif")) {
++              static const char* const kKnownSerifFonts[] = {
++                  "Noto Serif",
++                  "DejaVu Serif",
++                  "Liberation Serif",
++                  "Droid Serif",
++              };
++
++              nsAutoCString primarySerif;
++              if (be_plain_font) {
++                font_family plainFamily;
++                font_style plainStyle;
++                be_plain_font->GetFamilyAndStyle(&plainFamily, &plainStyle);
++
++                nsDependentCString familyStr(plainFamily);
++                int32_t spaceIdx = familyStr.FindChar(' ');
++                uint32_t prefixLen =
++                    spaceIdx != -1 ? uint32_t(spaceIdx) : familyStr.Length();
++                const nsDependentCSubstring prefix =
++                    Substring(familyStr, 0, prefixLen);
++
++                if (!prefix.IsEmpty()) {
++                  for (const auto* serifFont : kKnownSerifFonts) {
++                    if (StringBeginsWith(nsDependentCString(serifFont), prefix)) {
++                      primarySerif.Assign(serifFont);
++                      break;
++                    }
++                  }
++                }
++              }
++
++              if (primarySerif.IsEmpty()) {
++                primarySerif.Assign(kKnownSerifFonts[0]);
++              }
++
++              FcPatternAddString(genericPattern, FC_FAMILY,
++                                 ToFcChar8Ptr(primarySerif.get()));
++
++              for (const auto* serifFont : kKnownSerifFonts) {
++                if (!primarySerif.Equals(serifFont)) {
++                  FcPatternAddString(genericPattern, FC_FAMILY,
++                                     ToFcChar8Ptr(serifFont));
++                }
++              }
++            }
++          }
++#endif
+           FcPatternAddString(genericPattern, FC_FAMILY,
+                              ToFcChar8Ptr(aGeneric.get()));
+ 
+@@ -3221,7 +3301,9 @@ bool gfxFcPlatformFontList::UpdateSystemFontOptions() {
        gdk_screen_get_font_options(gdk_screen_get_default());
    if (!options) {
      bool changed = !!mSystemFontOptions;
@@ -2061,7 +2198,7 @@ index e4a99a13e9..ff9b6448b7 100644
      return changed;
    }
  
-@@ -3234,8 +3236,9 @@ bool gfxFcPlatformFontList::UpdateSystemFontOptions() {
+@@ -3234,8 +3316,9 @@ bool gfxFcPlatformFontList::UpdateSystemFontOptions() {
    }
  
    SetSubpixelOrderFromCairo(options);
@@ -2072,7 +2209,7 @@ index e4a99a13e9..ff9b6448b7 100644
    mSystemFontOptions = newOptions;
    return true;
  }
-@@ -3257,7 +3260,9 @@ void gfxFcPlatformFontList::SystemFontOptionsToIpc(
+@@ -3257,7 +3340,9 @@ void gfxFcPlatformFontList::SystemFontOptionsToIpc(
  
  void gfxFcPlatformFontList::UpdateSystemFontOptionsFromIpc(
      const dom::SystemFontOptions& aOptions) {
@@ -3056,10 +3193,10 @@ index c47d4b804d..59cf02d96f 100644
  #endif
 diff --git a/media/libcubeb/src/cubeb_haiku.cpp b/media/libcubeb/src/cubeb_haiku.cpp
 new file mode 100644
-index 0000000000..e8e0fdab53
+index 0000000000..93d265fdd5
 --- /dev/null
 +++ b/media/libcubeb/src/cubeb_haiku.cpp
-@@ -0,0 +1,1574 @@
+@@ -0,0 +1,1587 @@
 +/*
 + * Copyright © 2024-2026 Gerasim Troeglazov
 + *
@@ -3126,6 +3263,19 @@ index 0000000000..e8e0fdab53
 +      return;
 +    }
 +  }
++
++  image_info img_info;
++  int32 cookie = 0;
++  while (get_next_image_info(B_CURRENT_TEAM, &cookie, &img_info) == B_OK) {
++    if (img_info.type == B_APP_IMAGE) {
++      BPath path(img_info.name);
++      if (path.InitCheck() == B_OK && path.Leaf() != NULL) {
++        snprintf(buffer, size, "%s", path.Leaf());
++        return;
++      }
++    }
++  }
++
 +  snprintf(buffer, size, "%s", fallback ? fallback : DEFAULT_CONTEXT_NAME);
 +}
 +
@@ -4684,7 +4834,7 @@ index 5518bff6bd..ccddfdb24c 100644
  #  define MOZ_REALLY_CRASH(line) __builtin_trap()
  
 diff --git a/modules/libpref/init/StaticPrefList.yaml b/modules/libpref/init/StaticPrefList.yaml
-index b4ea2261c2..977842bde2 100644
+index b4ea2261c2..a453202275 100644
 --- a/modules/libpref/init/StaticPrefList.yaml
 +++ b/modules/libpref/init/StaticPrefList.yaml
 @@ -7900,7 +7900,7 @@
@@ -4786,6 +4936,24 @@ index b4ea2261c2..977842bde2 100644
  #else
    value: false
  #endif
+@@ -19847,7 +19865,7 @@
+ # Does the access key by itself focus the menu bar?
+ - name: ui.key.menuAccessKeyFocuses
+   type: bool
+-#if defined(XP_WIN) || defined(MOZ_WIDGET_GTK)
++#if defined(XP_WIN) || defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_HAIKU)
+   # On Windows and Linux, we now default to showing the menu bar only when alt
+   # is pressed.
+   value: true
+@@ -19863,7 +19881,7 @@
+   value: true
+   mirror: always
+ 
+-#ifdef MOZ_WIDGET_GTK
++#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_HAIKU)
+ # Only GtkTextView (native multiline text viewer/editor) supports "select-all"
+ # signal so that we cannot know "select-all" key bindings only with GtkEntry.
+ # When this pref is set to true, if a key combination does not cause any
 @@ -21340,6 +21358,8 @@
    type: bool
  #if defined(XP_MACOSX)
@@ -4795,6 +4963,19 @@ index b4ea2261c2..977842bde2 100644
  #else
    value: false
  #endif
+diff --git a/modules/libpref/init/all.js b/modules/libpref/init/all.js
+index d740a8988b..637e577bd8 100644
+--- a/modules/libpref/init/all.js
++++ b/modules/libpref/init/all.js
+@@ -2849,7 +2849,7 @@ pref("font.size.monospace.x-math", 13);
+ 
+ #endif // !ANDROID && !XP_MACOSX && XP_UNIX
+ 
+-#if defined(ANDROID)
++#if defined(ANDROID) || defined(XP_HAIKU) || defined(MOZ_WIDGET_HAIKU)
+ 
+   pref("font.size.monospace.ar", 12);
+ 
 diff --git a/moz.configure b/moz.configure
 index 4a6f49e35b..ea2edc689f 100755
 --- a/moz.configure
@@ -4905,6 +5086,28 @@ index 7e3bff4b50..5371b02093 100644
 +OS_LIBS += [
 +    "network"
 +]
+diff --git a/netwerk/protocol/http/nsHttpHandler.cpp b/netwerk/protocol/http/nsHttpHandler.cpp
+index 0699d970c4..3302134f47 100644
+--- a/netwerk/protocol/http/nsHttpHandler.cpp
++++ b/netwerk/protocol/http/nsHttpHandler.cpp
+@@ -1114,6 +1114,8 @@ void nsHttpHandler::InitUserAgentComponents() {
+       "Macintosh"
+ #elif defined(XP_IOS)
+       "iPhone"
++#elif defined(XP_HAIKU)
++      "Haiku"
+ #elif defined(XP_UNIX)
+       // We historically have always had X11 here,
+       // and there seems little a webpage can sensibly do
+@@ -1221,6 +1223,8 @@ void nsHttpHandler::InitUserAgentComponents() {
+   mOscpu.AssignLiteral("Linux armv81");
+ #elif defined(XP_IOS)
+   mOscpu.AssignLiteral("iPhone");
++#elif defined(XP_HAIKU)
++  mOscpu.AssignLiteral("Haiku x86_64");
+ #else
+   mOscpu.AssignLiteral("Linux x86_64");
+ #endif
 diff --git a/netwerk/sctp/src/netinet/sctp.h b/netwerk/sctp/src/netinet/sctp.h
 index 6129e77f96..be8e4135df 100644
 --- a/netwerk/sctp/src/netinet/sctp.h
@@ -7558,10 +7761,10 @@ index cd99c3df81..662e59dfca 100644
      "../../profile",
 diff --git a/toolkit/components/remote/nsHaikuRemoteClient.cpp b/toolkit/components/remote/nsHaikuRemoteClient.cpp
 new file mode 100644
-index 0000000000..d00f98b7f4
+index 0000000000..808e9b7fd7
 --- /dev/null
 +++ b/toolkit/components/remote/nsHaikuRemoteClient.cpp
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,56 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7570,6 +7773,7 @@ index 0000000000..d00f98b7f4
 +#include "RemoteUtils.h"
 +
 +#include <cstring>
++#include <unistd.h>
 +#include <vector>
 +
 +nsresult nsHaikuRemoteClient::Init() {
@@ -7597,6 +7801,14 @@ index 0000000000..d00f98b7f4
 +
 +  std::vector<char> payload;
 +  payload.push_back(aRaise ? '1' : '0');
++
++  char cwd[PATH_MAX];
++  if (getcwd(cwd, sizeof(cwd))) {
++    size_t cwdLen = strlen(cwd) + 1;
++    payload.insert(payload.end(), cwd, cwd + cwdLen);
++  } else {
++    payload.push_back('\0');
++  }
 +
 +  for (int i = 0; i < argc; i++) {
 +    const char* arg = argv[i];
@@ -7642,10 +7854,10 @@ index 0000000000..d0b37cd1b9
 +#endif  // _nsHaikuRemoteClient_h_
 diff --git a/toolkit/components/remote/nsHaikuRemoteServer.cpp b/toolkit/components/remote/nsHaikuRemoteServer.cpp
 new file mode 100644
-index 0000000000..92de915df5
+index 0000000000..dab213280b
 --- /dev/null
 +++ b/toolkit/components/remote/nsHaikuRemoteServer.cpp
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,149 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7658,6 +7870,11 @@ index 0000000000..92de915df5
 +#include "nsICommandLine.h"
 +#include "nsCOMPtr.h"
 +#include "nsThreadUtils.h"
++#include "nsIFile.h"
++#include "nsNetUtil.h"
++#include "nsIWindowWatcher.h"
++#include "nsPIDOMWindow.h"
++#include "nsServiceManagerUtils.h"
 +
 +#include <cstring>
 +#include <utility>
@@ -7731,9 +7948,19 @@ index 0000000000..92de915df5
 +
 +  bool activate = (aData[0] == '1');
 +
-+  std::vector<const char*> argv;
 +  size_t offset = 1;
++  nsCOMPtr<nsIFile> workingDir;
 +
++  if (offset < aData.size()) {
++    const char* cwdStr = aData.data() + offset;
++    size_t cwdLen = strnlen(cwdStr, aData.size() - offset);
++    if (cwdLen > 0) {
++      NS_NewNativeLocalFile(nsDependentCString(cwdStr, cwdLen), getter_AddRefs(workingDir));
++    }
++    offset += cwdLen + 1;
++  }
++
++  std::vector<const char*> argv;
 +  while (offset < aData.size()) {
 +    const char* str = aData.data() + offset;
 +    size_t strLen = strnlen(str, aData.size() - offset);
@@ -7743,34 +7970,41 @@ index 0000000000..92de915df5
 +    offset += strLen + 1;
 +  }
 +
-+  if (argv.empty()) {
-+    if (activate) {
-+      team_info teamInfo;
-+      if (get_team_info(B_CURRENT_TEAM, &teamInfo) == B_OK) {
-+        be_roster->ActivateApp(teamInfo.team);
++  auto raiseWindow = [activate]() {
++    if (!activate) {
++      return;
++    }
++
++    team_info teamInfo;
++    if (get_team_info(B_CURRENT_TEAM, &teamInfo) == B_OK) {
++      be_roster->ActivateApp(teamInfo.team);
++    }
++
++    nsCOMPtr<nsIWindowWatcher> ww = do_GetService(NS_WINDOWWATCHER_CONTRACTID);
++    if (ww) {
++      nsCOMPtr<mozIDOMWindowProxy> activeWin;
++      ww->GetActiveWindow(getter_AddRefs(activeWin));
++      if (activeWin) {
++        nsCOMPtr<nsPIDOMWindowOuter> pwin = nsPIDOMWindowOuter::From(activeWin);
++        if (pwin) {
++          pwin->Focus(mozilla::dom::CallerType::System);
++        }
 +      }
 +    }
++  };
++
++  if (argv.empty()) {
++    raiseWindow();
 +    return;
 +  }
 +
 +  nsCOMPtr<nsICommandLineRunner> cmdLine(new nsCommandLine());
-+  nsresult rv = cmdLine->Init(argv.size(), argv.data(), nullptr,
++  nsresult rv = cmdLine->Init(argv.size(), argv.data(), workingDir,
 +                              nsICommandLine::STATE_REMOTE_AUTO);
 +
 +  if (NS_SUCCEEDED(rv)) {
 +    cmdLine->Run();
-+    if (activate) {
-+      team_info teamInfo;
-+      if (get_team_info(B_CURRENT_TEAM, &teamInfo) == B_OK) {
-+        if (be_roster->ActivateApp(teamInfo.team) != B_OK && be_app != nullptr) {
-+          for (int32 i = 0; BWindow* window = be_app->WindowAt(i); i++) {
-+            if (window->Type() == B_TITLED_WINDOW) {
-+              window->Activate(true);
-+            }
-+          }
-+        }
-+      }
-+    }
++    raiseWindow();
 +  }
 +}
 diff --git a/toolkit/components/remote/nsHaikuRemoteServer.h b/toolkit/components/remote/nsHaikuRemoteServer.h
@@ -7902,17 +8136,26 @@ index a263b1dbd7..378a485cb2 100644
      # We don't want to enable refcount logging during rusttests, since the
      # relevant FFI symbols wouldn't be found.
 diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
-index df764857c8..d0403e396a 100644
+index df764857c8..dead5338fa 100644
 --- a/toolkit/modules/AppConstants.sys.mjs
 +++ b/toolkit/modules/AppConstants.sys.mjs
-@@ -86,6 +86,8 @@ export var AppConstants = Object.freeze({
-   "android",
- #elif XP_LINUX
+@@ -76,6 +76,8 @@ export var AppConstants = Object.freeze({
+   platform:
+ #ifdef MOZ_WIDGET_GTK
    "linux",
-+#elif XP_HAIKU
++#elif MOZ_WIDGET_HAIKU
 +  "linux",
+ #elif XP_WIN
+   "win",
+ #elif XP_MACOSX
+@@ -103,6 +105,8 @@ export var AppConstants = Object.freeze({
+     "freebsd",
+ #elif XP_SOLARIS
+     "solaris",
++#elif XP_HAIKU
++    "haiku",
  #else
-   "other",
+     "other",
  #endif
 diff --git a/toolkit/modules/ShortcutUtils.sys.mjs b/toolkit/modules/ShortcutUtils.sys.mjs
 index 0a2a5ac202..d87183b478 100644
@@ -8017,7 +8260,7 @@ index c0cb86856f..ac1798a6e2 100644
      DIRS += [
          "mozapps/dmgInstallHelper",
 diff --git a/toolkit/moz.configure b/toolkit/moz.configure
-index 3409bfcec8..b0c620638b 100644
+index 3409bfcec8..6b13709325 100644
 --- a/toolkit/moz.configure
 +++ b/toolkit/moz.configure
 @@ -269,6 +269,8 @@ def audio_backends_default(target):
@@ -8058,16 +8301,19 @@ index 3409bfcec8..b0c620638b 100644
  imply_option(
      "--enable-jack", imply_jack, reason="--enable-audio-backends", when=use_pkg_config
  )
-@@ -529,6 +539,8 @@ def toolkit_choices(target):
+@@ -529,6 +539,11 @@ def toolkit_choices(target):
          return ("cairo-uikit",)
      elif target.os == "Android":
          return ("cairo-android",)
 +    elif target.os == "Haiku":
-+        return ("cairo-haiku",)
++        return (
++            "cairo-haiku",
++            "cairo-gtk3-wayland-only",
++        )
      else:
          # cairo-gtk3 - X11 backend with optional Wayland backend (auto detected)
          # cairo-gtk3-wayland - Wayland backend with optional X11 backend (auto detected)
-@@ -730,7 +742,7 @@ set_config("MOZ_GL_PROVIDER", gl_provider)
+@@ -730,7 +745,7 @@ set_config("MOZ_GL_PROVIDER", gl_provider)
  # ==============================================================
  @depends(toolkit)
  def pdf_printing(toolkit):
@@ -8076,7 +8322,7 @@ index 3409bfcec8..b0c620638b 100644
          return True
  
  
-@@ -744,7 +756,7 @@ option(env="USE_FC_FREETYPE", help="Force-enable the use of fontconfig freetype"
+@@ -744,7 +759,7 @@ option(env="USE_FC_FREETYPE", help="Force-enable the use of fontconfig freetype"
  
  @depends("USE_FC_FREETYPE", toolkit)
  def fc_freetype(value, toolkit):
@@ -8085,7 +8331,7 @@ index 3409bfcec8..b0c620638b 100644
          return True
  
  
-@@ -2790,7 +2802,7 @@ with only_when(target_is_windows & compile_environment):
+@@ -2790,7 +2805,7 @@ with only_when(target_is_windows & compile_environment):
  
  @depends(toolkit)
  def has_remote(toolkit):
@@ -8094,7 +8340,7 @@ index 3409bfcec8..b0c620638b 100644
          return True
  
  
-@@ -3109,6 +3121,7 @@ def forkserver_default(target, build_project):
+@@ -3109,6 +3124,7 @@ def forkserver_default(target, build_project):
          (target.os == "GNU" and target.kernel == "Linux")
          or target.os == "FreeBSD"
          or target.os == "OpenBSD"
@@ -8102,7 +8348,7 @@ index 3409bfcec8..b0c620638b 100644
      )
  
  
-@@ -4166,7 +4179,7 @@ with only_when(compile_environment):
+@@ -4166,7 +4182,7 @@ with only_when(compile_environment):
  
      @depends(target)
      def default_user_appdir(target):
@@ -9147,10 +9393,10 @@ index 0000000000..4c4fdf193c
 +#endif  // mozilla_widget_GfxInfo_h
 diff --git a/widget/haiku/HaikuAlerts.cpp b/widget/haiku/HaikuAlerts.cpp
 new file mode 100644
-index 0000000000..bd46ca270a
+index 0000000000..41041d680f
 --- /dev/null
 +++ b/widget/haiku/HaikuAlerts.cpp
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,211 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -9170,6 +9416,42 @@ index 0000000000..bd46ca270a
 +
 +NS_IMPL_ISUPPORTS(HaikuAlerts, nsIAlertsService)
 +
++static const uint32_t kMaxTitleLength = 100;
++static const uint32_t kMaxContentLength = 280;
++static const uint32_t kMaxContentLines = 4;
++
++static void SanitizeTitle(nsAutoString& aTitle) {
++  for (size_t i = 0; i < aTitle.Length(); ++i) {
++    if (aTitle[i] == u'\r' || aTitle[i] == u'\n') {
++      aTitle.SetCharAt(u' ', i);
++    }
++  }
++
++  if (aTitle.Length() > kMaxTitleLength) {
++    aTitle.Truncate(kMaxTitleLength);
++    aTitle.Append(char16_t(0x2026));
++  }
++}
++
++static void SanitizeContent(nsAutoString& aText) {
++  uint32_t lines = 0;
++  for (size_t i = 0; i < aText.Length(); ++i) {
++    if (aText[i] == u'\n') {
++      lines++;
++      if (lines >= kMaxContentLines) {
++        aText.Truncate(i);
++        aText.Append(char16_t(0x2026));
++        break;
++      }
++    }
++  }
++
++  if (aText.Length() > kMaxContentLength) {
++    aText.Truncate(kMaxContentLength);
++    aText.Append(char16_t(0x2026));
++  }
++}
++
 +class AlertCallbacksToObserver final : public nsIObserver {
 + public:
 +  NS_DECL_ISUPPORTS
@@ -9181,15 +9463,20 @@ index 0000000000..bd46ca270a
 +
 +  NS_IMETHODIMP Observe(nsISupports* aSubject, const char* aTopic,
 +                        const char16_t* aData) override {
++    nsCOMPtr<nsIAlertCallbacks> callbacks = mCallbacks;
++    if (!callbacks) {
++      return NS_OK;
++    }
++
 +    if (!strcmp("alertshow", aTopic)) {
-+      mCallbacks->OnAlertShow();
++      callbacks->OnAlertShow();
 +      return NS_OK;
 +    }
 +    if (!strcmp("alertfinished", aTopic)) {
 +      if (aData && nsDependentString(aData) == u"close"_ns) {
-+        mCallbacks->OnAlertClosed();
++        callbacks->OnAlertClosed();
 +      } else {
-+        mCallbacks->OnAlertFinished();
++        callbacks->OnAlertFinished();
 +      }
 +      return NS_OK;
 +    }
@@ -9230,6 +9517,9 @@ index 0000000000..bd46ca270a
 +
 +  bool requireInteraction = false;
 +  aAlert->GetRequireInteraction(&requireInteraction);
++
++  SanitizeTitle(title);
++  SanitizeContent(text);
 +
 +  NS_ConvertUTF16toUTF8 u8Title(title);
 +  NS_ConvertUTF16toUTF8 u8Text(text);
@@ -9365,10 +9655,10 @@ index 0000000000..1fb972996d
 +#endif  // mozilla_widget_HaikuAlerts_h
 diff --git a/widget/haiku/HaikuApplication.cpp b/widget/haiku/HaikuApplication.cpp
 new file mode 100644
-index 0000000000..efdaad7d50
+index 0000000000..9708a178ad
 --- /dev/null
 +++ b/widget/haiku/HaikuApplication.cpp
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,203 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -9385,6 +9675,7 @@ index 0000000000..efdaad7d50
 +namespace mozilla::widget {
 +
 +HaikuApplication* HaikuApplication::sInstance = nullptr;
++sem_id HaikuApplication::sGeckoTerminatedSem = B_BAD_SEM_ID;
 +
 +static const char* kFirefoxSignature = "application/x-vnd.Mozilla-Firefox";
 +static sem_id sInitSem = B_BAD_SEM_ID;
@@ -9394,27 +9685,31 @@ index 0000000000..efdaad7d50
 +    return;
 +  }
 +
-+  if (XRE_IsParentProcess()) {
-+    sInitSem = create_sem(0, "gecko_app_init_sem");
++  if (!XRE_IsParentProcess()) {
++    return;
++  }
 +
-+    thread_id thread = spawn_thread(sAppThreadFunc, "BApplication_thread",
-+                                    B_NORMAL_PRIORITY, nullptr);
-+    if (thread >= B_OK) {
-+      resume_thread(thread);
-+      acquire_sem_etc(sInitSem, 1, B_RELATIVE_TIMEOUT, 10000000);
-+    }
++  sInitSem = create_sem(0, "gecko_app_init_sem");
 +
-+    if (sInitSem >= B_OK) {
-+      delete_sem(sInitSem);
-+      sInitSem = B_BAD_SEM_ID;
-+    }
-+  } else {
-+    sInstance = new HaikuApplication(kFirefoxSignature);
-+    sInstance->UnlockLooper();
++  thread_id thread = spawn_thread(sAppThreadFunc, "BApplication_thread",
++                                  B_NORMAL_PRIORITY, nullptr);
++  if (thread >= B_OK) {
++    resume_thread(thread);
++    acquire_sem_etc(sInitSem, 1, B_RELATIVE_TIMEOUT, 10000000);
++  }
++
++  if (sInitSem >= B_OK) {
++    delete_sem(sInitSem);
++    sInitSem = B_BAD_SEM_ID;
 +  }
 +}
 +
 +void HaikuApplication::Shutdown() {
++  if (sGeckoTerminatedSem >= B_OK) {
++    delete_sem(sGeckoTerminatedSem);
++    sGeckoTerminatedSem = B_BAD_SEM_ID;
++  }
++
 +  if (!sInstance) {
 +    return;
 +  }
@@ -9423,6 +9718,12 @@ index 0000000000..efdaad7d50
 +    sInstance->Quit();
 +  }
 +  sInstance = nullptr;
++}
++
++void HaikuApplication::NotifyGeckoExited() {
++  if (sGeckoTerminatedSem >= B_OK) {
++    release_sem(sGeckoTerminatedSem);
++  }
 +}
 +
 +int32 HaikuApplication::sAppThreadFunc(void* aData) {
@@ -9520,19 +9821,53 @@ index 0000000000..efdaad7d50
 +}
 +
 +bool HaikuApplication::QuitRequested() {
-+  if (nsAppShell::GetAppShell()) {
-+    nsAppShell::GetAppShell()->ScheduleQuitEvent();
++  if (!XRE_IsParentProcess()) {
++    return true;
 +  }
-+  return false;
++
++  if (sGeckoTerminatedSem >= B_OK) {
++    delete_sem(sGeckoTerminatedSem);
++  }
++  sGeckoTerminatedSem = create_sem(0, "gecko_terminated_sem");
++  if (sGeckoTerminatedSem < B_OK) {
++    return false;
++  }
++
++  sem_id checkSem = create_sem(0, "gecko_quit_check_sem");
++  if (checkSem < B_OK) {
++    delete_sem(sGeckoTerminatedSem);
++    sGeckoTerminatedSem = B_BAD_SEM_ID;
++    return false;
++  }
++
++  bool allowedQuit = false;
++  nsAppShell::DispatchQuit(checkSem, &allowedQuit);
++
++  status_t checkRes = acquire_sem_etc(checkSem, 1, B_RELATIVE_TIMEOUT, 5000000);
++  delete_sem(checkSem);
++
++  if (checkRes != B_OK || !allowedQuit) {
++    delete_sem(sGeckoTerminatedSem);
++    sGeckoTerminatedSem = B_BAD_SEM_ID;
++    return false;
++  }
++
++  status_t termRes = acquire_sem_etc(sGeckoTerminatedSem, 1, B_RELATIVE_TIMEOUT, 5000000);
++  if (sGeckoTerminatedSem >= B_OK) {
++    delete_sem(sGeckoTerminatedSem);
++    sGeckoTerminatedSem = B_BAD_SEM_ID;
++  }
++
++  return (termRes == B_OK);
 +}
 +
 +}  // namespace mozilla::widget
 diff --git a/widget/haiku/HaikuApplication.h b/widget/haiku/HaikuApplication.h
 new file mode 100644
-index 0000000000..680b58cb1c
+index 0000000000..9287600c13
 --- /dev/null
 +++ b/widget/haiku/HaikuApplication.h
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,40 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -9550,6 +9885,7 @@ index 0000000000..680b58cb1c
 + public:
 +  static void EnsureInitialized();
 +  static void Shutdown();
++  static void NotifyGeckoExited();
 +
 +  explicit HaikuApplication(const char* aSignature);
 +  ~HaikuApplication() override;
@@ -9565,6 +9901,7 @@ index 0000000000..680b58cb1c
 +  static int32 sAppThreadFunc(void* aData);
 +
 +  static HaikuApplication* sInstance;
++  static sem_id sGeckoTerminatedSem;
 +  thread_id mThread;
 +};
 +
@@ -10006,10 +10343,10 @@ index 0000000000..4f6eabf91c
 +#endif  // mozilla_widget_HaikuIMEHandler_h
 diff --git a/widget/haiku/HaikuKeyboard.cpp b/widget/haiku/HaikuKeyboard.cpp
 new file mode 100644
-index 0000000000..2883756a44
+index 0000000000..0c06ce5bc3
 --- /dev/null
 +++ b/widget/haiku/HaikuKeyboard.cpp
-@@ -0,0 +1,298 @@
+@@ -0,0 +1,340 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -10029,6 +10366,8 @@ index 0000000000..2883756a44
 +#include "nsThreadUtils.h"
 +#include "nsString.h"
 +
++#include "nsFocusManager.h"
++
 +namespace mozilla::widget {
 +
 +mozilla::Modifiers GetGeckoModifiers(int32_t aHaikuModifiers) {
@@ -10037,13 +10376,19 @@ index 0000000000..2883756a44
 +  if (aHaikuModifiers & (B_SHIFT_KEY | B_LEFT_SHIFT_KEY | B_RIGHT_SHIFT_KEY)) {
 +    mods |= mozilla::MODIFIER_SHIFT;
 +  }
-+  if ((aHaikuModifiers & (B_CONTROL_KEY | B_LEFT_CONTROL_KEY | B_RIGHT_CONTROL_KEY)) ||
-+      (aHaikuModifiers & (B_COMMAND_KEY | B_LEFT_COMMAND_KEY | B_RIGHT_COMMAND_KEY))) {
-+    mods |= mozilla::MODIFIER_CONTROL;
-+  }
-+  if (aHaikuModifiers & (B_OPTION_KEY | B_LEFT_OPTION_KEY | B_RIGHT_OPTION_KEY)) {
++
++  if (aHaikuModifiers & (B_CONTROL_KEY | B_LEFT_CONTROL_KEY | B_RIGHT_CONTROL_KEY)) {
 +    mods |= mozilla::MODIFIER_ALT;
 +  }
++
++  if (aHaikuModifiers & (B_COMMAND_KEY | B_LEFT_COMMAND_KEY | B_RIGHT_COMMAND_KEY)) {
++    mods |= mozilla::MODIFIER_CONTROL;
++  }
++
++  if (aHaikuModifiers & (B_OPTION_KEY | B_LEFT_OPTION_KEY | B_RIGHT_OPTION_KEY)) {
++    mods |= mozilla::MODIFIER_ALTGRAPH;
++  }
++
 +  if (aHaikuModifiers & B_CAPS_LOCK) {
 +    mods |= mozilla::MODIFIER_CAPSLOCK;
 +  }
@@ -10270,6 +10615,40 @@ index 0000000000..2883756a44
 +            aEvent.mKeyValue = keyString;
 +          }
 +        };
++
++        if (aIsDown) {
++          bool isControlOnly = (geckoModifiers & MODIFIER_CONTROL) && !(geckoModifiers & MODIFIER_ALT);
++
++          if (isControlOnly) {
++            char lowerChar = std::tolower(static_cast<char>(aRawChar));
++            bool isGlobalAction = false;
++
++            switch (lowerChar) {
++              case 'w':
++              case 'f':
++              case 'k':
++              case 'u':
++              case 'd':
++              case 'b':
++              case 'h':
++                isGlobalAction = true;
++                break;
++              default:
++                break;
++            }
++
++            if (isGlobalAction) {
++              nsFocusManager* fm = nsFocusManager::GetFocusManager();
++              if (fm) {
++                nsCOMPtr<mozIDOMWindowProxy> activeWin;
++                fm->GetActiveWindow(getter_AddRefs(activeWin));
++                if (activeWin) {
++                  fm->ClearFocus(activeWin);
++                }
++              }
++            }
++          }
++        }
 +
 +        RefPtr<TextEventDispatcher> dispatcher = window->GetTextEventDispatcher();
 +        if (!dispatcher) {
@@ -10586,10 +10965,10 @@ index 0000000000..2d69cb4b97
 +#endif  // mozilla_widget_HaikuUtils_h
 diff --git a/widget/haiku/HaikuView.cpp b/widget/haiku/HaikuView.cpp
 new file mode 100644
-index 0000000000..b3b91ed666
+index 0000000000..1c7499f6a8
 --- /dev/null
 +++ b/widget/haiku/HaikuView.cpp
-@@ -0,0 +1,547 @@
+@@ -0,0 +1,584 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -10612,6 +10991,11 @@ index 0000000000..b3b91ed666
 +  BEntry srcEntry(aSrcPath, true);
 +  if (!srcEntry.Exists()) {
 +    return B_ENTRY_NOT_FOUND;
++  }
++
++  BEntry dstEntry(aDstDir, aDstName, true);
++  if (srcEntry == dstEntry) {
++    return B_OK;
 +  }
 +
 +  BFile src(&srcEntry, B_READ_ONLY);
@@ -10649,7 +11033,21 @@ index 0000000000..b3b91ed666
 +HaikuWindow::HaikuWindow(BRect aFrame, const char* aTitle, window_look aLook,
 +                         window_feel aFeel, uint32 aFlags, nsWindow* aGeckoWindow)
 +    : BWindow(aFrame, aTitle, aLook, aFeel, aFlags),
-+      mGeckoWindow(aGeckoWindow) {}
++      mGeckoWindow(aGeckoWindow) {
++  RemoveShortcut('W', B_COMMAND_KEY);
++  RemoveShortcut('Q', B_COMMAND_KEY);
++  RemoveShortcut('X', B_COMMAND_KEY);
++  RemoveShortcut('C', B_COMMAND_KEY);
++  RemoveShortcut('V', B_COMMAND_KEY);
++  RemoveShortcut('A', B_COMMAND_KEY);
++
++  RemoveShortcut('M', B_COMMAND_KEY | B_CONTROL_KEY);
++  RemoveShortcut('Z', B_COMMAND_KEY | B_CONTROL_KEY);
++  RemoveShortcut('Z', B_SHIFT_KEY | B_COMMAND_KEY | B_CONTROL_KEY);
++  RemoveShortcut('H', B_COMMAND_KEY | B_CONTROL_KEY);
++  RemoveShortcut('F', B_COMMAND_KEY | B_CONTROL_KEY);
++  RemoveShortcut('B', B_COMMAND_KEY | B_CONTROL_KEY);
++}
 +
 +void HaikuWindow::DispatchMessage(BMessage* aMessage, BHandler* aHandler) {
 +  switch (aMessage->what) {
@@ -10680,14 +11078,6 @@ index 0000000000..b3b91ed666
 +        mGeckoWindow->OnHaikuKeyEvent(isDown, key, rawChar, modifiers,
 +                                     bytes ? bytes : "",
 +                                     bytes ? strlen(bytes) : 0);
-+
-+        if (modifiers & B_COMMAND_KEY) {
-+          int32 unshiftedChar = std::tolower(rawChar);
-+          if (unshiftedChar == 'q' || unshiftedChar == 'w' ||
-+              unshiftedChar == 'm' || unshiftedChar == 'h') {
-+            return;
-+          }
-+        }
 +      }
 +      break;
 +    }
@@ -10857,9 +11247,14 @@ index 0000000000..b3b91ed666
 +      }
 +    }
 +
++    int32_t modifiers = 0;
++    if (aMessage->FindInt32("modifiers", &modifiers) != B_OK) {
++      modifiers = ::modifiers();
++    }
++
 +    BPoint dropPoint = aMessage->DropPoint();
 +    ConvertFromScreen(&dropPoint);
-+    mGeckoWindow->OnHaikuDrop(dropPoint.x, dropPoint.y, aMessage);
++    mGeckoWindow->OnHaikuDrop(dropPoint.x, dropPoint.y, aMessage, modifiers);
 +    return;
 +  }
 +
@@ -10883,6 +11278,22 @@ index 0000000000..b3b91ed666
 +            auto* haikuSession = static_cast<nsDragSession*>(session.get());
 +            haikuSession->GetLastDragFilePath(srcFilePath);
 +            haikuSession->GetLastDragBookmarkInfo(url, title);
++          }
++        }
++
++        if (srcFilePath.IsEmpty()) {
++          BMessage orig;
++          if (aMessage->FindMessage("be:originator-data", &orig) == B_OK) {
++            orig.FindString("file_path", &srcFilePath);
++            if (srcFilePath.IsEmpty()) {
++              entry_ref fileRef;
++              if (orig.FindRef("refs", &fileRef) == B_OK) {
++                BPath p(&fileRef);
++                if (p.InitCheck() == B_OK) {
++                  srcFilePath = p.Path();
++                }
++              }
++            }
 +          }
 +        }
 +
@@ -11056,7 +11467,17 @@ index 0000000000..b3b91ed666
 +    return;
 +  }
 +
++  int32_t buttons = 0;
++  int32_t modifiers = 0;
++  GetCurrentMouseState(buttons, modifiers);
++  mLastButtons = buttons;
++
 +  if (aMessage != nullptr) {
++    int32_t dragModifiers = 0;
++    if (aMessage->FindInt32("modifiers", &dragModifiers) != B_OK) {
++      dragModifiers = modifiers;
++    }
++
 +    switch (aTransit) {
 +      case B_ENTERED_VIEW: {
 +        mIsDragOver = true;
@@ -11068,11 +11489,11 @@ index 0000000000..b3b91ed666
 +            static_cast<nsDragSession*>(session.get())->SetOverGeckoWindow(true);
 +          }
 +        }
-+        mGeckoWindow->OnHaikuDragEnter(aPoint.x, aPoint.y, aMessage);
++        mGeckoWindow->OnHaikuDragEnter(aPoint.x, aPoint.y, aMessage, dragModifiers);
 +        return;
 +      }
 +      case B_INSIDE_VIEW: {
-+        mGeckoWindow->OnHaikuDragOver(aPoint.x, aPoint.y, aMessage);
++        mGeckoWindow->OnHaikuDragOver(aPoint.x, aPoint.y, aMessage, dragModifiers);
 +        return;
 +      }
 +      case B_EXITED_VIEW: {
@@ -11085,7 +11506,7 @@ index 0000000000..b3b91ed666
 +            static_cast<nsDragSession*>(session.get())->SetOverGeckoWindow(false);
 +          }
 +        }
-+        mGeckoWindow->OnHaikuDragExit();
++        mGeckoWindow->OnHaikuDragExit(dragModifiers);
 +        return;
 +      }
 +      case B_OUTSIDE_VIEW: {
@@ -11104,13 +11525,8 @@ index 0000000000..b3b91ed666
 +    }
 +  } else if (mIsDragOver) {
 +    mIsDragOver = false;
-+    mGeckoWindow->OnHaikuDragExit();
++    mGeckoWindow->OnHaikuDragExit(modifiers);
 +  }
-+
-+  int32_t buttons = 0;
-+  int32_t modifiers = 0;
-+  GetCurrentMouseState(buttons, modifiers);
-+  mLastButtons = buttons;
 +
 +  switch (aTransit) {
 +    case B_ENTERED_VIEW:
@@ -11474,6 +11890,258 @@ index 0000000000..d2bf8ca0f4
 +}  // namespace mozilla::widget
 +
 +#endif  // mozilla_widget_HaikuWindowBuffer_h
+diff --git a/widget/haiku/NativeKeyBindings.cpp b/widget/haiku/NativeKeyBindings.cpp
+new file mode 100644
+index 0000000000..112e5004ca
+--- /dev/null
++++ b/widget/haiku/NativeKeyBindings.cpp
+@@ -0,0 +1,198 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "NativeKeyBindings.h"
++
++#include "mozilla/NativeKeyBindingsType.h"
++#include "mozilla/TextEvents.h"
++#include "mozilla/WritingModes.h"
++
++namespace mozilla::widget {
++
++NativeKeyBindings* NativeKeyBindings::sInstanceForSingleLineEditor = nullptr;
++NativeKeyBindings* NativeKeyBindings::sInstanceForMultiLineEditor = nullptr;
++
++NativeKeyBindings* NativeKeyBindings::GetInstance(NativeKeyBindingsType aType) {
++  switch (aType) {
++    case NativeKeyBindingsType::SingleLineEditor:
++      if (!sInstanceForSingleLineEditor) {
++        sInstanceForSingleLineEditor = new NativeKeyBindings();
++        sInstanceForSingleLineEditor->mType = aType;
++      }
++      return sInstanceForSingleLineEditor;
++
++    default:
++    case NativeKeyBindingsType::MultiLineEditor:
++    case NativeKeyBindingsType::RichTextEditor:
++      if (!sInstanceForMultiLineEditor) {
++        sInstanceForMultiLineEditor = new NativeKeyBindings();
++        sInstanceForMultiLineEditor->mType = aType;
++      }
++      return sInstanceForMultiLineEditor;
++  }
++}
++
++void NativeKeyBindings::Shutdown() {
++  delete sInstanceForSingleLineEditor;
++  sInstanceForSingleLineEditor = nullptr;
++  delete sInstanceForMultiLineEditor;
++  sInstanceForMultiLineEditor = nullptr;
++}
++
++void NativeKeyBindings::GetEditCommands(const WidgetKeyboardEvent& aEvent,
++                                        const Maybe<WritingMode>& aWritingMode,
++                                        nsTArray<CommandInt>& aCommands) {
++  MOZ_ASSERT(aCommands.IsEmpty());
++
++  if (aEvent.IsAlt() || aEvent.IsMeta()) {
++    return;
++  }
++
++  Command command = Command::DoNothing;
++  const KeyNameIndex remappedKeyNameIndex =
++      aWritingMode.isSome() ? aEvent.GetRemappedKeyNameIndex(aWritingMode.ref())
++                            : aEvent.mKeyNameIndex;
++
++  const bool extendSelection = aEvent.IsShift();
++
++  switch (remappedKeyNameIndex) {
++    case KEY_NAME_INDEX_USE_STRING:
++      switch (aEvent.PseudoCharCode()) {
++        case 'a':
++        case 'A':
++          if (aEvent.IsControl()) {
++            command = Command::SelectAll;
++          }
++          break;
++        case 'c':
++        case 'C':
++          if (aEvent.IsControl() && !extendSelection) {
++            command = Command::Copy;
++          }
++          break;
++        case 'v':
++        case 'V':
++          if (aEvent.IsControl() && !extendSelection) {
++            command = Command::Paste;
++          }
++          break;
++        case 'x':
++        case 'X':
++          if (aEvent.IsControl() && !extendSelection) {
++            command = Command::Cut;
++          }
++          break;
++        case 'z':
++        case 'Z':
++          if (aEvent.IsControl()) {
++            command = extendSelection ? Command::HistoryRedo : Command::HistoryUndo;
++          }
++          break;
++        case 'y':
++        case 'Y':
++          if (aEvent.IsControl()) {
++            command = Command::HistoryRedo;
++          }
++          break;
++        default:
++          break;
++      }
++      break;
++
++    case KEY_NAME_INDEX_Insert:
++      if (aEvent.IsControl() && !extendSelection) {
++        command = Command::Copy;
++      } else if (extendSelection && !aEvent.IsControl()) {
++        command = Command::Paste;
++      }
++      break;
++
++    case KEY_NAME_INDEX_Delete:
++      if (extendSelection && !aEvent.IsControl()) {
++        command = Command::Cut;
++      } else if (aEvent.IsControl()) {
++        command = Command::DeleteWordForward;
++      } else {
++        command = Command::DeleteCharForward;
++      }
++      break;
++
++    case KEY_NAME_INDEX_Backspace:
++      if (aEvent.IsControl()) {
++        command = Command::DeleteWordBackward;
++      } else {
++        command = Command::DeleteCharBackward;
++      }
++      break;
++
++    case KEY_NAME_INDEX_ArrowLeft:
++      if (aEvent.IsControl()) {
++        command = extendSelection ? Command::SelectWordPrevious : Command::WordPrevious;
++      } else {
++        command = extendSelection ? Command::SelectCharPrevious : Command::CharPrevious;
++      }
++      break;
++
++    case KEY_NAME_INDEX_ArrowRight:
++      if (aEvent.IsControl()) {
++        command = extendSelection ? Command::SelectWordNext : Command::WordNext;
++      } else {
++        command = extendSelection ? Command::SelectCharNext : Command::CharNext;
++      }
++      break;
++
++    case KEY_NAME_INDEX_ArrowUp:
++      if (mType == NativeKeyBindingsType::SingleLineEditor) {
++        command = extendSelection ? Command::SelectBeginLine : Command::BeginLine;
++      } else {
++        command = extendSelection ? Command::SelectLinePrevious : Command::LinePrevious;
++      }
++      break;
++
++    case KEY_NAME_INDEX_ArrowDown:
++      if (mType == NativeKeyBindingsType::SingleLineEditor) {
++        command = extendSelection ? Command::SelectEndLine : Command::EndLine;
++      } else {
++        command = extendSelection ? Command::SelectLineNext : Command::LineNext;
++      }
++      break;
++
++    case KEY_NAME_INDEX_Home:
++      if (aEvent.IsControl()) {
++        command = extendSelection ? Command::SelectTop : Command::MoveTop;
++      } else {
++        command = extendSelection ? Command::SelectBeginLine : Command::BeginLine;
++      }
++      break;
++
++    case KEY_NAME_INDEX_End:
++      if (aEvent.IsControl()) {
++        command = extendSelection ? Command::SelectBottom : Command::MoveBottom;
++      } else {
++        command = extendSelection ? Command::SelectEndLine : Command::EndLine;
++      }
++      break;
++
++    case KEY_NAME_INDEX_PageUp:
++      if (mType != NativeKeyBindingsType::SingleLineEditor) {
++        command = extendSelection ? Command::SelectPageUp : Command::MovePageUp;
++      }
++      break;
++
++    case KEY_NAME_INDEX_PageDown:
++      if (mType != NativeKeyBindingsType::SingleLineEditor) {
++        command = extendSelection ? Command::SelectPageDown : Command::MovePageDown;
++      }
++      break;
++
++    default:
++      break;
++  }
++
++  if (command != Command::DoNothing) {
++    aCommands.AppendElement(static_cast<CommandInt>(command));
++  }
++}
++
++}  // namespace mozilla::widget
+diff --git a/widget/haiku/NativeKeyBindings.h b/widget/haiku/NativeKeyBindings.h
+new file mode 100644
+index 0000000000..12853ca2a7
+--- /dev/null
++++ b/widget/haiku/NativeKeyBindings.h
+@@ -0,0 +1,42 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef mozilla_widget_NativeKeyBindings_h
++#define mozilla_widget_NativeKeyBindings_h
++
++#include "mozilla/EventForwards.h"
++#include "nsTArray.h"
++
++namespace mozilla {
++enum class NativeKeyBindingsType : uint8_t;
++
++class WritingMode;
++template <typename T>
++class Maybe;
++
++namespace widget {
++
++class NativeKeyBindings final {
++ public:
++  static NativeKeyBindings* GetInstance(NativeKeyBindingsType aType);
++  static void Shutdown();
++
++  void GetEditCommands(const WidgetKeyboardEvent& aEvent,
++                       const Maybe<WritingMode>& aWritingMode,
++                       nsTArray<CommandInt>& aCommands);
++
++ private:
++  NativeKeyBindings() = default;
++  ~NativeKeyBindings() = default;
++
++  NativeKeyBindingsType mType;
++
++  static NativeKeyBindings* sInstanceForSingleLineEditor;
++  static NativeKeyBindings* sInstanceForMultiLineEditor;
++};
++
++}  // namespace widget
++}  // namespace mozilla
++
++#endif  // mozilla_widget_NativeKeyBindings_h
 diff --git a/widget/haiku/ScreenHelperHaiku.cpp b/widget/haiku/ScreenHelperHaiku.cpp
 new file mode 100644
 index 0000000000..29041eb03d
@@ -11699,10 +12367,10 @@ index 0000000000..af7bc73854
 +]
 diff --git a/widget/haiku/moz.build b/widget/haiku/moz.build
 new file mode 100644
-index 0000000000..c00cb903c0
+index 0000000000..85114cf5b3
 --- /dev/null
 +++ b/widget/haiku/moz.build
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,68 @@
 +# This Source Code Form is subject to the terms of the Mozilla Public
 +# License, v. 2.0. If a copy of the MPL was not distributed with this
 +# file, You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -11724,6 +12392,7 @@ index 0000000000..c00cb903c0
 +    "HaikuUtils.cpp",
 +    "HaikuView.cpp",
 +    "HaikuWindowBuffer.cpp",
++    "NativeKeyBindings.cpp",
 +    "nsAppShell.cpp",
 +    "nsBidiKeyboard.cpp",
 +    "nsClipboardHaiku.cpp",    
@@ -11772,10 +12441,10 @@ index 0000000000..c00cb903c0
 +SOURCES["HaikuApplication.cpp"].flags += ["-frtti"]
 diff --git a/widget/haiku/nsAppShell.cpp b/widget/haiku/nsAppShell.cpp
 new file mode 100644
-index 0000000000..c3f9ef46f9
+index 0000000000..f77182db14
 --- /dev/null
 +++ b/widget/haiku/nsAppShell.cpp
-@@ -0,0 +1,235 @@
+@@ -0,0 +1,258 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -11789,6 +12458,7 @@ index 0000000000..c3f9ef46f9
 +#include <utility>
 +
 +#include "mozilla/BackgroundHangMonitor.h"
++#include "mozilla/Components.h"
 +#include "mozilla/Hal.h"
 +#include "mozilla/widget/ScreenManager.h"
 +#include "mozilla/widget/ThemeChangeKind.h"
@@ -11933,12 +12603,16 @@ index 0000000000..c3f9ef46f9
 +}
 +
 +NS_IMETHODIMP nsAppShell::Run(void) {
-+  return nsBaseAppShell::Run();
++  nsresult rv = nsBaseAppShell::Run();
++  HaikuApplication::NotifyGeckoExited();
++  return rv;
 +}
 +
 +NS_IMETHODIMP nsAppShell::Exit(void) {
 +  ScheduleNativeEventCallback();
-+  return nsBaseAppShell::Exit();
++  nsresult rv = nsBaseAppShell::Exit();
++  HaikuApplication::NotifyGeckoExited();
++  return rv;
 +}
 +
 +void nsAppShell::DispatchRelaunch() {
@@ -12011,12 +12685,30 @@ index 0000000000..c3f9ef46f9
 +        DispatchRelaunch();
 +      }));
 +}
++
++void nsAppShell::DispatchQuit(sem_id aCheckSem, bool* aAllowedQuit) {
++  NS_DispatchToMainThread(NS_NewRunnableFunction(
++      "nsAppShell::DispatchQuit", [aCheckSem, aAllowedQuit]() {
++        nsCOMPtr<nsIAppStartup> appStartup =
++            mozilla::components::AppStartup::Service();
++        if (appStartup) {
++          bool userAllowedQuit = false;
++          appStartup->Quit(nsIAppStartup::eAttemptQuit, 0, &userAllowedQuit);
++          if (aAllowedQuit) {
++            *aAllowedQuit = userAllowedQuit;
++          }
++        }
++        if (aCheckSem >= B_OK) {
++          release_sem(aCheckSem);
++        }
++      }));
++}
 diff --git a/widget/haiku/nsAppShell.h b/widget/haiku/nsAppShell.h
 new file mode 100644
-index 0000000000..4e0919ef3c
+index 0000000000..7a194bf1b3
 --- /dev/null
 +++ b/widget/haiku/nsAppShell.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,50 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12048,6 +12740,7 @@ index 0000000000..4e0919ef3c
 +  static void DispatchThemeChanged();
 +  static void DispatchRefs(nsTArray<nsCString>&& aPaths);
 +  static void DispatchArgv(nsTArray<nsCString>&& aArgs);
++  static void DispatchQuit(sem_id aCheckSem, bool* aAllowedQuit);
 +
 + protected:
 +  ~nsAppShell() override;
@@ -12629,10 +13322,10 @@ index 0000000000..3226fd8960
 +#endif  // nsDeviceContextSpecHaiku_h_
 diff --git a/widget/haiku/nsDragService.cpp b/widget/haiku/nsDragService.cpp
 new file mode 100644
-index 0000000000..dd3e51934e
+index 0000000000..2ebc9385ce
 --- /dev/null
 +++ b/widget/haiku/nsDragService.cpp
-@@ -0,0 +1,800 @@
+@@ -0,0 +1,805 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -13002,6 +13695,11 @@ index 0000000000..dd3e51934e
 +      msg->AddString("name", firstFileRef.name);
 +      msg->AddString("be:filetypes", "application/octet-stream");
 +      msg->AddString("be:types", "application/octet-stream");
++
++      BMessage originatorData(B_SIMPLE_DATA);
++      originatorData.AddString("file_path", path.Path());
++      originatorData.AddRef("refs", &firstFileRef);
++      msg->AddMessage("be:originator-data", &originatorData);
 +    }
 +
 +    BString uriList;
@@ -13933,10 +14631,10 @@ index 0000000000..a678e53cf7
 +#endif  // mozilla_widget_nsFilePicker_h
 diff --git a/widget/haiku/nsLookAndFeel.cpp b/widget/haiku/nsLookAndFeel.cpp
 new file mode 100644
-index 0000000000..f159175c30
+index 0000000000..eda4981566
 --- /dev/null
 +++ b/widget/haiku/nsLookAndFeel.cpp
-@@ -0,0 +1,444 @@
+@@ -0,0 +1,508 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -13948,7 +14646,12 @@ index 0000000000..f159175c30
 +#include "nsStyleConsts.h"
 +#include "HaikuUtils.h"
 +
++#include <cstdint>
 +#include <cstdlib>
++
++#pragma GCC visibility push(default)
++#include <interface/Menu.h>
++#pragma GCC visibility pop
 +
 +using namespace mozilla;
 +
@@ -13962,6 +14665,17 @@ index 0000000000..f159175c30
 +  res.green = static_cast<uint8>((int32(bg.green) + int32(fg.green) + 1) / 2);
 +  res.blue = static_cast<uint8>((int32(bg.blue) + int32(fg.blue) + 1) / 2);
 +  return res;
++}
++
++static float ConvertFontSize(float aFontSize) {
++  if (!be_plain_font || aFontSize <= 0.0f) {
++    return 12.0f;
++  }
++  float plainSize = be_plain_font->Size();
++  if (plainSize <= 12.0f) {
++    return aFontSize;
++  }
++  return aFontSize - (plainSize - 12.0f);
 +}
 +
 +nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme aColorScheme, nscolor& aResult) {
@@ -14309,55 +15023,79 @@ index 0000000000..f159175c30
 +  return NS_OK;
 +}
 +
++void nsLookAndFeel::InitSystemFont(const char* aFamily, float aSize,
++                                   uint16_t aFace, SystemFontInfo& aInfo) {
++  if (!aFamily || aFamily[0] == '\0') {
++    aInfo.mName.AssignLiteral("sans-serif");
++  } else {
++    CopyUTF8toUTF16(Span(aFamily, strlen(aFamily)), aInfo.mName);
++  }
++
++  aInfo.mStyle.size = aSize > 0.0f ? aSize : 12.0f;
++  aInfo.mStyle.systemFont = true;
++
++  if (aFace & B_ITALIC_FACE) {
++    aInfo.mStyle.style = FontSlantStyle::ITALIC;
++  } else {
++    aInfo.mStyle.style = FontSlantStyle::NORMAL;
++  }
++
++  if (aFace & B_HEAVY_FACE) {
++    aInfo.mStyle.weight = FontWeight::FromFloat(800.0f);
++  } else if (aFace & B_BOLD_FACE) {
++    aInfo.mStyle.weight = FontWeight::BOLD;
++  } else if (aFace & B_LIGHT_FACE) {
++    aInfo.mStyle.weight = FontWeight::FromFloat(300.0f);
++  } else {
++    aInfo.mStyle.weight = FontWeight::NORMAL;
++  }
++
++  if (aFace & B_CONDENSED_FACE) {
++    aInfo.mStyle.width = FontWidth::CONDENSED;
++  } else {
++    aInfo.mStyle.width = FontWidth::NORMAL;
++  }
++}
++
 +bool nsLookAndFeel::NativeGetFont(FontID aID, nsString& aFontName, gfxFontStyle& aFontStyle) {
 +  EnsureInit();
 +
-+  if (!be_app || be_app->InitCheck() != B_OK || !be_plain_font) {
++  if (!mInitialized) {
 +    aFontStyle.style = FontSlantStyle::NORMAL;
 +    aFontStyle.weight = FontWeight::NORMAL;
 +    aFontStyle.width = FontWidth::NORMAL;
-+    aFontStyle.size = 12;
++    aFontStyle.size = 12.0f;
 +    aFontStyle.systemFont = true;
 +    aFontName.AssignLiteral("sans-serif");
 +    return true;
 +  }
 +
-+  const BFont* bfont = be_plain_font;
++  switch (aID) {
++    case FontID::Menu:
++    case FontID::MozPullDownMenu:
++      aFontName = mMenuFont.mName;
++      aFontStyle = mMenuFont.mStyle;
++      break;
 +
-+  font_family family;
-+  font_style style;
-+  bfont->GetFamilyAndStyle(&family, &style);
++    case FontID::Caption:
++    case FontID::SmallCaption:
++      aFontName = mBoldFont.mName;
++      aFontStyle = mBoldFont.mStyle;
++      break;
 +
-+  CopyUTF8toUTF16(Span(family, strlen(family)), aFontName);
++    default:
++      aFontName = mPlainFont.mName;
++      aFontStyle = mPlainFont.mStyle;
++      break;
++  }
 +
-+  float fontSize = bfont->Size();
-+  double scale = mozilla::widget::GetHaikuSystemScale();
-+
-+  aFontStyle.size = fontSize / scale;
-+  aFontStyle.systemFont = true;
-+
-+  uint16 face = bfont->Face();
-+
-+  if (face & B_ITALIC_FACE) {
-+    aFontStyle.style = FontSlantStyle::ITALIC;
-+  } else {
++  if (aFontName.IsEmpty()) {
++    aFontName.AssignLiteral("sans-serif");
 +    aFontStyle.style = FontSlantStyle::NORMAL;
-+  }
-+
-+  if (face & B_HEAVY_FACE) {
-+    aFontStyle.weight = FontWeight::FromFloat(800.0f);
-+  } else if (face & B_BOLD_FACE) {
-+    aFontStyle.weight = FontWeight::BOLD;
-+  } else if (face & B_LIGHT_FACE) {
-+    aFontStyle.weight = FontWeight::FromFloat(300.0f);
-+  } else {
 +    aFontStyle.weight = FontWeight::NORMAL;
-+  }
-+
-+  if (face & B_CONDENSED_FACE) {
-+    aFontStyle.width = FontWidth::CONDENSED;
-+  } else {
 +    aFontStyle.width = FontWidth::NORMAL;
++    aFontStyle.size = 12.0f;
++    aFontStyle.systemFont = true;
 +  }
 +
 +  return true;
@@ -14375,6 +15113,30 @@ index 0000000000..f159175c30
 +
 +  rgb_color bg = ui_color(B_PANEL_BACKGROUND_COLOR);
 +  mSystemIsDark = bg.IsDark();
++
++  if (be_plain_font) {
++    font_family plainFamily;
++    font_style plainStyle;
++    be_plain_font->GetFamilyAndStyle(&plainFamily, &plainStyle);
++    InitSystemFont(plainFamily, ConvertFontSize(be_plain_font->Size()),
++                   be_plain_font->Face(), mPlainFont);
++  }
++
++  if (be_bold_font) {
++    font_family boldFamily;
++    font_style boldStyle;
++    be_bold_font->GetFamilyAndStyle(&boldFamily, &boldStyle);
++    InitSystemFont(boldFamily, ConvertFontSize(be_bold_font->Size() * 0.96f),
++                   be_bold_font->Face(), mBoldFont);
++  }
++
++  menu_info menuInfo;
++  if (get_menu_info(&menuInfo) == B_OK) {
++    InitSystemFont(menuInfo.f_family, ConvertFontSize(menuInfo.font_size),
++                   0, mMenuFont);
++  } else if (be_plain_font) {
++    mMenuFont = mPlainFont;
++  }
 +}
 +
 +void nsLookAndFeel::RefreshImpl() {
@@ -14383,10 +15145,10 @@ index 0000000000..f159175c30
 +}
 diff --git a/widget/haiku/nsLookAndFeel.h b/widget/haiku/nsLookAndFeel.h
 new file mode 100644
-index 0000000000..4e7ff7399d
+index 0000000000..4b0446e7e5
 --- /dev/null
 +++ b/widget/haiku/nsLookAndFeel.h
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,48 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -14394,7 +15156,9 @@ index 0000000000..4e7ff7399d
 +#ifndef mozilla_widget_nsLookAndFeel_h
 +#define mozilla_widget_nsLookAndFeel_h
 +
++#include <cstdint>
 +#include "nsXPLookAndFeel.h"
++#include "gfxFont.h"
 +
 +class nsLookAndFeel final : public nsXPLookAndFeel {
 + public:
@@ -14417,8 +15181,19 @@ index 0000000000..4e7ff7399d
 +  }
 +
 + private:
++  struct SystemFontInfo {
++    nsString mName;
++    gfxFontStyle mStyle;
++  };
++
++  void InitSystemFont(const char* aFamily, float aSize, uint16_t aFace, SystemFontInfo& aInfo);
++
 +  bool mInitialized = false;
 +  bool mSystemIsDark = false;
++
++  SystemFontInfo mPlainFont;
++  SystemFontInfo mBoldFont;
++  SystemFontInfo mMenuFont;
 +};
 +
 +#endif  // mozilla_widget_nsLookAndFeel_h
@@ -14610,10 +15385,10 @@ index 0000000000..6f5ba3c607
 +#endif  // mozilla_widget_nsUserIdleServiceHaiku_h
 diff --git a/widget/haiku/nsWidgetFactory.cpp b/widget/haiku/nsWidgetFactory.cpp
 new file mode 100644
-index 0000000000..7ef623eb10
+index 0000000000..7ab3e9dbc0
 --- /dev/null
 +++ b/widget/haiku/nsWidgetFactory.cpp
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,56 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -14625,8 +15400,9 @@ index 0000000000..7ef623eb10
 +#include "nsClipboardHaiku.h"
 +#include "mozilla/WidgetUtils.h"
 +#include "mozilla/Components.h"
-+#include "HaikuApplication.h"
 +#include "HaikuUtils.h"
++#include "HaikuApplication.h"
++#include "NativeKeyBindings.h"
 +#include "Theme.h"
 +
 +using namespace mozilla;
@@ -14643,6 +15419,7 @@ index 0000000000..7ef623eb10
 +}
 +
 +void nsWidgetHaikuModuleDtor() {
++  NativeKeyBindings::Shutdown();
 +  WidgetUtils::Shutdown();
 +  nsLookAndFeel::Shutdown();
 +  nsAppShellShutdown();
@@ -14692,10 +15469,10 @@ index 0000000000..654df7ab36
 +#endif  // mozilla_widget_nsWidgetFactory_h
 diff --git a/widget/haiku/nsWindow.cpp b/widget/haiku/nsWindow.cpp
 new file mode 100644
-index 0000000000..7f9cd217b7
+index 0000000000..6324d3e4ad
 --- /dev/null
 +++ b/widget/haiku/nsWindow.cpp
-@@ -0,0 +1,1168 @@
+@@ -0,0 +1,1203 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -14712,10 +15489,12 @@ index 0000000000..7f9cd217b7
 +#include "HaikuIMEHandler.h"
 +#include "HaikuCursor.h"
 +#include "HaikuWindowBuffer.h"
++#include "NativeKeyBindings.h"
 +
 +#include "mozilla/BasicEvents.h"
 +#include "mozilla/EventForwards.h"
 +#include "mozilla/MouseEvents.h"
++#include "mozilla/TextEventDispatcher.h"
 +#include "mozilla/TextEvents.h"
 +#include "mozilla/TimeStamp.h"
 +#include "mozilla/UniquePtr.h"
@@ -14988,6 +15767,9 @@ index 0000000000..7f9cd217b7
 +      if (mWindow->IsHidden()) {
 +        mWindow->Show();
 +      }
++      if (mWindow->IsMinimized()) {
++        mWindow->Minimize(false);
++      }
 +      if (!mIsPopup) {
 +        mWindow->Activate(true);
 +      }
@@ -15011,6 +15793,9 @@ index 0000000000..7f9cd217b7
 +  }
 +
 +  if (mWindow && mWindow->LockWithTimeout(50000) == B_OK) {
++    if (mWindow->IsMinimized()) {
++      mWindow->Minimize(false);
++    }
 +    mWindow->Activate(true);
 +    if (mView) {
 +      mView->MakeFocus(true);
@@ -15279,6 +16064,9 @@ index 0000000000..7f9cd217b7
 +      }
 +
 +      case nsSizeMode_Maximized: {
++        if (mWindow->IsMinimized()) {
++          mWindow->Minimize(false);
++        }
 +        mWindow->Zoom();
 +        break;
 +      }
@@ -15332,6 +16120,26 @@ index 0000000000..7f9cd217b7
 +mozilla::widget::TextEventDispatcherListener*
 +nsWindow::GetNativeTextEventDispatcherListener() {
 +  return mIMEHandler.get();
++}
++
++MOZ_CAN_RUN_SCRIPT bool nsWindow::GetEditCommands(
++    NativeKeyBindingsType aType,
++    const WidgetKeyboardEvent& aEvent,
++    nsTArray<CommandInt>& aCommands) {
++  if (NS_WARN_IF(!nsIWidget::GetEditCommands(aType, aEvent, aCommands))) {
++    return false;
++  }
++
++  Maybe<WritingMode> writingMode;
++  if (aEvent.NeedsToRemapNavigationKey()) {
++    if (RefPtr<TextEventDispatcher> dispatcher = GetTextEventDispatcher()) {
++      writingMode = dispatcher->MaybeQueryWritingModeAtSelection();
++    }
++  }
++
++  NativeKeyBindings* keyBindings = NativeKeyBindings::GetInstance(aType);
++  keyBindings->GetEditCommands(aEvent, writingMode, aCommands);
++  return true;
 +}
 +
 +already_AddRefed<DrawTarget> nsWindow::StartRemoteDrawingInRegion(
@@ -15472,6 +16280,9 @@ index 0000000000..7f9cd217b7
 +          if (rollupListener) {
 +            rollupListener->Rollup({});
 +          }
++        } else if (self->mSizeMode == nsSizeMode_Minimized) {
++          self->mSizeMode = nsSizeMode_Normal;
++          self->mWidgetListener->SizeModeChanged(nsSizeMode_Normal);
 +        }
 +
 +        if (self->mWidgetListener) {
@@ -15694,7 +16505,7 @@ index 0000000000..7f9cd217b7
 +  }
 +}
 +
-+RefPtr<nsDragSession> nsWindow::GetOrCreateDragSession(const BMessage* aMessage) {
++RefPtr<nsDragSession> nsWindow::GetOrCreateDragSession(const BMessage* aMessage, int32_t aModifiers) {
 +  nsDragService* dragService = nsDragService::GetInstance();
 +  if (!dragService) {
 +    return nullptr;
@@ -15713,8 +16524,9 @@ index 0000000000..7f9cd217b7
 +  haikuSession->SetHaikuDragMessage(aMessage);
 +  haikuSession->SetOverGeckoWindow(true);
 +
++  mozilla::Modifiers geckoMods = GetGeckoModifiers(aModifiers);
 +  uint32_t action = nsIDragService::DRAGDROP_ACTION_MOVE;
-+  if (::modifiers() & (B_OPTION_KEY | B_LEFT_OPTION_KEY | B_RIGHT_OPTION_KEY)) {
++  if (geckoMods & mozilla::MODIFIER_ALTGRAPH) {
 +    action = nsIDragService::DRAGDROP_ACTION_COPY;
 +  }
 +  session->SetDragAction(action);
@@ -15722,50 +16534,50 @@ index 0000000000..7f9cd217b7
 +  return haikuSession;
 +}
 +
-+void nsWindow::OnHaikuDragEnter(float aX, float aY, const BMessage* aMessage) {
++void nsWindow::OnHaikuDragEnter(float aX, float aY, const BMessage* aMessage, int32_t aModifiers) {
 +  RefPtr<nsWindow> self(this);
 +  BMessage msg(*aMessage);
 +  NS_DispatchToMainThread(NS_NewRunnableFunction(
-+      "nsWindow::OnHaikuDragEnter", [self, aX, aY, msg]() {
++      "nsWindow::OnHaikuDragEnter", [self, aX, aY, msg, aModifiers]() {
 +        if (self->mOnDestroyCalled || !self->mWidgetListener) {
 +          return;
 +        }
 +
-+        self->GetOrCreateDragSession(&msg);
++        self->GetOrCreateDragSession(&msg, aModifiers);
 +
 +        nsIWidget* widget = static_cast<nsIWidget*>(self.get());
 +        WidgetDragEvent event(true, eDragEnter, widget);
 +        event.mRefPoint = LayoutDeviceIntPoint(int32_t(aX), int32_t(aY));
-+        event.mModifiers = GetGeckoModifiers(::modifiers());
++        event.mModifiers = GetGeckoModifiers(aModifiers);
 +        event.mTimeStamp = TimeStamp::Now();
 +        self->DispatchInputEvent(&event);
 +      }));
 +}
 +
-+void nsWindow::OnHaikuDragOver(float aX, float aY, const BMessage* aMessage) {
++void nsWindow::OnHaikuDragOver(float aX, float aY, const BMessage* aMessage, int32_t aModifiers) {
 +  RefPtr<nsWindow> self(this);
 +  BMessage msg(*aMessage);
 +  NS_DispatchToMainThread(NS_NewRunnableFunction(
-+      "nsWindow::OnHaikuDragOver", [self, aX, aY, msg]() {
++      "nsWindow::OnHaikuDragOver", [self, aX, aY, msg, aModifiers]() {
 +        if (self->mOnDestroyCalled || !self->mWidgetListener) {
 +          return;
 +        }
 +
-+        self->GetOrCreateDragSession(&msg);
++        self->GetOrCreateDragSession(&msg, aModifiers);
 +
 +        nsIWidget* widget = static_cast<nsIWidget*>(self.get());
 +        WidgetDragEvent event(true, eDragOver, widget);
 +        event.mRefPoint = LayoutDeviceIntPoint(int32_t(aX), int32_t(aY));
-+        event.mModifiers = GetGeckoModifiers(::modifiers());
++        event.mModifiers = GetGeckoModifiers(aModifiers);
 +        event.mTimeStamp = TimeStamp::Now();
 +        self->DispatchInputEvent(&event);
 +      }));
 +}
 +
-+void nsWindow::OnHaikuDragExit() {
++void nsWindow::OnHaikuDragExit(int32_t aModifiers) {
 +  RefPtr<nsWindow> self(this);
 +  NS_DispatchToMainThread(NS_NewRunnableFunction(
-+      "nsWindow::OnHaikuDragExit", [self]() {
++      "nsWindow::OnHaikuDragExit", [self, aModifiers]() {
 +        if (self->mOnDestroyCalled || !self->mWidgetListener) {
 +          return;
 +        }
@@ -15781,22 +16593,22 @@ index 0000000000..7f9cd217b7
 +
 +        nsIWidget* widget = static_cast<nsIWidget*>(self.get());
 +        WidgetDragEvent event(true, eDragExit, widget);
-+        event.mModifiers = GetGeckoModifiers(::modifiers());
++        event.mModifiers = GetGeckoModifiers(aModifiers);
 +        event.mTimeStamp = TimeStamp::Now();
 +        self->DispatchInputEvent(&event);
 +      }));
 +}
 +
-+void nsWindow::OnHaikuDrop(float aX, float aY, const BMessage* aMessage) {
++void nsWindow::OnHaikuDrop(float aX, float aY, const BMessage* aMessage, int32_t aModifiers) {
 +  RefPtr<nsWindow> self(this);
 +  BMessage msg(*aMessage);
 +  NS_DispatchToMainThread(NS_NewRunnableFunction(
-+      "nsWindow::OnHaikuDrop", [self, aX, aY, msg]() {
++      "nsWindow::OnHaikuDrop", [self, aX, aY, msg, aModifiers]() {
 +        if (self->mOnDestroyCalled || !self->mWidgetListener) {
 +          return;
 +        }
 +
-+        RefPtr<nsDragSession> session = self->GetOrCreateDragSession(&msg);
++        RefPtr<nsDragSession> session = self->GetOrCreateDragSession(&msg, aModifiers);
 +        if (session) {
 +          session->SetCanDrop(true);
 +        }
@@ -15804,7 +16616,7 @@ index 0000000000..7f9cd217b7
 +        nsIWidget* widget = static_cast<nsIWidget*>(self.get());
 +        WidgetDragEvent event(true, eDrop, widget);
 +        event.mRefPoint = LayoutDeviceIntPoint(int32_t(aX), int32_t(aY));
-+        event.mModifiers = GetGeckoModifiers(::modifiers());
++        event.mModifiers = GetGeckoModifiers(aModifiers);
 +        event.mTimeStamp = TimeStamp::Now();
 +        self->DispatchInputEvent(&event);
 +
@@ -15817,7 +16629,7 @@ index 0000000000..7f9cd217b7
 +          }
 +
 +          session->EndDragSession(action != nsIDragService::DRAGDROP_ACTION_NONE,
-+                                  GetGeckoModifiers(::modifiers()));
++                                  GetGeckoModifiers(aModifiers));
 +        }
 +      }));
 +}
@@ -15866,10 +16678,10 @@ index 0000000000..7f9cd217b7
 +}
 diff --git a/widget/haiku/nsWindow.h b/widget/haiku/nsWindow.h
 new file mode 100644
-index 0000000000..44724ee6d9
+index 0000000000..412ca1dbd2
 --- /dev/null
 +++ b/widget/haiku/nsWindow.h
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,168 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -15964,8 +16776,12 @@ index 0000000000..44724ee6d9
 +    return mInputContext;
 +  }
 +
++  MOZ_CAN_RUN_SCRIPT bool GetEditCommands(
++      mozilla::NativeKeyBindingsType aType,
++      const mozilla::WidgetKeyboardEvent& aEvent,
++      nsTArray<mozilla::CommandInt>& aCommands) override;
 +  mozilla::widget::TextEventDispatcherListener*
-+  GetNativeTextEventDispatcherListener() override;
++      GetNativeTextEventDispatcherListener() override;
 +
 +  already_AddRefed<mozilla::gfx::DrawTarget> StartRemoteDrawingInRegion(
 +      const LayoutDeviceIntRegion& aInvalidRegion) override;
@@ -15994,10 +16810,10 @@ index 0000000000..44724ee6d9
 +  void OnHaikuKeyEvent(bool aIsDown, int32_t aKey, int32_t aRawChar, int32_t aModifiers,
 +                       const char* aBytes, int32_t aNumBytes);
 +  void OnHaikuInputMethodEvent(BMessage* aMessage);
-+  void OnHaikuDragEnter(float aX, float aY, const BMessage* aMessage);
-+  void OnHaikuDragOver(float aX, float aY, const BMessage* aMessage);
-+  void OnHaikuDragExit();
-+  void OnHaikuDrop(float aX, float aY, const BMessage* aMessage);
++  void OnHaikuDragEnter(float aX, float aY, const BMessage* aMessage, int32_t aModifiers);
++  void OnHaikuDragOver(float aX, float aY, const BMessage* aMessage, int32_t aModifiers);
++  void OnHaikuDragExit(int32_t aModifiers);
++  void OnHaikuDrop(float aX, float aY, const BMessage* aMessage, int32_t aModifiers);
 +  void OnHaikuCopyTargetDone();
 +  void OnHaikuDragEndedOutside(float aScreenX, float aScreenY, int32_t aModifiers);
 +
@@ -16008,7 +16824,7 @@ index 0000000000..44724ee6d9
 +  void EnsureFrameIsOnScreen();
 +  void UpdateBounds();
 +  nsresult DoMakeFullScreen(bool aFullScreen);
-+  RefPtr<nsDragSession> GetOrCreateDragSession(const BMessage* aMessage);
++  RefPtr<nsDragSession> GetOrCreateDragSession(const BMessage* aMessage, int32_t aModifiers);
 +
 +  HaikuWindow* mWindow;
 +  HaikuView* mView;
@@ -16362,67 +17178,6 @@ index 8112a54313..ec1760f6ae 100644
  #    include <sys/wait.h>
  #  endif
  #  include <signal.h>
--- 
-2.54.0
-
-
-From 6696b1ec921cf13a455a4876b6eca0d326b86b60 Mon Sep 17 00:00:00 2001
-From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Wed, 30 Sep 2026 22:26:20 +1000
-Subject: Fix targets for Haiku
-
-
-diff --git a/toolkit/moz.configure b/toolkit/moz.configure
-index b0c620638b..6b13709325 100644
---- a/toolkit/moz.configure
-+++ b/toolkit/moz.configure
-@@ -540,7 +540,10 @@ def toolkit_choices(target):
-     elif target.os == "Android":
-         return ("cairo-android",)
-     elif target.os == "Haiku":
--        return ("cairo-haiku",)
-+        return (
-+            "cairo-haiku",
-+            "cairo-gtk3-wayland-only",
-+        )
-     else:
-         # cairo-gtk3 - X11 backend with optional Wayland backend (auto detected)
-         # cairo-gtk3-wayland - Wayland backend with optional X11 backend (auto detected)
--- 
-2.54.0
-
-
-From 3d8bc82cfa220db6c19d6d562496fda43ad30553 Mon Sep 17 00:00:00 2001
-From: Thomas Deutschmann <whissi@gentoo.org>
-Date: Sat, 29 Aug 2020 22:30:59 +0200
-Subject: [PATCH 27/30] LTO: Only enable LTO for Rust when complete build uses
- LTO
-
-Signed-off-by: Thomas Deutschmann <whissi@gentoo.org>
----
- config/makefiles/rust.mk | 2 ++
- 1 file changed, 2 insertions(+)
-
-diff --git a/config/makefiles/rust.mk b/config/makefiles/rust.mk
-index 0a7413d3ee..f9d88b3df4 100644
---- a/config/makefiles/rust.mk
-+++ b/config/makefiles/rust.mk
-@@ -81,6 +81,7 @@ endif
- # These flags are passed via `cargo rustc` and only apply to the final rustc
- # invocation (i.e., only the top-level crate, not its dependencies).
- cargo_rustc_flags = $(CARGO_RUSTCFLAGS)
-+ifdef MOZ_LTO
- ifndef DEVELOPER_OPTIONS
- ifndef MOZ_DEBUG_RUST
- # Enable link-time optimization for release builds, but not when linking
-@@ -100,6 +101,7 @@ endif
- endif
- endif
- endif
-+endif
- 
- ifdef CARGO_INCREMENTAL
- export CARGO_INCREMENTAL
 -- 
 2.54.0
 
