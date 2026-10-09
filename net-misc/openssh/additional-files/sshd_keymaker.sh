@@ -17,12 +17,17 @@ hostKeyDir=${SETTINGSSSHDIR}
 
 
 if [ ! -f "$hostKeyDir/ssh_host_ecdsa_key" ] ; then
-	_progress 0.2 "ecdsa"
+	_progress 0.15 "ecdsa"
 	ssh-keygen -t ecdsa -f "$hostKeyDir/ssh_host_ecdsa_key" -N ""
 fi
 
+if [ ! -f "$hostKeyDir/ssh_host_ecdsa_sk_key" ] ; then
+	_progress 0.3 "ecdsa_sk"
+	ssh-keygen -t ecdsa_sk -f "$hostKeyDir/ssh_host_ecdsa_sk_key" -N ""
+fi
+
 if [ ! -f "$hostKeyDir/ssh_host_rsa_key" ] ; then
-	_progress 0.4 "rsa"
+	_progress 0.45 "rsa"
 	ssh-keygen -t rsa -f "$hostKeyDir/ssh_host_rsa_key" -N ""
 fi
 
@@ -31,8 +36,13 @@ if [ ! -f "$hostKeyDir/ssh_host_ed25519_key" ] ; then
 	ssh-keygen -t ed25519 -f "$hostKeyDir/ssh_host_ed25519_key" -N ""
 fi
 
+if [ ! -f "$hostKeyDir/ssh_host_ed25519_sk_key" ] ; then
+	_progress 0.75 "ed25519_sk"
+	ssh-keygen -t ed25519_sk -f "$hostKeyDir/ssh_host_ed25519_sk_key" -N ""
+fi
+
 if [ ! -f "$hostKeyDir/ssh_host_mldsa44-ed25519_key" ] ; then
-	_progress 0.8 "mldsa44-ed25519"
+	_progress 0.9 "mldsa44-ed25519"
 	ssh-keygen -t mldsa44-ed25519 -f "$hostKeyDir/ssh_host_mldsa44-ed25519_key" -N ""
 fi
 
