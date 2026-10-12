@@ -1,17 +1,18 @@
-From 395cc3fdab77f8fae3a8ae1b14db2b79ae5e145c Mon Sep 17 00:00:00 2001
+From 11d94994bd75e34cfa744efda11c350766ac847b Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Tue, 6 Oct 2026 10:53:19 +1000
+Date: Mon, 12 Oct 2026 15:29:19 +1000
 Subject: Add Haiku platform support with dual-backend build
 
 Based on patches sourced from https://github.com/kenz-gelsoft/gecko-dev/
 
 - Build System & Architecture:
   * Added Haiku target with dual-backend support: native UI and GTK3 + Wayland.
-  * Adjusted compiler and linker flags
+  * Adjusted compiler and linker flags for Haiku toolchain.
 
 - Native UI & System Integration (widget/haiku):
   * Implemented native windowing and view backend (BWindow/BView) with
     software double-buffered rendering via Skia.
+  * Implemented native-styled scrollbar theme.
   * Implemented native file dialogs (BFilePanel), clipboard (BClipboard),
     custom/system cursors (BCursor), and input method support (IME).
   * Implemented advanced Drag & Drop with support for files, text, images,
@@ -21,17 +22,20 @@ Based on patches sourced from https://github.com/kenz-gelsoft/gecko-dev/
   * Implemented shell services (MIME associations, Tracker wallpaper).
   * Added `moz-icon:` channel for native vector (HVIF) and MIME icons.
 
-- Graphics & Multimedia:
+- Graphics, Multimedia & Hardware APIs:
   * Implemented native WebGL context provider via Haiku BGLView.
   * Implemented native cubeb audio backend for MediaKit.
   * Implemented WebRTC desktop screen capture and webcam video capture.
   * Implemented Gamepad API backend using BJoystick.
+  * Implemented WebSerial API backend for serial port enumeration and
+    communication on Haiku.
 
 - Platform Compatibility & Third-Party:
   * Adjusted networking and socket options across libwebrtc, nICEr,
     nrappkit, SCTP, and quinn-udp for Haiku network stack.
   * Fixed type collisions (int64) and compatibility issues in vendored
     Rust crates (glslopt, iana-time-zone-haiku, lmdb-rkv-sys).
+
 
 diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
 index 1391383448..aec43249fc 100644
@@ -172,7 +176,7 @@ index 29fc3b9c8c..c7f7a6048e 100644
  if SOURCES:
 diff --git a/browser/components/shell/nsHaikuShellService.cpp b/browser/components/shell/nsHaikuShellService.cpp
 new file mode 100644
-index 0000000000..d48664900a
+index 0000000000..733606626f
 --- /dev/null
 +++ b/browser/components/shell/nsHaikuShellService.cpp
 @@ -0,0 +1,321 @@
@@ -1102,6 +1106,28 @@ index ad946302dd..d33c5c6615 100644
  else:
      UNIFIED_SOURCES += ["fallback/FallbackGamepad.cpp"]
  
+diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
+index 00715397e5..7d4dfdf7ea 100644
+--- a/dom/ipc/PContent.ipdl
++++ b/dom/ipc/PContent.ipdl
+@@ -237,7 +237,7 @@ struct SystemFontListEntry {
+ };
+ #endif
+ 
+-#ifdef MOZ_WIDGET_GTK
++#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_HAIKU)
+ struct SystemFontOptions {
+     int32_t antialias; // cairo_antialias_t
+     int32_t subpixelOrder; // cairo_subpixel_order_t
+@@ -248,7 +248,7 @@ struct SystemFontOptions {
+ 
+ struct SystemFontList {
+     SystemFontListEntry[] entries;
+-#ifdef MOZ_WIDGET_GTK
++#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_HAIKU)
+     SystemFontOptions options;
+ #endif
+ };
 diff --git a/dom/media/CallbackThreadRegistry.cpp b/dom/media/CallbackThreadRegistry.cpp
 index 3b2455c53e..614de8b7ed 100644
 --- a/dom/media/CallbackThreadRegistry.cpp
@@ -1407,6 +1433,148 @@ index a56beb58da..6bc53ebc64 100644
  
  if toolkit != "cocoa":
      EXPORTS += [
+diff --git a/dom/webserial/PosixSerialPlatformService.cpp b/dom/webserial/PosixSerialPlatformService.cpp
+index e42eae2709..496834adfe 100644
+--- a/dom/webserial/PosixSerialPlatformService.cpp
++++ b/dom/webserial/PosixSerialPlatformService.cpp
+@@ -38,6 +38,10 @@
+ #  endif
+ #endif
+ 
++#ifdef XP_HAIKU
++#  include <sys/stat.h>
++#endif
++
+ #ifdef TCGETS2
+ // Support non-standard baud rates through TCGETS2/TCSETS2
+ #  define LINUX_NSTD_BAUD 1
+@@ -79,6 +83,12 @@ static Result<Ok, int> IsRealSerialPort(const char* aDevpath) {
+   }
+   int status;
+   bool isReal = ioctl(fd, TIOCMGET, &status) == 0;
++#ifdef XP_HAIKU
++  if (!isReal) {
++    struct termios tty;
++    isReal = (tcgetattr(fd, &tty) == 0);
++  }
++#endif
+   // Capture errno before close(), which may overwrite it.
+   int ioctlErrno = errno;
+   close(fd);
+@@ -463,6 +473,58 @@ nsresult PosixSerialPlatformService::EnumeratePortsImpl(
+       aPorts.AppendElement(info);
+     }
+   }
++#elif defined(XP_HAIKU)
++  auto scanPortsDir = [&](auto& self, const nsACString& aDir) -> void {
++    DIR* devDir = opendir(PromiseFlatCString(aDir).get());
++    if (!devDir) {
++      MOZ_LOG(gWebSerialLog, LogLevel::Warning,
++              ("PosixSerialPlatformService[%p]::EnumeratePorts unable to open %s",
++               this, PromiseFlatCString(aDir).get()));
++      return;
++    }
++    auto cleanupDir = MakeScopeExit([&]() { closedir(devDir); });
++
++    while (struct dirent* ent = readdir(devDir)) {
++      if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
++        continue;
++      }
++
++      nsAutoCString devpath(aDir);
++      if (!devpath.IsEmpty() && devpath.Last() != '/') {
++        devpath.Append('/');
++      }
++      devpath.Append(ent->d_name);
++
++      struct stat st;
++      if (stat(devpath.get(), &st) == 0 && S_ISDIR(st.st_mode)) {
++        self(self, devpath);
++        continue;
++      }
++
++      if (IsRealSerialPort(devpath.get()).isErr()) {
++        continue;
++      }
++
++      MOZ_LOG(gWebSerialLog, LogLevel::Debug,
++              ("PosixSerialPlatformService[%p]::EnumeratePorts found port: %s",
++               this, devpath.get()));
++
++      IPCSerialPortInfo info;
++      NS_ConvertUTF8toUTF16 devpathUtf16(devpath);
++      info.id() = devpathUtf16;
++      info.path() = devpathUtf16;
++      info.friendlyName() =
++          NS_ConvertUTF8toUTF16(nsDependentCString(ent->d_name));
++
++      aPorts.AppendElement(info);
++    }
++  };
++
++  scanPortsDir(scanPortsDir, "/dev/ports"_ns);
++
++  if (aLikelyAccessDenied) {
++    *aLikelyAccessDenied = false;
++  }
+ #endif
+ 
+   MOZ_LOG(gWebSerialLog, LogLevel::Debug,
+@@ -621,7 +683,11 @@ nsresult PosixSerialPlatformService::ConfigurePort(
+   // and reading with no bytes available still fails with EAGAIN, but not on
+   // macOS where that case returns 0 which PlatformPipeReader treats as EOF.
+   // POSIX allows either behavior, so we use VMIN=1 instead.
++#ifdef XP_HAIKU
++  tty.c_cc[VMIN] = 0;
++#else
+   tty.c_cc[VMIN] = 1;
++#endif
+   tty.c_cc[VTIME] = 0;
+ 
+   speed_t speed;
+@@ -782,6 +848,16 @@ nsresult PosixSerialPlatformService::OpenImpl(
+     return rv;
+   }
+ 
++#ifdef XP_HAIKU
++  int flags = fcntl(fd, F_GETFL, 0);
++  if (flags >= 0) {
++    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
++  }
++
++  int nonBlocking = 1;
++  ioctl(fd, FIONBIO, &nonBlocking);
++#endif
++
+ #ifdef LINUX_NSTD_BAUD
+   ioctl(fd, TCFLSH, TCIOFLUSH);
+ #else
+diff --git a/dom/webserial/SerialPlatformService.cpp b/dom/webserial/SerialPlatformService.cpp
+index 5a9bfdc922..26b439b89b 100644
+--- a/dom/webserial/SerialPlatformService.cpp
++++ b/dom/webserial/SerialPlatformService.cpp
+@@ -15,7 +15,8 @@
+ namespace mozilla::dom {
+ 
+ #if !defined(XP_WIN) && !defined(XP_MACOSX) && \
+-    !(defined(XP_LINUX) && !defined(ANDROID)) && !defined(XP_FREEBSD)
++    !(defined(XP_LINUX) && !defined(ANDROID)) && \
++    !defined(XP_FREEBSD) && !defined(XP_HAIKU)
+ already_AddRefed<SerialPlatformService>
+ SerialPlatformService::GetInstanceImpl() {
+   return MakeAndAddRef<TestSerialPlatformService>();
+diff --git a/dom/webserial/moz.build b/dom/webserial/moz.build
+index 2961557046..4e369d608a 100644
+--- a/dom/webserial/moz.build
++++ b/dom/webserial/moz.build
+@@ -29,6 +29,7 @@ if CONFIG["OS_TARGET"] == "WINNT":
+ elif (
+     (CONFIG["OS_TARGET"] == "Darwin" and CONFIG["TARGET_OS"] != "iOS")
+     or CONFIG["OS_TARGET"] == "FreeBSD"
++    or CONFIG["OS_TARGET"] == "Haiku"
+     or CONFIG["OS_TARGET"] == "Linux"
+ ):
+     UNIFIED_SOURCES += [
 diff --git a/gfx/2d/2D.h b/gfx/2d/2D.h
 index d697d4dcbe..a815c71360 100644
 --- a/gfx/2d/2D.h
@@ -2057,168 +2225,558 @@ index 5ce0885c70..4b7d48497b 100644
  #endif
    bool mFixedPitch;
 diff --git a/gfx/thebes/gfxFcPlatformFontList.cpp b/gfx/thebes/gfxFcPlatformFontList.cpp
-index e4a99a13e9..0e55018b8d 100644
+index e4a99a13e9..4c31a02dbb 100644
 --- a/gfx/thebes/gfxFcPlatformFontList.cpp
 +++ b/gfx/thebes/gfxFcPlatformFontList.cpp
-@@ -48,6 +48,14 @@
- #  include "mozilla/WidgetUtilsGtk.h"
- #endif
- 
-+#ifdef MOZ_WIDGET_HAIKU
-+#  pragma GCC visibility push(default)
-+#  include <app/Application.h>
-+#  include <interface/Font.h>
-+#  pragma GCC visibility pop
-+#  include "nsReadableUtils.h"
-+#endif
-+
- #ifdef MOZ_X11
- #  include "mozilla/X11Util.h"
- #endif
-@@ -1771,9 +1779,9 @@ nsresult gfxFcPlatformFontList::InitFontListForPlatform() {
- 
-   mLocalNames.Clear();
-   mFcSubstituteCache.Clear();
--
-+#ifdef MOZ_WIDGET_GTK
-   ClearSystemFontOptions();
--
-+#endif
-   mAlwaysUseFontconfigGenerics = PrefFontListsUseOnlyGenerics();
-   mOtherFamilyNamesInitialized = true;
- 
-@@ -1811,9 +1819,9 @@ nsresult gfxFcPlatformFontList::InitFontListForPlatform() {
-     fontList.entries().Clear();
-     return NS_OK;
+@@ -937,11 +937,11 @@ static void PreparePattern(FcPattern* aPattern, bool aIsPrinterFont) {
+     cairo_ft_font_options_substitute(options, aPattern);
+     cairo_font_options_destroy(options);
+     FcPatternAddBool(aPattern, PRINTING_FC_PROPERTY, FcTrue);
+-#ifdef MOZ_WIDGET_GTK
++#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_HAIKU)
+   } else {
+     gfxFcPlatformFontList::PlatformFontList()->SubstituteSystemFontOptions(
+         aPattern);
+-#endif  // MOZ_WIDGET_GTK
++#endif  // MOZ_WIDGET_GTK || MOZ_WIDGET_HAIKU
    }
--
-+#ifdef MOZ_WIDGET_GTK
-   UpdateSystemFontOptions();
--
-+#endif
-   UniquePtr<SandboxPolicy> policy;
  
- #if defined(MOZ_SANDBOX) && defined(XP_LINUX)
-@@ -2406,9 +2414,15 @@ FontFamily gfxFcPlatformFontList::GetDefaultFontForPlatform(
-     nsAtom* aLanguage) {
-   // Get the default font by using a fake name to retrieve the first
-   // scalable font that fontconfig suggests for the given language.
-+#ifdef MOZ_WIDGET_HAIKU
+   FcDefaultSubstitute(aPattern);
+@@ -1792,7 +1792,7 @@ nsresult gfxFcPlatformFontList::InitFontListForPlatform() {
+     // or in an UpdateFontList message.
+     auto& fontList = dom::ContentChild::GetSingleton()->SystemFontList();
+ 
+-#ifdef MOZ_WIDGET_GTK
++#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_HAIKU)
+     UpdateSystemFontOptionsFromIpc(fontList.options());
+ #endif
+ 
+@@ -1851,7 +1851,7 @@ void gfxFcPlatformFontList::ReadSystemFontList(dom::SystemFontList* retValue) {
+   // Fontconfig versions below 2.9 drop the FC_FILE element in FcNameUnparse
+   // (see https://bugs.freedesktop.org/show_bug.cgi?id=26718), so when using
+   // an older version, we manually append it to the unparsed pattern.
+-#ifdef MOZ_WIDGET_GTK
++#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_HAIKU)
+   SystemFontOptionsToIpc(retValue->options());
+ #endif
+ 
+@@ -1929,7 +1929,7 @@ void gfxFcPlatformFontList::InitSharedFontListForPlatform() {
+   mLastConfig = FcConfigGetCurrent();
+ 
+   if (!XRE_IsParentProcess()) {
+-#ifdef MOZ_WIDGET_GTK
++#if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_HAIKU)
+     auto& fontList = dom::ContentChild::GetSingleton()->SystemFontList();
+     UpdateSystemFontOptionsFromIpc(fontList.options());
+ #endif
+diff --git a/gfx/thebes/gfxFcPlatformFontList.h b/gfx/thebes/gfxFcPlatformFontList.h
+index a8f8103d24..4c083ccffd 100644
+--- a/gfx/thebes/gfxFcPlatformFontList.h
++++ b/gfx/thebes/gfxFcPlatformFontList.h
+@@ -251,7 +251,7 @@ class gfxFontconfigFont final : public gfxFT2FontBase {
+   RefPtr<FcPattern> mPattern;
+ };
+ 
+-class gfxFcPlatformFontList final : public gfxPlatformFontList {
++class gfxFcPlatformFontList : public gfxPlatformFontList {
+   using FontPatternListEntry = mozilla::dom::SystemFontListEntry;
+ 
+  public:
+@@ -342,7 +342,7 @@ class gfxFcPlatformFontList final : public gfxPlatformFontList {
+ 
+   // figure out which families fontconfig maps a generic to
+   // (aGeneric assumed already lowercase)
+-  PrefFontList* FindGenericFamilies(
++  virtual PrefFontList* FindGenericFamilies(
+       FontVisibilityProvider* aFontVisibilityProvider,
+       const nsCString& aGeneric, nsAtom* aLanguage) MOZ_REQUIRES(mLock);
+ 
+@@ -396,21 +396,32 @@ class gfxFcPlatformFontList final : public gfxPlatformFontList {
+   cairo_font_options_t* mSystemFontOptions = nullptr;
+   int32_t mFreetypeLcdSetting = -1;  // -1 for not set
+ 
+-  void ClearSystemFontOptions();
++  virtual void ClearSystemFontOptions();
+ 
+   // Returns whether options actually changed.
+   // TODO(emilio): We could call this when gsettings change or such, but
+   // historically we haven't reacted to these settings changes, so keeping it
+   // simple for now.
+-  bool UpdateSystemFontOptions();
++  virtual bool UpdateSystemFontOptions();
+ 
+-  void UpdateSystemFontOptionsFromIpc(const mozilla::dom::SystemFontOptions&);
+-  void SystemFontOptionsToIpc(mozilla::dom::SystemFontOptions&);
++  virtual void UpdateSystemFontOptionsFromIpc(const mozilla::dom::SystemFontOptions&);
++  virtual void SystemFontOptionsToIpc(mozilla::dom::SystemFontOptions&);
+ 
+  public:
+-  void SubstituteSystemFontOptions(FcPattern*);
++  virtual void SubstituteSystemFontOptions(FcPattern*);
+ 
+  private:
++#elif defined(MOZ_WIDGET_HAIKU)
++  virtual void ClearSystemFontOptions() {}
++  virtual bool UpdateSystemFontOptions() { return false; }
++  virtual void UpdateSystemFontOptionsFromIpc(
++      const mozilla::dom::SystemFontOptions&) {}
++  virtual void SystemFontOptionsToIpc(mozilla::dom::SystemFontOptions&) {}
++
++ public:
++  virtual void SubstituteSystemFontOptions(FcPattern*) {}
++
++ protected:
+ #endif
+ 
+   // Cache for most recently used language code in FindAndAddFamiliesLocked,
+diff --git a/gfx/thebes/gfxHaikuPlatformFontList.cpp b/gfx/thebes/gfxHaikuPlatformFontList.cpp
+new file mode 100644
+index 0000000000..2960190c18
+--- /dev/null
++++ b/gfx/thebes/gfxHaikuPlatformFontList.cpp
+@@ -0,0 +1,381 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "gfxHaikuPlatformFontList.h"
++
++#include "SharedFontList-impl.h"
++#include "mozilla/Preferences.h"
++#include "mozilla/dom/ContentChild.h"
++#include "mozilla/gfx/2D.h"
++#include "nsGkAtoms.h"
++#include "nsPrintfCString.h"
++#include "nsReadableUtils.h"
++#include "nsXULAppAPI.h"
++
++#include <fontconfig/fontconfig.h>
++
++#pragma GCC visibility push(default)
++#include <app/Application.h>
++#include <interface/Font.h>
++extern status_t get_subpixel_antialiasing(bool* subpix);
++extern status_t get_hinting_mode(uint8* hinting);
++#pragma GCC visibility pop
++
++using namespace mozilla;
++using namespace mozilla::gfx;
++
++static const FcChar8* ToFcChar8Ptr(const char* aStr) {
++  return reinterpret_cast<const FcChar8*>(aStr);
++}
++
++static const char* ToCharPtr(const FcChar8* aStr) {
++  return reinterpret_cast<const char*>(aStr);
++}
++
++static const char* const kKnownSerifFonts[] = {
++    "Noto Serif",
++    "DejaVu Serif",
++    "Liberation Serif",
++    "Droid Serif",
++};
++
++gfxHaikuPlatformFontList::gfxHaikuPlatformFontList()
++    : gfxFcPlatformFontList() {
++  InitHaikuDefaults();
++}
++
++void gfxHaikuPlatformFontList::InitHaikuDefaults() {
++  mPlainFamily.Truncate();
++  mFixedFamily.Truncate();
++  mSerifFamily.Truncate();
++
++  if (XRE_IsParentProcess()) {
++    if (be_app && be_plain_font) {
++      font_family plainFamily = "";
++      font_style plainStyle = "";
++      be_plain_font->GetFamilyAndStyle(&plainFamily, &plainStyle);
++      mPlainFamily.Assign(plainFamily);
++
++      nsDependentCString familyStr(plainFamily);
++      int32_t spaceIdx = familyStr.FindChar(' ');
++      uint32_t prefixLen =
++          spaceIdx != -1 ? uint32_t(spaceIdx) : familyStr.Length();
++      const nsDependentCSubstring prefix = Substring(familyStr, 0, prefixLen);
++
++      if (!prefix.IsEmpty()) {
++        for (const auto* serifFont : kKnownSerifFonts) {
++          if (StringBeginsWith(nsDependentCString(serifFont), prefix)) {
++            mSerifFamily.Assign(serifFont);
++            break;
++          }
++        }
++      }
++    }
++
++    if (be_app && be_fixed_font) {
++      font_family fixedFamily = "";
++      font_style fixedStyle = "";
++      be_fixed_font->GetFamilyAndStyle(&fixedFamily, &fixedStyle);
++      mFixedFamily.Assign(fixedFamily);
++    }
++
++    if (mPlainFamily.IsEmpty()) {
++      mPlainFamily.AssignLiteral("Noto Sans");
++    }
++    if (mSerifFamily.IsEmpty()) {
++      mSerifFamily.AssignLiteral("Noto Serif");
++    }
++    if (mFixedFamily.IsEmpty()) {
++      mFixedFamily.AssignLiteral("Noto Sans Mono");
++    }
++
++    Preferences::SetCString("haiku.system.font.plain", mPlainFamily);
++    Preferences::SetCString("haiku.system.font.serif", mSerifFamily);
++    Preferences::SetCString("haiku.system.font.fixed", mFixedFamily);
++
++    UpdateSystemFontOptions();
++  } else {
++    Preferences::GetCString("haiku.system.font.plain", mPlainFamily);
++    Preferences::GetCString("haiku.system.font.serif", mSerifFamily);
++    Preferences::GetCString("haiku.system.font.fixed", mFixedFamily);
++
++    if (mPlainFamily.IsEmpty()) {
++      mPlainFamily.AssignLiteral("Noto Sans");
++    }
++    if (mSerifFamily.IsEmpty()) {
++      mSerifFamily.AssignLiteral("Noto Serif");
++    }
++    if (mFixedFamily.IsEmpty()) {
++      mFixedFamily.AssignLiteral("Noto Sans Mono");
++    }
++
++    Factory::SetSubpixelOrder(mSubpixel ? SubpixelOrder::RGB
++                                        : SubpixelOrder::UNKNOWN);
++  }
++}
++
++bool gfxHaikuPlatformFontList::UpdateSystemFontOptions() {
++  MOZ_ASSERT(XRE_IsParentProcess());
++
++  bool subpixel = false;
++  uint8_t hinting = 1;
++
++  get_subpixel_antialiasing(&subpixel);
++  get_hinting_mode(&hinting);
++
++  bool changed = (mSubpixel != subpixel || mHinting != hinting);
++  mSubpixel = subpixel;
++  mHinting = hinting;
++
++  Factory::SetSubpixelOrder(mSubpixel ? SubpixelOrder::RGB
++                                      : SubpixelOrder::UNKNOWN);
++
++  return changed;
++}
++
++void gfxHaikuPlatformFontList::SystemFontOptionsToIpc(
++    dom::SystemFontOptions& aOptions) {
++  aOptions.antialias() = 1;
++  aOptions.subpixelOrder() = mSubpixel ? 1 : 0;
++  aOptions.hintStyle() = mHinting;
++  aOptions.lcdFilter() = mSubpixel ? 1 : 0;
++}
++
++void gfxHaikuPlatformFontList::UpdateSystemFontOptionsFromIpc(
++    const dom::SystemFontOptions& aOptions) {
++  mSubpixel = (aOptions.subpixelOrder() != 0);
++  mHinting = static_cast<uint8_t>(aOptions.hintStyle());
++
++  Factory::SetSubpixelOrder(mSubpixel ? SubpixelOrder::RGB
++                                      : SubpixelOrder::UNKNOWN);
++}
++
++void gfxHaikuPlatformFontList::SubstituteSystemFontOptions(
++    FcPattern* aPattern) {
++  FcPatternDel(aPattern, FC_ANTIALIAS);
++  FcPatternAddBool(aPattern, FC_ANTIALIAS, FcTrue);
++
++  FcPatternDel(aPattern, FC_RGBA);
++  FcPatternDel(aPattern, FC_LCD_FILTER);
++  if (mSubpixel) {
++    FcPatternAddInteger(aPattern, FC_RGBA, FC_RGBA_RGB);
++    FcPatternAddInteger(aPattern, FC_LCD_FILTER, FC_LCD_DEFAULT);
++  } else {
++    FcPatternAddInteger(aPattern, FC_RGBA, FC_RGBA_NONE);
++    FcPatternAddInteger(aPattern, FC_LCD_FILTER, FC_LCD_NONE);
++  }
++
++  FcPatternDel(aPattern, FC_HINTING);
++  FcPatternDel(aPattern, FC_HINT_STYLE);
++
++  if (mHinting == 0) {
++    FcPatternAddBool(aPattern, FC_HINTING, FcFalse);
++    FcPatternAddInteger(aPattern, FC_HINT_STYLE, FC_HINT_NONE);
++  } else if (mHinting == 1) {
++    FcPatternAddBool(aPattern, FC_HINTING, FcTrue);
++    FcPatternAddInteger(aPattern, FC_HINT_STYLE, FC_HINT_FULL);
++  } else if (mHinting == 2) {
++    int spacing = FC_PROPORTIONAL;
++    FcChar8* family = nullptr;
++    bool isMono = false;
++
++    if (FcPatternGetInteger(aPattern, FC_SPACING, 0, &spacing) ==
++            FcResultMatch &&
++        spacing == FC_MONO) {
++      isMono = true;
++    } else if (FcPatternGetString(aPattern, FC_FAMILY, 0, &family) ==
++                   FcResultMatch &&
++               family &&
++               strstr(reinterpret_cast<const char*>(family), "Mono")) {
++      isMono = true;
++    }
++
++    if (isMono) {
++      FcPatternAddBool(aPattern, FC_HINTING, FcTrue);
++      FcPatternAddInteger(aPattern, FC_HINT_STYLE, FC_HINT_FULL);
++    } else {
++      FcPatternAddBool(aPattern, FC_HINTING, FcFalse);
++      FcPatternAddInteger(aPattern, FC_HINT_STYLE, FC_HINT_NONE);
++    }
++  }
++}
++
++FontFamily gfxHaikuPlatformFontList::GetDefaultFontForPlatform(
++    FontVisibilityProvider* aFontVisibilityProvider,
++    const gfxFontStyle* aStyle, nsAtom* aLanguage) {
 +  PrefFontList* prefFonts =
 +      FindGenericFamilies(aFontVisibilityProvider, "sans-serif"_ns,
 +                          aLanguage ? aLanguage : nsGkAtoms::x_western);
-+#else
-   PrefFontList* prefFonts =
-       FindGenericFamilies(aFontVisibilityProvider, "-moz-default"_ns,
-                           aLanguage ? aLanguage : nsGkAtoms::x_western);
-+#endif
-   NS_ASSERTION(prefFonts, "null list of generic fonts");
-   if (prefFonts && !prefFonts->IsEmpty()) {
-     return (*prefFonts)[0];
-@@ -2825,6 +2839,72 @@ gfxPlatformFontList::PrefFontList* gfxFcPlatformFontList::FindGenericFamilies(
-         if (!entry) {
-           // if not found, ask fontconfig to pick the appropriate font
-           RefPtr<FcPattern> genericPattern = dont_AddRef(FcPatternCreate());
-+#ifdef MOZ_WIDGET_HAIKU
-+          if (be_app) {
++  if (prefFonts && !prefFonts->IsEmpty()) {
++    return (*prefFonts)[0];
++  }
++  return FontFamily();
++}
++
++gfxPlatformFontList::PrefFontList* gfxHaikuPlatformFontList::FindGenericFamilies(
++    FontVisibilityProvider* aFontVisibilityProvider,
++    const nsCString& aGeneric, nsAtom* aLanguage) {
++  nsAutoCString fcLang;
++  GetSampleLangForGroup(aLanguage, fcLang);
++  ToLowerCase(fcLang);
++
++  nsAutoCString cacheKey(aGeneric);
++  if (fcLang.Length() > 0) {
++    cacheKey.Append('-');
++    cacheKey.Append(fcLang);
++  }
++
++  return mGenericMappings.WithEntryHandle(
++      cacheKey, [&](auto&& entry) -> PrefFontList* {
++        if (!entry) {
++          nsAutoCString targetFont;
++          nsAutoCString userPrefFont;
++          bool hasUserPref = false;
++
++          nsAtom* langGroup = GetLangGroup(aLanguage);
++          if (!langGroup) {
++            langGroup = nsGkAtoms::x_western;
++          }
++
++          nsAutoCString langGroupStr;
++          langGroup->ToUTF8String(langGroupStr);
++
++          nsPrintfCString prefName("font.name.%s.%s", aGeneric.get(),
++                                   langGroupStr.get());
++          nsPrintfCString prefListName("font.name-list.%s.%s", aGeneric.get(),
++                                       langGroupStr.get());
++
++          if (Preferences::HasUserValue(prefName.get())) {
++            Preferences::GetCString(prefName.get(), userPrefFont);
++            hasUserPref = true;
++          } else if (Preferences::HasUserValue(prefListName.get())) {
++            Preferences::GetCString(prefListName.get(), userPrefFont);
++            hasUserPref = true;
++          }
++
++          if (hasUserPref && !userPrefFont.IsEmpty() &&
++              !userPrefFont.EqualsLiteral("serif") &&
++              !userPrefFont.EqualsLiteral("sans-serif") &&
++              !userPrefFont.EqualsLiteral("monospace")) {
++            targetFont = userPrefFont;
++          } else {
 +            if (aGeneric.EqualsLiteral("sans-serif") ||
++                aGeneric.EqualsLiteral("sans") ||
++                aGeneric.EqualsLiteral("system-ui") ||
 +                aGeneric.EqualsLiteral("-moz-default")) {
-+              if (be_plain_font) {
-+                font_family plainFamily;
-+                font_style plainStyle;
-+                be_plain_font->GetFamilyAndStyle(&plainFamily, &plainStyle);
-+                FcPatternAddString(genericPattern, FC_FAMILY,
-+                                   ToFcChar8Ptr(plainFamily));
-+              }
-+            } else if (aGeneric.EqualsLiteral("monospace")) {
-+              if (be_fixed_font) {
-+                font_family fixedFamily;
-+                font_style fixedStyle;
-+                be_fixed_font->GetFamilyAndStyle(&fixedFamily, &fixedStyle);
-+                FcPatternAddString(genericPattern, FC_FAMILY,
-+                                   ToFcChar8Ptr(fixedFamily));
-+              }
++              targetFont = mPlainFamily;
++            } else if (aGeneric.EqualsLiteral("monospace") ||
++                       aGeneric.EqualsLiteral("mono")) {
++              targetFont = mFixedFamily;
 +            } else if (aGeneric.EqualsLiteral("serif")) {
-+              static const char* const kKnownSerifFonts[] = {
-+                  "Noto Serif",
-+                  "DejaVu Serif",
-+                  "Liberation Serif",
-+                  "Droid Serif",
-+              };
++              targetFont = mSerifFamily;
++            }
++          }
 +
-+              nsAutoCString primarySerif;
-+              if (be_plain_font) {
-+                font_family plainFamily;
-+                font_style plainStyle;
-+                be_plain_font->GetFamilyAndStyle(&plainFamily, &plainStyle);
++          RefPtr<FcPattern> genericPattern = dont_AddRef(FcPatternCreate());
 +
-+                nsDependentCString familyStr(plainFamily);
-+                int32_t spaceIdx = familyStr.FindChar(' ');
-+                uint32_t prefixLen =
-+                    spaceIdx != -1 ? uint32_t(spaceIdx) : familyStr.Length();
-+                const nsDependentCSubstring prefix =
-+                    Substring(familyStr, 0, prefixLen);
++          if (!targetFont.IsEmpty()) {
++            FcPatternAddString(genericPattern, FC_FAMILY,
++                               ToFcChar8Ptr(targetFont.get()));
 +
-+                if (!prefix.IsEmpty()) {
-+                  for (const auto* serifFont : kKnownSerifFonts) {
-+                    if (StringBeginsWith(nsDependentCString(serifFont), prefix)) {
-+                      primarySerif.Assign(serifFont);
-+                      break;
-+                    }
-+                  }
-+                }
-+              }
-+
-+              if (primarySerif.IsEmpty()) {
-+                primarySerif.Assign(kKnownSerifFonts[0]);
-+              }
-+
-+              FcPatternAddString(genericPattern, FC_FAMILY,
-+                                 ToFcChar8Ptr(primarySerif.get()));
-+
++            if (aGeneric.EqualsLiteral("serif") &&
++                targetFont.Equals(mSerifFamily)) {
 +              for (const auto* serifFont : kKnownSerifFonts) {
-+                if (!primarySerif.Equals(serifFont)) {
++                if (!targetFont.Equals(serifFont)) {
 +                  FcPatternAddString(genericPattern, FC_FAMILY,
 +                                     ToFcChar8Ptr(serifFont));
 +                }
 +              }
 +            }
 +          }
-+#endif
-           FcPatternAddString(genericPattern, FC_FAMILY,
-                              ToFcChar8Ptr(aGeneric.get()));
- 
-@@ -3221,7 +3301,9 @@ bool gfxFcPlatformFontList::UpdateSystemFontOptions() {
-       gdk_screen_get_font_options(gdk_screen_get_default());
-   if (!options) {
-     bool changed = !!mSystemFontOptions;
-+#ifdef MOZ_WIDGET_GTK
-     ClearSystemFontOptions();
-+#endif
-     return changed;
-   }
- 
-@@ -3234,8 +3316,9 @@ bool gfxFcPlatformFontList::UpdateSystemFontOptions() {
-   }
- 
-   SetSubpixelOrderFromCairo(options);
--
-+#ifdef MOZ_WIDGET_GTK
-   ClearSystemFontOptions();
-+#endif
-   mSystemFontOptions = newOptions;
-   return true;
- }
-@@ -3257,7 +3340,9 @@ void gfxFcPlatformFontList::SystemFontOptionsToIpc(
- 
- void gfxFcPlatformFontList::UpdateSystemFontOptionsFromIpc(
-     const dom::SystemFontOptions& aOptions) {
-+#ifdef MOZ_WIDGET_GTK
-   ClearSystemFontOptions();
-+#endif
-   mSystemFontOptions = cairo_font_options_create();
-   cairo_font_options_set_antialias(mSystemFontOptions,
-                                    cairo_antialias_t(aOptions.antialias()));
++
++          FcPatternAddString(genericPattern, FC_FAMILY,
++                             ToFcChar8Ptr(aGeneric.get()));
++
++          FcPatternAddBool(genericPattern, FC_SCALABLE, FcTrue);
++
++          if (!fcLang.IsEmpty()) {
++            FcPatternAddString(genericPattern, FC_LANG,
++                               ToFcChar8Ptr(fcLang.get()));
++          }
++
++          FcConfigSubstitute(nullptr, genericPattern, FcMatchPattern);
++          FcDefaultSubstitute(genericPattern);
++
++          FcResult result;
++          UniquePtr<FcFontSet> faces(
++              FcFontSort(nullptr, genericPattern, FcFalse, nullptr, &result));
++
++          int count = faces ? faces->nfont : 0;
++          if (!faces || count == 0) {
++            return nullptr;
++          }
++
++          auto prefFonts = MakeUnique<PrefFontList>();
++          uint32_t limit = 16;
++
++          for (int i = 0; i < count; i++) {
++            FcPattern* font = faces->fonts[i];
++            FcChar8* mappedGeneric = nullptr;
++
++            if (FcPatternGetString(font, FC_FAMILY, 0, &mappedGeneric) ==
++                    FcResultMatch &&
++                mappedGeneric) {
++              mLock.AssertCurrentThreadIn();
++              nsAutoCString mappedGenericName(ToCharPtr(mappedGeneric));
++              AutoTArray<FamilyAndGeneric, 1> genericFamilies;
++              if (gfxPlatformFontList::FindAndAddFamiliesLocked(
++                      aFontVisibilityProvider, StyleGenericFontFamily::None,
++                      mappedGenericName, &genericFamilies,
++                      FindFamiliesFlags(0))) {
++                if (!genericFamilies.IsEmpty() &&
++                    !prefFonts->Contains(genericFamilies[0].mFamily)) {
++                  prefFonts->AppendElement(genericFamilies[0].mFamily);
++                  if (prefFonts->Length() >= limit) {
++                    break;
++                  }
++                }
++              }
++            }
++          }
++
++          entry.Insert(std::move(prefFonts));
++        }
++        return entry->get();
++      });
++}
++
++/* static */
++void gfxHaikuPlatformFontList::LookupSystemFont(
++    mozilla::LookAndFeel::FontID aSystemFontID, nsACString& aSystemFontName,
++    gfxFontStyle& aFontStyle) {
++  const BFont* bFont = be_plain_font;
++
++  if (bFont) {
++    font_family family;
++    font_style style;
++    bFont->GetFamilyAndStyle(&family, &style);
++    aSystemFontName.Assign(family);
++
++    aFontStyle.style = (bFont->Face() & B_ITALIC_FACE) ? FontSlantStyle::ITALIC
++                                                       : FontSlantStyle::NORMAL;
++    aFontStyle.weight = (bFont->Face() & B_BOLD_FACE) ? FontWeight::BOLD
++                                                      : FontWeight::NORMAL;
++    aFontStyle.size = bFont->Size() > 0.0f ? bFont->Size() : 12.0f;
++  } else {
++    gfxHaikuPlatformFontList* pfl =
++        gfxHaikuPlatformFontList::PlatformFontList();
++    if (pfl && !pfl->mPlainFamily.IsEmpty()) {
++      aSystemFontName.Assign(pfl->mPlainFamily);
++    } else {
++      aSystemFontName.AssignLiteral("Noto Sans");
++    }
++
++    aFontStyle.style = FontSlantStyle::NORMAL;
++    aFontStyle.weight = FontWeight::NORMAL;
++    aFontStyle.size = 12.0f;
++  }
++
++  aFontStyle.systemFont = true;
++}
+diff --git a/gfx/thebes/gfxHaikuPlatformFontList.h b/gfx/thebes/gfxHaikuPlatformFontList.h
+new file mode 100644
+index 0000000000..885c532981
+--- /dev/null
++++ b/gfx/thebes/gfxHaikuPlatformFontList.h
+@@ -0,0 +1,55 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef GFX_HAIKU_PLATFORM_FONTLIST_H_
++#define GFX_HAIKU_PLATFORM_FONTLIST_H_
++
++#include "gfxFcPlatformFontList.h"
++#include "mozilla/LookAndFeel.h"
++
++class gfxHaikuPlatformFontList final : public gfxFcPlatformFontList {
++ public:
++  gfxHaikuPlatformFontList();
++
++  static gfxHaikuPlatformFontList* PlatformFontList() {
++    return static_cast<gfxHaikuPlatformFontList*>(
++        gfxPlatformFontList::PlatformFontList());
++  }
++
++  static void LookupSystemFont(mozilla::LookAndFeel::FontID aSystemFontID,
++                               nsACString& aSystemFontName,
++                               gfxFontStyle& aFontStyle);
++
++  void SubstituteSystemFontOptions(FcPattern* aPattern) override;
++
++ protected:
++  virtual ~gfxHaikuPlatformFontList() = default;
++
++  bool UpdateSystemFontOptions() override;
++  void SystemFontOptionsToIpc(mozilla::dom::SystemFontOptions& aOptions) override;
++  void UpdateSystemFontOptionsFromIpc(
++      const mozilla::dom::SystemFontOptions& aOptions) override;
++
++  PrefFontList* FindGenericFamilies(
++      FontVisibilityProvider* aFontVisibilityProvider,
++      const nsCString& aGeneric,
++      nsAtom* aLanguage) MOZ_REQUIRES(mLock) override;
++
++  FontFamily GetDefaultFontForPlatform(
++      FontVisibilityProvider* aFontVisibilityProvider,
++      const gfxFontStyle* aStyle,
++      nsAtom* aLanguage = nullptr) MOZ_REQUIRES(mLock) override;
++
++ private:
++  void InitHaikuDefaults();
++
++  nsAutoCString mPlainFamily;
++  nsAutoCString mFixedFamily;
++  nsAutoCString mSerifFamily;
++
++  bool mSubpixel = false;
++  uint8_t mHinting = 1;
++};
++
++#endif  // GFX_HAIKU_PLATFORM_FONTLIST_H_
 diff --git a/gfx/thebes/gfxPlatform.cpp b/gfx/thebes/gfxPlatform.cpp
 index 18afa45876..110eeeca35 100644
 --- a/gfx/thebes/gfxPlatform.cpp
@@ -2252,7 +2810,7 @@ index 18afa45876..110eeeca35 100644
  #endif
 diff --git a/gfx/thebes/gfxPlatformHaiku.cpp b/gfx/thebes/gfxPlatformHaiku.cpp
 new file mode 100644
-index 0000000000..1ac6f97f29
+index 0000000000..3fb2548012
 --- /dev/null
 +++ b/gfx/thebes/gfxPlatformHaiku.cpp
 @@ -0,0 +1,69 @@
@@ -2262,7 +2820,7 @@ index 0000000000..1ac6f97f29
 +
 +#include "gfxPlatformHaiku.h"
 +
-+#include "gfxFcPlatformFontList.h"
++#include "gfxHaikuPlatformFontList.h"
 +#include "gfxImageSurface.h"
 +#include "SoftwareVsyncSource.h"
 +#include "mozilla/gfx/2D.h"
@@ -2300,7 +2858,7 @@ index 0000000000..1ac6f97f29
 +}
 +
 +bool gfxPlatformHaiku::CreatePlatformFontList() {
-+  return gfxPlatformFontList::Initialize(new gfxFcPlatformFontList);
++  return gfxPlatformFontList::Initialize(new gfxHaikuPlatformFontList);
 +}
 +
 +void gfxPlatformHaiku::ReadSystemFontList(mozilla::dom::SystemFontList* retValue) {
@@ -2366,10 +2924,10 @@ index 0000000000..9601cf9a3b
 +
 +#endif /* GFX_PLATFORM_HAIKU_H */
 diff --git a/gfx/thebes/moz.build b/gfx/thebes/moz.build
-index a9f68b0563..5b5aba89c9 100644
+index a9f68b0563..4e67c0e4d3 100644
 --- a/gfx/thebes/moz.build
 +++ b/gfx/thebes/moz.build
-@@ -150,7 +150,21 @@ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
+@@ -150,7 +150,22 @@ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
              "gfxXlibSurface.cpp",
              "XlibDisplay.cpp",
          ]
@@ -2386,13 +2944,14 @@ index a9f68b0563..5b5aba89c9 100644
 +        "gfxFcPlatformFontList.cpp",
 +        "gfxFT2FontBase.cpp",
 +        "gfxFT2Utils.cpp",
++        "gfxHaikuPlatformFontList.cpp",
 +        "gfxPlatformHaiku.cpp",
 +        "PrintTargetPDF.cpp",
 +    ]
  elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
      EXPORTS += [
          "gfxDWriteCommon.h",
-@@ -280,11 +294,12 @@ LOCAL_INCLUDES += [
+@@ -280,11 +295,12 @@ LOCAL_INCLUDES += [
      "/widget/gtk",
  ]
  
@@ -2407,7 +2966,7 @@ index a9f68b0563..5b5aba89c9 100644
  
  if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
      CXXFLAGS += CONFIG["MOZ_GTK3_CFLAGS"]
-@@ -301,3 +316,6 @@ DEFINES["GRAPHITE2_STATIC"] = True
+@@ -301,3 +317,6 @@ DEFINES["GRAPHITE2_STATIC"] = True
  COMPILE_FLAGS["WARNINGS_CXXFLAGS"] += ["-Werror=switch"]
  
  include("/tools/fuzzing/libfuzzer-config.mozbuild")
@@ -2459,10 +3018,10 @@ index 0000000000..d8d380f0cd
 +FINAL_LIBRARY = "xul"
 diff --git a/image/decoders/icon/haiku/nsIconChannel.cpp b/image/decoders/icon/haiku/nsIconChannel.cpp
 new file mode 100644
-index 0000000000..b4b1a18a53
+index 0000000000..54b3dbc7db
 --- /dev/null
 +++ b/image/decoders/icon/haiku/nsIconChannel.cpp
-@@ -0,0 +1,318 @@
+@@ -0,0 +1,323 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -2475,6 +3034,7 @@ index 0000000000..b4b1a18a53
 +
 +#pragma GCC visibility push(default)
 +#include <IconUtils.h>
++#include <app/Application.h>
 +#include <interface/Bitmap.h>
 +#include <storage/Entry.h>
 +#include <storage/Mime.h>
@@ -2614,6 +3174,10 @@ index 0000000000..b4b1a18a53
 +                                    nsIChannel** aChannel) {
 +  NS_ENSURE_TRUE(aIconURI, NS_ERROR_NULL_POINTER);
 +  NS_ENSURE_TRUE(aIconSize < 256, NS_ERROR_UNEXPECTED);
++
++  if (!be_app) {
++    return NS_ERROR_NOT_AVAILABLE;
++  }
 +
 +  uint32_t width = (aIconSize == 0) ? 16 : aIconSize;
 +  uint32_t height = width;
@@ -6444,7 +7008,7 @@ index 0000000000..cdf5adbaa1
 +#endif  // MODULES_VIDEO_CAPTURE_MAIN_SOURCE_HAIKU_DEVICE_INFO_HAIKU_H_
 diff --git a/third_party/libwebrtc/modules/video_capture/haiku/video_capture_haiku.cc b/third_party/libwebrtc/modules/video_capture/haiku/video_capture_haiku.cc
 new file mode 100644
-index 0000000000..93a69b442b
+index 0000000000..95bdf5ffaa
 --- /dev/null
 +++ b/third_party/libwebrtc/modules/video_capture/haiku/video_capture_haiku.cc
 @@ -0,0 +1,214 @@
@@ -7854,10 +8418,10 @@ index 0000000000..d0b37cd1b9
 +#endif  // _nsHaikuRemoteClient_h_
 diff --git a/toolkit/components/remote/nsHaikuRemoteServer.cpp b/toolkit/components/remote/nsHaikuRemoteServer.cpp
 new file mode 100644
-index 0000000000..dab213280b
+index 0000000000..9e71d83de3
 --- /dev/null
 +++ b/toolkit/components/remote/nsHaikuRemoteServer.cpp
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,162 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7970,9 +8534,22 @@ index 0000000000..dab213280b
 +    offset += strLen + 1;
 +  }
 +
-+  auto raiseWindow = [activate]() {
++auto raiseWindow = [activate]() {
 +    if (!activate) {
 +      return;
++    }
++
++    if (be_app && be_app->LockWithTimeout(50000) == B_OK) {
++      for (int32 i = 0; i < be_app->CountWindows(); ++i) {
++        BWindow* win = be_app->WindowAt(i);
++        if (win && win->LockWithTimeout(10000) == B_OK) {
++          if (win->IsMinimized()) {
++            win->Minimize(false);
++          }
++          win->Unlock();
++        }
++      }
++      be_app->Unlock();
 +    }
 +
 +    team_info teamInfo;
@@ -9012,19 +9589,782 @@ index 3eb43a93a8..3dd49a769c 100644
  GFXINFO_OS(Android, "Android")
  GFXINFO_OS(Ios, "Ios")
 +GFXINFO_OS(Haiku, "Haiku")
+diff --git a/widget/ScrollbarDrawing.h b/widget/ScrollbarDrawing.h
+index a56bcef9cc..b99cdd7b73 100644
+--- a/widget/ScrollbarDrawing.h
++++ b/widget/ScrollbarDrawing.h
+@@ -33,6 +33,7 @@ class ScrollbarDrawing {
+     Gtk,
+     Win10,
+     Win11,
++    Haiku,
+   };
+ 
+   explicit ScrollbarDrawing(Kind aKind) : mKind(aKind) {}
+diff --git a/widget/ScrollbarDrawingHaiku.cpp b/widget/ScrollbarDrawingHaiku.cpp
+new file mode 100644
+index 0000000000..5c51ff6608
+--- /dev/null
++++ b/widget/ScrollbarDrawingHaiku.cpp
+@@ -0,0 +1,657 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "ScrollbarDrawingHaiku.h"
++
++#include <algorithm>
++#include <cmath>
++
++#include "mozilla/dom/Document.h"
++#include "mozilla/gfx/PathHelpers.h"
++#include "mozilla/PresShell.h"
++#include "mozilla/StaticPrefs_widget.h"
++#include "nsLayoutUtils.h"
++#include "nsNativeTheme.h"
++#include "nsPresContext.h"
++#include "nsScrollbarFrame.h"
++
++using namespace mozilla;
++using namespace mozilla::gfx;
++using namespace mozilla::widget;
++
++namespace {
++
++static constexpr int32_t kHaikuScrollbarSize = 14;
++
++enum HaikuBorderFlags : uint32_t {
++  BORDER_LEFT   = 1 << 0,
++  BORDER_TOP    = 1 << 1,
++  BORDER_RIGHT  = 1 << 2,
++  BORDER_BOTTOM = 1 << 3,
++  BORDER_ALL    = BORDER_LEFT | BORDER_TOP | BORDER_RIGHT | BORDER_BOTTOM
++};
++
++static constexpr float kLightenMaxTint = 0.0f;
++static constexpr float kLighten2Tint   = 0.385f;
++static constexpr float kLighten1Tint   = 0.590f;
++static constexpr float kDarken1Tint    = 1.147f;
++static constexpr float kDarken2Tint    = 1.295f;
++static constexpr float kDarken3Tint    = 1.407f;
++static constexpr float kHoverTintFactor = 0.85f;
++
++inline sRGBColor TintColor(const sRGBColor& aColor, float aTint) {
++  if (aTint < 1.0f) {
++    float lighten = 1.0f - aTint;
++    return sRGBColor(aColor.r + (1.0f - aColor.r) * lighten,
++                     aColor.g + (1.0f - aColor.g) * lighten,
++                     aColor.b + (1.0f - aColor.b) * lighten,
++                     aColor.a);
++  }
++  float darken = std::max(0.0f, 2.0f - aTint);
++  return sRGBColor(aColor.r * darken, aColor.g * darken, aColor.b * darken, aColor.a);
++}
++
++inline sRGBColor Untint(const sRGBColor& aColor, float aTint) {
++  if (aTint < 1.0f) {
++    float lighten = 1.0f - aTint;
++    if (lighten >= 1.0f) {
++      return aColor;
++    }
++    float factor = 1.0f - lighten;
++    return sRGBColor(std::clamp((aColor.r - lighten) / factor, 0.0f, 1.0f),
++                     std::clamp((aColor.g - lighten) / factor, 0.0f, 1.0f),
++                     std::clamp((aColor.b - lighten) / factor, 0.0f, 1.0f),
++                     aColor.a);
++  }
++  float darken = 2.0f - aTint;
++  if (darken <= 0.0f) {
++    return aColor;
++  }
++  return sRGBColor(std::clamp(aColor.r / darken, 0.0f, 1.0f),
++                   std::clamp(aColor.g / darken, 0.0f, 1.0f),
++                   std::clamp(aColor.b / darken, 0.0f, 1.0f),
++                   aColor.a);
++}
++
++static bool IsWindowActive(const nsIFrame* aFrame) {
++  if (!aFrame || !aFrame->PresContext()) {
++    return true;
++  }
++  const dom::Document* doc = aFrame->PresContext()->Document();
++  return doc && !doc->State().HasState(dom::DocumentState::WINDOW_INACTIVE);
++}
++
++void DrawHaikuFrame(DrawTarget& aDt, Rect& aRect,
++                    const sRGBColor& aLeft, const sRGBColor& aTop,
++                    const sRGBColor& aRight, const sRGBColor& aBottom,
++                    uint32_t aBorders = BORDER_ALL) {
++  StrokeOptions stroke(1.0f);
++
++  if (aBorders & BORDER_LEFT) {
++    aDt.StrokeLine(Point(aRect.x + 0.5f, aRect.y),
++                   Point(aRect.x + 0.5f, aRect.YMost()),
++                   ColorPattern(ToDeviceColor(aLeft)), stroke);
++    aRect.x += 1.0f;
++    aRect.width -= 1.0f;
++  }
++  if (aBorders & BORDER_TOP) {
++    aDt.StrokeLine(Point(aRect.x, aRect.y + 0.5f),
++                   Point(aRect.XMost(), aRect.y + 0.5f),
++                   ColorPattern(ToDeviceColor(aTop)), stroke);
++    aRect.y += 1.0f;
++    aRect.height -= 1.0f;
++  }
++  if (aBorders & BORDER_RIGHT) {
++    aDt.StrokeLine(Point(aRect.XMost() - 0.5f, aRect.y),
++                   Point(aRect.XMost() - 0.5f, aRect.YMost()),
++                   ColorPattern(ToDeviceColor(aRight)), stroke);
++    aRect.width -= 1.0f;
++  }
++  if (aBorders & BORDER_BOTTOM) {
++    aDt.StrokeLine(Point(aRect.x, aRect.YMost() - 0.5f),
++                   Point(aRect.XMost(), aRect.YMost() - 0.5f),
++                   ColorPattern(ToDeviceColor(aBottom)), stroke);
++    aRect.height -= 1.0f;
++  }
++}
++
++void DrawHaikuButton(DrawTarget& aDt, Rect aRect,
++                     const sRGBColor& aBase, bool aIsActivated,
++                     bool aIsHover, bool aIsDisabled, bool aIsWindowActive,
++                     bool aIsHorizontal, uint32_t aOuterBorders = BORDER_ALL) {
++  if (aRect.width <= 0 || aRect.height <= 0) {
++    return;
++  }
++
++  sRGBColor frameLight  = TintColor(aBase, aIsWindowActive ? kDarken2Tint : 1.20f);
++  sRGBColor frameShadow = TintColor(aBase, aIsWindowActive ? kDarken3Tint : 1.30f);
++
++  if (aIsActivated) {
++    std::swap(frameLight, frameShadow);
++  }
++
++  DrawHaikuFrame(aDt, aRect, frameLight, frameLight, frameShadow, frameShadow, aOuterBorders);
++
++  if (aRect.width <= 0 || aRect.height <= 0) {
++    return;
++  }
++
++  if (aIsActivated) {
++    sRGBColor bevelShadow = TintColor(aBase, 1.17f);
++    StrokeOptions stroke(1.0f);
++
++    if (aOuterBorders & BORDER_LEFT) {
++      aDt.StrokeLine(Point(aRect.x + 0.5f, aRect.y),
++                     Point(aRect.x + 0.5f, aRect.YMost()),
++                     ColorPattern(ToDeviceColor(bevelShadow)), stroke);
++      aRect.x += 1.0f;
++      aRect.width -= 1.0f;
++    }
++    if (aOuterBorders & BORDER_TOP) {
++      aDt.StrokeLine(Point(aRect.x, aRect.y + 0.5f),
++                     Point(aRect.XMost(), aRect.y + 0.5f),
++                     ColorPattern(ToDeviceColor(bevelShadow)), stroke);
++      aRect.y += 1.0f;
++      aRect.height -= 1.0f;
++    }
++    if (aRect.width > 0 && aRect.height > 0) {
++      if (aOuterBorders & BORDER_LEFT) {
++        aDt.StrokeLine(Point(aRect.x + 0.5f, aRect.y),
++                       Point(aRect.x + 0.5f, aRect.YMost()),
++                       ColorPattern(ToDeviceColor(bevelShadow)), stroke);
++        aRect.x += 1.0f;
++        aRect.width -= 1.0f;
++      }
++      if (aOuterBorders & BORDER_TOP) {
++        aDt.StrokeLine(Point(aRect.x, aRect.y + 0.5f),
++                       Point(aRect.XMost(), aRect.y + 0.5f),
++                       ColorPattern(ToDeviceColor(bevelShadow)), stroke);
++        aRect.y += 1.0f;
++        aRect.height -= 1.0f;
++      }
++    }
++  } else {
++    sRGBColor bevelLight  = aIsDisabled ? TintColor(aBase, kLighten1Tint)
++                                        : TintColor(aBase, 0.20f);
++    sRGBColor bevelShadow = aIsDisabled ? aBase
++                                        : TintColor(aBase, 1.105f);
++    DrawHaikuFrame(aDt, aRect, bevelLight, bevelLight, bevelShadow, bevelShadow, aOuterBorders);
++  }
++
++  if (aRect.width <= 0 || aRect.height <= 0) {
++    return;
++  }
++
++  Point startPt = aRect.TopLeft();
++  Point endPt   = aIsHorizontal ? Point(aRect.x, aRect.YMost()) : Point(aRect.XMost(), aRect.y);
++
++  if (aIsActivated) {
++    GradientStop stops[2] = {
++      {0.0f, ToDeviceColor(TintColor(aBase, 1.135f))},
++      {1.0f, ToDeviceColor(TintColor(aBase, 1.105f))}
++    };
++    RefPtr<GradientStops> gStops = aDt.CreateGradientStops(stops, 2);
++    aDt.FillRect(aRect, LinearGradientPattern(startPt, endPt, gStops));
++  } else {
++    float topTint = aIsDisabled ? 0.80f : 0.60f;
++    float mid1    = aIsDisabled ? 0.875f : 0.75f;
++    float mid2    = aIsDisabled ? 0.95f : 0.90f;
++    float botTint = aIsDisabled ? 1.005f : 1.01f;
++
++    if (aIsHover && !aIsDisabled) {
++      topTint *= kHoverTintFactor;
++      mid1    *= kHoverTintFactor;
++      mid2    *= kHoverTintFactor;
++      botTint *= kHoverTintFactor;
++    }
++
++    GradientStop stops[4] = {
++      {0.0f,             ToDeviceColor(TintColor(aBase, topTint))},
++      {132.0f / 255.0f, ToDeviceColor(TintColor(aBase, mid1))},
++      {136.0f / 255.0f, ToDeviceColor(TintColor(aBase, mid2))},
++      {1.0f,             ToDeviceColor(TintColor(aBase, botTint))}
++    };
++    RefPtr<GradientStops> gStops = aDt.CreateGradientStops(stops, 4);
++    aDt.FillRect(aRect, LinearGradientPattern(startPt, endPt, gStops));
++  }
++}
++
++}  // namespace
++
++bool ScrollbarDrawingHaiku::DoesScrollbarTouchWindowEdge(
++    nsIFrame* aFrame, bool aIsHorizontal) const {
++  if (!aFrame || !aFrame->PresContext()) {
++    return false;
++  }
++  nsPresContext* pc = aFrame->PresContext();
++  if (pc->GetParentPresContext()) {
++    return false;
++  }
++
++  bool isTopLevel = pc->IsRootContentDocumentCrossProcess() ||
++                    (pc->IsChrome() && !pc->GetParentPresContext());
++  if (!isTopLevel) {
++    return false;
++  }
++
++  PresShell* presShell = pc->PresShell();
++  if (!presShell) {
++    return false;
++  }
++
++  nsIFrame* rootFrame = presShell->GetRootFrame();
++  if (!rootFrame) {
++    return false;
++  }
++
++  nsIFrame* sbFrame = ScrollbarDrawing::GetParentScrollbarFrame(aFrame);
++  if (!sbFrame) {
++    sbFrame = aFrame;
++  }
++
++  nsRect visibleArea = pc->GetVisibleArea();
++  nsPoint offset = sbFrame->GetOffsetTo(rootFrame);
++  nsSize sbSize = sbFrame->GetSize();
++  if (sbSize.width <= 0 || sbSize.height <= 0) {
++    return false;
++  }
++
++  nscoord tolerance = pc->DevPixelsToAppUnits(2);
++
++  if (aIsHorizontal) {
++    return (offset.y + sbSize.height >= visibleArea.height - tolerance);
++  }
++
++  return (offset.x + sbSize.width >= visibleArea.width - tolerance);
++}
++
++bool ScrollbarDrawingHaiku::ShouldHideScrollbarButtons(
++    nsIFrame* aFrame, StyleAppearance aAppearance) {
++  if (IsScrollbarWidthThin(aFrame)) {
++    return true;
++  }
++  auto scrollbarSize = GetScrollbarSize(aFrame->PresContext(), aFrame);
++  if (scrollbarSize < kHaikuScrollbarSize) {
++    return true;
++  }
++  nsScrollbarFrame* sf = ScrollbarDrawing::GetParentScrollbarFrame(aFrame);
++  if (!sf) {
++    return false;
++  }
++  bool isHorizontal = (aAppearance == StyleAppearance::ScrollbarbuttonLeft ||
++                       aAppearance == StyleAppearance::ScrollbarbuttonRight ||
++                       aAppearance == StyleAppearance::ScrollbarHorizontal);
++  nsSize sfSize = sf->GetSize();
++  nscoord lengthAppUnits = isHorizontal ? sfSize.width : sfSize.height;
++  if (lengthAppUnits <= 0) {
++    return false;
++  }
++  int32_t lengthDevPx = sf->PresContext()->AppUnitsToDevPixels(lengthAppUnits);
++  return (lengthDevPx < scrollbarSize * 3);
++}
++
++void ScrollbarDrawingHaiku::RecomputeScrollbarParams() {
++  int32_t defaultSize = kHaikuScrollbarSize;
++  uint32_t overrideSize = StaticPrefs::widget_non_native_theme_scrollbar_size_override();
++  if (overrideSize > 0) {
++    defaultSize = static_cast<int32_t>(overrideSize);
++  }
++  ConfigureScrollbarSize(defaultSize);
++}
++
++LayoutDeviceIntSize ScrollbarDrawingHaiku::GetMinimumWidgetSize(
++    nsPresContext* aPresContext, StyleAppearance aAppearance,
++    nsIFrame* aFrame) {
++  auto size = GetScrollbarSize(aPresContext, aFrame);
++
++  if (aAppearance == StyleAppearance::ScrollbarbuttonUp ||
++      aAppearance == StyleAppearance::ScrollbarbuttonDown ||
++      aAppearance == StyleAppearance::ScrollbarbuttonLeft ||
++      aAppearance == StyleAppearance::ScrollbarbuttonRight) {
++    if (ShouldHideScrollbarButtons(aFrame, aAppearance)) {
++      return LayoutDeviceIntSize{0, 0};
++    }
++  }
++
++  if ((size < kHaikuScrollbarSize || IsScrollbarWidthThin(aFrame)) &&
++      aAppearance != StyleAppearance::ScrollbarHorizontal &&
++      aAppearance != StyleAppearance::ScrollbarVertical &&
++      aAppearance != StyleAppearance::ScrollbarthumbHorizontal &&
++      aAppearance != StyleAppearance::ScrollbarthumbVertical) {
++    return LayoutDeviceIntSize{0, 0};
++  }
++  return LayoutDeviceIntSize{size, size};
++}
++
++Maybe<nsITheme::Transparency> ScrollbarDrawingHaiku::GetScrollbarPartTransparency(
++    nsIFrame* aFrame, StyleAppearance aAppearance) {
++  return Some(nsITheme::eOpaque);
++}
++
++bool ScrollbarDrawingHaiku::PaintScrollbar(
++    DrawTarget& aDrawTarget, const LayoutDeviceRect& aRect,
++    ScrollbarKind aScrollbarKind, nsIFrame* aFrame, const ComputedStyle& aStyle,
++    const ElementState& aElementState, const Colors& aColors,
++    const DPIRatio& aDpiRatio) {
++  Rect rect = aRect.ToUnknownRect();
++  if (rect.width <= 0 || rect.height <= 0) {
++    return true;
++  }
++
++  const auto scrollbarSize = GetScrollbarSize(aFrame->PresContext(), aFrame);
++  const bool isThin = scrollbarSize < kHaikuScrollbarSize || IsScrollbarWidthThin(aFrame);
++
++  bool isHorizontal        = (aScrollbarKind == ScrollbarKind::Horizontal);
++  bool isEnabled           = !aElementState.HasState(ElementState::DISABLED);
++  bool isWindowActive      = IsWindowActive(aFrame);
++  bool effectivelyEnabled  = isEnabled && isWindowActive;
++  bool touchesEdge         = DoesScrollbarTouchWindowEdge(aFrame, isHorizontal);
++
++  sRGBColor base = Untint(ComputeScrollbarTrackColor(aFrame, aStyle, aColors), 1.08f);
++
++  float gradient1Tint = effectivelyEnabled ? 1.10f : 0.90f;
++  float gradient2Tint = effectivelyEnabled ? 1.05f : 0.80f;
++  float darkEdge1Tint = effectivelyEnabled ? kDarken3Tint : kDarken2Tint;
++  float darkEdge2Tint = kDarken2Tint;
++  float shadowTint    = gradient1Tint;
++
++  sRGBColor darkEdge1 = TintColor(base, darkEdge1Tint);
++  sRGBColor darkEdge2 = TintColor(base, darkEdge2Tint);
++  sRGBColor shadow    = TintColor(base, shadowTint);
++
++  uint32_t outerBorders = BORDER_ALL;
++  if (!isThin && touchesEdge) {
++    if (isHorizontal) {
++      outerBorders &= ~BORDER_BOTTOM;
++      rect.y += 1.0f;
++      rect.height -= 1.0f;
++    } else if (aScrollbarKind == ScrollbarKind::VerticalRight) {
++      outerBorders &= ~BORDER_RIGHT;
++      rect.x += 1.0f;
++      rect.width -= 1.0f;
++    } else if (aScrollbarKind == ScrollbarKind::VerticalLeft) {
++      outerBorders &= ~BORDER_LEFT;
++      rect.width -= 1.0f;
++    }
++  }
++
++  if (rect.width <= 0 || rect.height <= 0) {
++    return true;
++  }
++
++  DrawHaikuFrame(aDrawTarget, rect, darkEdge2, darkEdge2, darkEdge2, darkEdge2, outerBorders);
++
++  StrokeOptions stroke(1.0f);
++
++  if (isHorizontal) {
++    aDrawTarget.StrokeLine(Point(rect.x + 0.5f, rect.y),
++                           Point(rect.x + 0.5f, rect.YMost()),
++                           ColorPattern(ToDeviceColor(darkEdge1)), stroke);
++    rect.x += 1.0f;
++    rect.width -= 1.0f;
++
++    aDrawTarget.StrokeLine(Point(rect.XMost() - 0.5f, rect.y),
++                           Point(rect.XMost() - 0.5f, rect.YMost()),
++                           ColorPattern(ToDeviceColor(darkEdge2)), stroke);
++    rect.width -= 1.0f;
++
++    aDrawTarget.StrokeLine(Point(rect.x + 0.5f, rect.y),
++                           Point(rect.x + 0.5f, rect.YMost()),
++                           ColorPattern(ToDeviceColor(shadow)), stroke);
++    rect.x += 1.0f;
++    rect.width -= 1.0f;
++
++    if (rect.width > 0 && rect.height > 0) {
++      GradientStop stops[2] = {
++        {0.0f, ToDeviceColor(TintColor(base, gradient1Tint))},
++        {1.0f, ToDeviceColor(TintColor(base, gradient2Tint))}
++      };
++      RefPtr<GradientStops> gStops = aDrawTarget.CreateGradientStops(stops, 2);
++      aDrawTarget.FillRect(rect, LinearGradientPattern(Point(rect.x, rect.y),
++                                                       Point(rect.x, rect.YMost()), gStops));
++    }
++  } else {
++    aDrawTarget.StrokeLine(Point(rect.x, rect.y + 0.5f),
++                           Point(rect.XMost(), rect.y + 0.5f),
++                           ColorPattern(ToDeviceColor(darkEdge1)), stroke);
++    rect.y += 1.0f;
++    rect.height -= 1.0f;
++
++    aDrawTarget.StrokeLine(Point(rect.x, rect.YMost() - 0.5f),
++                           Point(rect.XMost(), rect.YMost() - 0.5f),
++                           ColorPattern(ToDeviceColor(darkEdge2)), stroke);
++    rect.height -= 1.0f;
++
++    aDrawTarget.StrokeLine(Point(rect.x, rect.y + 0.5f),
++                           Point(rect.XMost(), rect.y + 0.5f),
++                           ColorPattern(ToDeviceColor(shadow)), stroke);
++    rect.y += 1.0f;
++    rect.height -= 1.0f;
++
++    if (rect.width > 0 && rect.height > 0) {
++      GradientStop stops[2] = {
++        {0.0f, ToDeviceColor(TintColor(base, gradient1Tint))},
++        {1.0f, ToDeviceColor(TintColor(base, gradient2Tint))}
++      };
++      RefPtr<GradientStops> gStops = aDrawTarget.CreateGradientStops(stops, 2);
++      aDrawTarget.FillRect(rect, LinearGradientPattern(Point(rect.x, rect.y),
++                                                       Point(rect.XMost(), rect.y), gStops));
++    }
++  }
++
++  return true;
++}
++
++bool ScrollbarDrawingHaiku::PaintScrollbarThumb(
++    DrawTarget& aDrawTarget, const LayoutDeviceRect& aRect,
++    ScrollbarKind aScrollbarKind, nsIFrame* aFrame, const ComputedStyle& aStyle,
++    const ElementState& aElementState, const Colors& aColors,
++    const DPIRatio& aDpiRatio) {
++  Rect rect = aRect.ToUnknownRect();
++  if (rect.width <= 0 || rect.height <= 0) {
++    return true;
++  }
++
++  const auto scrollbarSize = GetScrollbarSize(aFrame->PresContext(), aFrame);
++  const bool isThin = scrollbarSize < kHaikuScrollbarSize || IsScrollbarWidthThin(aFrame);
++
++  bool isHorizontal       = (aScrollbarKind == ScrollbarKind::Horizontal);
++  bool isEnabled          = !aElementState.HasState(ElementState::DISABLED);
++  bool isWindowActive     = IsWindowActive(aFrame);
++  bool effectivelyEnabled = isEnabled && isWindowActive;
++  bool touchesEdge        = DoesScrollbarTouchWindowEdge(aFrame, isHorizontal);
++
++  uint32_t outerBorders = BORDER_ALL;
++  if (!isThin && touchesEdge) {
++    if (isHorizontal) {
++      outerBorders &= ~BORDER_BOTTOM;
++      rect.y += 1.0f;
++      rect.height -= 1.0f;
++    } else if (aScrollbarKind == ScrollbarKind::VerticalRight) {
++      outerBorders &= ~BORDER_RIGHT;
++      rect.x += 1.0f;
++      rect.width -= 1.0f;
++    } else if (aScrollbarKind == ScrollbarKind::VerticalLeft) {
++      outerBorders &= ~BORDER_LEFT;
++      rect.width -= 1.0f;
++    }
++  }
++
++  if (rect.width <= 0 || rect.height <= 0) {
++    return true;
++  }
++
++  sRGBColor thumbColor = ComputeScrollbarThumbColor(aFrame, aStyle, ElementState(), aColors);
++
++  if (!effectivelyEnabled) {
++    sRGBColor frameLight  = TintColor(thumbColor, 1.20f);
++    sRGBColor frameShadow = TintColor(thumbColor, 1.30f);
++    DrawHaikuFrame(aDrawTarget, rect, frameLight, frameLight, frameShadow, frameShadow, outerBorders);
++
++    sRGBColor light = TintColor(thumbColor, kLightenMaxTint);
++    sRGBColor dark2 = TintColor(thumbColor, kLighten1Tint);
++    sRGBColor dark1 = TintColor(thumbColor, kLighten2Tint);
++
++    DrawHaikuFrame(aDrawTarget, rect, light, light, dark2, dark2, outerBorders);
++    aDrawTarget.FillRect(rect, ColorPattern(ToDeviceColor(dark1)));
++  } else {
++    DrawHaikuButton(aDrawTarget, rect, thumbColor, false, false, false,
++                    isWindowActive, isHorizontal, outerBorders);
++  }
++
++  float crossSize = isHorizontal ? rect.height : rect.width;
++
++  if (crossSize >= 9.0f) {
++    sRGBColor knobLight, knobDark;
++    if (effectivelyEnabled) {
++      knobLight = TintColor(thumbColor, kLightenMaxTint);
++      knobDark  = TintColor(thumbColor, 1.22f);
++    } else {
++      sRGBColor dark1 = TintColor(thumbColor, kLighten2Tint);
++      knobLight = TintColor(dark1, 1.06f);
++      knobDark  = TintColor(knobLight, kDarken1Tint);
++    }
++
++    float spacer = crossSize;
++    float cx = std::floor(rect.x + rect.width / 2.0f);
++    float cy = std::floor(rect.y + rect.height / 2.0f);
++
++    auto drawDot = [&](float x, float y) {
++      aDrawTarget.FillRect(Rect(x - 1.0f, y - 1.0f, 2.0f, 2.0f),
++                           ColorPattern(ToDeviceColor(knobDark)));
++      aDrawTarget.FillRect(Rect(x, y, 2.0f, 2.0f),
++                           ColorPattern(ToDeviceColor(knobLight)));
++    };
++
++    float length = isHorizontal ? rect.width : rect.height;
++
++    drawDot(cx, cy);
++
++    if (length >= spacer * 3.5f) {
++      if (isHorizontal) {
++        drawDot(cx - spacer, cy);
++        drawDot(cx + spacer, cy);
++      } else {
++        drawDot(cx, cy - spacer);
++        drawDot(cx, cy + spacer);
++      }
++    }
++  }
++
++  return true;
++}
++
++bool ScrollbarDrawingHaiku::PaintScrollbarButton(
++    DrawTarget& aDrawTarget, StyleAppearance aAppearance,
++    const LayoutDeviceRect& aRect, ScrollbarKind aScrollbarKind,
++    nsIFrame* aFrame, const ComputedStyle& aStyle,
++    const ElementState& aElementState, const Colors& aColors,
++    const DPIRatio& aDpiRatio) {
++  if (ShouldHideScrollbarButtons(aFrame, aAppearance)) {
++    return true;
++  }
++
++  Rect rect = aRect.ToUnknownRect();
++  if (rect.width <= 0 || rect.height <= 0) {
++    return true;
++  }
++
++  const auto scrollbarSize = GetScrollbarSize(aFrame->PresContext(), aFrame);
++  const bool isThin = scrollbarSize < kHaikuScrollbarSize || IsScrollbarWidthThin(aFrame);
++
++  bool isHorizontal       = (aScrollbarKind == ScrollbarKind::Horizontal);
++  bool isEnabled          = !aElementState.HasState(ElementState::DISABLED);
++  bool isActivated        = aElementState.HasState(ElementState::ACTIVE);
++  bool isHover            = aElementState.HasState(ElementState::HOVER);
++  bool isWindowActive     = IsWindowActive(aFrame);
++  bool effectivelyEnabled = isEnabled && isWindowActive;
++  bool touchesEdge        = DoesScrollbarTouchWindowEdge(aFrame, isHorizontal);
++
++  uint32_t outerBorders = BORDER_ALL;
++  if (!isThin && touchesEdge) {
++    if (isHorizontal) {
++      outerBorders &= ~BORDER_BOTTOM;
++      rect.y += 1.0f;
++      rect.height -= 1.0f;
++    } else if (aScrollbarKind == ScrollbarKind::VerticalRight) {
++      outerBorders &= ~BORDER_RIGHT;
++      rect.x += 1.0f;
++      rect.width -= 1.0f;
++    } else if (aScrollbarKind == ScrollbarKind::VerticalLeft) {
++      outerBorders &= ~BORDER_LEFT;
++      rect.width -= 1.0f;
++    }
++  }
++
++  if (rect.width <= 0 || rect.height <= 0) {
++    return true;
++  }
++
++  auto [buttonColor, arrowColor] = ComputeScrollbarButtonColors(
++      aFrame, aAppearance, aStyle, aElementState, aColors);
++
++  if (!effectivelyEnabled) {
++    buttonColor = TintColor(buttonColor, kLighten1Tint);
++    arrowColor  = TintColor(arrowColor, kLighten1Tint);
++  }
++
++  DrawHaikuButton(aDrawTarget, rect, buttonColor, isActivated, isHover,
++                  !effectivelyEnabled, isWindowActive, isHorizontal, outerBorders);
++
++  float bLeft   = rect.x;
++  float bTop    = rect.y;
++  float bRight  = rect.XMost() - 1.0f;
++  float bBottom = rect.YMost() - 1.0f;
++
++  float bWidth  = bRight - bLeft;
++  float bHeight = bBottom - bTop;
++
++  float hInset = bWidth / 3.0f;
++  float vInset = bHeight / 3.0f;
++
++  float l = bLeft + hInset;
++  float r = bRight - hInset;
++  float t = bTop + vInset;
++  float b = bBottom - vInset;
++
++  float insetW = r - l;
++  float insetH = b - t;
++
++  Point p1, p2, p3;
++  switch (aAppearance) {
++    case StyleAppearance::ScrollbarbuttonLeft:
++      p1 = Point(r, t);
++      p2 = Point(r - insetW / 1.33f, (t + b + 1.0f) / 2.0f);
++      p3 = Point(r, b + 1.0f);
++      break;
++    case StyleAppearance::ScrollbarbuttonRight:
++      p1 = Point(l + 1.0f, b + 1.0f);
++      p2 = Point(l + 1.0f + insetW / 1.33f, (t + b + 1.0f) / 2.0f);
++      p3 = Point(l + 1.0f, t);
++      break;
++    case StyleAppearance::ScrollbarbuttonUp:
++      p1 = Point(l, b);
++      p2 = Point((l + r + 1.0f) / 2.0f, b - insetH / 1.33f);
++      p3 = Point(r + 1.0f, b);
++      break;
++    case StyleAppearance::ScrollbarbuttonDown:
++    default:
++      p1 = Point(l, t + 1.0f);
++      p2 = Point((l + r + 1.0f) / 2.0f, t + 1.0f + insetH / 1.33f);
++      p3 = Point(r + 1.0f, t + 1.0f);
++      break;
++  }
++
++  RefPtr<PathBuilder> builder = aDrawTarget.CreatePathBuilder();
++  builder->MoveTo(p1);
++  builder->LineTo(p2);
++  builder->LineTo(p3);
++  RefPtr<Path> arrowPath = builder->Finish();
++
++  float penSize = std::max(2.0f, std::ceil(hInset / 2.0f));
++  StrokeOptions arrowStroke(penSize, JoinStyle::MITER, CapStyle::BUTT);
++  aDrawTarget.Stroke(arrowPath, ColorPattern(ToDeviceColor(arrowColor)), arrowStroke);
++
++  return true;
++}
+diff --git a/widget/ScrollbarDrawingHaiku.h b/widget/ScrollbarDrawingHaiku.h
+new file mode 100644
+index 0000000000..b09f6cfafa
+--- /dev/null
++++ b/widget/ScrollbarDrawingHaiku.h
+@@ -0,0 +1,62 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef mozilla_widget_ScrollbarDrawingHaiku_h
++#define mozilla_widget_ScrollbarDrawingHaiku_h
++
++#include "ScrollbarDrawing.h"
++
++namespace mozilla::widget {
++
++class ScrollbarDrawingHaiku final : public ScrollbarDrawing {
++ public:
++  ScrollbarDrawingHaiku() : ScrollbarDrawing(Kind::Haiku) {}
++  virtual ~ScrollbarDrawingHaiku() = default;
++
++  LayoutDeviceIntSize GetMinimumWidgetSize(nsPresContext*,
++                                           StyleAppearance aAppearance,
++                                           nsIFrame* aFrame) override;
++
++  Maybe<nsITheme::Transparency> GetScrollbarPartTransparency(
++      nsIFrame* aFrame, StyleAppearance aAppearance) override;
++
++  bool PaintScrollbarThumb(DrawTarget&, const LayoutDeviceRect&, ScrollbarKind,
++                           nsIFrame*, const ComputedStyle&, const ElementState&,
++                           const Colors&, const DPIRatio&) override;
++  bool PaintScrollbarThumb(WebRenderBackendData&, const LayoutDeviceRect&,
++                           ScrollbarKind, nsIFrame*, const ComputedStyle&,
++                           const ElementState&, const Colors&,
++                           const DPIRatio&) override {
++    return false;
++  }
++
++  using ScrollbarDrawing::PaintScrollbar;
++  bool PaintScrollbar(DrawTarget&, const LayoutDeviceRect&,
++                      ScrollbarKind, nsIFrame*, const ComputedStyle&,
++                      const ElementState&, const Colors&,
++                      const DPIRatio&) override;
++  bool PaintScrollbar(WebRenderBackendData&, const LayoutDeviceRect&,
++                      ScrollbarKind, nsIFrame*, const ComputedStyle&,
++                      const ElementState&, const Colors&,
++                      const DPIRatio&) override {
++    return false;
++  }
++
++  bool PaintScrollbarButton(DrawTarget&, StyleAppearance,
++                            const LayoutDeviceRect&, ScrollbarKind,
++                            nsIFrame*, const ComputedStyle&,
++                            const ElementState&, const Colors&,
++                            const DPIRatio&) override;
++
++  void RecomputeScrollbarParams() override;
++  bool ShouldDrawScrollbarButtons() override { return true; }
++
++ private:
++  bool DoesScrollbarTouchWindowEdge(nsIFrame* aFrame, bool aIsHorizontal) const;
++  bool ShouldHideScrollbarButtons(nsIFrame* aFrame, StyleAppearance aAppearance);
++};
++
++}  // namespace mozilla::widget
++
++#endif  // mozilla_widget_ScrollbarDrawingHaiku_h
 diff --git a/widget/Theme.cpp b/widget/Theme.cpp
-index 93c947bb8d..057ed8f48c 100644
+index 93c947bb8d..6879b194d9 100644
 --- a/widget/Theme.cpp
 +++ b/widget/Theme.cpp
-@@ -1502,7 +1502,7 @@ UniquePtr<ScrollbarDrawing> Theme::ScrollbarStyle() {
+@@ -10,6 +10,7 @@
+ #include "ScrollbarDrawingAndroid.h"
+ #include "ScrollbarDrawingCocoa.h"
+ #include "ScrollbarDrawingGTK.h"
++#include "ScrollbarDrawingHaiku.h"
+ #include "ScrollbarDrawingWin.h"
+ #include "ScrollbarDrawingWin11.h"
+ #include "ThemeCocoa.h"
+@@ -1491,6 +1492,8 @@ UniquePtr<ScrollbarDrawing> Theme::ScrollbarStyle() {
+       return MakeUnique<ScrollbarDrawingWin>();
+     case 5:
+       return MakeUnique<ScrollbarDrawingWin11>();
++    case 6:
++      return MakeUnique<ScrollbarDrawingHaiku>();
+     default:
+       break;
+   }
+@@ -1502,8 +1505,10 @@ UniquePtr<ScrollbarDrawing> Theme::ScrollbarStyle() {
    return MakeUnique<ScrollbarDrawingWin>();
  #elif defined(MOZ_WIDGET_COCOA) || defined(MOZ_WIDGET_UIKIT)
    return MakeUnique<ScrollbarDrawingCocoa>();
 -#elif MOZ_WIDGET_GTK
-+#elif defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_HAIKU)
++#elif defined(MOZ_WIDGET_GTK)
    return MakeUnique<ScrollbarDrawingGTK>();
++#elif defined(MOZ_WIDGET_HAIKU)
++  return MakeUnique<ScrollbarDrawingHaiku>();
  #elif ANDROID
    return MakeUnique<ScrollbarDrawingAndroid>();
+ #else
 diff --git a/widget/gtk/moz.build b/widget/gtk/moz.build
 index bc717d1fbc..538d72dcf3 100644
 --- a/widget/gtk/moz.build
@@ -9393,10 +10733,10 @@ index 0000000000..4c4fdf193c
 +#endif  // mozilla_widget_GfxInfo_h
 diff --git a/widget/haiku/HaikuAlerts.cpp b/widget/haiku/HaikuAlerts.cpp
 new file mode 100644
-index 0000000000..41041d680f
+index 0000000000..1ef47cdfea
 --- /dev/null
 +++ b/widget/haiku/HaikuAlerts.cpp
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,215 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -9507,6 +10847,10 @@ index 0000000000..41041d680f
 +NS_IMETHODIMP HaikuAlerts::ShowAlert(nsIAlertNotification* aAlert,
 +                                     nsIObserver* aAlertListener) {
 +  NS_ENSURE_ARG_POINTER(aAlert);
++
++  if (!be_app) {
++    return NS_ERROR_NOT_AVAILABLE;
++  }
 +
 +  nsAutoString title;
 +  nsAutoString text;
@@ -9655,7 +10999,7 @@ index 0000000000..1fb972996d
 +#endif  // mozilla_widget_HaikuAlerts_h
 diff --git a/widget/haiku/HaikuApplication.cpp b/widget/haiku/HaikuApplication.cpp
 new file mode 100644
-index 0000000000..9708a178ad
+index 0000000000..7c9ba3211b
 --- /dev/null
 +++ b/widget/haiku/HaikuApplication.cpp
 @@ -0,0 +1,203 @@
@@ -10725,7 +12069,7 @@ index 0000000000..4be7028a4a
 +#endif  // mozilla_widget_HaikuKeyboard_h
 diff --git a/widget/haiku/HaikuUtils.cpp b/widget/haiku/HaikuUtils.cpp
 new file mode 100644
-index 0000000000..e69691df4b
+index 0000000000..607a5937f0
 --- /dev/null
 +++ b/widget/haiku/HaikuUtils.cpp
 @@ -0,0 +1,155 @@
@@ -10779,7 +12123,7 @@ index 0000000000..e69691df4b
 +    float aAlphaMultiplier,
 +    int32_t aMaxWidth,
 +    int32_t aMaxHeight) {
-+  if (!aSurface) {
++  if (!be_app || !aSurface) {
 +    return nullptr;
 +  }
 +
@@ -10871,7 +12215,7 @@ index 0000000000..e69691df4b
 +    float aAlphaMultiplier,
 +    int32_t aMaxWidth,
 +    int32_t aMaxHeight) {
-+  if (!aImage) {
++  if (!be_app || !aImage) {
 +    return nullptr;
 +  }
 +  RefPtr<SourceSurface> surface = aImage->GetFrame(
@@ -12246,10 +13590,10 @@ index 0000000000..b1a8c472b7
 +#endif  // mozilla_widget_ScreenHelperHaiku_h
 diff --git a/widget/haiku/components.conf b/widget/haiku/components.conf
 new file mode 100644
-index 0000000000..af7bc73854
+index 0000000000..4cc63f2e46
 --- /dev/null
 +++ b/widget/haiku/components.conf
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,116 @@
 +# This Source Code Form is subject to the terms of the Mozilla Public
 +# License, v. 2.0. If a copy of the MPL was not distributed with this
 +# file, You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -12331,6 +13675,7 @@ index 0000000000..af7bc73854
 +        'contract_ids': ['@mozilla.org/system-alerts-service;1'],
 +        'type': 'mozilla::widget::HaikuAlerts',
 +        'headers': ['/widget/haiku/HaikuAlerts.h'],
++        'processes': ProcessSelector.MAIN_PROCESS_ONLY,
 +    },
 +    {
 +        'cid': '{330e716a-d2d4-4a57-89df-1d6eb75890d2}',
@@ -12367,10 +13712,10 @@ index 0000000000..af7bc73854
 +]
 diff --git a/widget/haiku/moz.build b/widget/haiku/moz.build
 new file mode 100644
-index 0000000000..85114cf5b3
+index 0000000000..2bbf57e471
 --- /dev/null
 +++ b/widget/haiku/moz.build
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,69 @@
 +# This Source Code Form is subject to the terms of the Mozilla Public
 +# License, v. 2.0. If a copy of the MPL was not distributed with this
 +# file, You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -12439,9 +13784,10 @@ index 0000000000..85114cf5b3
 +
 +SOURCES["HaikuView.cpp"].flags += ["-frtti"]
 +SOURCES["HaikuApplication.cpp"].flags += ["-frtti"]
++
 diff --git a/widget/haiku/nsAppShell.cpp b/widget/haiku/nsAppShell.cpp
 new file mode 100644
-index 0000000000..f77182db14
+index 0000000000..cbbffac3e2
 --- /dev/null
 +++ b/widget/haiku/nsAppShell.cpp
 @@ -0,0 +1,258 @@
@@ -14631,10 +15977,10 @@ index 0000000000..a678e53cf7
 +#endif  // mozilla_widget_nsFilePicker_h
 diff --git a/widget/haiku/nsLookAndFeel.cpp b/widget/haiku/nsLookAndFeel.cpp
 new file mode 100644
-index 0000000000..eda4981566
+index 0000000000..fcaadfd440
 --- /dev/null
 +++ b/widget/haiku/nsLookAndFeel.cpp
-@@ -0,0 +1,508 @@
+@@ -0,0 +1,504 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -15079,15 +16425,19 @@ index 0000000000..eda4981566
 +
 +    case FontID::Caption:
 +    case FontID::SmallCaption:
-+      aFontName = mBoldFont.mName;
-+      aFontStyle = mBoldFont.mStyle;
-+      break;
-+
++    case FontID::Icon:
++    case FontID::MessageBox:
++    case FontID::StatusBar:
++    case FontID::MozField:
++    case FontID::MozButton:
++    case FontID::MozList:
 +    default:
 +      aFontName = mPlainFont.mName;
 +      aFontStyle = mPlainFont.mStyle;
 +      break;
 +  }
++
++  aFontStyle.systemFont = true;
 +
 +  if (aFontName.IsEmpty()) {
 +    aFontName.AssignLiteral("sans-serif");
@@ -15122,14 +16472,6 @@ index 0000000000..eda4981566
 +                   be_plain_font->Face(), mPlainFont);
 +  }
 +
-+  if (be_bold_font) {
-+    font_family boldFamily;
-+    font_style boldStyle;
-+    be_bold_font->GetFamilyAndStyle(&boldFamily, &boldStyle);
-+    InitSystemFont(boldFamily, ConvertFontSize(be_bold_font->Size() * 0.96f),
-+                   be_bold_font->Face(), mBoldFont);
-+  }
-+
 +  menu_info menuInfo;
 +  if (get_menu_info(&menuInfo) == B_OK) {
 +    InitSystemFont(menuInfo.f_family, ConvertFontSize(menuInfo.font_size),
@@ -15145,10 +16487,10 @@ index 0000000000..eda4981566
 +}
 diff --git a/widget/haiku/nsLookAndFeel.h b/widget/haiku/nsLookAndFeel.h
 new file mode 100644
-index 0000000000..4b0446e7e5
+index 0000000000..8f7dfd43b8
 --- /dev/null
 +++ b/widget/haiku/nsLookAndFeel.h
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,47 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -15192,7 +16534,6 @@ index 0000000000..4b0446e7e5
 +  bool mSystemIsDark = false;
 +
 +  SystemFontInfo mPlainFont;
-+  SystemFontInfo mBoldFont;
 +  SystemFontInfo mMenuFont;
 +};
 +
@@ -15469,10 +16810,10 @@ index 0000000000..654df7ab36
 +#endif  // mozilla_widget_nsWidgetFactory_h
 diff --git a/widget/haiku/nsWindow.cpp b/widget/haiku/nsWindow.cpp
 new file mode 100644
-index 0000000000..6324d3e4ad
+index 0000000000..b8aaaf3755
 --- /dev/null
 +++ b/widget/haiku/nsWindow.cpp
-@@ -0,0 +1,1203 @@
+@@ -0,0 +1,1192 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -15627,7 +16968,7 @@ index 0000000000..6324d3e4ad
 +
 +  window_look wlook = B_TITLED_WINDOW_LOOK;
 +  window_feel wfeel = B_NORMAL_WINDOW_FEEL;
-+  uint32 wflag = 0;
++  uint32 wflag = B_ASYNCHRONOUS_CONTROLS;
 +
 +  switch (aInitData.mWindowType) {
 +    case WindowType::Popup: {
@@ -15644,12 +16985,8 @@ index 0000000000..6324d3e4ad
 +    }
 +    case WindowType::Dialog: {
 +      wlook = B_TITLED_WINDOW_LOOK;
-+      if (aParent) {
-+        wfeel = B_MODAL_SUBSET_WINDOW_FEEL;
-+      } else {
-+        wfeel = B_MODAL_APP_WINDOW_FEEL;
-+      }
-+      wflag = B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE;
++      wfeel = B_NORMAL_WINDOW_FEEL;
++      wflag = B_ASYNCHRONOUS_CONTROLS | B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE;
 +      break;
 +    }
 +    case WindowType::Invisible: {
@@ -15770,9 +17107,6 @@ index 0000000000..6324d3e4ad
 +      if (mWindow->IsMinimized()) {
 +        mWindow->Minimize(false);
 +      }
-+      if (!mIsPopup) {
-+        mWindow->Activate(true);
-+      }
 +      if (!mHasBeenShown && !mIsPopup) {
 +        EnsureFrameIsOnScreen();
 +        mHasBeenShown = true;
@@ -15793,10 +17127,6 @@ index 0000000000..6324d3e4ad
 +  }
 +
 +  if (mWindow && mWindow->LockWithTimeout(50000) == B_OK) {
-+    if (mWindow->IsMinimized()) {
-+      mWindow->Minimize(false);
-+    }
-+    mWindow->Activate(true);
 +    if (mView) {
 +      mView->MakeFocus(true);
 +    }
@@ -16851,7 +18181,7 @@ index 0000000000..412ca1dbd2
 +
 +#endif  // mozilla_widget_nsWindow_h
 diff --git a/widget/moz.build b/widget/moz.build
-index a845e87076..3b14c05220 100644
+index a845e87076..41d8ecb0d4 100644
 --- a/widget/moz.build
 +++ b/widget/moz.build
 @@ -53,7 +53,7 @@ XPCOM_MANIFESTS += [
@@ -16863,7 +18193,15 @@ index a845e87076..3b14c05220 100644
      DIRS += [toolkit]
  
  if toolkit == "cocoa":
-@@ -339,17 +339,17 @@ EXPORTS.ipc = [
+@@ -282,6 +282,7 @@ UNIFIED_SOURCES += [
+     "ScrollbarDrawingAndroid.cpp",
+     "ScrollbarDrawingCocoa.cpp",
+     "ScrollbarDrawingGTK.cpp",
++    "ScrollbarDrawingHaiku.cpp",
+     "ScrollbarDrawingWin.cpp",
+     "ScrollbarDrawingWin11.cpp",
+     "SharedWidgetUtils.cpp",
+@@ -339,17 +340,17 @@ EXPORTS.ipc = [
  if CONFIG["MOZ_X11"] or CONFIG["MOZ_WAYLAND"]:
      DIRS += ["x11"]
  
@@ -17057,7 +18395,7 @@ index 8e6b58eced..4dd9e1e0ae 100644
  #  error Oops, you need platform-specific code here
  #endif
 diff --git a/xpcom/io/nsLocalFileUnix.cpp b/xpcom/io/nsLocalFileUnix.cpp
-index 1ae057fb97..4b538f975b 100644
+index b40865bbc2..bc34fde912 100644
 --- a/xpcom/io/nsLocalFileUnix.cpp
 +++ b/xpcom/io/nsLocalFileUnix.cpp
 @@ -53,6 +53,16 @@
@@ -17077,7 +18415,7 @@ index 1ae057fb97..4b538f975b 100644
  #ifdef MOZ_WIDGET_COCOA
  #  include <Carbon/Carbon.h>
  
-@@ -2405,6 +2415,43 @@ nsLocalFile::Reveal() {
+@@ -2399,6 +2409,43 @@ nsLocalFile::Reveal() {
      return NS_ERROR_FAILURE;
    }
    return giovfs->RevealFile(this);
@@ -17121,7 +18459,7 @@ index 1ae057fb97..4b538f975b 100644
  #elif defined(MOZ_WIDGET_COCOA)
    CFURLRef url;
    if (NS_SUCCEEDED(GetCFURL(&url))) {
-@@ -2431,6 +2478,27 @@ nsLocalFile::Launch() {
+@@ -2425,6 +2472,27 @@ nsLocalFile::Launch() {
    }
  
    return giovfs->LaunchFile(mPath);
