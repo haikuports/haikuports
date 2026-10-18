@@ -1,0 +1,142 @@
+From eb14474fe3c552d651b5b3fbd4c54162f0de13dc Mon Sep 17 00:00:00 2001
+From: Luc Schrijvers <begasus@gmail.com>
+Date: Wed, 16 Apr 2025 15:09:57 +0200
+Subject: Fix for pthread_self()
+
+
+diff --git a/sources/shiboken6/libshiboken/helper.cpp b/sources/shiboken6/libshiboken/helper.cpp
+index 016ba12..7624f80 100644
+--- a/sources/shiboken6/libshiboken/helper.cpp
++++ b/sources/shiboken6/libshiboken/helper.cpp
+@@ -600,7 +600,7 @@ ThreadId currentThreadId()
+ {
+ #if defined(_WIN32)
+     return GetCurrentThreadId();
+-#elif defined(__APPLE_CC__)
++#elif defined(__APPLE_CC__) || defined(__HAIKU__)
+     return reinterpret_cast<ThreadId>(pthread_self());
+ #else
+     return pthread_self();
+-- 
+2.56.0
+
+
+From 80a2885c3061cf6d229686df383f8de097bb90de Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Sat, 17 Oct 2026 18:33:51 +0200
+Subject: fixes for building wheels in haikuporter
+
+
+diff --git a/build_scripts/main.py b/build_scripts/main.py
+index 02ad402..075b796 100644
+--- a/build_scripts/main.py
++++ b/build_scripts/main.py
+@@ -636,15 +636,19 @@ class PysideBuild(_build, CommandMixin, BuildInfoCollectorMixin):
+             cmake_cmd.append(f"-DPython_LIBRARY={self.py_library}")
+ 
+         # If a custom shiboken cmake config directory path was provided, pass it to CMake.
+-        if OPTION["SHIBOKEN_CONFIG_DIR"] and config.is_internal_pyside_build():
+-            config_dir = OPTION["SHIBOKEN_CONFIG_DIR"]
+-            if config_dir.exists():
+-                log.info(f"Using custom provided {SHIBOKEN} installation: {config_dir}")
+-                cmake_cmd.append(f"-DShiboken6_DIR={config_dir}")
+-            else:
++        if config.is_internal_pyside_build():
++            if OPTION["SHIBOKEN_CONFIG_DIR"]:
++                config_dir = OPTION["SHIBOKEN_CONFIG_DIR"]
++                if config_dir.exists():
++                    log.info(f"Using custom provided {SHIBOKEN} installation: {config_dir}")
++                    cmake_cmd.append(f"-DShiboken6_DIR={config_dir}")
++                else:
+ 
+-                log.info(f"Custom provided {SHIBOKEN} installation not found. "
+-                         f"Path given: {config_dir}")
++                    log.info(f"Custom provided {SHIBOKEN} installation not found. "
++                             f"Path given: {config_dir}")
++            else:
++                cmake_cmd.append(f"-DShiboken6_DIR={self.install_dir}/lib/cmake/Shiboken6")
++                cmake_cmd.append(f"-DShiboken6Tools_DIR={self.install_dir}/lib/cmake/Shiboken6Tools")
+ 
+         if OPTION["MODULE_SUBSET"]:
+             cmake_cmd.append(f"-DMODULES={parse_modules(OPTION['MODULE_SUBSET'])}")
+@@ -841,6 +845,10 @@ class PysideBuild(_build, CommandMixin, BuildInfoCollectorMixin):
+         if OPTION["SKIP_MYPY_TEST"]:
+             cmake_cmd.append("-DSKIP_MYPY_TEST=1")
+ 
++        if OPTION["QT_TOOLS_PATH"]:
++            cmake_cmd.append(f"-DQDOC_EXECUTABLE={OPTION['QT_TOOLS_PATH']}")
++            cmake_cmd.append(f"-DQHELPGENERATOR_EXECUTABLE={OPTION['QT_TOOLS_PATH']}")
++
+         if self.cmake_toolchain_file:
+             cmake_cmd.append(f"-DCMAKE_TOOLCHAIN_FILE={self.cmake_toolchain_file}")
+ 
+diff --git a/build_scripts/options.py b/build_scripts/options.py
+index ba4039e..1826d88 100644
+--- a/build_scripts/options.py
++++ b/build_scripts/options.py
+@@ -268,6 +268,7 @@ class CommandMixin:
+         # enabled, the extra include path of /app/include will be added to the option
+         # --shiboken-extra-include-paths.
+         ('flatpak', None, 'Build PySide6 for Flatpak.'),
++        ('qt-tools-path=', None, 'Path of Qt tools'),
+     ]
+ 
+     def __init__(self):
+@@ -333,6 +334,7 @@ class CommandMixin:
+         self.shiboken_force_process_system_headers = False
+         self.shiboken_extra_include_paths = None
+         self.flatpak = False
++        self.qt_tools_path = None
+ 
+         # When initializing a command other than the main one (so the
+         # first one), we need to copy the user options from the main
+@@ -546,6 +548,7 @@ class CommandMixin:
+             sys.exit(-1)
+ 
+         OPTION['PLAT_NAME'] = self.plat_name
++        OPTION['QT_TOOLS_PATH'] = self.qt_tools_path
+ 
+     def _extra_checks(self):
+         if self.is_cross_compile and not self.plat_name:
+diff --git a/build_scripts/utils.py b/build_scripts/utils.py
+index 3cb7ade..757d90c 100644
+--- a/build_scripts/utils.py
++++ b/build_scripts/utils.py
+@@ -78,7 +78,7 @@ def update_env_path(newpaths):
+ 
+ def get_numpy_location():
+     for p in sys.path:
+-        if 'site-' in p:
++        if 'site-' in p or 'vendor-' in p:
+             numpy = Path(p).resolve() / 'numpy'
+             if numpy.is_dir():
+                 candidate = numpy / '_core' / 'include'  # Version 2
+diff --git a/build_scripts/wheel_files.py b/build_scripts/wheel_files.py
+index 79bd6fa..9333314 100644
+--- a/build_scripts/wheel_files.py
++++ b/build_scripts/wheel_files.py
+@@ -137,7 +137,7 @@ class ModuleData:
+ 
+     @staticmethod
+     def get_extension_from_platform(platform: str) -> str:
+-        if platform == "linux":
++        if platform == "linux" or platform == "haiku":
+             return "so"
+         elif platform == "darwin":
+             return "dylib"
+diff --git a/sources/pyside6/cmake/Macros/PySideModules.cmake b/sources/pyside6/cmake/Macros/PySideModules.cmake
+index 86791f4..1f8d841 100644
+--- a/sources/pyside6/cmake/Macros/PySideModules.cmake
++++ b/sources/pyside6/cmake/Macros/PySideModules.cmake
+@@ -281,6 +281,8 @@ macro(create_pyside_module)
+         set(ld_prefix_var_name "PATH")
+     elseif(APPLE)
+         set(ld_prefix_var_name "DYLD_LIBRARY_PATH")
++    elseif(HAIKU)
++        set(ld_prefix_var_name "LIBRARY_PATH")
+     else()
+         set(ld_prefix_var_name "LD_LIBRARY_PATH")
+     endif()
+-- 
+2.56.0
+
