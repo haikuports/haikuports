@@ -1,0 +1,228 @@
+From 9eaff5288b125d792c54eb6a165dbfca3bbd09bb Mon Sep 17 00:00:00 2001
+From: Roberto Acevedo <robante12@gmail.com>
+Date: Sun, 24 May 2026 13:37:31 -0600
+Subject: [PATCH] Haiku Build
+
+Changes needed to build in Haiku
+---
+ src/openboardview/CMakeLists.txt |  29 +++++--
+ src/openboardview/haiku.cpp      | 140 +++++++++++++++++++++++++++++++
+ src/openboardview/unix.cpp       |   2 +-
+ 3 files changed, 162 insertions(+), 9 deletions(-)
+ create mode 100644 src/openboardview/haiku.cpp
+
+diff --git a/src/openboardview/CMakeLists.txt b/src/openboardview/CMakeLists.txt
+index 7f8fbc0..aa94479 100644
+--- a/src/openboardview/CMakeLists.txt
++++ b/src/openboardview/CMakeLists.txt
+@@ -38,14 +38,16 @@ else()
+ 			message(WARNING "GTK not found, file picker will be unavailable.")
+ 		endif()
+
+-		pkg_search_module(GIO REQUIRED gio-2.0)
+-		if(GIO_FOUND)
+-			message(STATUS "Found GIO version ${GIO_VERSION}")
+-			link_directories(${GIO_LIBRARY_DIRS})
+-			add_definitions(${GIO_CFLAGS} ${GIO_CFLAGS_OTHER})
+-			add_definitions(-DENABLE_PDFBRIDGE_EVINCE)
+-		else()
+-			message(SEND_ERROR "GIO not found, PDFBridgeEvince cannot be enabled.")
++		if(NOT HAIKU)
++			pkg_search_module(GIO REQUIRED gio-2.0)
++			if(GIO_FOUND)
++				message(STATUS "Found GIO version ${GIO_VERSION}")
++				link_directories(${GIO_LIBRARY_DIRS})
++				add_definitions(${GIO_CFLAGS} ${GIO_CFLAGS_OTHER})
++				add_definitions(-DENABLE_PDFBRIDGE_EVINCE)
++			else()
++				message(SEND_ERROR "GIO not found, PDFBridgeEvince cannot be enabled.")
++			endif()
+ 		endif()
+ 	endif(APPLE)
+ endif()
+@@ -140,6 +142,10 @@ if(APPLE)
+ 	set(SOURCES ${SOURCES}
+ 		osx.mm
+ 	)
++elseif(HAIKU)
++	set(SOURCES ${SOURCES}
++		haiku.cpp
++	)
+ endif()
+ 	set(SOURCES ${SOURCES}
+ 		unix.cpp
+@@ -221,6 +227,13 @@ if(GIO_FOUND)
+ 	)
+ endif()
+
++if(HAIKU)
++	target_link_libraries(${PROJECT_NAME_LOWER}
++		be
++		tracker
++		stdc++
++	)
++endif()
+
+ if(MINGW)
+ target_link_libraries(${PROJECT_NAME_LOWER}
+diff --git a/src/openboardview/haiku.cpp b/src/openboardview/haiku.cpp
+new file mode 100644
+index 0000000..7b889de
+--- /dev/null
++++ b/src/openboardview/haiku.cpp
+@@ -0,0 +1,140 @@
++#ifdef __HAIKU__
++
++#include "platform.h"
++
++#include <FilePanel.h>
++#include <FindDirectory.h>
++#include <Looper.h>
++#include <Path.h>
++#include <Messenger.h>
++#include <Window.h>
++#include <MenuItem.h>
++#include <MenuBar.h>
++#include <stdio.h>
++#include <compat/sys/stat.h>
++#include <string.h>
++
++extern "C" char *open_file_dialog(void);
++
++class FileFilter: public BRefFilter
++{
++	public:
++	bool Filter(const entry_ref *ref,
++		BNode *node,
++		struct stat_beos *stat,
++		const char *mimeType)
++	{
++		int len = strlen(ref->name);
++		if (S_ISDIR(stat->st_mode))
++			return true;
++		if(len > 2 && !strcasecmp(ref->name + len - 3, ".fz"))
++			return true;
++		if (len > 3) {
++			const char *ext = ref->name + len - 4;
++			if (!strcasecmp(ext, ".asc") ||
++				!strcasecmp(ext, ".bom") ||
++
++				!strcasecmp(ext, ".cae") ||
++				!strcasecmp(ext, ".adf") ||
++				!strcasecmp(ext, ".cad") ||
++				!strcasecmp(ext, ".cae") ||
++				!strcasecmp(ext, ".cst") ||
++				!strcasecmp(ext, ".brd") ||
++				!strcasecmp(ext, ".bdv") ||
++				!strcasecmp(ext, ".bvr") ||
++				!strcasecmp(ext, ".xzz") ||
++				!strcasecmp(ext, ".pcb"))
++				return true;
++		}
++		if (len > 7 && !strcasecmp(ref->name + len - 8, ".pcbdoc"))
++			return true;
++		return false;
++	}
++};
++
++class FileHandler: public BLooper
++{
++	public:
++
++	FileHandler()
++		: BLooper("filepanel listener")
++	{
++		lock = create_sem(0, "filepanel sem");
++		path = NULL;
++		Run();
++	}
++
++	~FileHandler()
++	{
++		delete_sem(lock);
++		if (path != NULL)
++			free(path);
++	}
++	void MessageReceived(BMessage* message)
++	{
++		switch(message->what)
++		{
++			case B_REFS_RECEIVED:
++			{
++				entry_ref ref;
++
++				message->FindRef("refs", 0, &ref);
++				BEntry entry(&ref, true);
++				BPath xpath;
++				entry.GetPath(&xpath);
++				path = strdup(xpath.Path());
++				break;
++			}
++			case B_CANCEL:
++				break;
++			default:
++				BHandler::MessageReceived(message);
++				return;
++		}
++		release_sem(lock);
++	}
++
++	void Wait() {
++		acquire_sem(lock);
++	}
++
++	char* path;
++
++	private:
++		sem_id lock;
++};
++
++static char ret[PATH_MAX];
++
++char *open_file_dialog(void)
++{
++	FileHandler *handler = new FileHandler();
++	FileFilter filter;
++	BMessenger messenger(handler);
++	BFilePanel panel(B_OPEN_PANEL,
++		&messenger,
++		NULL,
++		B_FILE_NODE,
++		false,
++		NULL,
++		&filter,
++		true);
++	panel.Show();
++	handler->Wait();
++	if (handler->path == NULL) {
++		messenger.SendMessage(B_QUIT_REQUESTED);
++		return NULL;
++	}
++	snprintf(ret, sizeof(ret), "%s", handler->path);
++	ret[sizeof(ret) - 1] = 0;
++	messenger.SendMessage(B_QUIT_REQUESTED);
++	return ret;
++}
++
++const filesystem::path show_file_picker(bool filterBoards){
++    char *path = open_file_dialog();
++    if (path == NULL) return std::string();
++    return std::string(path);
++}
++
++#endif
+diff --git a/src/openboardview/unix.cpp b/src/openboardview/unix.cpp
+index 6bad927..3bb7265 100644
+--- a/src/openboardview/unix.cpp
++++ b/src/openboardview/unix.cpp
+@@ -149,7 +149,7 @@ const filesystem::path show_file_picker(bool filterBoards) {
+
+ 	return path;
+ }
+-#elif !defined(__APPLE__)
++#elif !defined(__APPLE__) && !defined(__HAIKU__)
+ const filesystem::path show_file_picker(bool filterBoards) { // dummy function when not building for OS X and GTK not available
+ 	SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Cannot show open file dialog: not built in.");
+ 	return std::string();
+--
+2.54.0
