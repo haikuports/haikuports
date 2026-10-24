@@ -1,0 +1,98 @@
+From 1615580fdd4527fbfc68f8798796c52b1cfa2d78 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Sun, 18 Oct 2026 15:17:55 -0300
+Subject: [PATCH 1/2] Audio on Haiku: no stream tried without a sound card
+
+Haiku's media server mixes into a "Default Output" with or without a card, PortAudio lists it either way, and opening it with no card behind it crashed Subtitld at start instead of raising. With nothing published under /dev/audio, the engine has no output to try: it logs once and plays silently, as with no device elsewhere, and picks up a card plugged in later on the next play().
+---
+ src/subtitld/modules/audioengine.py | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/src/subtitld/modules/audioengine.py b/src/subtitld/modules/audioengine.py
+index 93787cf..19721de 100644
+--- a/src/subtitld/modules/audioengine.py
++++ b/src/subtitld/modules/audioengine.py
+@@ -955,6 +955,17 @@ class Track:
+         return out
+ 
+ 
++def _haiku_sound_card():
++    """Whether Haiku has a sound card to play to. Its media server mixes
++    into a "Default Output" with or without one, and PortAudio lists it
++    either way; opened with no card behind it, it crashes the process
++    rather than raising. Sound drivers publish their devices under
++    /dev/audio (/dev/audio/hmulti/hda/0 for HD Audio); with no card,
++    nothing is there. Checked again on each play(), so a USB card plugged
++    in later is found."""
++    return any(files for _, _, files in os.walk('/dev/audio'))
++
++
+ class SoundDeviceAudioEngine:
+     def __init__(self, samplerate=48000, blocksize=4096):
+         # ARCHITECTURE
+@@ -1191,7 +1202,8 @@ class SoundDeviceAudioEngine:
+             return True
+         if not self._no_output_logged:
+             self._no_output_logged = True
+-            sys.stderr.write(f'[audioengine] WARNING: no audio output device, playback is silent ({error})\n')
++            reason = error if error is not None else 'no sound card'
++            sys.stderr.write(f'[audioengine] WARNING: no audio output device, playback is silent ({reason})\n')
+             sys.stderr.flush()
+         return False
+ 
+@@ -1203,7 +1215,10 @@ class SoundDeviceAudioEngine:
+         some 430 ms of audio and reports about 175: the picture, lined up
+         with what it reports, still ran a quarter of a second ahead of the
+         sound. WASAPI reports what it holds, and holds less. Then the
+-        default, everywhere."""
++        default, everywhere; except on Haiku without a sound card, where
++        there is nothing to try (see _haiku_sound_card)."""
++        if sys.platform.startswith('haiku') and not _haiku_sound_card():
++            return []
+         choices = []
+         if sys.platform == 'win32':
+             try:
+-- 
+2.53.0
+
+
+From e9e63225f1846f9202286b7372a8212d4cc72f7c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Sun, 18 Oct 2026 15:17:55 -0300
+Subject: [PATCH 2/2] Playback with no sound device: the picture is the clock
+
+With no output stream the engine never starts and its playhead stands still. The video-sync watchdog snapped the picture back to it four times a second, holding it on one frame, and the cursor and timecode read it too. Now the watchdog only follows sound that plays, and with no stream the cursor follows the picture.
+---
+ src/subtitld/interface/playercontrols.py | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/subtitld/interface/playercontrols.py b/src/subtitld/interface/playercontrols.py
+index 6efe2af..613f87e 100755
+--- a/src/subtitld/interface/playercontrols.py
++++ b/src/subtitld/interface/playercontrols.py
+@@ -1374,6 +1374,11 @@ def load(self):
+         engine = _audio_engine()
+         if engine is None:
+             return float(session.SUBTITLE.get('position', 0) or 0)
++        if engine.stream is None:
++            # No sound device: the engine stands still, and the picture
++            # plays on its own (preview_panel._start_picture). The
++            # picture is the clock, playing or paused.
++            return self.preview_panel_player._media_player.position() / 1000.0
+         ae_pos = engine.heard_position
+         if not _is_playing():
+             # Paused — engine playhead is canonical, don't extrapolate.
+@@ -1489,6 +1494,10 @@ def load(self):
+         mp = self.preview_panel_player._media_player
+         if mp.playbackState() != QMediaPlayer.PlayingState:
+             return
++        if not engine.playing:
++            # No sound device, so no sound to follow: snapping the picture
++            # to the engine's standing playhead held it on one frame.
++            return
+         # Where the sound is heard, not what has been handed to the device:
+         # snapping to that left the picture the device's latency ahead.
+         audio_pos = engine.heard_position    # seconds
+-- 
+2.53.0
+
