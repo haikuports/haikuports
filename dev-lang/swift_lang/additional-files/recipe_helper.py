@@ -65,7 +65,7 @@ def main():
 		target_branch = checkout_config['branch-schemes'][RELEASE_NAME_IN_CONFIG]['repos']
 		for (repoid, tag) in target_branch.items():
 			owner_repo = gh_repos[repoid]['remote']['id']
-			if tag.ends_with(RELEASE_NAME_IN_CONFIG):
+			if tag.endswith(RELEASE_NAME_IN_CONFIG):
 				tag = SWIFT_RELEASE_TAG_NAME
 			config_items.append(ConfigItem(repoid, owner_repo, tag))
 
