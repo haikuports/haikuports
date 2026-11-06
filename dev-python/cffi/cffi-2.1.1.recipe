@@ -4,20 +4,13 @@ HOMEPAGE="https://cffi.readthedocs.io/
 	https://pypi.org/project/cffi/"
 COPYRIGHT="2012-2021 Armin Rigo, Maciej Fijalkowski"
 LICENSE="MIT"
-REVISION="5"
-SOURCE_URI="https://files.pythonhosted.org/packages/source/c/cffi/cffi-$portVersion.tar.gz"
-CHECKSUM_SHA256="d400bfb9a37b1351253cb402671cea7e89bdecc294e8016a707f6d1d8ac934f9"
+REVISION="1"
+SOURCE_URI="https://files.pythonhosted.org/packages/source/${portBaseName:0:1}/$portBaseName/$portBaseName-$portVersion.tar.gz"
+CHECKSUM_SHA256="dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be"
 PATCHES="cffi-$portVersion.patchset"
 
 ARCHITECTURES="all !x86_gcc2"
 SECONDARY_ARCHITECTURES="x86"
-
-PROVIDES="
-	$portName = $portVersion
-	"
-REQUIRES="
-	haiku$secondaryArchSuffix
-	"
 
 BUILD_REQUIRES="
 	haiku${secondaryArchSuffix}_devel
@@ -27,24 +20,44 @@ BUILD_PREREQUIRES="
 	cmd:gcc$secondaryArchSuffix
 	"
 
-PYTHON_VERSIONS=(3.10)
+PYTHON_VERSIONS=(3.10 3.14)
+defaultVersion=3.14
 
-for i in "${!PYTHON_VERSIONS[@]}"; do
-	pythonVersion=${PYTHON_VERSIONS[$i]}
+for pythonVersion in ${PYTHON_VERSIONS[@]}; do
 	pythonPackage=python${pythonVersion//.}
 
-	eval "PROVIDES_${pythonPackage}=\"
+	# Not renaming 3.10 packages to avoid needing massive packages rebuilds.
+	# No need for REPLACES then. ToDo: remove the conditional after dropping 3.10.
+	if [ $pythonVersion != 3.10 ]; then
+		# Allows using dot in sub-package names (eg: "_python3.14" vs "_python314"):
+		eval "PACKAGE_NAME_$pythonPackage=${portName}_python$pythonVersion"
+
+		eval "PROVIDES_$pythonPackage=\"
+			${portName}_python$pythonVersion = $portVersion
+			\""
+	fi
+
+	eval "PROVIDES_$pythonPackage+=\"
 		${portName}_$pythonPackage = $portVersion
+		cmd:cffi_gen_src_$pythonVersion = $portVersion
 		\""
 
-	if [ "$targetArchitecture" = x86_gcc2 ]; then
+	# Provide non-suffixed cmd only for the default Python version
+	if [ $pythonVersion = $defaultVersion ]; then
 		eval "PROVIDES_${pythonPackage}+=\"
-			cffi_$pythonPackage = $portVersion
+			cmd:cffi_gen_src = $portVersion
+			\""
+	fi
+
+	if [ -n "$secondaryArchSuffix" ]; then
+		eval "PROVIDES_$pythonPackage+=\"
+			${portBaseName}_python$pythonVersion = $portVersion
+			${portBaseName}_$pythonPackage = $portVersion
 			\""
 	fi
 
 	eval "REQUIRES_$pythonPackage=\"
-		haiku
+		haiku$secondaryArchSuffix
 		pycparser_$pythonPackage
 		cmd:python$pythonVersion
 		lib:libffi$secondaryArchSuffix
@@ -62,7 +75,6 @@ for i in "${!PYTHON_VERSIONS[@]}"; do
 
 	TEST_REQUIRES="
 		cffi_$pythonPackage
-		py_$pythonPackage
 		pytest_$pythonPackage
 		"
 done
@@ -85,8 +97,21 @@ INSTALL()
 		$python setup.py build install \
 			--root=/ --prefix=$prefix
 
+		# Version suffix all the scripts
+		for f in $prefix/bin/*; do
+			mv $f $f-$pythonVersion
+		done
+
+		# And provide suffix-less symlinks for the default version
+		if [ $pythonVersion = $defaultVersion ]; then
+			for f in $prefix/bin/*; do
+				ln -sr $f ${f%-$pythonVersion}
+			done
+		fi
+
 		packageEntries $pythonPackage \
-			$prefix/lib/python*
+			$prefix/lib/$python \
+			$prefix/bin
 	done
 }
 
@@ -96,6 +121,6 @@ INSTALL()
 TEST()
 {
 	for i in "${!PYTHON_VERSIONS[@]}"; do
-		py.test c/ testing/
+		pytest c/ testing/
 	done
 }
