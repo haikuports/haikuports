@@ -1,0 +1,220 @@
+From 9b5965d743f9ebaf3075a3bf5c44f8b7c0f24a0b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Sun, 18 Oct 2026 15:17:55 -0300
+Subject: [PATCH 1/3] Audio on Haiku: no stream tried without a sound card
+
+Haiku's media server mixes into a "Default Output" with or without a card, PortAudio lists it either way, and opening it with no card behind it crashed Subtitld at start instead of raising. With nothing published under /dev/audio, the engine has no output to try: it logs once and plays silently, as with no device elsewhere, and picks up a card plugged in later on the next play().
+---
+ src/subtitld/modules/audioengine.py | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/src/subtitld/modules/audioengine.py b/src/subtitld/modules/audioengine.py
+index 93787cf..19721de 100644
+--- a/src/subtitld/modules/audioengine.py
++++ b/src/subtitld/modules/audioengine.py
+@@ -955,6 +955,17 @@ class Track:
+         return out
+ 
+ 
++def _haiku_sound_card():
++    """Whether Haiku has a sound card to play to. Its media server mixes
++    into a "Default Output" with or without one, and PortAudio lists it
++    either way; opened with no card behind it, it crashes the process
++    rather than raising. Sound drivers publish their devices under
++    /dev/audio (/dev/audio/hmulti/hda/0 for HD Audio); with no card,
++    nothing is there. Checked again on each play(), so a USB card plugged
++    in later is found."""
++    return any(files for _, _, files in os.walk('/dev/audio'))
++
++
+ class SoundDeviceAudioEngine:
+     def __init__(self, samplerate=48000, blocksize=4096):
+         # ARCHITECTURE
+@@ -1191,7 +1202,8 @@ class SoundDeviceAudioEngine:
+             return True
+         if not self._no_output_logged:
+             self._no_output_logged = True
+-            sys.stderr.write(f'[audioengine] WARNING: no audio output device, playback is silent ({error})\n')
++            reason = error if error is not None else 'no sound card'
++            sys.stderr.write(f'[audioengine] WARNING: no audio output device, playback is silent ({reason})\n')
+             sys.stderr.flush()
+         return False
+ 
+@@ -1203,7 +1215,10 @@ class SoundDeviceAudioEngine:
+         some 430 ms of audio and reports about 175: the picture, lined up
+         with what it reports, still ran a quarter of a second ahead of the
+         sound. WASAPI reports what it holds, and holds less. Then the
+-        default, everywhere."""
++        default, everywhere; except on Haiku without a sound card, where
++        there is nothing to try (see _haiku_sound_card)."""
++        if sys.platform.startswith('haiku') and not _haiku_sound_card():
++            return []
+         choices = []
+         if sys.platform == 'win32':
+             try:
+-- 
+2.53.0
+
+
+From 32b12f2c00ee8470ae944320d990fea9394b6783 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Sun, 18 Oct 2026 15:17:55 -0300
+Subject: [PATCH 2/3] Playback with no sound device: the picture is the clock
+
+With no output stream the engine never starts and its playhead stands still. The video-sync watchdog snapped the picture back to it four times a second, holding it on one frame, and the cursor and timecode read it too. Now the watchdog only follows sound that plays, and with no stream the cursor follows the picture.
+---
+ src/subtitld/interface/playercontrols.py | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/subtitld/interface/playercontrols.py b/src/subtitld/interface/playercontrols.py
+index 6efe2af..613f87e 100755
+--- a/src/subtitld/interface/playercontrols.py
++++ b/src/subtitld/interface/playercontrols.py
+@@ -1374,6 +1374,11 @@ def load(self):
+         engine = _audio_engine()
+         if engine is None:
+             return float(session.SUBTITLE.get('position', 0) or 0)
++        if engine.stream is None:
++            # No sound device: the engine stands still, and the picture
++            # plays on its own (preview_panel._start_picture). The
++            # picture is the clock, playing or paused.
++            return self.preview_panel_player._media_player.position() / 1000.0
+         ae_pos = engine.heard_position
+         if not _is_playing():
+             # Paused — engine playhead is canonical, don't extrapolate.
+@@ -1489,6 +1494,10 @@ def load(self):
+         mp = self.preview_panel_player._media_player
+         if mp.playbackState() != QMediaPlayer.PlayingState:
+             return
++        if not engine.playing:
++            # No sound device, so no sound to follow: snapping the picture
++            # to the engine's standing playhead held it on one frame.
++            return
+         # Where the sound is heard, not what has been handed to the device:
+         # snapping to that left the picture the device's latency ahead.
+         audio_pos = engine.heard_position    # seconds
+-- 
+2.53.0
+
+
+From 9eaa60a6a048ec86952f0e18f9d0105ababce65b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 5 Nov 2026 00:55:41 -0300
+Subject: [PATCH 3/3] OpenCV and edge-tts optional: Subtitld starts where they
+ are not packaged
+
+Haiku's packages have neither for Python 3.14 (edge-tts would bring a
+dozen more with aiohttp), and both were imported at start. Without
+OpenCV, face extraction says so, as it does without MediaPipe, which
+Haiku lacks anyway. Without edge-tts, Edge's voices are not offered;
+asked anyway, it answers each line with an error.
+---
+ src/subtitld/__main__.py                      |  5 +++--
+ src/subtitld/interface/left_panel_speakers.py |  7 ++++++-
+ .../addons/builtin/edge_tts_provider.py       | 21 ++++++++++++++++---
+ 3 files changed, 27 insertions(+), 6 deletions(-)
+
+diff --git a/src/subtitld/__main__.py b/src/subtitld/__main__.py
+index 13d37a7..5fd8453 100644
+--- a/src/subtitld/__main__.py
++++ b/src/subtitld/__main__.py
+@@ -427,7 +427,7 @@ def main():
+     # Built-in providers are registered first so they're always available
+     # right after install, even before the user discovers the add-ons
+     # panel. Today's set:
+-    #   - Edge TTS — speech synthesis, no credentials required
++    #   - Edge TTS — speech synthesis, no credentials required (where edge-tts is installed)
+     #   - FFmpeg separator — audio source separation, no model required
+     # No speech-to-text engine ships as a built-in. Offline whisper.cpp and
+     # RealtimeSTT are add-ons, which keeps the app download small; the cloud
+@@ -440,7 +440,8 @@ def main():
+     # (provider QObjects are auto-parented to it), so this happens
+     # after `QApplication(sys.argv)`.
+     addon_manager = addons.get_manager()
+-    addon_manager.register_builtin(_edge_tts_provider.get_provider())
++    if _edge_tts_provider.available():
++        addon_manager.register_builtin(_edge_tts_provider.get_provider())
+     addon_manager.register_builtin(_ffmpeg_separator_provider.get_provider())
+     addon_manager.register_builtin(_gtts_provider.get_provider())
+     addon_manager.register_builtin(_import_provider.get_provider())
+diff --git a/src/subtitld/interface/left_panel_speakers.py b/src/subtitld/interface/left_panel_speakers.py
+index 3825fbd..9813943 100644
+--- a/src/subtitld/interface/left_panel_speakers.py
++++ b/src/subtitld/interface/left_panel_speakers.py
+@@ -2,7 +2,10 @@ import colorsys
+ import hashlib
+ import logging
+ 
+-import cv2
++try:
++    import cv2
++except Exception:  # optional, like MediaPipe: not packaged on some platforms (e.g. Haiku)
++    cv2 = None
+ import numpy as np
+ 
+ from PySide6.QtWidgets import QVBoxLayout, QWidget, QScrollArea, QHBoxLayout, QDialog, QPushButton, QLabel, QLineEdit, QSizePolicy, QColorDialog, QComboBox, QCheckBox, QStackedWidget, QStyle, QStyleOption, QGraphicsOpacityEffect
+@@ -44,6 +47,8 @@ class FaceExtractorThread(QThread):
+         # MediaPipe is absent on platforms it does not ship for, and 0.10.30
+         # to 0.10.32 cannot run the face model (see modules/face_detection).
+         try:
++            if cv2 is None:
++                raise FaceDetectionUnavailable('OpenCV is not installed')
+             face_detector = FaceDetector()
+         except FaceDetectionUnavailable as e:
+             self.error.emit(f"Face detection is unavailable: {e}.")
+diff --git a/src/subtitld/modules/addons/builtin/edge_tts_provider.py b/src/subtitld/modules/addons/builtin/edge_tts_provider.py
+index ecf3a8a..12a2c7d 100644
+--- a/src/subtitld/modules/addons/builtin/edge_tts_provider.py
++++ b/src/subtitld/modules/addons/builtin/edge_tts_provider.py
+@@ -21,8 +21,11 @@ import os
+ import socket
+ import subprocess
+ 
+-import aiohttp
+-import edge_tts
++try:
++    import aiohttp
++    import edge_tts
++except Exception:  # optional: not packaged on some platforms (e.g. Haiku), where Edge is not offered
++    aiohttp = edge_tts = None
+ from PySide6.QtCore import QObject, QThread, Signal
+ 
+ from subtitld.modules import session
+@@ -73,7 +76,12 @@ _REFUSED = ("Microsoft's Edge speech service refused the request (403). It is ch
+ 
+ 
+ def _refused(error):
+-    return isinstance(error, aiohttp.ClientResponseError) and error.status == 403
++    return aiohttp is not None and isinstance(error, aiohttp.ClientResponseError) and error.status == 403
++
++
++def available() -> bool:
++    """Whether edge-tts (and its aiohttp) are installed: Subtitld offers Edge's voices only then."""
++    return edge_tts is not None
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -231,6 +239,8 @@ class EdgeTTSProvider(TTSProvider):
+             return
+ 
+         cfg = session.CONFIG.setdefault('dubbing', {}).setdefault('edge-tts', {}).setdefault('voices', {})
++        if not available():
++            return
+ 
+         def on_voice(voice: dict) -> None:
+             cfg[voice['ShortName']] = voice
+@@ -247,6 +257,11 @@ class EdgeTTSProvider(TTSProvider):
+ 
+     # ---- Synthesis --------------------------------------------------------
+     def generate_speeches(self, text_list: list[dict]) -> None:
++        if not available():
++            for subtitle in text_list:
++                self.speech_error.emit(subtitle.get('uid', ''), subtitle,
++                                       'edge-tts: not installed in this Subtitld')
++            return
+         # Online preflight — emit a single error per item if offline so the
+         # UI can show a "you're offline" message instead of a 30s timeout.
+         if not _online():
+-- 
+2.53.0
+
