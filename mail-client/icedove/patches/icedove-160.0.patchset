@@ -1,9 +1,11 @@
-From a73b6d8ef6bfc0f1c277be7d01e8b6fdf21f19c5 Mon Sep 17 00:00:00 2001
+From af1b5a8aae947895b49247869924c4ad99b7cb19 Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Fri, 30 Oct 2026 14:32:15 +1000
+Date: Fri, 13 Nov 2026 18:45:24 +1000
 Subject: Add Haiku platform support with dual-backend build
 
-Based on patches sourced from https://github.com/kenz-gelsoft/gecko-dev/
+Based on patches sourced from:
+- https://github.com/kenz-gelsoft/gecko-dev
+- https://github.com/haiku-pi/haiku-rpi
 
 - Build System & Architecture:
   * Added Haiku target with dual-backend support: native UI and GTK3 + Wayland.
@@ -12,6 +14,8 @@ Based on patches sourced from https://github.com/kenz-gelsoft/gecko-dev/
 - Native UI & System Integration (widget/haiku):
   * Implemented native windowing and view backend (BWindow/BView) with
     software double-buffered rendering via Skia.
+  * Added support for borderless Picture-in-Picture (PiP) and mini-windows
+    with interactive content dragging and native frame resizing.
   * Implemented native-styled scrollbar theme.
   * Implemented native file dialogs (BFilePanel), clipboard (BClipboard),
     custom/system cursors (BCursor), and input method support (IME).
@@ -31,13 +35,15 @@ Based on patches sourced from https://github.com/kenz-gelsoft/gecko-dev/
     communication on Haiku.
 
 - Platform Compatibility & Third-Party:
+  * Optimized OS entropy generation in MFBT using getentropy() system
+    call instead of /dev/urandom.
   * Adjusted networking and socket options across libwebrtc, nICEr,
     nrappkit, SCTP, and quinn-udp for Haiku network stack.
   * Fixed type collisions (int64) and compatibility issues in vendored
     Rust crates (glslopt, iana-time-zone-haiku, lmdb-rkv-sys).
 
 diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
-index 0f4b2915ad..df8d54cb44 100644
+index 15a12b6..db366ec 100644
 --- a/browser/app/profile/firefox.js
 +++ b/browser/app/profile/firefox.js
 @@ -14,7 +14,9 @@
@@ -60,7 +66,7 @@ index 0f4b2915ad..df8d54cb44 100644
    pref("general.autoScroll", false);
  #else
    pref("general.autoScroll", true);
-@@ -1236,7 +1238,7 @@ pref("security.allow_parent_unrestricted_js_loads", false);
+@@ -1226,7 +1228,7 @@ pref("security.allow_parent_unrestricted_js_loads", false);
  pref("browser.tabs.min_inactive_duration_before_unload", 600000);
  
  // Does middleclick paste of clipboard to new tab button
@@ -70,7 +76,7 @@ index 0f4b2915ad..df8d54cb44 100644
  #else
  pref("browser.tabs.searchclipboardfor.middleclick", false);
 diff --git a/browser/branding/branding-common.mozbuild b/browser/branding/branding-common.mozbuild
-index dd02e32066..d85c5e4eaf 100644
+index dd02e32..d85c5e4 100644
 --- a/browser/branding/branding-common.mozbuild
 +++ b/browser/branding/branding-common.mozbuild
 @@ -25,7 +25,7 @@ def FirefoxBranding():
@@ -83,7 +89,7 @@ index dd02e32066..d85c5e4eaf 100644
              "default128.png",
              "default16.png",
 diff --git a/browser/components/build/components.conf b/browser/components/build/components.conf
-index 9682419437..c43b5768e4 100644
+index 9682419..c43b576 100644
 --- a/browser/components/build/components.conf
 +++ b/browser/components/build/components.conf
 @@ -51,3 +51,13 @@ elif buildconfig.substs['OS_ARCH'] == 'WINNT':
@@ -101,10 +107,10 @@ index 9682419437..c43b5768e4 100644
 +        },
 +    ]
 diff --git a/browser/components/shell/ShellService.sys.mjs b/browser/components/shell/ShellService.sys.mjs
-index e6b3089bd1..f66ed8737f 100644
+index 249d9cb..56ed2fb 100644
 --- a/browser/components/shell/ShellService.sys.mjs
 +++ b/browser/components/shell/ShellService.sys.mjs
-@@ -105,6 +105,10 @@ let ShellServiceInternal = {
+@@ -112,6 +112,10 @@ let ShellServiceInternal = {
     * environments.
     */
    get canSetDesktopBackground() {
@@ -115,7 +121,7 @@ index e6b3089bd1..f66ed8737f 100644
      if (AppConstants.platform == "win" || AppConstants.platform == "macosx") {
        return true;
      }
-@@ -1383,21 +1387,22 @@ let ShellServiceInternal = {
+@@ -1440,21 +1444,22 @@ let ShellServiceInternal = {
  // consistent behavior, we query the native shell interface inheriting from
  // `nsIShellService` on setup.
  let shellInterface;
@@ -154,11 +160,11 @@ index e6b3089bd1..f66ed8737f 100644
  
  XPCOMUtils.defineLazyServiceGetters(ShellServiceInternal, {
 diff --git a/browser/components/shell/moz.build b/browser/components/shell/moz.build
-index 548cf0e4cf..50c6b06712 100644
+index 8690a0e..304652b 100644
 --- a/browser/components/shell/moz.build
 +++ b/browser/components/shell/moz.build
-@@ -104,6 +104,15 @@ elif CONFIG["OS_ARCH"] == "WINNT":
-         "components.conf",
+@@ -129,6 +129,15 @@ elif CONFIG["OS_ARCH"] == "WINNT":
+         "WindowsUserChoice.h",
      ]
  
 +elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "haiku":
@@ -175,10 +181,10 @@ index 548cf0e4cf..50c6b06712 100644
  if SOURCES:
 diff --git a/browser/components/shell/nsHaikuShellService.cpp b/browser/components/shell/nsHaikuShellService.cpp
 new file mode 100644
-index 0000000000..30ff1fff79
+index 0000000..ed47362
 --- /dev/null
 +++ b/browser/components/shell/nsHaikuShellService.cpp
-@@ -0,0 +1,328 @@
+@@ -0,0 +1,218 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -199,28 +205,17 @@ index 0000000000..30ff1fff79
 +#include <storage/Path.h>
 +#pragma GCC visibility pop
 +
-+#include "mozilla/dom/Document.h"
-+#include "mozilla/dom/Element.h"
-+#include "mozilla/dom/ReferrerInfo.h"
-+#include "nsComponentManagerUtils.h"
-+#include "nsContentPolicyUtils.h"
-+#include "nsICookieJarSettings.h"
-+#include "nsIDocShell.h"
-+#include "nsIImageLoadingContent.h"
-+#include "nsILoadContext.h"
++#include "nsIFile.h"
 +#include "nsIObserverService.h"
 +#include "nsIPrefService.h"
-+#include "nsIURI.h"
-+#include "nsIWebBrowserPersist.h"
-+#include "nsNetUtil.h"
 +#include "nsServiceManagerUtils.h"
 +#include "nsShellService.h"
 +#include "nsString.h"
 +
-+#define HAIKU_FIREFOX_SIGNATURE "application/x-vnd.iceweasel-launcher"
++#define HAIKU_FIREFOX_SIGNATURE "application/x-vnd.icedove-launcher"
 +
 +NS_IMPL_ISUPPORTS_INHERITED(nsHaikuShellService, nsShellService,
-+                            nsIShellService, nsIWebProgressListener)
++                            nsIShellService)
 +
 +nsresult nsHaikuShellService::Init() { return NS_OK; }
 +
@@ -350,71 +345,27 @@ index 0000000000..30ff1fff79
 +}
 +
 +NS_IMETHODIMP
-+nsHaikuShellService::SetDesktopBackground(mozilla::dom::Element* aElement,
-+                                         int32_t aPosition,
-+                                         const nsACString& aImageName) {
-+  NS_ENSURE_ARG_POINTER(aElement);
++nsHaikuShellService::SetDesktopBackgroundFile(nsIFile* aFile,
++                                              int32_t aPosition) {
++  NS_ENSURE_ARG_POINTER(aFile);
 +
-+  nsresult rv;
-+  nsCOMPtr<nsIImageLoadingContent> imageContent =
-+      do_QueryInterface(aElement, &rv);
++  nsAutoCString nativePath;
++  nsresult rv = aFile->GetNativePath(nativePath);
 +  NS_ENSURE_SUCCESS(rv, rv);
 +
-+  nsCOMPtr<nsIURI> imageURI;
-+  rv = imageContent->GetCurrentURI(getter_AddRefs(imageURI));
-+  NS_ENSURE_SUCCESS(rv, rv);
-+
-+  BPath settingsPath;
-+  if (find_directory(B_USER_SETTINGS_DIRECTORY, &settingsPath) != B_OK) {
++  int32_t haikuMode = ConvertPositionToHaikuMode(aPosition);
++  status_t err = ApplyHaikuDesktopBackground(nativePath.get(), haikuMode);
++  if (err != B_OK) {
 +    return NS_ERROR_FAILURE;
 +  }
-+  settingsPath.Append("Mozilla/Firefox");
-+  create_directory(settingsPath.Path(), 0755);
 +
-+  nsAutoCString leafName(aImageName);
-+  int32_t dot = leafName.RFindChar('.');
-+  nsAutoCString ext(".png"_ns);
-+  if (dot != kNotFound) {
-+    ext = Substring(leafName, dot);
++  nsCOMPtr<nsIObserverService> os(
++      do_GetService("@mozilla.org/observer-service;1"));
++  if (os) {
++    os->NotifyObservers(nullptr, "shell:desktop-background-changed", nullptr);
 +  }
 +
-+  nsAutoCString bgFileName("desktop_background");
-+  bgFileName.Append(ext);
-+  settingsPath.Append(bgFileName.get());
-+
-+  rv = NS_NewNativeLocalFile(nsDependentCString(settingsPath.Path()),
-+                             getter_AddRefs(mBackgroundFile));
-+  NS_ENSURE_SUCCESS(rv, rv);
-+
-+  mBackgroundPosition = aPosition;
-+
-+  nsCOMPtr<nsIWebBrowserPersist> wbp(do_CreateInstance(
-+      "@mozilla.org/embedding/browser/nsWebBrowserPersist;1", &rv));
-+  NS_ENSURE_SUCCESS(rv, rv);
-+
-+  uint32_t flags = nsIWebBrowserPersist::PERSIST_FLAGS_NO_CONVERSION |
-+                   nsIWebBrowserPersist::PERSIST_FLAGS_REPLACE_EXISTING_FILES |
-+                   nsIWebBrowserPersist::PERSIST_FLAGS_FROM_CACHE;
-+
-+  wbp->SetPersistFlags(flags);
-+  wbp->SetProgressListener(this);
-+
-+  nsCOMPtr<nsILoadContext> loadContext;
-+  nsCOMPtr<nsISupports> container = aElement->OwnerDoc()->GetContainer();
-+  nsCOMPtr<nsIDocShell> docShell = do_QueryInterface(container);
-+  if (docShell) {
-+    loadContext = do_QueryInterface(docShell);
-+  }
-+
-+  auto referrerInfo =
-+      mozilla::MakeRefPtr<mozilla::dom::ReferrerInfo>(*aElement);
-+  nsCOMPtr<nsICookieJarSettings> cookieJarSettings =
-+      aElement->OwnerDoc()->CookieJarSettings();
-+
-+  return wbp->SaveURI(imageURI, aElement->NodePrincipal(), 0, referrerInfo,
-+                      cookieJarSettings, nullptr, nullptr, mBackgroundFile,
-+                      nsIContentPolicy::TYPE_IMAGE,
-+                      loadContext ? loadContext->UsePrivateBrowsing() : false);
++  return NS_OK;
 +}
 +
 +NS_IMETHODIMP
@@ -452,67 +403,12 @@ index 0000000000..30ff1fff79
 +
 +  return NS_OK;
 +}
-+
-+NS_IMETHODIMP
-+nsHaikuShellService::OnStateChange(nsIWebProgress* aWebProgress,
-+                                   nsIRequest* aRequest, uint32_t aStateFlags,
-+                                   nsresult aStatus) {
-+  if (NS_SUCCEEDED(aStatus) && (aStateFlags & STATE_STOP) && !aRequest) {
-+    if (mBackgroundFile) {
-+      bool exists = false;
-+      mBackgroundFile->Exists(&exists);
-+      if (exists) {
-+        nsAutoCString nativePath;
-+        mBackgroundFile->GetNativePath(nativePath);
-+        int32_t haikuMode = ConvertPositionToHaikuMode(mBackgroundPosition);
-+        ApplyHaikuDesktopBackground(nativePath.get(), haikuMode);
-+      }
-+    }
-+
-+    nsCOMPtr<nsIObserverService> os(
-+        do_GetService("@mozilla.org/observer-service;1"));
-+    if (os) {
-+      os->NotifyObservers(nullptr, "shell:desktop-background-changed", nullptr);
-+    }
-+  }
-+
-+  return NS_OK;
-+}
-+
-+NS_IMETHODIMP
-+nsHaikuShellService::OnProgressChange(nsIWebProgress*, nsIRequest*, int32_t,
-+                                      int32_t, int32_t, int32_t) {
-+  return NS_OK;
-+}
-+
-+NS_IMETHODIMP
-+nsHaikuShellService::OnLocationChange(nsIWebProgress*, nsIRequest*, nsIURI*,
-+                                      uint32_t) {
-+  return NS_OK;
-+}
-+
-+NS_IMETHODIMP
-+nsHaikuShellService::OnStatusChange(nsIWebProgress*, nsIRequest*, nsresult,
-+                                    const char16_t*) {
-+  return NS_OK;
-+}
-+
-+NS_IMETHODIMP
-+nsHaikuShellService::OnSecurityChange(nsIWebProgress*, nsIRequest*, uint32_t) {
-+  return NS_OK;
-+}
-+
-+NS_IMETHODIMP
-+nsHaikuShellService::OnContentBlockingEvent(nsIWebProgress*, nsIRequest*,
-+                                            uint32_t) {
-+  return NS_OK;
-+}
 diff --git a/browser/components/shell/nsHaikuShellService.h b/browser/components/shell/nsHaikuShellService.h
 new file mode 100644
-index 0000000000..87b319a113
+index 0000000..0c1e1bd
 --- /dev/null
 +++ b/browser/components/shell/nsHaikuShellService.h
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,34 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -523,7 +419,6 @@ index 0000000000..87b319a113
 +#include "nsCOMPtr.h"
 +#include "nsIFile.h"
 +#include "nsIShellService.h"
-+#include "nsIWebProgressListener.h"
 +#include "nsShellService.h"
 +
 +#define NS_HAIKUSHELLSERVICE_CID                     \
@@ -534,28 +429,22 @@ index 0000000000..87b319a113
 +  }
 +
 +class nsHaikuShellService final : public nsShellService,
-+                                  public nsIShellService,
-+                                  public nsIWebProgressListener {
++                                  public nsIShellService {
 + public:
 +  nsHaikuShellService() = default;
 +
 +  NS_DECL_ISUPPORTS_INHERITED
 +  NS_DECL_NSISHELLSERVICE
-+  NS_DECL_NSIWEBPROGRESSLISTENER
 +
 +  nsresult Init();
 +
 + protected:
 +  virtual ~nsHaikuShellService() = default;
-+
-+ private:
-+  nsCOMPtr<nsIFile> mBackgroundFile;
-+  int32_t mBackgroundPosition = nsIShellService::BACKGROUND_STRETCH;
 +};
 +
 +#endif  // nsHaikuShellService_h_
 diff --git a/browser/fonts/moz.build b/browser/fonts/moz.build
-index 0ebf2de60f..91852c20a9 100644
+index 0ebf2de..91852c2 100644
 --- a/browser/fonts/moz.build
 +++ b/browser/fonts/moz.build
 @@ -2,6 +2,6 @@
@@ -567,7 +456,7 @@ index 0ebf2de60f..91852c20a9 100644
      DIST_SUBDIR = ""
      FINAL_TARGET_FILES.fonts += ["TwemojiMozilla.ttf"]
 diff --git a/browser/themes/moz.build b/browser/themes/moz.build
-index 08450b78d4..551409c752 100644
+index 08450b7..551409c 100644
 --- a/browser/themes/moz.build
 +++ b/browser/themes/moz.build
 @@ -31,6 +31,8 @@ if toolkit == "cocoa":
@@ -580,7 +469,7 @@ index 08450b78d4..551409c752 100644
      DIRS += ["windows"]
  
 diff --git a/build/RunCbindgen.py b/build/RunCbindgen.py
-index bb0de610ed..2459b8aba3 100644
+index bb0de61..2459b8a 100644
 --- a/build/RunCbindgen.py
 +++ b/build/RunCbindgen.py
 @@ -55,7 +55,7 @@ def generate_metadata(output, cargo_config):
@@ -593,7 +482,7 @@ index bb0de610ed..2459b8aba3 100644
      stdout, returncode = _run_process(args)
  
 diff --git a/build/gecko_templates.mozbuild b/build/gecko_templates.mozbuild
-index fa2cabfdcf..2548e3ad6d 100644
+index fa2cabf..2548e3a 100644
 --- a/build/gecko_templates.mozbuild
 +++ b/build/gecko_templates.mozbuild
 @@ -42,7 +42,8 @@ def GeckoBinary(linkage="dependent", mozglue=None):
@@ -607,7 +496,7 @@ index fa2cabfdcf..2548e3ad6d 100644
              LIBRARY_DEFINES["MOZ_HAS_MOZGLUE"] = True
              if not CONFIG["MOZ_GLUE_IN_PROGRAM"]:
 diff --git a/build/gn_processor.py b/build/gn_processor.py
-index 9d04c760f1..7175f30f0b 100644
+index 9d04c76..7175f30 100644
 --- a/build/gn_processor.py
 +++ b/build/gn_processor.py
 @@ -214,6 +214,7 @@ def filter_gn_config(path, gn_result, sandbox_vars, input_vars, gn_target):
@@ -637,7 +526,7 @@ index 9d04c760f1..7175f30f0b 100644
  
                  config_args = config.get("gn_args", {})
 diff --git a/build/gyp_includes/common.gypi b/build/gyp_includes/common.gypi
-index 8acb326278..a50a7826d7 100644
+index 8acb326..a50a782 100644
 --- a/build/gyp_includes/common.gypi
 +++ b/build/gyp_includes/common.gypi
 @@ -685,7 +685,7 @@
@@ -668,7 +557,7 @@ index 8acb326278..a50a7826d7 100644
                  },
                }],
 diff --git a/build/moz.configure/bindgen.configure b/build/moz.configure/bindgen.configure
-index bfc6a45f15..bcc8b94c78 100644
+index bfc6a45..bcc8b94 100644
 --- a/build/moz.configure/bindgen.configure
 +++ b/build/moz.configure/bindgen.configure
 @@ -198,7 +198,7 @@ def bindgen_libclang_path(libclang_path, clang, library_name_info, host):
@@ -681,10 +570,10 @@ index bfc6a45f15..bcc8b94c78 100644
  
      if host.os == "OpenBSD":
 diff --git a/build/moz.configure/flags.configure b/build/moz.configure/flags.configure
-index 64bdd75850..c3aa3f67f1 100644
+index 6d3d126..4a142ff 100644
 --- a/build/moz.configure/flags.configure
 +++ b/build/moz.configure/flags.configure
-@@ -543,8 +543,8 @@ set_config("EXPAND_LIBS_LIST_STYLE", expand_libs_list_style)
+@@ -535,8 +535,8 @@ set_config("EXPAND_LIBS_LIST_STYLE", expand_libs_list_style)
  # ---------------------------------
  @depends(building_with_gnu_compatible_cc, target)
  def moz_program_ldflags(building_with_gnu_compatible_cc, target):
@@ -696,7 +585,7 @@ index 64bdd75850..c3aa3f67f1 100644
  
  set_config("MOZ_PROGRAM_LDFLAGS", moz_program_ldflags)
 diff --git a/build/moz.configure/init.configure b/build/moz.configure/init.configure
-index 93cb8dcb87..34346d0c33 100644
+index 05b178a..78f0cd0 100644
 --- a/build/moz.configure/init.configure
 +++ b/build/moz.configure/init.configure
 @@ -523,6 +523,8 @@ def split_triplet(triplet, allow_wasi=False):
@@ -725,7 +614,7 @@ index 93cb8dcb87..34346d0c33 100644
  def target_is_solaris(target):
      if target.kernel == "SunOS":
 diff --git a/comm/chat/modules/CLib.sys.mjs b/comm/chat/modules/CLib.sys.mjs
-index 35226b565b..cdb08b795e 100644
+index 35226b5..cdb08b7 100644
 --- a/comm/chat/modules/CLib.sys.mjs
 +++ b/comm/chat/modules/CLib.sys.mjs
 @@ -41,6 +41,11 @@ switch (OS) {
@@ -741,7 +630,7 @@ index 35226b565b..cdb08b795e 100644
      throw new Error("Unknown OS");
  }
 diff --git a/comm/mail/installer/package-manifest.in b/comm/mail/installer/package-manifest.in
-index 56b32634a7..d656a6583c 100644
+index 56b3263..d656a65 100644
 --- a/comm/mail/installer/package-manifest.in
 +++ b/comm/mail/installer/package-manifest.in
 @@ -224,7 +224,7 @@
@@ -754,10 +643,10 @@ index 56b32634a7..d656a6583c 100644
  @RESPATH@/chrome/icons/default/*.svg
  #endif
 diff --git a/comm/mail/moz.configure b/comm/mail/moz.configure
-index 1cf811a23f..394e29226e 100644
+index c1cbe3e..519a3bb 100644
 --- a/comm/mail/moz.configure
 +++ b/comm/mail/moz.configure
-@@ -295,8 +295,8 @@ imply_option("MOZ_APP_BASENAME", "Thunderbird", when=~thunderbird_enterprise)
+@@ -307,8 +307,8 @@ imply_option("MOZ_APP_BASENAME", "Thunderbird", when=~thunderbird_enterprise)
  
  # MOZ_APP_PROFILE: When set, used for application.ini's
  # "Profile" field, which controls profile location.
@@ -769,10 +658,10 @@ index 1cf811a23f..394e29226e 100644
  imply_option("MOZ_APP_PROFILE", "ThunderbirdEnterprise", when=(target_is_windows | target_is_osx) & thunderbird_enterprise)
  imply_option("MOZ_APP_PROFILE", "thunderbirdenterprise", when=~target_is_windows & ~target_is_osx & thunderbird_enterprise)
 diff --git a/comm/mailnews/base/src/moz.build b/comm/mailnews/base/src/moz.build
-index cd5bbf3381..3ec9191a08 100644
+index 8d89cb3..6d99268 100644
 --- a/comm/mailnews/base/src/moz.build
 +++ b/comm/mailnews/base/src/moz.build
-@@ -113,7 +113,7 @@ if CONFIG["OS_ARCH"] == "WINNT":
+@@ -112,7 +112,7 @@ if CONFIG["OS_ARCH"] == "WINNT":
          "nsMessengerWinIntegration.cpp",
          "nsUserInfoWin.cpp",
      ]
@@ -782,7 +671,7 @@ index cd5bbf3381..3ec9191a08 100644
          "nsUserInfoUnix.cpp",
      ]
 diff --git a/comm/third_party/rust/glslopt/Cargo.toml b/comm/third_party/rust/glslopt/Cargo.toml
-index c69d209249..9e4499a1b2 100644
+index c69d209..9e4499a 100644
 --- a/comm/third_party/rust/glslopt/Cargo.toml
 +++ b/comm/third_party/rust/glslopt/Cargo.toml
 @@ -9,6 +9,11 @@
@@ -806,7 +695,7 @@ index c69d209249..9e4499a1b2 100644
 +[build-dependencies]
 +cc = "1.0"
 diff --git a/comm/third_party/rust/glslopt/glsl-optimizer/src/compiler/glsl/builtin_functions.cpp b/comm/third_party/rust/glslopt/glsl-optimizer/src/compiler/glsl/builtin_functions.cpp
-index 603c7f6458..46c2dcb36d 100644
+index 603c7f6..46c2dcb 100644
 --- a/comm/third_party/rust/glslopt/glsl-optimizer/src/compiler/glsl/builtin_functions.cpp
 +++ b/comm/third_party/rust/glslopt/glsl-optimizer/src/compiler/glsl/builtin_functions.cpp
 @@ -735,7 +735,7 @@ fp64(const _mesa_glsl_parse_state *state)
@@ -954,7 +843,7 @@ index 603c7f6458..46c2dcb36d 100644
     FD(length)
     FD(distance)
 diff --git a/comm/third_party/rust/glslopt/glsl-optimizer/src/util/u_endian.h b/comm/third_party/rust/glslopt/glsl-optimizer/src/util/u_endian.h
-index 6bbae3c444..d1540e9769 100644
+index 6bbae3c..d1540e9 100644
 --- a/comm/third_party/rust/glslopt/glsl-optimizer/src/util/u_endian.h
 +++ b/comm/third_party/rust/glslopt/glsl-optimizer/src/util/u_endian.h
 @@ -27,7 +27,7 @@
@@ -967,7 +856,7 @@ index 6bbae3c444..d1540e9769 100644
  
  #if __BYTE_ORDER == __LITTLE_ENDIAN
 diff --git a/comm/third_party/rust/glslopt/glsl-optimizer/src/util/u_math.h b/comm/third_party/rust/glslopt/glsl-optimizer/src/util/u_math.h
-index 42d9e348ec..240bd41d8c 100644
+index 42d9e34..240bd41 100644
 --- a/comm/third_party/rust/glslopt/glsl-optimizer/src/util/u_math.h
 +++ b/comm/third_party/rust/glslopt/glsl-optimizer/src/util/u_math.h
 @@ -676,6 +676,9 @@ util_memcpy_cpu_to_le32(void * restrict dest, const void * restrict src, size_t
@@ -981,7 +870,7 @@ index 42d9e348ec..240bd41d8c 100644
   * Align a value up to an alignment value
   *
 diff --git a/comm/third_party/rust/iana-time-zone-haiku/src/implementation.cc b/comm/third_party/rust/iana-time-zone-haiku/src/implementation.cc
-index d1c92cd3b7..e08b1594da 100644
+index d1c92cd..e08b159 100644
 --- a/comm/third_party/rust/iana-time-zone-haiku/src/implementation.cc
 +++ b/comm/third_party/rust/iana-time-zone-haiku/src/implementation.cc
 @@ -4,56 +4,54 @@
@@ -1080,7 +969,7 @@ index d1c92cd3b7..e08b1594da 100644
  }  // extern "C"
  
 diff --git a/comm/third_party/rust/mtu/src/lib.rs b/comm/third_party/rust/mtu/src/lib.rs
-index 22483976a2..7e01f91325 100644
+index 2248397..7e01f91 100644
 --- a/comm/third_party/rust/mtu/src/lib.rs
 +++ b/comm/third_party/rust/mtu/src/lib.rs
 @@ -114,7 +114,8 @@ const fn aligned_by(size: usize, align: usize) -> usize {
@@ -1094,7 +983,7 @@ index 22483976a2..7e01f91325 100644
  pub fn interface_and_mtu_impl(remote: IpAddr) -> Result<(String, usize)> {
      return Err(default_err());
 diff --git a/comm/third_party/rust/quinn-udp/src/unix.rs b/comm/third_party/rust/quinn-udp/src/unix.rs
-index 6564cdda63..14b6685f3a 100644
+index d260476..277c0bc 100644
 --- a/comm/third_party/rust/quinn-udp/src/unix.rs
 +++ b/comm/third_party/rust/quinn-udp/src/unix.rs
 @@ -19,6 +19,39 @@ use super::{
@@ -1154,7 +1043,7 @@ index 6564cdda63..14b6685f3a 100644
              target_os = "hurd",
              solarish
          )))]
-@@ -173,8 +207,7 @@ impl UdpSocketState {
+@@ -172,8 +206,7 @@ impl UdpSocketState {
          // Options standardized in RFC 3542
          #[cfg(not(target_os = "redox"))]
          if !is_ipv4 {
@@ -1164,7 +1053,7 @@ index 6564cdda63..14b6685f3a 100644
              // Linux's IP_PMTUDISC_PROBE allows us to operate under interface MTU rather than the
              // kernel's path MTU guess, but actually disabling fragmentation requires this too. See
              // __ip6_append_data in ip6_output.c.
-@@ -182,7 +215,7 @@ impl UdpSocketState {
+@@ -181,7 +214,7 @@ impl UdpSocketState {
              may_fragment |= !set_socket_option_supported(
                  &*io,
                  libc::IPPROTO_IPV6,
@@ -1173,7 +1062,7 @@ index 6564cdda63..14b6685f3a 100644
                  OPTION_ON,
              )?;
          }
-@@ -247,6 +280,7 @@ impl UdpSocketState {
+@@ -246,6 +279,7 @@ impl UdpSocketState {
          target_os = "openbsd",
          target_os = "netbsd",
          target_os = "dragonfly",
@@ -1181,7 +1070,7 @@ index 6564cdda63..14b6685f3a 100644
          target_os = "redox",
          target_os = "hurd",
          solarish
-@@ -278,6 +312,7 @@ impl UdpSocketState {
+@@ -277,6 +311,7 @@ impl UdpSocketState {
          target_os = "openbsd",
          target_os = "netbsd",
          target_os = "dragonfly",
@@ -1189,7 +1078,7 @@ index 6564cdda63..14b6685f3a 100644
          target_os = "redox",
          target_os = "hurd",
          solarish,
-@@ -625,6 +660,7 @@ pub(crate) fn send_single(
+@@ -624,6 +659,7 @@ pub(crate) fn send_single(
      target_os = "openbsd",
      target_os = "netbsd",
      target_os = "dragonfly",
@@ -1205,7 +1094,7 @@ index 6564cdda63..14b6685f3a 100644
      target_os = "redox",
      target_os = "hurd",
      solarish,
-@@ -743,7 +780,7 @@ fn prepare_msg(
+@@ -733,7 +770,7 @@ fn prepare_msg(
              }
          }
      } else {
@@ -1214,7 +1103,7 @@ index 6564cdda63..14b6685f3a 100644
          encoder.push(libc::IPPROTO_IPV6, libc::IPV6_TCLASS, ecn);
      }
  
-@@ -755,6 +792,7 @@ fn prepare_msg(
+@@ -745,6 +782,7 @@ fn prepare_msg(
          gso::set_segment_size(&mut encoder, segment_size as u16);
      }
  
@@ -1222,7 +1111,7 @@ index 6564cdda63..14b6685f3a 100644
      if let Some(ip) = &transmit.src_ip {
          match ip {
              IpAddr::V4(v4) => {
-@@ -779,17 +817,17 @@ fn prepare_msg(
+@@ -769,17 +807,17 @@ fn prepare_msg(
                      }
                  }
              }
@@ -1244,7 +1133,7 @@ index 6564cdda63..14b6685f3a 100644
              }
          }
      }
-@@ -864,13 +902,14 @@ impl ControlMetadata {
+@@ -854,13 +892,14 @@ impl ControlMetadata {
                  target_os = "openbsd",
                  target_os = "netbsd",
                  target_os = "dragonfly",
@@ -1253,27 +1142,66 @@ index 6564cdda63..14b6685f3a 100644
                  solarish
              )))]
              (libc::IPPROTO_IP, libc::IP_RECVTOS) => unsafe {
-                 self.ecn_bits = cmsg::decode::<u8, libc::cmsghdr>(cmsg);
+                 self.ecn_bits = cmsg.decode::<u8>();
              },
 -            #[cfg(not(target_os = "redox",))]
 +            #[cfg(not(any(target_os = "redox", target_os = "haiku")))]
              (libc::IPPROTO_IPV6, libc::IPV6_TCLASS) => unsafe {
                  // Temporary hack around broken macos ABI. Remove once upstream fixes it.
                  // https://bugreport.apple.com/web/?problemID=48761855
-@@ -896,7 +935,7 @@ impl ControlMetadata {
-                 let in_addr = unsafe { cmsg::decode::<libc::in_addr, libc::cmsghdr>(cmsg) };
+@@ -886,7 +925,7 @@ impl ControlMetadata {
+                 let in_addr = unsafe { cmsg.decode::<libc::in_addr>() };
                  self.dst_ip = Some(IpAddr::V4(Ipv4Addr::from(in_addr.s_addr.to_ne_bytes())));
              }
 -            #[cfg(not(any(target_os = "redox", target_os = "hurd")))]
 +            #[cfg(not(any(target_os = "redox", target_os = "hurd", target_os = "haiku")))]
              (libc::IPPROTO_IPV6, libc::IPV6_PKTINFO) => {
-                 let pktinfo = unsafe { cmsg::decode::<libc::in6_pktinfo, libc::cmsghdr>(cmsg) };
+                 let pktinfo = unsafe { cmsg.decode::<libc::in6_pktinfo>() };
                  self.dst_ip = Some(IpAddr::V6(Ipv6Addr::from(pktinfo.ipi6_addr.s6_addr)));
+diff --git a/comm/third_party/rust/xshell-venv/src/lib.rs b/comm/third_party/rust/xshell-venv/src/lib.rs
+index 20731d2..750cf1b 100644
+--- a/comm/third_party/rust/xshell-venv/src/lib.rs
++++ b/comm/third_party/rust/xshell-venv/src/lib.rs
+@@ -153,10 +153,10 @@ fn guess_python(sh: &Shell, path: &Path) -> Result<&'static str, Error> {
+ fn create_venv(sh: &Shell, path: &Path) -> Result<(), Error> {
+     trace!("Creating venv at {}", path.display());
+     // First create a lock file, so that multiple runs cannot overlap.
+-    let lock_path = path.join("xshell-venv.lock");
++    //let lock_path = path.join("xshell-venv.lock");
+     sh.create_dir(path)?;
+-    let mut f = FileLock::new(File::create(&lock_path)?);
+-    let lock = f.write()?;
++    //let mut f = FileLock::new(File::create(&lock_path)?);
++    //let lock = f.write()?;
+ 
+     let python = guess_python(sh, path)?;
+ 
+@@ -172,8 +172,8 @@ fn create_venv(sh: &Shell, path: &Path) -> Result<(), Error> {
+     }
+ 
+     // Work is done. Drop the lock.
+-    drop(lock);
+-    sh.remove_path(lock_path)?;
++    //drop(lock);
++    //sh.remove_path(lock_path)?;
+ 
+     Ok(())
+ }
+@@ -417,7 +417,9 @@ impl FileLock {
+     }
+ 
+     pub fn write(&mut self) -> io::Result<FileLockWriteGuard<'_>> {
++        #[cfg(not(target_os = "haiku"))]
+         self.file.lock()?;
++
+         Ok(FileLockWriteGuard::new(&mut self.file))
+     }
+ }
 diff --git a/dom/base/Navigator.cpp b/dom/base/Navigator.cpp
-index 20fc3905d5..95b0d5efb9 100644
+index 2019f1f..365bf19 100644
 --- a/dom/base/Navigator.cpp
 +++ b/dom/base/Navigator.cpp
-@@ -2069,6 +2069,8 @@ nsresult Navigator::GetPlatform(nsAString& aPlatform, Document* aCallerDoc,
+@@ -2084,6 +2084,8 @@ nsresult Navigator::GetPlatform(nsAString& aPlatform, Document* aCallerDoc,
  #elif defined(XP_MACOSX)
    // Always return "MacIntel", even on ARM64 macOS like Safari does.
    aPlatform.AssignLiteral("MacIntel");
@@ -1283,7 +1211,7 @@ index 20fc3905d5..95b0d5efb9 100644
    aPlatform.AssignLiteral("Linux armv81");
  #else
 diff --git a/dom/canvas/WebGLContext.cpp b/dom/canvas/WebGLContext.cpp
-index ee2efa6b90..9864e6c768 100644
+index b4d397e..73a9ff1 100644
 --- a/dom/canvas/WebGLContext.cpp
 +++ b/dom/canvas/WebGLContext.cpp
 @@ -2400,6 +2400,8 @@ Maybe<std::string> WebGLContext::GetString(const GLenum pname) const {
@@ -1296,7 +1224,7 @@ index ee2efa6b90..9864e6c768 100644
        return Some("unknown"_ns);
      }
 diff --git a/dom/events/ShortcutKeyDefinitions.cpp b/dom/events/ShortcutKeyDefinitions.cpp
-index 02c5494467..e1f5d782c7 100644
+index 02c5494..e1f5d78 100644
 --- a/dom/events/ShortcutKeyDefinitions.cpp
 +++ b/dom/events/ShortcutKeyDefinitions.cpp
 @@ -435,13 +435,13 @@ ShortcutKeyData ShortcutKeys::sBrowserHandlers[] = {
@@ -1317,7 +1245,7 @@ index 02c5494467..e1f5d782c7 100644
      {u"keypress", u"VK_LEFT",  nullptr, u"alt,shift",     u"cmd_selectLeft2"},         // macOS
 diff --git a/dom/gamepad/haiku/HaikuGamepad.cpp b/dom/gamepad/haiku/HaikuGamepad.cpp
 new file mode 100644
-index 0000000000..813a4fa610
+index 0000000..813a4fa
 --- /dev/null
 +++ b/dom/gamepad/haiku/HaikuGamepad.cpp
 @@ -0,0 +1,301 @@
@@ -1623,7 +1551,7 @@ index 0000000000..813a4fa610
 +
 +} // namespace mozilla::dom
 diff --git a/dom/gamepad/moz.build b/dom/gamepad/moz.build
-index ad946302dd..d33c5c6615 100644
+index ad94630..d33c5c6 100644
 --- a/dom/gamepad/moz.build
 +++ b/dom/gamepad/moz.build
 @@ -59,6 +59,9 @@ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "android":
@@ -1637,7 +1565,7 @@ index ad946302dd..d33c5c6615 100644
      UNIFIED_SOURCES += ["fallback/FallbackGamepad.cpp"]
  
 diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
-index 3715db0dc9..3468427b27 100644
+index 3843ba4..da0a107 100644
 --- a/dom/ipc/PContent.ipdl
 +++ b/dom/ipc/PContent.ipdl
 @@ -238,7 +238,7 @@ struct SystemFontListEntry {
@@ -1659,7 +1587,7 @@ index 3715db0dc9..3468427b27 100644
  #endif
  };
 diff --git a/dom/media/CallbackThreadRegistry.cpp b/dom/media/CallbackThreadRegistry.cpp
-index 3b2455c53e..614de8b7ed 100644
+index 3b2455c..614de8b 100644
 --- a/dom/media/CallbackThreadRegistry.cpp
 +++ b/dom/media/CallbackThreadRegistry.cpp
 @@ -92,7 +92,9 @@ void CallbackThreadRegistry::Unregister(ProfilerThreadId aThreadId) {
@@ -1673,7 +1601,7 @@ index 3b2455c53e..614de8b7ed 100644
  
  }  // namespace mozilla
 diff --git a/dom/media/platforms/ffmpeg/FFmpegVulkanVideoDecoder.cpp b/dom/media/platforms/ffmpeg/FFmpegVulkanVideoDecoder.cpp
-index 652dda0b04..28473922dd 100644
+index ae338a3..0a9557e 100644
 --- a/dom/media/platforms/ffmpeg/FFmpegVulkanVideoDecoder.cpp
 +++ b/dom/media/platforms/ffmpeg/FFmpegVulkanVideoDecoder.cpp
 @@ -45,6 +45,11 @@
@@ -1689,7 +1617,7 @@ index 652dda0b04..28473922dd 100644
  
  namespace mozilla {
 diff --git a/dom/media/webrtc/transport/common.build b/dom/media/webrtc/transport/common.build
-index 215d61190d..d5e81f6c89 100644
+index 215d611..d5e81f6 100644
 --- a/dom/media/webrtc/transport/common.build
 +++ b/dom/media/webrtc/transport/common.build
 @@ -61,6 +61,11 @@ if CONFIG["OS_TARGET"] in ["Darwin", "DragonFly", "FreeBSD", "NetBSD", "OpenBSD"
@@ -1705,7 +1633,7 @@ index 215d61190d..d5e81f6c89 100644
      DEFINES["LINUX"] = True
      LOCAL_INCLUDES += [
 diff --git a/dom/media/webrtc/transport/third_party/nICEr/nicer.gyp b/dom/media/webrtc/transport/third_party/nICEr/nicer.gyp
-index 4bfd7d62d1..b773b74f29 100644
+index 4bfd7d6..b773b74 100644
 --- a/dom/media/webrtc/transport/third_party/nICEr/nicer.gyp
 +++ b/dom/media/webrtc/transport/third_party/nICEr/nicer.gyp
 @@ -7,7 +7,8 @@
@@ -1758,7 +1686,7 @@ index 4bfd7d62d1..b773b74f29 100644
                [ 'OS == "win"', {
                  'defines' : [
 diff --git a/dom/media/webrtc/transport/third_party/nICEr/src/stun/addrs-bsd.cpp b/dom/media/webrtc/transport/third_party/nICEr/src/stun/addrs-bsd.cpp
-index ec2d084445..ab6d9907b3 100644
+index ec2d084..ab6d990 100644
 --- a/dom/media/webrtc/transport/third_party/nICEr/src/stun/addrs-bsd.cpp
 +++ b/dom/media/webrtc/transport/third_party/nICEr/src/stun/addrs-bsd.cpp
 @@ -2,7 +2,7 @@
@@ -1818,7 +1746,7 @@ index ec2d084445..ab6d9907b3 100644
  
  static int
 diff --git a/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h b/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h
-index 905105c4a2..778903b4da 100644
+index 905105c..778903b 100644
 --- a/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h
 +++ b/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h
 @@ -52,8 +52,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
@@ -1833,7 +1761,7 @@ index 905105c4a2..778903b4da 100644
  #include <netdb.h>
  #endif
 diff --git a/dom/media/webrtc/transport/third_party/nrappkit/nrappkit.gyp b/dom/media/webrtc/transport/third_party/nrappkit/nrappkit.gyp
-index df3b4225ef..f839713f0d 100644
+index df3b422..f839713 100644
 --- a/dom/media/webrtc/transport/third_party/nrappkit/nrappkit.gyp
 +++ b/dom/media/webrtc/transport/third_party/nrappkit/nrappkit.gyp
 @@ -6,6 +6,9 @@
@@ -1888,7 +1816,7 @@ index df3b4225ef..f839713f0d 100644
                   'defines' : [
 diff --git a/dom/media/webrtc/transport/third_party/nrappkit/src/port/haiku/include/csi_platform.h b/dom/media/webrtc/transport/third_party/nrappkit/src/port/haiku/include/csi_platform.h
 new file mode 100644
-index 0000000000..bc8ad50826
+index 0000000..bc8ad50
 --- /dev/null
 +++ b/dom/media/webrtc/transport/third_party/nrappkit/src/port/haiku/include/csi_platform.h
 @@ -0,0 +1,58 @@
@@ -1951,7 +1879,7 @@ index 0000000000..bc8ad50826
 +#endif
 +
 diff --git a/dom/system/moz.build b/dom/system/moz.build
-index a56beb58da..6bc53ebc64 100644
+index a56beb5..6bc53eb 100644
 --- a/dom/system/moz.build
 +++ b/dom/system/moz.build
 @@ -41,6 +41,8 @@ elif toolkit == "android":
@@ -1964,7 +1892,7 @@ index a56beb58da..6bc53ebc64 100644
  if toolkit != "cocoa":
      EXPORTS += [
 diff --git a/dom/webserial/PosixSerialPlatformService.cpp b/dom/webserial/PosixSerialPlatformService.cpp
-index e42eae2709..496834adfe 100644
+index e42eae2..496834a 100644
 --- a/dom/webserial/PosixSerialPlatformService.cpp
 +++ b/dom/webserial/PosixSerialPlatformService.cpp
 @@ -38,6 +38,10 @@
@@ -2080,7 +2008,7 @@ index e42eae2709..496834adfe 100644
    ioctl(fd, TCFLSH, TCIOFLUSH);
  #else
 diff --git a/dom/webserial/SerialPlatformService.cpp b/dom/webserial/SerialPlatformService.cpp
-index 5a9bfdc922..26b439b89b 100644
+index 5a9bfdc..26b439b 100644
 --- a/dom/webserial/SerialPlatformService.cpp
 +++ b/dom/webserial/SerialPlatformService.cpp
 @@ -15,7 +15,8 @@
@@ -2094,10 +2022,10 @@ index 5a9bfdc922..26b439b89b 100644
  SerialPlatformService::GetInstanceImpl() {
    return MakeAndAddRef<TestSerialPlatformService>();
 diff --git a/dom/webserial/moz.build b/dom/webserial/moz.build
-index 95aecdb845..3a74ae63d8 100644
+index 511f59d..4cc61ac 100644
 --- a/dom/webserial/moz.build
 +++ b/dom/webserial/moz.build
-@@ -30,6 +30,7 @@ if CONFIG["OS_TARGET"] == "WINNT":
+@@ -35,6 +35,7 @@ if CONFIG["OS_TARGET"] == "WINNT":
  elif (
      (CONFIG["OS_TARGET"] == "Darwin" and CONFIG["TARGET_OS"] != "iOS")
      or CONFIG["OS_TARGET"] == "FreeBSD"
@@ -2106,7 +2034,7 @@ index 95aecdb845..3a74ae63d8 100644
  ):
      UNIFIED_SOURCES += [
 diff --git a/gfx/2d/2D.h b/gfx/2d/2D.h
-index 6a7496ccc9..dac1b42075 100644
+index b446303..60303e72 100644
 --- a/gfx/2d/2D.h
 +++ b/gfx/2d/2D.h
 @@ -35,7 +35,7 @@
@@ -2118,7 +2046,7 @@ index 6a7496ccc9..dac1b42075 100644
  #  ifndef MOZ_ENABLE_FREETYPE
  #    define MOZ_ENABLE_FREETYPE
  #  endif
-@@ -2250,7 +2250,7 @@ class GFX2D_API Factory {
+@@ -2298,7 +2298,7 @@ class GFX2D_API Factory {
        bool aHasColorGlyphs = false);
  #endif
  
@@ -2128,10 +2056,10 @@ index 6a7496ccc9..dac1b42075 100644
        const RefPtr<UnscaledFont>& aUnscaledFont, Float aSize,
        RefPtr<SharedFTFace> aFace, FcPattern* aPattern);
 diff --git a/gfx/2d/DrawTargetSkia.cpp b/gfx/2d/DrawTargetSkia.cpp
-index 2431e8e4e4..7c2f18be0c 100644
+index d7966a0..854cff8 100644
 --- a/gfx/2d/DrawTargetSkia.cpp
 +++ b/gfx/2d/DrawTargetSkia.cpp
-@@ -1921,7 +1921,7 @@ void DrawTargetSkia::UpdateSurfaceProps() {
+@@ -1957,7 +1957,7 @@ void DrawTargetSkia::UpdateSurfaceProps() {
    SkScalar gamma = SK_Scalar1;
  #endif
  
@@ -2141,7 +2069,7 @@ index 2431e8e4e4..7c2f18be0c 100644
    int32_t contrastVal =
        StaticPrefs::gfx_font_rendering_freetype_enhanced_contrast();
 diff --git a/gfx/2d/Factory.cpp b/gfx/2d/Factory.cpp
-index 2092997792..16ca4c4748 100644
+index 44e181a..d11b0f0 100644
 --- a/gfx/2d/Factory.cpp
 +++ b/gfx/2d/Factory.cpp
 @@ -23,7 +23,7 @@
@@ -2181,7 +2109,7 @@ index 2092997792..16ca4c4748 100644
      const RefPtr<UnscaledFont>& aUnscaledFont, Float aSize,
      RefPtr<SharedFTFace> aFace, FcPattern* aPattern) {
 diff --git a/gfx/2d/NativeFontResourceFreeType.cpp b/gfx/2d/NativeFontResourceFreeType.cpp
-index 2d6358ad16..0402ad6283 100644
+index 2d6358a..0402ad6 100644
 --- a/gfx/2d/NativeFontResourceFreeType.cpp
 +++ b/gfx/2d/NativeFontResourceFreeType.cpp
 @@ -53,7 +53,7 @@ already_AddRefed<SharedFTFace> NativeFontResourceFreeType::CloneFace(
@@ -2194,7 +2122,7 @@ index 2d6358ad16..0402ad6283 100644
      const uint8_t*&& aFontData, uint32_t aDataLength)
      : NativeFontResourceFreeType(std::move(aFontData), aDataLength) {}
 diff --git a/gfx/2d/NativeFontResourceFreeType.h b/gfx/2d/NativeFontResourceFreeType.h
-index 9b65eca3fe..5cfaf6d01f 100644
+index 9b65eca..5cfaf6d 100644
 --- a/gfx/2d/NativeFontResourceFreeType.h
 +++ b/gfx/2d/NativeFontResourceFreeType.h
 @@ -39,7 +39,7 @@ class NativeFontResourceFreeType : public NativeFontResource {
@@ -2207,7 +2135,7 @@ index 9b65eca3fe..5cfaf6d01f 100644
   public:
    MOZ_DECLARE_REFCOUNTED_VIRTUAL_TYPENAME(NativeFontResourceFontconfig,
 diff --git a/gfx/2d/UnscaledFontFreeType.h b/gfx/2d/UnscaledFontFreeType.h
-index 9e468eabda..7d14a791cf 100644
+index 453fc0a..7e0071f 100644
 --- a/gfx/2d/UnscaledFontFreeType.h
 +++ b/gfx/2d/UnscaledFontFreeType.h
 @@ -14,6 +14,7 @@ namespace gfx {
@@ -2218,7 +2146,7 @@ index 9e468eabda..7d14a791cf 100644
  
  class UnscaledFontFreeType : public UnscaledFont {
   public:
-@@ -69,7 +70,7 @@ class UnscaledFontFreeType : public UnscaledFont {
+@@ -76,7 +77,7 @@ class UnscaledFontFreeType : public UnscaledFont {
                                      uint32_t aNumVariations, FT_Face aFace);
  };
  
@@ -2228,20 +2156,20 @@ index 9e468eabda..7d14a791cf 100644
   public:
    MOZ_DECLARE_REFCOUNTED_VIRTUAL_TYPENAME(UnscaledFontFontconfig, override)
 diff --git a/gfx/2d/moz.build b/gfx/2d/moz.build
-index 2abc9c4581..9303a4e62a 100644
+index 058076f..70c8812 100644
 --- a/gfx/2d/moz.build
 +++ b/gfx/2d/moz.build
-@@ -87,7 +87,7 @@ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
+@@ -97,7 +97,7 @@ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
+         "ScaledFontDWrite.h",
      ]
-     DEFINES["WIN32"] = True
  
 -if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
 +if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk", "haiku"):
      EXPORTS.mozilla.gfx += [
          "UnscaledFontFreeType.h",
      ]
-@@ -96,12 +96,12 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
-         "UnscaledFontFreeType.cpp",
+@@ -109,7 +109,7 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
+         "NativeFontResourceFreeType.h",
      ]
  
 -if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
@@ -2249,13 +2177,7 @@ index 2abc9c4581..9303a4e62a 100644
      SOURCES += [
          "ScaledFontFontconfig.cpp",
      ]
- 
--if CONFIG["MOZ_WIDGET_TOOLKIT"] == "android":
-+if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android"): 
-     SOURCES += [
-         "ScaledFontFreeType.cpp",
-     ]
-@@ -193,12 +193,12 @@ FINAL_LIBRARY = "xul"
+@@ -224,12 +224,12 @@ FINAL_LIBRARY = "xul"
  for var in ("USE_CAIRO", "MOZ2D_HAS_MOZ_CAIRO"):
      DEFINES[var] = True
  
@@ -2272,7 +2194,7 @@ index 2abc9c4581..9303a4e62a 100644
  LOCAL_INCLUDES += CONFIG["SKIA_INCLUDES"]
 diff --git a/gfx/gl/GLContextBGL.h b/gfx/gl/GLContextBGL.h
 new file mode 100644
-index 0000000000..b51dc4bf85
+index 0000000..b51dc4b
 --- /dev/null
 +++ b/gfx/gl/GLContextBGL.h
 @@ -0,0 +1,81 @@
@@ -2358,7 +2280,7 @@ index 0000000000..b51dc4bf85
 +
 +#endif
 diff --git a/gfx/gl/GLContextProvider.h b/gfx/gl/GLContextProvider.h
-index 1d7e5cf18f..975c24abc3 100644
+index 1d7e5cf..975c24a 100644
 --- a/gfx/gl/GLContextProvider.h
 +++ b/gfx/gl/GLContextProvider.h
 @@ -68,6 +68,13 @@ namespace gl {
@@ -2377,7 +2299,7 @@ index 1d7e5cf18f..975c24abc3 100644
  #endif
 diff --git a/gfx/gl/GLContextProviderBGL.cpp b/gfx/gl/GLContextProviderBGL.cpp
 new file mode 100644
-index 0000000000..f8f3c5fd21
+index 0000000..2641416
 --- /dev/null
 +++ b/gfx/gl/GLContextProviderBGL.cpp
 @@ -0,0 +1,235 @@
@@ -2419,7 +2341,7 @@ index 0000000000..f8f3c5fd21
 +  BAutolock lock(sBGLGlobalLock);
 +  if (!sDisplayKeeper) {
 +    if (!sGLLibrary) {
-+      sGLLibrary = PR_LoadLibrary("libGL.so");
++      sGLLibrary = PR_LoadLibrary("libGL.so.1");
 +    }
 +    ulong options = BGL_RGB | BGL_ALPHA | BGL_DEPTH | BGL_DOUBLE;
 +    sDisplayKeeper = new BGLView(BRect(0, 0, 1, 1), "GeckoBGLDisplayKeeper",
@@ -2547,9 +2469,9 @@ index 0000000000..f8f3c5fd21
 +  EnsureBGLDisplayKeeper();
 +
 +  if (!sGLLibrary) {
-+    sGLLibrary = PR_LoadLibrary("libGL.so");
++    sGLLibrary = PR_LoadLibrary("libGL.so.1");
 +    if (!sGLLibrary) {
-+      NS_WARNING("Failed to load libGL.so on Haiku!");
++      NS_WARNING("Failed to load libGL library!");
 +      *aOutFailureId = "FEATURE_FAILURE_LIBGL_LOAD"_ns;
 +      return nullptr;
 +    }
@@ -2617,7 +2539,7 @@ index 0000000000..f8f3c5fd21
 +
 +}
 diff --git a/gfx/gl/GLContextProviderNull.cpp b/gfx/gl/GLContextProviderNull.cpp
-index 3f2a9803db..ec725bdb3e 100644
+index 3f2a980..ec725bd 100644
 --- a/gfx/gl/GLContextProviderNull.cpp
 +++ b/gfx/gl/GLContextProviderNull.cpp
 @@ -2,6 +2,7 @@
@@ -2629,7 +2551,7 @@ index 3f2a9803db..ec725bdb3e 100644
  
  namespace mozilla {
 diff --git a/gfx/gl/GLContextTypes.h b/gfx/gl/GLContextTypes.h
-index 548ee08373..2a6b0c75f3 100644
+index 548ee08..2a6b0c7 100644
 --- a/gfx/gl/GLContextTypes.h
 +++ b/gfx/gl/GLContextTypes.h
 @@ -14,7 +14,7 @@ namespace gl {
@@ -2642,7 +2564,7 @@ index 548ee08373..2a6b0c75f3 100644
  enum class OriginPos : uint8_t { TopLeft, BottomLeft };
  
 diff --git a/gfx/gl/moz.build b/gfx/gl/moz.build
-index c041b023b7..c7349cb5be 100644
+index d3da279..a70f8ce 100644
 --- a/gfx/gl/moz.build
 +++ b/gfx/gl/moz.build
 @@ -15,6 +15,8 @@ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
@@ -2654,7 +2576,7 @@ index c041b023b7..c7349cb5be 100644
  
  if CONFIG["MOZ_GL_PROVIDER"]:
      gl_provider = CONFIG["MOZ_GL_PROVIDER"]
-@@ -113,6 +115,19 @@ elif gl_provider == "Linux":
+@@ -115,6 +117,19 @@ elif gl_provider == "Linux":
      if CONFIG["MOZ_X11"]:
          SOURCES += ["GLContextProviderGLX.cpp"]
  
@@ -2675,7 +2597,7 @@ index c041b023b7..c7349cb5be 100644
      "AndroidSurfaceTexture.cpp",
      "Colorspaces.cpp",
 diff --git a/gfx/layers/wr/IpcResourceUpdateQueue.cpp b/gfx/layers/wr/IpcResourceUpdateQueue.cpp
-index 490d26f66e..e5a1add990 100644
+index 2796129..f09544b 100644
 --- a/gfx/layers/wr/IpcResourceUpdateQueue.cpp
 +++ b/gfx/layers/wr/IpcResourceUpdateQueue.cpp
 @@ -52,7 +52,8 @@ layers::OffsetRange ShmSegmentsWriter::Write(Range<uint8_t> aBytes) {
@@ -2689,7 +2611,7 @@ index 490d26f66e..e5a1add990 100644
      if (range.length()) {
        // Allocation was successful
 diff --git a/gfx/skia/moz.build b/gfx/skia/moz.build
-index 7c81493630..40ac6277be 100644
+index 5dacf12..48b8b0e 100644
 --- a/gfx/skia/moz.build
 +++ b/gfx/skia/moz.build
 @@ -558,7 +558,7 @@ if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('cocoa', 'uikit'):
@@ -2701,7 +2623,7 @@ index 7c81493630..40ac6277be 100644
      UNIFIED_SOURCES += [
          'skia/src/ports/SkLog_stdio.cpp',
          'skia/src/ports/SkOSFile_posix.cpp',
-@@ -650,7 +650,7 @@ LOCAL_INCLUDES += [
+@@ -653,7 +653,7 @@ LOCAL_INCLUDES += [
      "/gfx/harfbuzz/src",
  ]
  
@@ -2711,7 +2633,7 @@ index 7c81493630..40ac6277be 100644
          "/gfx/cairo/cairo/src",
      ]
 diff --git a/gfx/skia/skia/include/private/base/SkTArray.h b/gfx/skia/skia/include/private/base/SkTArray.h
-index 1a833f1086..61e08e2a3c 100644
+index 1a833f1..61e08e2 100644
 --- a/gfx/skia/skia/include/private/base/SkTArray.h
 +++ b/gfx/skia/skia/include/private/base/SkTArray.h
 @@ -561,7 +561,7 @@ private:
@@ -2724,10 +2646,10 @@ index 1a833f1086..61e08e2a3c 100644
      void setDataFromBytes(SkSpan<std::byte> allocation) {
          T* data = TCast(allocation.data());
 diff --git a/gfx/thebes/SharedFontList.h b/gfx/thebes/SharedFontList.h
-index 5ce0885c70..4b7d48497b 100644
+index 111c61f..26d8255 100644
 --- a/gfx/thebes/SharedFontList.h
 +++ b/gfx/thebes/SharedFontList.h
-@@ -171,7 +171,7 @@ struct Face {
+@@ -167,7 +167,7 @@ struct Face {
      nsCString mDescriptor;  // descriptor that can be used to instantiate a
                              // platform font reference
      uint16_t mIndex;        // an index used with descriptor (on some platforms)
@@ -2736,7 +2658,7 @@ index 5ce0885c70..4b7d48497b 100644
      uint16_t mSize;  // pixel size if bitmap; zero indicates scalable
  #endif
      bool mFixedPitch;                  // is the face fixed-pitch (monospaced)?
-@@ -186,7 +186,7 @@ struct Face {
+@@ -182,7 +182,7 @@ struct Face {
    Face(FontList* aList, const InitData& aData)
        : mDescriptor(aList, aData.mDescriptor),
          mIndex(aData.mIndex),
@@ -2745,7 +2667,7 @@ index 5ce0885c70..4b7d48497b 100644
          mSize(aData.mSize),
  #endif
          mFixedPitch(aData.mFixedPitch),
-@@ -205,7 +205,7 @@ struct Face {
+@@ -201,7 +201,7 @@ struct Face {
  
    String mDescriptor;
    uint16_t mIndex;
@@ -2755,10 +2677,10 @@ index 5ce0885c70..4b7d48497b 100644
  #endif
    bool mFixedPitch;
 diff --git a/gfx/thebes/gfxFcPlatformFontList.cpp b/gfx/thebes/gfxFcPlatformFontList.cpp
-index 3fbad92c0d..9abd593456 100644
+index 09abc19..3f6095a 100644
 --- a/gfx/thebes/gfxFcPlatformFontList.cpp
 +++ b/gfx/thebes/gfxFcPlatformFontList.cpp
-@@ -931,11 +931,11 @@ static void PreparePattern(FcPattern* aPattern, bool aIsPrinterFont) {
+@@ -933,11 +933,11 @@ static void PreparePattern(FcPattern* aPattern, bool aIsPrinterFont) {
      cairo_ft_font_options_substitute(options, aPattern);
      cairo_font_options_destroy(options);
      FcPatternAddBool(aPattern, PRINTING_FC_PROPERTY, FcTrue);
@@ -2772,7 +2694,7 @@ index 3fbad92c0d..9abd593456 100644
    }
  
    FcDefaultSubstitute(aPattern);
-@@ -1783,7 +1783,7 @@ nsresult gfxFcPlatformFontList::InitFontListForPlatform() {
+@@ -1782,7 +1782,7 @@ nsresult gfxFcPlatformFontList::InitFontListForPlatform() {
      // or in an UpdateFontList message.
      auto& fontList = dom::ContentChild::GetSingleton()->SystemFontList();
  
@@ -2781,7 +2703,7 @@ index 3fbad92c0d..9abd593456 100644
      UpdateSystemFontOptionsFromIpc(fontList.options());
  #endif
  
-@@ -1842,7 +1842,7 @@ void gfxFcPlatformFontList::ReadSystemFontList(dom::SystemFontList* retValue) {
+@@ -1841,7 +1841,7 @@ void gfxFcPlatformFontList::ReadSystemFontList(dom::SystemFontList* retValue) {
    // Fontconfig versions below 2.9 drop the FC_FILE element in FcNameUnparse
    // (see https://bugs.freedesktop.org/show_bug.cgi?id=26718), so when using
    // an older version, we manually append it to the unparsed pattern.
@@ -2790,7 +2712,7 @@ index 3fbad92c0d..9abd593456 100644
    SystemFontOptionsToIpc(retValue->options());
  #endif
  
-@@ -1920,7 +1920,7 @@ void gfxFcPlatformFontList::InitSharedFontListForPlatform() {
+@@ -1919,7 +1919,7 @@ void gfxFcPlatformFontList::InitSharedFontListForPlatform() {
    mLastConfig = FcConfigGetCurrent();
  
    if (!XRE_IsParentProcess()) {
@@ -2800,7 +2722,7 @@ index 3fbad92c0d..9abd593456 100644
      UpdateSystemFontOptionsFromIpc(fontList.options());
  #endif
 diff --git a/gfx/thebes/gfxFcPlatformFontList.h b/gfx/thebes/gfxFcPlatformFontList.h
-index 28f3feb31c..808116ca79 100644
+index ccd47a3..264af31 100644
 --- a/gfx/thebes/gfxFcPlatformFontList.h
 +++ b/gfx/thebes/gfxFcPlatformFontList.h
 @@ -250,7 +250,7 @@ class gfxFontconfigFont final : public gfxFT2FontBase {
@@ -2861,7 +2783,7 @@ index 28f3feb31c..808116ca79 100644
    // Cache for most recently used language code in FindAndAddFamiliesLocked,
 diff --git a/gfx/thebes/gfxHaikuPlatformFontList.cpp b/gfx/thebes/gfxHaikuPlatformFontList.cpp
 new file mode 100644
-index 0000000000..2960190c18
+index 0000000..2960190
 --- /dev/null
 +++ b/gfx/thebes/gfxHaikuPlatformFontList.cpp
 @@ -0,0 +1,381 @@
@@ -3248,7 +3170,7 @@ index 0000000000..2960190c18
 +}
 diff --git a/gfx/thebes/gfxHaikuPlatformFontList.h b/gfx/thebes/gfxHaikuPlatformFontList.h
 new file mode 100644
-index 0000000000..885c532981
+index 0000000..885c532
 --- /dev/null
 +++ b/gfx/thebes/gfxHaikuPlatformFontList.h
 @@ -0,0 +1,55 @@
@@ -3308,7 +3230,7 @@ index 0000000000..885c532981
 +
 +#endif  // GFX_HAIKU_PLATFORM_FONTLIST_H_
 diff --git a/gfx/thebes/gfxPlatform.cpp b/gfx/thebes/gfxPlatform.cpp
-index 9385c82abe..9384f72fcf 100644
+index 5acefcd..3abf1e6 100644
 --- a/gfx/thebes/gfxPlatform.cpp
 +++ b/gfx/thebes/gfxPlatform.cpp
 @@ -82,6 +82,8 @@
@@ -3340,7 +3262,7 @@ index 9385c82abe..9384f72fcf 100644
  #endif
 diff --git a/gfx/thebes/gfxPlatformHaiku.cpp b/gfx/thebes/gfxPlatformHaiku.cpp
 new file mode 100644
-index 0000000000..3fb2548012
+index 0000000..3fb2548
 --- /dev/null
 +++ b/gfx/thebes/gfxPlatformHaiku.cpp
 @@ -0,0 +1,69 @@
@@ -3415,7 +3337,7 @@ index 0000000000..3fb2548012
 +}
 diff --git a/gfx/thebes/gfxPlatformHaiku.h b/gfx/thebes/gfxPlatformHaiku.h
 new file mode 100644
-index 0000000000..9601cf9a3b
+index 0000000..9601cf9
 --- /dev/null
 +++ b/gfx/thebes/gfxPlatformHaiku.h
 @@ -0,0 +1,34 @@
@@ -3454,10 +3376,10 @@ index 0000000000..9601cf9a3b
 +
 +#endif /* GFX_PLATFORM_HAIKU_H */
 diff --git a/gfx/thebes/moz.build b/gfx/thebes/moz.build
-index ab172d9588..5c9c140630 100644
+index fdc0eef..0288873 100644
 --- a/gfx/thebes/moz.build
 +++ b/gfx/thebes/moz.build
-@@ -146,7 +146,22 @@ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
+@@ -151,7 +151,18 @@ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
              "gfxXlibSurface.cpp",
              "XlibDisplay.cpp",
          ]
@@ -3467,21 +3389,17 @@ index ab172d9588..5c9c140630 100644
 +        "gfxFT2FontBase.h",
 +        "gfxPlatformHaiku.h",
 +    ]
-+    EXPORTS.mozilla.gfx += [
-+        "PrintTargetPDF.h",
-+    ]
 +    SOURCES += [
 +        "gfxFcPlatformFontList.cpp",
 +        "gfxFT2FontBase.cpp",
 +        "gfxFT2Utils.cpp",
 +        "gfxHaikuPlatformFontList.cpp",
 +        "gfxPlatformHaiku.cpp",
-+        "PrintTargetPDF.cpp",
 +    ]
  elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
      EXPORTS += [
          "gfxDWriteCommon.h",
-@@ -256,11 +271,12 @@ LOCAL_INCLUDES += [
+@@ -271,11 +282,12 @@ LOCAL_INCLUDES += [
      "/widget/gtk",
  ]
  
@@ -3496,7 +3414,7 @@ index ab172d9588..5c9c140630 100644
  
  if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
      CXXFLAGS += CONFIG["MOZ_GTK3_CFLAGS"]
-@@ -278,6 +294,9 @@ COMPILE_FLAGS["WARNINGS_CXXFLAGS"] += ["-Werror=switch"]
+@@ -293,6 +305,9 @@ COMPILE_FLAGS["WARNINGS_CXXFLAGS"] += ["-Werror=switch"]
  
  include("/tools/fuzzing/libfuzzer-config.mozbuild")
  
@@ -3507,11 +3425,11 @@ index ab172d9588..5c9c140630 100644
  LICENSES["icu"].title = "ICU License"
  LICENSES["icu"].text = "LICENSE-NOTICE.txt"
 diff --git a/gfx/webrender_bindings/moz.build b/gfx/webrender_bindings/moz.build
-index 3310dc4604..131522d11b 100644
+index eab4080..7b7de5c 100644
 --- a/gfx/webrender_bindings/moz.build
 +++ b/gfx/webrender_bindings/moz.build
-@@ -107,7 +107,7 @@ if CONFIG["MOZ_WAYLAND"]:
-         "RenderCompositorNative.cpp",
+@@ -109,7 +109,7 @@ if CONFIG["MOZ_WAYLAND"]:
+         "RenderWaylandTextureHost.cpp",
      ]
  
 -if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk"):
@@ -3520,7 +3438,7 @@ index 3310dc4604..131522d11b 100644
  
  if CONFIG["COMPILE_ENVIRONMENT"]:
 diff --git a/image/SurfaceCache.cpp b/image/SurfaceCache.cpp
-index d9e329eaac..a0b534ce44 100644
+index d9e329e..a0b534c 100644
 --- a/image/SurfaceCache.cpp
 +++ b/image/SurfaceCache.cpp
 @@ -1644,7 +1644,7 @@ void SurfaceCache::Initialize() {
@@ -3534,7 +3452,7 @@ index d9e329eaac..a0b534ce44 100644
      memorySize = 256 * 1024 * 1024;  // Fall back to 256MB.
 diff --git a/image/decoders/icon/haiku/moz.build b/image/decoders/icon/haiku/moz.build
 new file mode 100644
-index 0000000000..d8d380f0cd
+index 0000000..d8d380f
 --- /dev/null
 +++ b/image/decoders/icon/haiku/moz.build
 @@ -0,0 +1,11 @@
@@ -3551,7 +3469,7 @@ index 0000000000..d8d380f0cd
 +FINAL_LIBRARY = "xul"
 diff --git a/image/decoders/icon/haiku/nsIconChannel.cpp b/image/decoders/icon/haiku/nsIconChannel.cpp
 new file mode 100644
-index 0000000000..54b3dbc7db
+index 0000000..54b3dbc
 --- /dev/null
 +++ b/image/decoders/icon/haiku/nsIconChannel.cpp
 @@ -0,0 +1,323 @@
@@ -3880,7 +3798,7 @@ index 0000000000..54b3dbc7db
 +}
 diff --git a/image/decoders/icon/haiku/nsIconChannel.h b/image/decoders/icon/haiku/nsIconChannel.h
 new file mode 100644
-index 0000000000..78846f620d
+index 0000000..78846f6
 --- /dev/null
 +++ b/image/decoders/icon/haiku/nsIconChannel.h
 @@ -0,0 +1,28 @@
@@ -3913,10 +3831,10 @@ index 0000000000..78846f620d
 +
 +#endif  // mozilla_image_decoders_icon_haiku_nsIconChannel_h
 diff --git a/image/decoders/icon/moz.build b/image/decoders/icon/moz.build
-index 1d981d83f0..fbb62e63d8 100644
+index 325a723..ea39d81 100644
 --- a/image/decoders/icon/moz.build
 +++ b/image/decoders/icon/moz.build
-@@ -33,6 +33,9 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "cocoa":
+@@ -37,6 +37,9 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "cocoa":
  if CONFIG["OS_TARGET"] == "Android":
      platform = "android"
  
@@ -3927,7 +3845,7 @@ index 1d981d83f0..fbb62e63d8 100644
      LOCAL_INCLUDES += [platform]
  
 diff --git a/image/decoders/moz.build b/image/decoders/moz.build
-index 6ba7a623f7..02dac29297 100644
+index 9c9afb2..54f8aa7 100644
 --- a/image/decoders/moz.build
 +++ b/image/decoders/moz.build
 @@ -16,6 +16,8 @@ if toolkit == "cocoa":
@@ -3940,7 +3858,7 @@ index 6ba7a623f7..02dac29297 100644
  UNIFIED_SOURCES += [
      "EXIF.cpp",
 diff --git a/intl/locale/moz.build b/intl/locale/moz.build
-index 4d6ff0428d..d737f4f5b4 100644
+index 4d6ff04..d737f4f 100644
 --- a/intl/locale/moz.build
 +++ b/intl/locale/moz.build
 @@ -16,6 +16,8 @@ elif toolkit in ("cocoa", "uikit"):
@@ -3953,7 +3871,7 @@ index 4d6ff0428d..d737f4f5b4 100644
      DIRS += ["android"]
  
 diff --git a/ipc/chromium/moz.build b/ipc/chromium/moz.build
-index 34e067a546..0518bb6f29 100644
+index 34e067a..0518bb6 100644
 --- a/ipc/chromium/moz.build
 +++ b/ipc/chromium/moz.build
 @@ -106,7 +106,7 @@ if CONFIG["TARGET_OS"] == "iOS":
@@ -3966,7 +3884,7 @@ index 34e067a546..0518bb6f29 100644
          "src/base/process_util_linux.cc",
          "src/base/time_posix.cc",
 diff --git a/ipc/chromium/src/base/message_loop.cc b/ipc/chromium/src/base/message_loop.cc
-index a22d37212b..50b42c972e 100644
+index 80350aa..014230b 100644
 --- a/ipc/chromium/src/base/message_loop.cc
 +++ b/ipc/chromium/src/base/message_loop.cc
 @@ -27,7 +27,7 @@
@@ -3979,7 +3897,7 @@ index a22d37212b..50b42c972e 100644
  #    include "base/message_pump_glib.h"
  #  endif
 diff --git a/ipc/chromium/src/base/platform_thread.h b/ipc/chromium/src/base/platform_thread.h
-index 2817cc9703..dc84d7a943 100644
+index 2817cc9..dc84d7a 100644
 --- a/ipc/chromium/src/base/platform_thread.h
 +++ b/ipc/chromium/src/base/platform_thread.h
 @@ -22,7 +22,7 @@ typedef void* PlatformThreadHandle;  // HANDLE
@@ -3992,7 +3910,7 @@ index 2817cc9703..dc84d7a943 100644
  #    include <unistd.h>
  typedef pid_t PlatformThreadId;
 diff --git a/ipc/chromium/src/base/platform_thread_posix.cc b/ipc/chromium/src/base/platform_thread_posix.cc
-index 01fd9c9061..bd02cd7c98 100644
+index 01fd9c9..bd02cd7 100644
 --- a/ipc/chromium/src/base/platform_thread_posix.cc
 +++ b/ipc/chromium/src/base/platform_thread_posix.cc
 @@ -14,6 +14,8 @@
@@ -4014,7 +3932,7 @@ index 01fd9c9061..bd02cd7c98 100644
  }
  
 diff --git a/ipc/chromium/src/base/process_util_posix.cc b/ipc/chromium/src/base/process_util_posix.cc
-index b9382c3309..975089b95e 100644
+index b9382c3..975089b 100644
 --- a/ipc/chromium/src/base/process_util_posix.cc
 +++ b/ipc/chromium/src/base/process_util_posix.cc
 @@ -123,7 +123,7 @@ void CloseSuperfluousFds(void* aCtx, bool (*aShouldPreserve)(void*, int)) {
@@ -4027,10 +3945,10 @@ index b9382c3309..975089b95e 100644
    static const char kFDDir[] = "/proc/self/fd";
  #elif defined(XP_DARWIN)
 diff --git a/ipc/chromium/src/chrome/common/ipc_channel_posix.cc b/ipc/chromium/src/chrome/common/ipc_channel_posix.cc
-index 2b9b8824dc..31a51939c5 100644
+index ed697bf..a70aabe 100644
 --- a/ipc/chromium/src/chrome/common/ipc_channel_posix.cc
 +++ b/ipc/chromium/src/chrome/common/ipc_channel_posix.cc
-@@ -291,7 +291,11 @@ bool ChannelPosix::ProcessIncomingMessages() {
+@@ -293,7 +293,11 @@ bool ChannelPosix::ProcessIncomingMessages() {
            int* const raw_wire_fds = reinterpret_cast<int*>(CMSG_DATA(cmsg));
            const size_t num_wire_fds = payload_len / sizeof(int);
            // Transfer fd ownershop into RAII-land.
@@ -4042,7 +3960,7 @@ index 2b9b8824dc..31a51939c5 100644
            for (size_t i = 0; i < num_wire_fds; ++i) {
              MOZ_RELEASE_ASSERT(raw_wire_fds[i] >= -1);
              wire_fds.AppendElement(raw_wire_fds[i]);
-@@ -307,7 +311,9 @@ bool ChannelPosix::ProcessIncomingMessages() {
+@@ -309,7 +313,9 @@ bool ChannelPosix::ProcessIncomingMessages() {
              return false;
            }
  
@@ -4053,7 +3971,7 @@ index 2b9b8824dc..31a51939c5 100644
        }
      }
 diff --git a/ipc/chromium/src/chrome/common/process_watcher_posix_sigchld.cc b/ipc/chromium/src/chrome/common/process_watcher_posix_sigchld.cc
-index 5f6071105b..4924740394 100644
+index 5f60711..4924740 100644
 --- a/ipc/chromium/src/chrome/common/process_watcher_posix_sigchld.cc
 +++ b/ipc/chromium/src/chrome/common/process_watcher_posix_sigchld.cc
 @@ -41,7 +41,7 @@
@@ -4066,10 +3984,10 @@ index 5f6071105b..4924740394 100644
  #  define HAVE_PIPE2 1
  #endif
 diff --git a/ipc/glue/GeckoChildProcessHost.cpp b/ipc/glue/GeckoChildProcessHost.cpp
-index 46012e95e5..4cbf078eb9 100644
+index b65b042..94f9cce 100644
 --- a/ipc/glue/GeckoChildProcessHost.cpp
 +++ b/ipc/glue/GeckoChildProcessHost.cpp
-@@ -334,7 +334,7 @@ typedef AndroidProcessLauncher ProcessLauncher;
+@@ -336,7 +336,7 @@ typedef AndroidProcessLauncher ProcessLauncher;
  // orthogonal IPC machinery there. Conversely, there are tier-3 non-Linux
  // platforms (BSD and Solaris) where we want the "linux" IPC machinery. So
  // we use MOZ_WIDGET_* to choose the platform backend.
@@ -4078,7 +3996,7 @@ index 46012e95e5..4cbf078eb9 100644
  class LinuxProcessLauncher : public PosixProcessLauncher {
   public:
    LinuxProcessLauncher(GeckoChildProcessHost* aHost,
-@@ -1342,7 +1342,7 @@ void BaseProcessLauncher::MapChildLogging() {
+@@ -1327,7 +1327,7 @@ void BaseProcessLauncher::MapChildLogging() {
    }
  }
  
@@ -4088,7 +4006,7 @@ index 46012e95e5..4cbf078eb9 100644
    Result<Ok, LaunchError> aError = PosixProcessLauncher::DoSetup();
    if (aError.isErr()) {
 diff --git a/js/src/threading/moz.build b/js/src/threading/moz.build
-index 3e8713e4a0..eaeaa8fce3 100644
+index 1a2bc7e..e4420df 100644
 --- a/js/src/threading/moz.build
 +++ b/js/src/threading/moz.build
 @@ -32,6 +32,11 @@ elif CONFIG["OS_ARCH"] == "WASI":
@@ -4104,7 +4022,7 @@ index 3e8713e4a0..eaeaa8fce3 100644
          "posix/CpuCount.cpp",
          "posix/PosixThread.cpp",
 diff --git a/js/src/util/NativeStack.cpp b/js/src/util/NativeStack.cpp
-index ab0f9a1b94..0794d0b2d2 100644
+index ab0f9a1..0794d0b 100644
 --- a/js/src/util/NativeStack.cpp
 +++ b/js/src/util/NativeStack.cpp
 @@ -29,6 +29,9 @@
@@ -4133,7 +4051,7 @@ index ab0f9a1b94..0794d0b2d2 100644
  
  // Since we rearrange the layout for wasi via --stack-first flag for the linker
 diff --git a/js/src/vm/DateTime.cpp b/js/src/vm/DateTime.cpp
-index 123965cf4b..13ddcea36a 100644
+index 51d1d54..e7dd3e7 100644
 --- a/js/src/vm/DateTime.cpp
 +++ b/js/src/vm/DateTime.cpp
 @@ -8,6 +8,15 @@
@@ -4152,7 +4070,7 @@ index 123965cf4b..13ddcea36a 100644
  #include "mozilla/ScopeExit.h"
  #include "mozilla/Span.h"
  #include "mozilla/TextUtils.h"
-@@ -851,6 +860,21 @@ static bool ReadTimeZoneLink(std::string_view tz,
+@@ -806,6 +815,21 @@ static bool ReadTimeZoneLink(std::string_view tz,
  #endif   /* JS_HAS_INTL_API */
  
  void js::DateTimeInfo::internalResyncICUDefaultTimeZone() {
@@ -4174,7 +4092,7 @@ index 123965cf4b..13ddcea36a 100644
  #if JS_HAS_INTL_API
    if (const char* tzenv = std::getenv("TZ")) {
      std::string_view tz(tzenv);
-@@ -913,5 +937,6 @@ void js::DateTimeInfo::internalResyncICUDefaultTimeZone() {
+@@ -868,5 +892,6 @@ void js::DateTimeInfo::internalResyncICUDefaultTimeZone() {
    // Intentionally ignore any errors, because we don't have a good way to report
    // errors from this function.
    (void)mozilla::intl::TimeZone::SetDefaultTimeZoneFromHostTimeZone();
@@ -4183,7 +4101,7 @@ index 123965cf4b..13ddcea36a 100644
 +#endif /* __HAIKU__ */
  }
 diff --git a/js/src/wasm/WasmSignalHandlers.cpp b/js/src/wasm/WasmSignalHandlers.cpp
-index c06cefcce0..4d3ec85eb8 100644
+index c06cefc..4d3ec85 100644
 --- a/js/src/wasm/WasmSignalHandlers.cpp
 +++ b/js/src/wasm/WasmSignalHandlers.cpp
 @@ -237,6 +237,17 @@ using namespace js::wasm;
@@ -4205,10 +4123,10 @@ index c06cefcce0..4d3ec85eb8 100644
  #    define EIP_sig(p) ((p)->thread.uts.ts32.__eip)
  #    define EBP_sig(p) ((p)->thread.uts.ts32.__ebp)
 diff --git a/layout/base/nsLayoutUtils.cpp b/layout/base/nsLayoutUtils.cpp
-index ef125f0123..16ca611340 100644
+index e06c75c..620765d 100644
 --- a/layout/base/nsLayoutUtils.cpp
 +++ b/layout/base/nsLayoutUtils.cpp
-@@ -9891,6 +9891,9 @@ static void GetSpoofedSystemFontForRFP(LookAndFeel::FontID aFontID,
+@@ -9886,6 +9886,9 @@ static void GetSpoofedSystemFontForRFP(LookAndFeel::FontID aFontID,
    // UI font-size.
    aName = u"sans-serif"_ns;
    aStyle.size = 15;
@@ -4219,7 +4137,7 @@ index ef125f0123..16ca611340 100644
  #  error "Unknown platform"
  #endif
 diff --git a/layout/style/nsMediaFeatures.cpp b/layout/style/nsMediaFeatures.cpp
-index 1f9613b8cd..8eb8c71e48 100644
+index bc73761..da4e89d 100644
 --- a/layout/style/nsMediaFeatures.cpp
 +++ b/layout/style/nsMediaFeatures.cpp
 @@ -256,7 +256,7 @@ bool Gecko_MediaFeatures_MatchesPlatform(StylePlatform aPlatform) {
@@ -4232,7 +4150,7 @@ index 1f9613b8cd..8eb8c71e48 100644
        return true;
  #elif defined(XP_MACOSX)
 diff --git a/media/ffvpx/config_unix64.h b/media/ffvpx/config_unix64.h
-index 7d63f47409..f72e3bdcf3 100644
+index 7d63f47..f72e3bd 100644
 --- a/media/ffvpx/config_unix64.h
 +++ b/media/ffvpx/config_unix64.h
 @@ -291,7 +291,7 @@
@@ -4254,7 +4172,7 @@ index 7d63f47409..f72e3bdcf3 100644
  #define HAVE_SETCONSOLETEXTATTRIBUTE 0
  #define HAVE_SETCONSOLECTRLHANDLER 0
 diff --git a/media/libcubeb/src/cubeb.c b/media/libcubeb/src/cubeb.c
-index c47d4b804d..59cf02d96f 100644
+index c47d4b8..59cf02d 100644
 --- a/media/libcubeb/src/cubeb.c
 +++ b/media/libcubeb/src/cubeb.c
 @@ -80,6 +80,10 @@ oss_init(cubeb ** context, char const * context_name);
@@ -4291,7 +4209,7 @@ index c47d4b804d..59cf02d96f 100644
  #endif
 diff --git a/media/libcubeb/src/cubeb_haiku.cpp b/media/libcubeb/src/cubeb_haiku.cpp
 new file mode 100644
-index 0000000000..93d265fdd5
+index 0000000..93d265f
 --- /dev/null
 +++ b/media/libcubeb/src/cubeb_haiku.cpp
 @@ -0,0 +1,1587 @@
@@ -5883,7 +5801,7 @@ index 0000000000..93d265fdd5
 +  return CUBEB_OK;
 +}
 diff --git a/media/libcubeb/src/moz.build b/media/libcubeb/src/moz.build
-index eb61973da7..74d45086f5 100644
+index 1249085..590157c 100644
 --- a/media/libcubeb/src/moz.build
 +++ b/media/libcubeb/src/moz.build
 @@ -28,6 +28,7 @@ if CONFIG['MOZ_SUNAUDIO']:
@@ -5919,7 +5837,7 @@ index eb61973da7..74d45086f5 100644
  
  # We allow warnings for third-party code that can be updated from upstream.
 diff --git a/mfbt/Assertions.h b/mfbt/Assertions.h
-index b26a32f2e3..3a15f62e5b 100644
+index b26a32f..3a15f62 100644
 --- a/mfbt/Assertions.h
 +++ b/mfbt/Assertions.h
 @@ -244,7 +244,7 @@ MOZ_ReportAssertionFailure(const char* aStr, const char* aFilename,
@@ -5931,11 +5849,51 @@ index b26a32f2e3..3a15f62e5b 100644
  
  #  define MOZ_REALLY_CRASH(line) __builtin_trap()
  
+diff --git a/mfbt/RandomNum.cpp b/mfbt/RandomNum.cpp
+index c5e1d9b..3a1f82b 100644
+--- a/mfbt/RandomNum.cpp
++++ b/mfbt/RandomNum.cpp
+@@ -9,6 +9,10 @@
+ #  include <unistd.h>
+ #endif
+ 
++#ifdef XP_HAIKU
++#  include <limits.h>
++#endif
++
+ #if defined(XP_WIN)
+ #  include "minwindef.h"
+ #  include "mozilla/DynamicallyLinkedFunctionPtr.h"
+@@ -103,6 +107,24 @@ MFBT_API bool GenerateRandomBytesFromOS(void* aBuffer, size_t aLength) {
+ 
+ #  endif  // defined(__linux__)
+ 
++#  if defined(XP_HAIKU)
++
++  uint8_t* bytes = static_cast<uint8_t*>(aBuffer);
++  size_t left = aLength;
++  while (left > 0) {
++    size_t chunk = left < GETENTROPY_MAX ? left : GETENTROPY_MAX;
++    if (getentropy(bytes, chunk) != 0) {
++      break;
++    }
++    bytes += chunk;
++    left -= chunk;
++  }
++  if (left == 0) {
++    return true;
++  }
++
++#  endif  // defined(XP_HAIKU)
++
+   int fd = open("/dev/urandom", O_RDONLY);
+   if (fd < 0) {
+     return false;
 diff --git a/modules/libpref/init/StaticPrefList.yaml b/modules/libpref/init/StaticPrefList.yaml
-index 80be46d83c..bdcb0dcf39 100644
+index 17f9237..e17e3de 100644
 --- a/modules/libpref/init/StaticPrefList.yaml
 +++ b/modules/libpref/init/StaticPrefList.yaml
-@@ -7990,7 +7990,7 @@
+@@ -8065,7 +8065,7 @@
    value: false
    mirror: always
  
@@ -5944,7 +5902,7 @@ index 80be46d83c..bdcb0dcf39 100644
    # -1 = disabled (no preblend, original behavior)
    #  0 = sRGB transfer
    # >0 = value/100.0 exponent
-@@ -8015,7 +8015,7 @@
+@@ -8090,7 +8090,7 @@
      mirror: always
  #endif
  
@@ -5953,7 +5911,7 @@ index 80be46d83c..bdcb0dcf39 100644
  -   name: gfx.font_rendering.fontconfig.max_generic_substitutions
      type: RelaxedAtomicUint32
      value: 3
-@@ -12771,6 +12771,8 @@
+@@ -12929,6 +12929,8 @@
    value: true
  #elif defined(XP_SOLARIS)
    value: true
@@ -5962,7 +5920,7 @@ index 80be46d83c..bdcb0dcf39 100644
  #else
    value: false
  #endif
-@@ -12823,6 +12825,8 @@
+@@ -12973,6 +12975,8 @@
    value: true
  #elif defined(XP_SOLARIS)
    value: true
@@ -5971,7 +5929,7 @@ index 80be46d83c..bdcb0dcf39 100644
  #else
    value: false
  #endif
-@@ -12861,6 +12865,8 @@
+@@ -13006,6 +13010,8 @@
    value: true
  #elif defined(XP_SOLARIS)
    value: true
@@ -5980,7 +5938,7 @@ index 80be46d83c..bdcb0dcf39 100644
  #else
    value: false
  #endif
-@@ -12889,6 +12895,8 @@
+@@ -13025,6 +13031,8 @@
    value: true
  #elif defined(XP_SOLARIS)
    value: true
@@ -5989,7 +5947,7 @@ index 80be46d83c..bdcb0dcf39 100644
  #else
    value: false
  #endif
-@@ -14022,6 +14030,8 @@
+@@ -14220,6 +14228,8 @@
    type: bool
  #if defined(MOZ_WIDGET_ANDROID)
    value: true
@@ -5998,7 +5956,7 @@ index 80be46d83c..bdcb0dcf39 100644
  #else
    value: false
  #endif
-@@ -14137,6 +14147,8 @@
+@@ -14335,6 +14345,8 @@
    type: bool
  #if !defined(MOZ_WIDGET_ANDROID)
    value: true
@@ -6007,7 +5965,7 @@ index 80be46d83c..bdcb0dcf39 100644
  #else
    value: false
  #endif
-@@ -15823,6 +15835,8 @@
+@@ -16036,6 +16048,8 @@
    type: RelaxedAtomicBool
  #if defined(XP_WIN)
    value: true
@@ -6016,7 +5974,7 @@ index 80be46d83c..bdcb0dcf39 100644
  #else
    value: false
  #endif
-@@ -17208,6 +17222,8 @@
+@@ -17421,6 +17435,8 @@
    type: RelaxedAtomicBool
  #if defined(XP_WIN)
    value: true
@@ -6025,7 +5983,7 @@ index 80be46d83c..bdcb0dcf39 100644
  #else
    value: false
  #endif
-@@ -19821,6 +19837,8 @@
+@@ -20083,6 +20099,8 @@
    type: RelaxedAtomicBool
  #ifdef XP_MACOSX
    value: true
@@ -6034,7 +5992,7 @@ index 80be46d83c..bdcb0dcf39 100644
  #else
    value: @IS_NIGHTLY_BUILD@
  #endif
-@@ -20047,7 +20065,7 @@
+@@ -20309,7 +20327,7 @@
  # Does the access key by itself focus the menu bar?
  - name: ui.key.menuAccessKeyFocuses
    type: bool
@@ -6043,7 +6001,7 @@ index 80be46d83c..bdcb0dcf39 100644
    # On Windows and Linux, we now default to showing the menu bar only when alt
    # is pressed.
    value: true
-@@ -20063,7 +20081,7 @@
+@@ -20325,7 +20343,7 @@
    value: true
    mirror: always
  
@@ -6052,7 +6010,7 @@ index 80be46d83c..bdcb0dcf39 100644
  # Only GtkTextView (native multiline text viewer/editor) supports "select-all"
  # signal so that we cannot know "select-all" key bindings only with GtkEntry.
  # When this pref is set to true, if a key combination does not cause any
-@@ -21575,6 +21593,8 @@
+@@ -21816,6 +21834,8 @@
    type: bool
  #if defined(XP_MACOSX)
    value: true
@@ -6062,10 +6020,10 @@ index 80be46d83c..bdcb0dcf39 100644
    value: false
  #endif
 diff --git a/modules/libpref/init/all.js b/modules/libpref/init/all.js
-index 2675300196..9b42011925 100644
+index fe38d02..e18c838 100644
 --- a/modules/libpref/init/all.js
 +++ b/modules/libpref/init/all.js
-@@ -2841,7 +2841,7 @@ pref("font.size.monospace.x-math", 13);
+@@ -2835,7 +2835,7 @@ pref("font.size.monospace.x-math", 13);
  
  #endif // !ANDROID && !XP_MACOSX && XP_UNIX
  
@@ -6075,7 +6033,7 @@ index 2675300196..9b42011925 100644
    pref("font.size.monospace.ar", 12);
  
 diff --git a/moz.configure b/moz.configure
-index 120f118708..cbcf4f2f45 100755
+index 120f118..cbcf4f2 100755
 --- a/moz.configure
 +++ b/moz.configure
 @@ -929,6 +929,8 @@ def strip_flags(flags, profiling, target):
@@ -6088,7 +6046,7 @@ index 120f118708..cbcf4f2f45 100755
  
  set_config("STRIP_FLAGS", strip_flags)
 diff --git a/mozglue/baseprofiler/core/ProfilerUtils.cpp b/mozglue/baseprofiler/core/ProfilerUtils.cpp
-index 87dafa27cf..170a6c8e3d 100644
+index 87dafa2..170a6c8 100644
 --- a/mozglue/baseprofiler/core/ProfilerUtils.cpp
 +++ b/mozglue/baseprofiler/core/ProfilerUtils.cpp
 @@ -127,6 +127,19 @@ BaseProfilerThreadId profiler_current_thread_id() {
@@ -6112,7 +6070,7 @@ index 87dafa27cf..170a6c8e3d 100644
  #  else
  
 diff --git a/mozglue/baseprofiler/public/BaseProfilerUtils.h b/mozglue/baseprofiler/public/BaseProfilerUtils.h
-index b875a071a0..deda521423 100644
+index b875a07..deda521 100644
 --- a/mozglue/baseprofiler/public/BaseProfilerUtils.h
 +++ b/mozglue/baseprofiler/public/BaseProfilerUtils.h
 @@ -64,6 +64,13 @@ namespace mozilla::baseprofiler::detail {
@@ -6130,7 +6088,7 @@ index b875a071a0..deda521423 100644
  #  else
  
 diff --git a/mozglue/misc/Now.cpp b/mozglue/misc/Now.cpp
-index cc3780ed60..6f08cbd5da 100644
+index cc3780e..6f08cbd 100644
 --- a/mozglue/misc/Now.cpp
 +++ b/mozglue/misc/Now.cpp
 @@ -89,8 +89,8 @@ Maybe<uint64_t> NowExcludingSuspendMs() {
@@ -6145,7 +6103,7 @@ index cc3780ed60..6f08cbd5da 100644
    struct timespec ts = {0};
  
 diff --git a/mozglue/misc/TimeStamp_posix.cpp b/mozglue/misc/TimeStamp_posix.cpp
-index 9137c18cc9..5b08d3eb27 100644
+index 9137c18..5b08d3e 100644
 --- a/mozglue/misc/TimeStamp_posix.cpp
 +++ b/mozglue/misc/TimeStamp_posix.cpp
 @@ -11,7 +11,9 @@
@@ -6160,10 +6118,10 @@ index 9137c18cc9..5b08d3eb27 100644
  #include <unistd.h>
  #include <string.h>
 diff --git a/netwerk/base/nsStandardURL.cpp b/netwerk/base/nsStandardURL.cpp
-index cd50ad61b6..0fcef6a741 100644
+index e58d9a3..09ae26c 100644
 --- a/netwerk/base/nsStandardURL.cpp
 +++ b/netwerk/base/nsStandardURL.cpp
-@@ -357,7 +357,7 @@ struct DumpLeakedURLs {
+@@ -358,7 +358,7 @@ struct DumpLeakedURLs {
  };
  
  DumpLeakedURLs::~DumpLeakedURLs() {
@@ -6173,7 +6131,7 @@ index cd50ad61b6..0fcef6a741 100644
    if (gAllURLs && !gAllURLs->isEmpty()) {
      printf("Leaked URLs:\n");
 diff --git a/netwerk/dns/moz.build b/netwerk/dns/moz.build
-index 513f9476b1..408e8ae66a 100644
+index 5d862cf..f8bcfff 100644
 --- a/netwerk/dns/moz.build
 +++ b/netwerk/dns/moz.build
 @@ -116,6 +116,9 @@ LOCAL_INCLUDES += [
@@ -6187,7 +6145,7 @@ index 513f9476b1..408e8ae66a 100644
  LICENSES["jpnic"].title = "Japan Network Information Center License"
  LICENSES["jpnic"].text = "LICENSE-NOTICE.txt"
 diff --git a/netwerk/protocol/http/nsHttpHandler.cpp b/netwerk/protocol/http/nsHttpHandler.cpp
-index c35867b90d..9baa8d4958 100644
+index e62b4d0..b554dfc 100644
 --- a/netwerk/protocol/http/nsHttpHandler.cpp
 +++ b/netwerk/protocol/http/nsHttpHandler.cpp
 @@ -1115,6 +1115,8 @@ void nsHttpHandler::InitUserAgentComponents() {
@@ -6209,7 +6167,7 @@ index c35867b90d..9baa8d4958 100644
    mOscpu.AssignLiteral("Linux x86_64");
  #endif
 diff --git a/netwerk/sctp/src/netinet/sctp.h b/netwerk/sctp/src/netinet/sctp.h
-index 6129e77f96..be8e4135df 100644
+index cef07e0..7eb0d23 100644
 --- a/netwerk/sctp/src/netinet/sctp.h
 +++ b/netwerk/sctp/src/netinet/sctp.h
 @@ -35,7 +35,7 @@
@@ -6220,12 +6178,12 @@ index 6129e77f96..be8e4135df 100644
 +#if defined(__APPLE__) || defined(__linux__) || defined(__HAIKU__)
  #include <stdint.h>
  #endif
- #if defined(__FreeBSD__) && !defined(__Userspace__)
+ #include <sys/types.h>
 diff --git a/netwerk/sctp/src/netinet/sctp_input.c b/netwerk/sctp/src/netinet/sctp_input.c
-index bcf6699e54..ffad43e18b 100644
+index 217b494..01f76bc 100644
 --- a/netwerk/sctp/src/netinet/sctp_input.c
 +++ b/netwerk/sctp/src/netinet/sctp_input.c
-@@ -6320,11 +6320,11 @@ sctp_input_with_port(struct mbuf *i_pak, int off, uint16_t port)
+@@ -6323,11 +6323,11 @@ sctp_input_with_port(struct mbuf *i_pak, int off, uint16_t port)
  #if defined(_WIN32) && !defined(__Userspace__)
  	NTOHS(ip->ip_len);
  #endif
@@ -6240,12 +6198,12 @@ index bcf6699e54..ffad43e18b 100644
  #else
  	length = ip->ip_len + iphlen;
 diff --git a/netwerk/sctp/src/netinet/sctp_os_userspace.h b/netwerk/sctp/src/netinet/sctp_os_userspace.h
-index 493ae0267f..cd160c50ac 100644
+index 848ed32..0f80876 100644
 --- a/netwerk/sctp/src/netinet/sctp_os_userspace.h
 +++ b/netwerk/sctp/src/netinet/sctp_os_userspace.h
-@@ -1145,7 +1145,7 @@ sctp_get_mbuf_for_msg(unsigned int space_needed, int want_header, int how, int a
- 
- #define SCTP_IS_LISTENING(inp) ((inp->sctp_flags & SCTP_PCB_FLAGS_ACCEPTING) != 0)
+@@ -1158,7 +1158,7 @@ in_broadcast(struct in_addr in)
+ 	        in.s_addr == htonl(INADDR_ANY));
+ }
  
 -#if defined(__APPLE__) || defined(__DragonFly__) || defined(__linux__) || defined(__native_client__) || defined(__NetBSD__) || defined(_WIN32) || defined(__Fuchsia__) || defined(__EMSCRIPTEN__)
 +#if defined(__APPLE__) || defined(__DragonFly__) || defined(__linux__) || defined(__native_client__) || defined(__NetBSD__) || defined(_WIN32) || defined(__Fuchsia__) || defined(__HAIKU__) || defined(__EMSCRIPTEN__)
@@ -6253,7 +6211,7 @@ index 493ae0267f..cd160c50ac 100644
  timingsafe_bcmp(const void *, const void *, size_t);
  #endif
 diff --git a/netwerk/sctp/src/netinet/sctp_userspace.c b/netwerk/sctp/src/netinet/sctp_userspace.c
-index 71888901fe..fac3e16917 100644
+index 7188890..fac3e16 100644
 --- a/netwerk/sctp/src/netinet/sctp_userspace.c
 +++ b/netwerk/sctp/src/netinet/sctp_userspace.c
 @@ -94,7 +94,7 @@ sctp_userspace_set_threadname(const char *name)
@@ -6284,7 +6242,7 @@ index 71888901fe..fac3e16917 100644
  timingsafe_bcmp(const void *b1, const void *b2, size_t n)
  {
 diff --git a/netwerk/sctp/src/user_environment.c b/netwerk/sctp/src/user_environment.c
-index ea52f0ada7..85b37eeed0 100644
+index ea52f0a..85b37ee 100644
 --- a/netwerk/sctp/src/user_environment.c
 +++ b/netwerk/sctp/src/user_environment.c
 @@ -172,7 +172,7 @@ finish_random(void)
@@ -6297,7 +6255,7 @@ index ea52f0ada7..85b37eeed0 100644
  
  static int fd = -1;
 diff --git a/netwerk/sctp/src/user_socket.c b/netwerk/sctp/src/user_socket.c
-index cde6ecc417..0407d01712 100644
+index 163db34..d812a48 100644
 --- a/netwerk/sctp/src/user_socket.c
 +++ b/netwerk/sctp/src/user_socket.c
 @@ -50,6 +50,9 @@
@@ -6310,7 +6268,7 @@ index cde6ecc417..0407d01712 100644
  #if !defined(_WIN32)
  #if defined INET || defined INET6
  #include <netinet/udp.h>
-@@ -1020,7 +1023,7 @@ userspace_sctp_recvmsg(struct socket *so,
+@@ -1023,7 +1026,7 @@ userspace_sctp_recvmsg(struct socket *so,
  	if (error) {
  		if ((auio.uio_resid != ulen) &&
  		    (error == EINTR ||
@@ -6319,7 +6277,7 @@ index cde6ecc417..0407d01712 100644
  		     error == ERESTART ||
  #endif
  		     error == EWOULDBLOCK)) {
-@@ -1113,7 +1116,7 @@ usrsctp_recvv(struct socket *so,
+@@ -1116,7 +1119,7 @@ usrsctp_recvv(struct socket *so,
  	if (errno) {
  		if ((auio.uio_resid != ulen) &&
  		    (errno == EINTR ||
@@ -6328,7 +6286,7 @@ index cde6ecc417..0407d01712 100644
  		     errno == ERESTART ||
  #endif
  		     errno == EWOULDBLOCK)) {
-@@ -1929,7 +1932,7 @@ int user_connect(struct socket *so, struct sockaddr *sa)
+@@ -1932,7 +1935,7 @@ int user_connect(struct socket *so, struct sockaddr *sa)
  		error = pthread_cond_wait(SOCK_COND(so), SOCK_MTX(so));
  #endif
  		if (error) {
@@ -6337,7 +6295,7 @@ index cde6ecc417..0407d01712 100644
  			if (error == EINTR) {
  #else
  			if (error == EINTR || error == ERESTART) {
-@@ -1949,7 +1952,7 @@ bad:
+@@ -1952,7 +1955,7 @@ bad:
  	if (!interrupted) {
  		so->so_state &= ~SS_ISCONNECTING;
  	}
@@ -6347,10 +6305,10 @@ index cde6ecc417..0407d01712 100644
  		error = EINTR;
  	}
 diff --git a/python/mach/mach/site.py b/python/mach/mach/site.py
-index b4b63c591e..c19d86c436 100644
+index d9f99fd..139da52 100644
 --- a/python/mach/mach/site.py
 +++ b/python/mach/mach/site.py
-@@ -1525,6 +1525,14 @@ def _create_venv_with_pthfile(
+@@ -1544,6 +1544,14 @@ def _create_venv_with_pthfile(
  
      _ensure_python_exe(Path(target_venv.python_path).parent)
  
@@ -6366,10 +6324,10 @@ index b4b63c591e..c19d86c436 100644
      pthfile_contents = "\n".join(pthfile_lines)
      with open(os.path.join(platlib_site_packages_dir, PTH_FILENAME), "w") as f:
 diff --git a/python/mozboot/mozboot/base.py b/python/mozboot/mozboot/base.py
-index 06cca004a3..c79efb06de 100644
+index b166f60..623b850 100644
 --- a/python/mozboot/mozboot/base.py
 +++ b/python/mozboot/mozboot/base.py
-@@ -569,9 +569,13 @@ class BaseBootstrapper:
+@@ -452,9 +452,13 @@ class BaseBootstrapper:
  
          if modern:
              print("Your version of Rust (%s) is new enough." % version)
@@ -6384,10 +6342,10 @@ index 06cca004a3..c79efb06de 100644
          if rustup and not modern:
              rustup_version = self._parse_version(rustup)
 diff --git a/python/mozboot/mozboot/bootstrap.py b/python/mozboot/mozboot/bootstrap.py
-index c5737d29cb..e5c0853a6a 100644
+index 4ba17af..33ed90d 100644
 --- a/python/mozboot/mozboot/bootstrap.py
 +++ b/python/mozboot/mozboot/bootstrap.py
-@@ -33,6 +33,7 @@ from mozboot.centosfedora import CentOSFedoraBootstrapper
+@@ -29,6 +29,7 @@ from mozboot.centosfedora import CentOSFedoraBootstrapper
  from mozboot.debian import DebianBootstrapper
  from mozboot.freebsd import FreeBSDBootstrapper
  from mozboot.gentoo import GentooBootstrapper
@@ -6395,7 +6353,7 @@ index c5737d29cb..e5c0853a6a 100644
  from mozboot.mozconfig import MozconfigBuilder
  from mozboot.mozillabuild import MozillaBuildBootstrapper
  from mozboot.openbsd import OpenBSDBootstrapper
-@@ -320,6 +321,10 @@ class Bootstrapper:
+@@ -240,6 +241,10 @@ class Bootstrapper:
              args["version"] = platform.release()
              args["flavor"] = platform.system()
  
@@ -6408,7 +6366,7 @@ index c5737d29cb..e5c0853a6a 100644
                  cls = MozillaBuildBootstrapper
 diff --git a/python/mozboot/mozboot/haiku.py b/python/mozboot/mozboot/haiku.py
 new file mode 100644
-index 0000000000..24482f2421
+index 0000000..24482f2
 --- /dev/null
 +++ b/python/mozboot/mozboot/haiku.py
 @@ -0,0 +1,55 @@
@@ -6468,7 +6426,7 @@ index 0000000000..24482f2421
 +    def ensure_node_packages(self):
 +        self.pkgman_install("npm")
 diff --git a/python/mozbuild/mozbuild/configure/constants.py b/python/mozbuild/mozbuild/configure/constants.py
-index ba6a6563d2..d9ad49181e 100644
+index 3bb9f69..ec65e49 100644
 --- a/python/mozbuild/mozbuild/configure/constants.py
 +++ b/python/mozbuild/mozbuild/configure/constants.py
 @@ -34,6 +34,7 @@ class OS(EnumString):
@@ -6496,10 +6454,10 @@ index ba6a6563d2..d9ad49181e 100644
      "Linux": "__linux__",
      "NetBSD": "__NetBSD__",
 diff --git a/python/mozbuild/mozbuild/vendor/vendor_rust.py b/python/mozbuild/mozbuild/vendor/vendor_rust.py
-index 0626a8bb9e..652b4d4abd 100644
+index 545adbb..cb71723 100644
 --- a/python/mozbuild/mozbuild/vendor/vendor_rust.py
 +++ b/python/mozbuild/mozbuild/vendor/vendor_rust.py
-@@ -231,8 +231,8 @@ class VendorRust(MozbuildObject):
+@@ -232,8 +232,8 @@ class VendorRust(MozbuildObject):
          # if we go back and forth between vendoring with an older version and
          # a newer version. Only allow the newer versions.
          minimum_rust_version = MINIMUM_RUST_VERSION
@@ -6511,10 +6469,10 @@ index 0626a8bb9e..652b4d4abd 100644
              self.log(
                  logging.ERROR,
 diff --git a/security/certverifier/ExtendedValidation.cpp b/security/certverifier/ExtendedValidation.cpp
-index 3ba39ac14d..fa98b7dad6 100644
+index 80f994c..ff1c7be 100644
 --- a/security/certverifier/ExtendedValidation.cpp
 +++ b/security/certverifier/ExtendedValidation.cpp
-@@ -1158,7 +1158,9 @@ nsresult LoadExtendedValidationInfo() {
+@@ -1124,7 +1124,9 @@ nsresult LoadExtendedValidationInfo() {
        // The entries for the debug EV roots are at indices 0 through
        // NUM_TEST_EV_ROOTS - 1. Since they're not built-in, they probably
        // haven't been loaded yet.
@@ -6525,7 +6483,7 @@ index 3ba39ac14d..fa98b7dad6 100644
        unsigned char certFingerprint[SHA256_LENGTH];
        srv = PK11_HashBuf(SEC_OID_SHA256, certFingerprint, cert->derCert.data,
 diff --git a/supply-chain/audits.toml b/supply-chain/audits.toml
-index e9afc807d9..0655ddf0e9 100644
+index aadfcb2..973affa 100644
 --- a/supply-chain/audits.toml
 +++ b/supply-chain/audits.toml
 @@ -3311,6 +3311,12 @@ who = "Kagami Sascha Rosylight <krosylight@proton.me>"
@@ -6541,7 +6499,7 @@ index e9afc807d9..0655ddf0e9 100644
  [[audits.goblin]]
  who = "Jan-Erik Rediger <jrediger@mozilla.com>"
  criteria = "safe-to-deploy"
-@@ -4435,6 +4441,12 @@ criteria = "safe-to-deploy"
+@@ -4440,6 +4446,12 @@ criteria = "safe-to-deploy"
  version = "0.14.0"
  notes = "Victor and Myk developed this crate at Mozilla."
  
@@ -6555,10 +6513,10 @@ index e9afc807d9..0655ddf0e9 100644
  who = "Mike Hommey <mh+mozilla@glandium.org>"
  criteria = "safe-to-deploy"
 diff --git a/supply-chain/config.toml b/supply-chain/config.toml
-index e6db492a04..eef572dbaa 100644
+index cc7fe1d..1f69295 100644
 --- a/supply-chain/config.toml
 +++ b/supply-chain/config.toml
-@@ -75,6 +75,10 @@ notes = "The dependencies on tokio-reactor and tokio-threadpools are just a hack
+@@ -79,6 +79,10 @@ notes = "The dependencies on tokio-reactor and tokio-threadpools are just a hack
  audit-as-crates-io = true
  notes = "This is upstream plus a build fix from rust-windowing/gl-rs#566. Can be removed once PR is merged upstream and gleam is updated to include the fix."
  
@@ -6569,7 +6527,7 @@ index e6db492a04..eef572dbaa 100644
  [policy.gluesmith]
  criteria = "safe-to-run"
  notes = "Used for fuzzing."
-@@ -155,6 +159,10 @@ notes = "Patched version of upstream to avoid vendoring unnecessary massive libd
+@@ -159,6 +163,10 @@ notes = "Patched version of upstream to avoid vendoring unnecessary massive libd
  audit-as-crates-io = false
  notes = "This override is an api-compatible fork with an orthogonal implementation."
  
@@ -6581,7 +6539,7 @@ index e6db492a04..eef572dbaa 100644
  audit-as-crates-io = false
  notes = "This was originally servo code which Bobby Holley put on crates.io some years ago and that was moved in-tree as first-party code later on."
 diff --git a/testing/mozbase/mozinfo/mozinfo/mozinfo.py b/testing/mozbase/mozinfo/mozinfo/mozinfo.py
-index 795b661e81..f56fbaf2c1 100755
+index 795b661..f56fbaf 100755
 --- a/testing/mozbase/mozinfo/mozinfo/mozinfo.py
 +++ b/testing/mozbase/mozinfo/mozinfo/mozinfo.py
 @@ -95,7 +95,7 @@ elif system == "Linux":
@@ -6594,7 +6552,7 @@ index 795b661e81..f56fbaf2c1 100755
      version = os_version = sys.platform
  elif system == "Darwin":
 diff --git a/third_party/abseil-cpp/absl/base/internal/sysinfo.cc b/third_party/abseil-cpp/absl/base/internal/sysinfo.cc
-index 1f380bcc60..ab1b631dc9 100644
+index 1f380bc..ab1b631 100644
 --- a/third_party/abseil-cpp/absl/base/internal/sysinfo.cc
 +++ b/third_party/abseil-cpp/absl/base/internal/sysinfo.cc
 @@ -14,6 +14,10 @@
@@ -6620,7 +6578,7 @@ index 1f380bcc60..ab1b631dc9 100644
  
  // Fallback implementation of `GetTID` using `pthread_self`.
 diff --git a/third_party/abseil-cpp/absl/log/internal/log_message.cc b/third_party/abseil-cpp/absl/log/internal/log_message.cc
-index 4e5da95a0a..22e45dc5f6 100644
+index 4e5da95..22e45dc 100644
 --- a/third_party/abseil-cpp/absl/log/internal/log_message.cc
 +++ b/third_party/abseil-cpp/absl/log/internal/log_message.cc
 @@ -226,8 +226,13 @@ void LogMessage::LogMessageData::InitializeEncodingAndFormat() {
@@ -6638,10 +6596,10 @@ index 4e5da95a0a..22e45dc5f6 100644
  
  void LogMessage::LogMessageData::FinalizeEncodingAndFormat() {
 diff --git a/third_party/angle/angle_common_gn/moz.build b/third_party/angle/angle_common_gn/moz.build
-index 7bd7d32284..14205668aa 100644
+index 7babe0f..64630ae 100644
 --- a/third_party/angle/angle_common_gn/moz.build
 +++ b/third_party/angle/angle_common_gn/moz.build
-@@ -136,6 +136,19 @@ if CONFIG["OS_TARGET"] == "Linux":
+@@ -138,6 +138,19 @@ if CONFIG["OS_TARGET"] == "Linux":
          "/third_party/angle/src/common/system_utils_posix.cpp"
      ]
  
@@ -6662,7 +6620,7 @@ index 7bd7d32284..14205668aa 100644
  
      DEFINES["EGL_NO_X11"] = True
 diff --git a/third_party/angle/angle_program_version_id_gn/moz.build b/third_party/angle/angle_program_version_id_gn/moz.build
-index bbd602444b..f601d8e139 100644
+index 8d33200..f33a2b2 100644
 --- a/third_party/angle/angle_program_version_id_gn/moz.build
 +++ b/third_party/angle/angle_program_version_id_gn/moz.build
 @@ -42,7 +42,7 @@ if CONFIG["OS_TARGET"] == "Android":
@@ -6675,7 +6633,7 @@ index bbd602444b..f601d8e139 100644
      GeneratedFile(
          "/third_party/angle/gen/ANGLEShaderProgramVersion.h.rsp",
 diff --git a/third_party/chromium/build/config/BUILDCONFIG.gn b/third_party/chromium/build/config/BUILDCONFIG.gn
-index 4bb38fe31f..f42d1e9cee 100644
+index 4bb38fe..f42d1e9 100644
 --- a/third_party/chromium/build/config/BUILDCONFIG.gn
 +++ b/third_party/chromium/build/config/BUILDCONFIG.gn
 @@ -206,7 +206,7 @@ if (host_toolchain == "") {
@@ -6705,7 +6663,7 @@ index 4bb38fe31f..f42d1e9cee 100644
  is_linux = current_os == "linux"
  is_bsd = current_os == "openbsd"
 diff --git a/third_party/chromium/build/config/gcc/BUILD.gn b/third_party/chromium/build/config/gcc/BUILD.gn
-index 6e291bb3c1..89c0f24aee 100644
+index 6e291bb..89c0f24 100644
 --- a/third_party/chromium/build/config/gcc/BUILD.gn
 +++ b/third_party/chromium/build/config/gcc/BUILD.gn
 @@ -93,7 +93,7 @@ if (is_component_build && !is_android) {
@@ -6718,7 +6676,7 @@ index 6e291bb3c1..89c0f24aee 100644
      ldflags += [
        "-Bdynamic",
 diff --git a/third_party/chromium/build/config/ozone.gni b/third_party/chromium/build/config/ozone.gni
-index 9d98d891f6..0bd4076901 100644
+index 9d98d89..0bd4076 100644
 --- a/third_party/chromium/build/config/ozone.gni
 +++ b/third_party/chromium/build/config/ozone.gni
 @@ -8,7 +8,7 @@ import("//chromium/build/toolchain/toolchain.gni")
@@ -6743,7 +6701,7 @@ index 9d98d891f6..0bd4076901 100644
        ozone_platform = "x11"
        ozone_platform_drm = true
 diff --git a/third_party/chromium/build/toolchain/siso.gni b/third_party/chromium/build/toolchain/siso.gni
-index 94055d5270..6f11061816 100644
+index 94055d5..6f11061 100644
 --- a/third_party/chromium/build/toolchain/siso.gni
 +++ b/third_party/chromium/build/toolchain/siso.gni
 @@ -1,30 +1,11 @@
@@ -6785,7 +6743,7 @@ index 94055d5270..6f11061816 100644
 +  use_siso = false
  }
 diff --git a/third_party/chromium/build/toolchain/toolchain.gni b/third_party/chromium/build/toolchain/toolchain.gni
-index 754f0e3bbd..185b04fb03 100644
+index 754f0e3..185b04f 100644
 --- a/third_party/chromium/build/toolchain/toolchain.gni
 +++ b/third_party/chromium/build/toolchain/toolchain.gni
 @@ -75,7 +75,7 @@ if (host_os == "mac") {
@@ -6798,7 +6756,7 @@ index 754f0e3bbd..185b04fb03 100644
  } else {
    assert(false, "Host platform not supported")
 diff --git a/third_party/dav1d/src/thread.h b/third_party/dav1d/src/thread.h
-index 459aaced66..b2989da2ab 100644
+index 459aace..b2989da 100644
 --- a/third_party/dav1d/src/thread.h
 +++ b/third_party/dav1d/src/thread.h
 @@ -177,14 +177,14 @@ static inline void dav1d_set_thread_name(const char *const name) {
@@ -6825,7 +6783,7 @@ index 459aaced66..b2989da2ab 100644
  
  #define dav1d_set_thread_name(name) do {} while (0)
 diff --git a/third_party/libepoxy/libepoxy/src/dispatch_common.c b/third_party/libepoxy/libepoxy/src/dispatch_common.c
-index 3ba9b0f114..45566b7c91 100644
+index 3ba9b0f..45566b7 100644
 --- a/third_party/libepoxy/libepoxy/src/dispatch_common.c
 +++ b/third_party/libepoxy/libepoxy/src/dispatch_common.c
 @@ -307,8 +307,10 @@ get_dlopen_handle(void **handle, const char *lib_name, bool exit_on_fail, bool l
@@ -6840,7 +6798,7 @@ index 3ba9b0f114..45566b7c91 100644
          *handle = dlopen(lib_name, flags);
          if (!*handle) {
 diff --git a/third_party/llama.cpp/src/llama-mmap.cpp b/third_party/llama.cpp/src/llama-mmap.cpp
-index 44c0745ff1..f797debc2b 100644
+index 44c0745..f797deb 100644
 --- a/third_party/llama.cpp/src/llama-mmap.cpp
 +++ b/third_party/llama.cpp/src/llama-mmap.cpp
 @@ -24,6 +24,10 @@
@@ -6864,7 +6822,7 @@ index 44c0745ff1..f797debc2b 100644
  #else
  const bool llama_mmap::SUPPORTED  = false;
 diff --git a/third_party/pipewire/pipewire/utils.h b/third_party/pipewire/pipewire/utils.h
-index 7d61764740..92db62c969 100644
+index 7d61764..92db62c 100644
 --- a/third_party/pipewire/pipewire/utils.h
 +++ b/third_party/pipewire/pipewire/utils.h
 @@ -8,7 +8,7 @@
@@ -6877,7 +6835,7 @@ index 7d61764740..92db62c969 100644
  #endif
  #include <errno.h>
 diff --git a/third_party/rust/glslopt/Cargo.toml b/third_party/rust/glslopt/Cargo.toml
-index c69d209249..9e4499a1b2 100644
+index c69d209..9e4499a 100644
 --- a/third_party/rust/glslopt/Cargo.toml
 +++ b/third_party/rust/glslopt/Cargo.toml
 @@ -9,6 +9,11 @@
@@ -6901,7 +6859,7 @@ index c69d209249..9e4499a1b2 100644
 +[build-dependencies]
 +cc = "1.0"
 diff --git a/third_party/rust/glslopt/glsl-optimizer/src/compiler/glsl/builtin_functions.cpp b/third_party/rust/glslopt/glsl-optimizer/src/compiler/glsl/builtin_functions.cpp
-index 603c7f6458..46c2dcb36d 100644
+index 603c7f6..46c2dcb 100644
 --- a/third_party/rust/glslopt/glsl-optimizer/src/compiler/glsl/builtin_functions.cpp
 +++ b/third_party/rust/glslopt/glsl-optimizer/src/compiler/glsl/builtin_functions.cpp
 @@ -735,7 +735,7 @@ fp64(const _mesa_glsl_parse_state *state)
@@ -7049,7 +7007,7 @@ index 603c7f6458..46c2dcb36d 100644
     FD(length)
     FD(distance)
 diff --git a/third_party/rust/glslopt/glsl-optimizer/src/util/u_endian.h b/third_party/rust/glslopt/glsl-optimizer/src/util/u_endian.h
-index 6bbae3c444..d1540e9769 100644
+index 6bbae3c..d1540e9 100644
 --- a/third_party/rust/glslopt/glsl-optimizer/src/util/u_endian.h
 +++ b/third_party/rust/glslopt/glsl-optimizer/src/util/u_endian.h
 @@ -27,7 +27,7 @@
@@ -7062,7 +7020,7 @@ index 6bbae3c444..d1540e9769 100644
  
  #if __BYTE_ORDER == __LITTLE_ENDIAN
 diff --git a/third_party/rust/glslopt/glsl-optimizer/src/util/u_math.h b/third_party/rust/glslopt/glsl-optimizer/src/util/u_math.h
-index 42d9e348ec..240bd41d8c 100644
+index 42d9e34..240bd41 100644
 --- a/third_party/rust/glslopt/glsl-optimizer/src/util/u_math.h
 +++ b/third_party/rust/glslopt/glsl-optimizer/src/util/u_math.h
 @@ -676,6 +676,9 @@ util_memcpy_cpu_to_le32(void * restrict dest, const void * restrict src, size_t
@@ -7076,7 +7034,7 @@ index 42d9e348ec..240bd41d8c 100644
   * Align a value up to an alignment value
   *
 diff --git a/third_party/rust/iana-time-zone-haiku/src/implementation.cc b/third_party/rust/iana-time-zone-haiku/src/implementation.cc
-index d1c92cd3b7..e08b1594da 100644
+index d1c92cd..e08b159 100644
 --- a/third_party/rust/iana-time-zone-haiku/src/implementation.cc
 +++ b/third_party/rust/iana-time-zone-haiku/src/implementation.cc
 @@ -4,56 +4,54 @@
@@ -7176,7 +7134,7 @@ index d1c92cd3b7..e08b1594da 100644
  
 diff --git a/third_party/rust/lmdb-rkv-sys/.rustfmt.toml b/third_party/rust/lmdb-rkv-sys/.rustfmt.toml
 new file mode 100644
-index 0000000000..fc441bbad4
+index 0000000..fc441bb
 --- /dev/null
 +++ b/third_party/rust/lmdb-rkv-sys/.rustfmt.toml
 @@ -0,0 +1,3 @@
@@ -7185,7 +7143,7 @@ index 0000000000..fc441bbad4
 +]
 \ No newline at end of file
 diff --git a/third_party/rust/mtu/src/lib.rs b/third_party/rust/mtu/src/lib.rs
-index 22483976a2..7e01f91325 100644
+index 2248397..7e01f91 100644
 --- a/third_party/rust/mtu/src/lib.rs
 +++ b/third_party/rust/mtu/src/lib.rs
 @@ -114,7 +114,8 @@ const fn aligned_by(size: usize, align: usize) -> usize {
@@ -7199,7 +7157,7 @@ index 22483976a2..7e01f91325 100644
  pub fn interface_and_mtu_impl(remote: IpAddr) -> Result<(String, usize)> {
      return Err(default_err());
 diff --git a/third_party/rust/quinn-udp/src/unix.rs b/third_party/rust/quinn-udp/src/unix.rs
-index 6564cdda63..14b6685f3a 100644
+index d260476..277c0bc 100644
 --- a/third_party/rust/quinn-udp/src/unix.rs
 +++ b/third_party/rust/quinn-udp/src/unix.rs
 @@ -19,6 +19,39 @@ use super::{
@@ -7259,7 +7217,7 @@ index 6564cdda63..14b6685f3a 100644
              target_os = "hurd",
              solarish
          )))]
-@@ -173,8 +207,7 @@ impl UdpSocketState {
+@@ -172,8 +206,7 @@ impl UdpSocketState {
          // Options standardized in RFC 3542
          #[cfg(not(target_os = "redox"))]
          if !is_ipv4 {
@@ -7269,7 +7227,7 @@ index 6564cdda63..14b6685f3a 100644
              // Linux's IP_PMTUDISC_PROBE allows us to operate under interface MTU rather than the
              // kernel's path MTU guess, but actually disabling fragmentation requires this too. See
              // __ip6_append_data in ip6_output.c.
-@@ -182,7 +215,7 @@ impl UdpSocketState {
+@@ -181,7 +214,7 @@ impl UdpSocketState {
              may_fragment |= !set_socket_option_supported(
                  &*io,
                  libc::IPPROTO_IPV6,
@@ -7278,7 +7236,7 @@ index 6564cdda63..14b6685f3a 100644
                  OPTION_ON,
              )?;
          }
-@@ -247,6 +280,7 @@ impl UdpSocketState {
+@@ -246,6 +279,7 @@ impl UdpSocketState {
          target_os = "openbsd",
          target_os = "netbsd",
          target_os = "dragonfly",
@@ -7286,7 +7244,7 @@ index 6564cdda63..14b6685f3a 100644
          target_os = "redox",
          target_os = "hurd",
          solarish
-@@ -278,6 +312,7 @@ impl UdpSocketState {
+@@ -277,6 +311,7 @@ impl UdpSocketState {
          target_os = "openbsd",
          target_os = "netbsd",
          target_os = "dragonfly",
@@ -7294,7 +7252,7 @@ index 6564cdda63..14b6685f3a 100644
          target_os = "redox",
          target_os = "hurd",
          solarish,
-@@ -625,6 +660,7 @@ pub(crate) fn send_single(
+@@ -624,6 +659,7 @@ pub(crate) fn send_single(
      target_os = "openbsd",
      target_os = "netbsd",
      target_os = "dragonfly",
@@ -7310,7 +7268,7 @@ index 6564cdda63..14b6685f3a 100644
      target_os = "redox",
      target_os = "hurd",
      solarish,
-@@ -743,7 +780,7 @@ fn prepare_msg(
+@@ -733,7 +770,7 @@ fn prepare_msg(
              }
          }
      } else {
@@ -7319,7 +7277,7 @@ index 6564cdda63..14b6685f3a 100644
          encoder.push(libc::IPPROTO_IPV6, libc::IPV6_TCLASS, ecn);
      }
  
-@@ -755,6 +792,7 @@ fn prepare_msg(
+@@ -745,6 +782,7 @@ fn prepare_msg(
          gso::set_segment_size(&mut encoder, segment_size as u16);
      }
  
@@ -7327,7 +7285,7 @@ index 6564cdda63..14b6685f3a 100644
      if let Some(ip) = &transmit.src_ip {
          match ip {
              IpAddr::V4(v4) => {
-@@ -779,17 +817,17 @@ fn prepare_msg(
+@@ -769,17 +807,17 @@ fn prepare_msg(
                      }
                  }
              }
@@ -7349,7 +7307,7 @@ index 6564cdda63..14b6685f3a 100644
              }
          }
      }
-@@ -864,13 +902,14 @@ impl ControlMetadata {
+@@ -854,13 +892,14 @@ impl ControlMetadata {
                  target_os = "openbsd",
                  target_os = "netbsd",
                  target_os = "dragonfly",
@@ -7358,24 +7316,63 @@ index 6564cdda63..14b6685f3a 100644
                  solarish
              )))]
              (libc::IPPROTO_IP, libc::IP_RECVTOS) => unsafe {
-                 self.ecn_bits = cmsg::decode::<u8, libc::cmsghdr>(cmsg);
+                 self.ecn_bits = cmsg.decode::<u8>();
              },
 -            #[cfg(not(target_os = "redox",))]
 +            #[cfg(not(any(target_os = "redox", target_os = "haiku")))]
              (libc::IPPROTO_IPV6, libc::IPV6_TCLASS) => unsafe {
                  // Temporary hack around broken macos ABI. Remove once upstream fixes it.
                  // https://bugreport.apple.com/web/?problemID=48761855
-@@ -896,7 +935,7 @@ impl ControlMetadata {
-                 let in_addr = unsafe { cmsg::decode::<libc::in_addr, libc::cmsghdr>(cmsg) };
+@@ -886,7 +925,7 @@ impl ControlMetadata {
+                 let in_addr = unsafe { cmsg.decode::<libc::in_addr>() };
                  self.dst_ip = Some(IpAddr::V4(Ipv4Addr::from(in_addr.s_addr.to_ne_bytes())));
              }
 -            #[cfg(not(any(target_os = "redox", target_os = "hurd")))]
 +            #[cfg(not(any(target_os = "redox", target_os = "hurd", target_os = "haiku")))]
              (libc::IPPROTO_IPV6, libc::IPV6_PKTINFO) => {
-                 let pktinfo = unsafe { cmsg::decode::<libc::in6_pktinfo, libc::cmsghdr>(cmsg) };
+                 let pktinfo = unsafe { cmsg.decode::<libc::in6_pktinfo>() };
                  self.dst_ip = Some(IpAddr::V6(Ipv6Addr::from(pktinfo.ipi6_addr.s6_addr)));
+diff --git a/third_party/rust/xshell-venv/src/lib.rs b/third_party/rust/xshell-venv/src/lib.rs
+index 20731d2..750cf1b 100644
+--- a/third_party/rust/xshell-venv/src/lib.rs
++++ b/third_party/rust/xshell-venv/src/lib.rs
+@@ -153,10 +153,10 @@ fn guess_python(sh: &Shell, path: &Path) -> Result<&'static str, Error> {
+ fn create_venv(sh: &Shell, path: &Path) -> Result<(), Error> {
+     trace!("Creating venv at {}", path.display());
+     // First create a lock file, so that multiple runs cannot overlap.
+-    let lock_path = path.join("xshell-venv.lock");
++    //let lock_path = path.join("xshell-venv.lock");
+     sh.create_dir(path)?;
+-    let mut f = FileLock::new(File::create(&lock_path)?);
+-    let lock = f.write()?;
++    //let mut f = FileLock::new(File::create(&lock_path)?);
++    //let lock = f.write()?;
+ 
+     let python = guess_python(sh, path)?;
+ 
+@@ -172,8 +172,8 @@ fn create_venv(sh: &Shell, path: &Path) -> Result<(), Error> {
+     }
+ 
+     // Work is done. Drop the lock.
+-    drop(lock);
+-    sh.remove_path(lock_path)?;
++    //drop(lock);
++    //sh.remove_path(lock_path)?;
+ 
+     Ok(())
+ }
+@@ -417,7 +417,9 @@ impl FileLock {
+     }
+ 
+     pub fn write(&mut self) -> io::Result<FileLockWriteGuard<'_>> {
++        #[cfg(not(target_os = "haiku"))]
+         self.file.lock()?;
++
+         Ok(FileLockWriteGuard::new(&mut self.file))
+     }
+ }
 diff --git a/toolkit/components/downloads/DownloadPlatform.cpp b/toolkit/components/downloads/DownloadPlatform.cpp
-index af13050adf..f32fb728b5 100644
+index af13050a..f32fb72 100644
 --- a/toolkit/components/downloads/DownloadPlatform.cpp
 +++ b/toolkit/components/downloads/DownloadPlatform.cpp
 @@ -33,6 +33,12 @@
@@ -7416,7 +7413,7 @@ index af13050adf..f32fb728b5 100644
    if (!pendingAsyncOperations) {
 diff --git a/toolkit/components/processtools/ProcInfo_haiku.cpp b/toolkit/components/processtools/ProcInfo_haiku.cpp
 new file mode 100644
-index 0000000000..6c0873224a
+index 0000000..6c08732
 --- /dev/null
 +++ b/toolkit/components/processtools/ProcInfo_haiku.cpp
 @@ -0,0 +1,90 @@
@@ -7511,7 +7508,7 @@ index 0000000000..6c0873224a
 +
 +}  // namespace mozilla
 diff --git a/toolkit/components/processtools/moz.build b/toolkit/components/processtools/moz.build
-index 60da6f2370..f4849ae5dd 100644
+index 60da6f2..f4849ae 100644
 --- a/toolkit/components/processtools/moz.build
 +++ b/toolkit/components/processtools/moz.build
 @@ -36,11 +36,13 @@ BROWSER_CHROME_MANIFESTS += ["tests/browser/browser.toml"]
@@ -7530,7 +7527,7 @@ index 60da6f2370..f4849ae5dd 100644
          UNIFIED_SOURCES += ["ProcInfo_linux.cpp"]
  elif toolkit == "windows":
 diff --git a/toolkit/components/remote/RemoteUtils.h b/toolkit/components/remote/RemoteUtils.h
-index 722d0c95ce..e32613cb80 100644
+index 722d0c9..e32613c 100644
 --- a/toolkit/components/remote/RemoteUtils.h
 +++ b/toolkit/components/remote/RemoteUtils.h
 @@ -13,7 +13,7 @@
@@ -7552,10 +7549,10 @@ index 722d0c95ce..e32613cb80 100644
    constexpr size_t ClassNameMaxLength = 128;
  #  endif
 diff --git a/toolkit/components/remote/moz.build b/toolkit/components/remote/moz.build
-index cd99c3df81..662e59dfca 100644
+index 16b3b05..4f85b7a 100644
 --- a/toolkit/components/remote/moz.build
 +++ b/toolkit/components/remote/moz.build
-@@ -26,7 +26,7 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
+@@ -32,7 +32,7 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
          "nsUnixRemoteServer.cpp",
          "RemoteUtils.cpp",
      ]
@@ -7564,7 +7561,7 @@ index cd99c3df81..662e59dfca 100644
          SOURCES += [
              "nsDBusRemoteClient.cpp",
              "nsDBusRemoteServer.cpp",
-@@ -37,11 +37,22 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
+@@ -49,17 +49,29 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
          ]
          CXXFLAGS += CONFIG["MOZ_DBUS_CFLAGS"]
      else:
@@ -7589,12 +7586,24 @@ index cd99c3df81..662e59dfca 100644
 +                "nsXRemoteClient.cpp",
 +                "nsXRemoteServer.cpp",
 +            ]
+ 
+-        SOURCE_HEADERS += [
+-            "nsGTKRemoteServer.h",
+-            "nsXRemoteClient.h",
+-            "nsXRemoteServer.h",
+-        ]
++            SOURCE_HEADERS += [
++                "nsGTKRemoteServer.h",
++                "nsXRemoteClient.h",
++                "nsXRemoteServer.h",
++            ]
++   
      CXXFLAGS += CONFIG["MOZ_GTK3_CFLAGS"]
  
  if CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
-@@ -55,6 +66,11 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "cocoa":
-         "nsMacRemoteClient.mm",
-         "nsMacRemoteServer.mm",
+@@ -82,6 +94,11 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "cocoa":
+         "nsMacRemoteClient.h",
+         "nsMacRemoteServer.h",
      ]
 +if CONFIG["MOZ_WIDGET_TOOLKIT"] == "haiku":
 +    SOURCES += [
@@ -7606,7 +7615,7 @@ index cd99c3df81..662e59dfca 100644
      "../../profile",
 diff --git a/toolkit/components/remote/nsHaikuRemoteClient.cpp b/toolkit/components/remote/nsHaikuRemoteClient.cpp
 new file mode 100644
-index 0000000000..808e9b7fd7
+index 0000000..808e9b7
 --- /dev/null
 +++ b/toolkit/components/remote/nsHaikuRemoteClient.cpp
 @@ -0,0 +1,56 @@
@@ -7668,7 +7677,7 @@ index 0000000000..808e9b7fd7
 +}
 diff --git a/toolkit/components/remote/nsHaikuRemoteClient.h b/toolkit/components/remote/nsHaikuRemoteClient.h
 new file mode 100644
-index 0000000000..d0b37cd1b9
+index 0000000..d0b37cd
 --- /dev/null
 +++ b/toolkit/components/remote/nsHaikuRemoteClient.h
 @@ -0,0 +1,25 @@
@@ -7699,7 +7708,7 @@ index 0000000000..d0b37cd1b9
 +#endif  // _nsHaikuRemoteClient_h_
 diff --git a/toolkit/components/remote/nsHaikuRemoteServer.cpp b/toolkit/components/remote/nsHaikuRemoteServer.cpp
 new file mode 100644
-index 0000000000..9e71d83de3
+index 0000000..9e71d83
 --- /dev/null
 +++ b/toolkit/components/remote/nsHaikuRemoteServer.cpp
 @@ -0,0 +1,162 @@
@@ -7867,7 +7876,7 @@ index 0000000000..9e71d83de3
 +}
 diff --git a/toolkit/components/remote/nsHaikuRemoteServer.h b/toolkit/components/remote/nsHaikuRemoteServer.h
 new file mode 100644
-index 0000000000..95681baf3c
+index 0000000..95681ba
 --- /dev/null
 +++ b/toolkit/components/remote/nsHaikuRemoteServer.h
 @@ -0,0 +1,39 @@
@@ -7911,7 +7920,7 @@ index 0000000000..95681baf3c
 +
 +#endif  // _nsHaikuRemoteServer_h_
 diff --git a/toolkit/components/remote/nsRemoteService.cpp b/toolkit/components/remote/nsRemoteService.cpp
-index 5c0e3d7562..512d84e389 100644
+index 5c0e3d7..512d84e 100644
 --- a/toolkit/components/remote/nsRemoteService.cpp
 +++ b/toolkit/components/remote/nsRemoteService.cpp
 @@ -3,8 +3,11 @@
@@ -7951,7 +7960,7 @@ index 5c0e3d7562..512d84e389 100644
    mRemoteServer = MakeUnique<nsDBusRemoteServer>();
  #  else
 diff --git a/toolkit/library/moz.build b/toolkit/library/moz.build
-index 671c32b2d8..a58046f97f 100644
+index 671c32b..a58046f 100644
 --- a/toolkit/library/moz.build
 +++ b/toolkit/library/moz.build
 @@ -108,6 +108,12 @@ def Libxul(name, output_category=None):
@@ -7977,7 +7986,7 @@ index 671c32b2d8..a58046f97f 100644
          "freetype",
      ]
 diff --git a/toolkit/library/rust/moz.build b/toolkit/library/rust/moz.build
-index b0c5c51031..c9b3706caa 100644
+index 3aecfaf..ce6e2c7 100644
 --- a/toolkit/library/rust/moz.build
 +++ b/toolkit/library/rust/moz.build
 @@ -6,6 +6,12 @@ include("gkrust-features.mozbuild")
@@ -7994,7 +8003,7 @@ index b0c5c51031..c9b3706caa 100644
      # We don't want to enable refcount logging during rusttests, since the
      # relevant FFI symbols wouldn't be found.
 diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
-index 9dc427fd61..1f5008569c 100644
+index 9dc427f..1f50085 100644
 --- a/toolkit/modules/AppConstants.sys.mjs
 +++ b/toolkit/modules/AppConstants.sys.mjs
 @@ -76,6 +76,8 @@ export var AppConstants = Object.freeze({
@@ -8016,7 +8025,7 @@ index 9dc427fd61..1f5008569c 100644
      "other",
  #endif
 diff --git a/toolkit/modules/ShortcutUtils.sys.mjs b/toolkit/modules/ShortcutUtils.sys.mjs
-index 0a2a5ac202..d87183b478 100644
+index 0a2a5ac..d87183b 100644
 --- a/toolkit/modules/ShortcutUtils.sys.mjs
 +++ b/toolkit/modules/ShortcutUtils.sys.mjs
 @@ -95,7 +95,7 @@ export var ShortcutUtils = {
@@ -8090,10 +8099,10 @@ index 0a2a5ac202..d87183b478 100644
  
      return elemString;
 diff --git a/toolkit/modules/moz.build b/toolkit/modules/moz.build
-index 852e9b0bb5..4f89a00b3f 100644
+index d560cc5..aa039a2 100644
 --- a/toolkit/modules/moz.build
 +++ b/toolkit/modules/moz.build
-@@ -247,7 +247,7 @@ EXTRA_JS_MODULES.sessionstore += [
+@@ -248,7 +248,7 @@ EXTRA_JS_MODULES.sessionstore += [
  
  EXTRA_JS_MODULES.third_party.fathom += ["third_party/fathom/fathom.mjs"]
  
@@ -8103,7 +8112,7 @@ index 852e9b0bb5..4f89a00b3f 100644
  else:
      DEFINES["HAVE_SHELL_SERVICE_BOOL"] = "false"
 diff --git a/toolkit/moz.build b/toolkit/moz.build
-index a7d7361df4..282feffff4 100644
+index a7d7361..282feff 100644
 --- a/toolkit/moz.build
 +++ b/toolkit/moz.build
 @@ -63,6 +63,10 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
@@ -8118,7 +8127,7 @@ index a7d7361df4..282feffff4 100644
      DIRS += [
          "mozapps/dmgInstallHelper",
 diff --git a/toolkit/moz.configure b/toolkit/moz.configure
-index a16fc0e924..cfe8c5eb30 100644
+index bc3cdce..d067d77 100644
 --- a/toolkit/moz.configure
 +++ b/toolkit/moz.configure
 @@ -388,6 +388,8 @@ def audio_backends_default(target):
@@ -8189,7 +8198,7 @@ index a16fc0e924..cfe8c5eb30 100644
          return True
  
  
-@@ -2838,7 +2853,7 @@ with only_when(target_is_windows & compile_environment):
+@@ -2826,7 +2841,7 @@ with only_when(target_is_windows & compile_environment):
  
  @depends(toolkit)
  def has_remote(toolkit):
@@ -8198,7 +8207,7 @@ index a16fc0e924..cfe8c5eb30 100644
          return True
  
  
-@@ -3159,6 +3174,7 @@ def forkserver_default(target, build_project):
+@@ -3145,6 +3160,7 @@ def forkserver_default(target, build_project):
          (target.os == "GNU" and target.kernel == "Linux")
          or target.os == "FreeBSD"
          or target.os == "OpenBSD"
@@ -8206,7 +8215,7 @@ index a16fc0e924..cfe8c5eb30 100644
      )
  
  
-@@ -4298,7 +4314,7 @@ with only_when(compile_environment):
+@@ -4283,7 +4299,7 @@ with only_when(compile_environment):
  
      @depends(target)
      def default_user_appdir(target):
@@ -8216,7 +8225,7 @@ index a16fc0e924..cfe8c5eb30 100644
          elif target.os == "Android":
              return ".mozilla"
 diff --git a/toolkit/system/gnome/moz.build b/toolkit/system/gnome/moz.build
-index 251fd85dbe..615aa22d78 100644
+index f70e988..3645130 100644
 --- a/toolkit/system/gnome/moz.build
 +++ b/toolkit/system/gnome/moz.build
 @@ -6,8 +6,12 @@ with Files("**"):
@@ -8234,7 +8243,7 @@ index 251fd85dbe..615aa22d78 100644
  ]
  
 diff --git a/toolkit/system/gnome/nsGIOService.cpp b/toolkit/system/gnome/nsGIOService.cpp
-index 85959301bf..68c70dadd6 100644
+index 8595930..68c70da 100644
 --- a/toolkit/system/gnome/nsGIOService.cpp
 +++ b/toolkit/system/gnome/nsGIOService.cpp
 @@ -493,6 +493,32 @@ gboolean g_app_info_launch_default_for_uri_openbsd(const char* uri,
@@ -8303,7 +8312,7 @@ index 85959301bf..68c70dadd6 100644
                                      GetLaunchContext(aXDGToken).get(),
 diff --git a/toolkit/system/haiku/moz.build b/toolkit/system/haiku/moz.build
 new file mode 100644
-index 0000000000..8c3bf79487
+index 0000000..8c3bf79
 --- /dev/null
 +++ b/toolkit/system/haiku/moz.build
 @@ -0,0 +1,26 @@
@@ -8335,7 +8344,7 @@ index 0000000000..8c3bf79487
 +CXXFLAGS += CONFIG["MOZ_GTK3_CFLAGS"]
 diff --git a/toolkit/system/haiku/nsAlertsIconListener.cpp b/toolkit/system/haiku/nsAlertsIconListener.cpp
 new file mode 100644
-index 0000000000..e4982a02b4
+index 0000000..e4982a0
 --- /dev/null
 +++ b/toolkit/system/haiku/nsAlertsIconListener.cpp
 @@ -0,0 +1,179 @@
@@ -8520,7 +8529,7 @@ index 0000000000..e4982a02b4
 +}
 diff --git a/toolkit/system/haiku/nsAlertsIconListener.h b/toolkit/system/haiku/nsAlertsIconListener.h
 new file mode 100644
-index 0000000000..c7330230a2
+index 0000000..c733023
 --- /dev/null
 +++ b/toolkit/system/haiku/nsAlertsIconListener.h
 @@ -0,0 +1,67 @@
@@ -8592,7 +8601,7 @@ index 0000000000..c7330230a2
 +
 +#endif
 diff --git a/toolkit/themes/moz.build b/toolkit/themes/moz.build
-index f7ddee71d2..f7e06df548 100644
+index f7ddee7..f7e06df 100644
 --- a/toolkit/themes/moz.build
 +++ b/toolkit/themes/moz.build
 @@ -20,6 +20,8 @@ if toolkit == "cocoa":
@@ -8605,7 +8614,7 @@ index f7ddee71d2..f7e06df548 100644
      DIRS += ["mobile"]
  else:
 diff --git a/toolkit/themes/shared/popup.css b/toolkit/themes/shared/popup.css
-index 06812c7624..247b998e94 100644
+index ad92741..f49a4c4 100644
 --- a/toolkit/themes/shared/popup.css
 +++ b/toolkit/themes/shared/popup.css
 @@ -50,6 +50,12 @@
@@ -8622,7 +8631,7 @@ index 06812c7624..247b998e94 100644
      /* -moz-window-shadow does the trick on macOS */
      --panel-box-shadow: none;
 diff --git a/toolkit/toolkit.mozbuild b/toolkit/toolkit.mozbuild
-index c2ac333a4d..03617f9a1b 100644
+index c2ac333..03617f9 100644
 --- a/toolkit/toolkit.mozbuild
 +++ b/toolkit/toolkit.mozbuild
 @@ -146,6 +146,7 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
@@ -8634,7 +8643,7 @@ index c2ac333a4d..03617f9a1b 100644
  
  if CONFIG["ENABLE_WEBDRIVER"]:
 diff --git a/toolkit/xre/nsAppRunner.cpp b/toolkit/xre/nsAppRunner.cpp
-index 003fc8545a..a8f1879f80 100644
+index 2a39c67..e272400 100644
 --- a/toolkit/xre/nsAppRunner.cpp
 +++ b/toolkit/xre/nsAppRunner.cpp
 @@ -346,14 +346,16 @@ constinit nsString gProcessStartupShortcut;
@@ -8673,7 +8682,7 @@ index 003fc8545a..a8f1879f80 100644
  }
  #else
  bool IsWaylandEnabled() { return false; }
-@@ -4299,7 +4305,7 @@ class XREMain {
+@@ -4337,7 +4343,7 @@ class XREMain {
  #endif
  };
  
@@ -8682,7 +8691,7 @@ index 003fc8545a..a8f1879f80 100644
  static SmprintfPointer FormatUid(uid_t aId) {
    if (const auto pw = getpwuid(aId)) {
      return mozilla::Smprintf("%s", pw->pw_name);
-@@ -4348,7 +4354,7 @@ static bool CheckForUserMismatch() {
+@@ -4386,7 +4392,7 @@ static bool CheckForUserMismatch() {
    }
    return false;
  }
@@ -8691,7 +8700,7 @@ index 003fc8545a..a8f1879f80 100644
  static bool CheckForUserMismatch() { return false; }
  #endif
  
-@@ -5353,7 +5359,7 @@ int XREMain::XRE_mainStartup(bool* aExitFlag) {
+@@ -5387,7 +5393,7 @@ int XREMain::XRE_mainStartup(bool* aExitFlag) {
      // display_name is owned by gdk.
      display_name = gdk_get_display_arg_name();
      bool waylandEnabled = IsWaylandEnabled();
@@ -8700,7 +8709,7 @@ index 003fc8545a..a8f1879f80 100644
      if (!display_name) {
        auto* proxyEnv = getenv("MOZ_DISABLE_WAYLAND_PROXY");
        bool disableWaylandProxy = proxyEnv && *proxyEnv;
-@@ -5428,7 +5434,7 @@ int XREMain::XRE_mainStartup(bool* aExitFlag) {
+@@ -5462,7 +5468,7 @@ int XREMain::XRE_mainStartup(bool* aExitFlag) {
      } else {
        gdk_display_manager_open_display(gdk_display_manager_get(), nullptr);
      }
@@ -8709,7 +8718,7 @@ index 003fc8545a..a8f1879f80 100644
      // We want to use proxy for main connection only so
      // restore original Wayland display for next potential Wayland connections
      // from gfx probe code and so on.
-@@ -6818,7 +6824,9 @@ int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
+@@ -6852,7 +6858,9 @@ int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
    if (!gfxPlatform::IsHeadless()) {
  #  ifdef MOZ_WAYLAND
      WaylandDisplayRelease();
@@ -8720,7 +8729,7 @@ index 003fc8545a..a8f1879f80 100644
    }
  #endif
 diff --git a/toolkit/xre/nsEmbedFunctions.cpp b/toolkit/xre/nsEmbedFunctions.cpp
-index 3848a18e4a..4f615c5158 100644
+index 3848a18..4f615c5 100644
 --- a/toolkit/xre/nsEmbedFunctions.cpp
 +++ b/toolkit/xre/nsEmbedFunctions.cpp
 @@ -351,6 +351,7 @@ nsresult XRE_InitChildProcess(int aArgc, char* aArgv[],
@@ -8750,7 +8759,7 @@ index 3848a18e4a..4f615c5158 100644
    return XRE_DeinitCommandLine();
  }
 diff --git a/toolkit/xre/nsSigHandlers.cpp b/toolkit/xre/nsSigHandlers.cpp
-index f9076ee0be..1b60fc473c 100644
+index 9e5942c..27722b6 100644
 --- a/toolkit/xre/nsSigHandlers.cpp
 +++ b/toolkit/xre/nsSigHandlers.cpp
 @@ -43,7 +43,9 @@
@@ -8774,10 +8783,10 @@ index f9076ee0be..1b60fc473c 100644
          "(%s) %s Proxy: %s",
          mozilla::widget::GetDesktopEnvironmentIdentifier().get(), reason.get(),
 diff --git a/toolkit/xre/nsXREDirProvider.cpp b/toolkit/xre/nsXREDirProvider.cpp
-index 2f4f5aab15..72c76a9b24 100644
+index f6437f0..ecc07a6 100644
 --- a/toolkit/xre/nsXREDirProvider.cpp
 +++ b/toolkit/xre/nsXREDirProvider.cpp
-@@ -84,6 +84,10 @@
+@@ -85,6 +85,10 @@
  #ifdef XP_IOS
  #  include "UIKitDirProvider.h"
  #endif
@@ -8788,7 +8797,7 @@ index 2f4f5aab15..72c76a9b24 100644
  
  #if defined(XP_MACOSX)
  #  define APP_REGISTRY_NAME "Application Registry"
-@@ -421,7 +425,7 @@ nsXREDirProvider::GetFile(const char* aProperty, bool* aPersistent,
+@@ -422,7 +426,7 @@ nsXREDirProvider::GetFile(const char* aProperty, bool* aPersistent,
      rv = GetUserDataDirectoryHome(getter_AddRefs(file), /* aLocal */ false,
                                    /* aForceLegacy */ true);
      NS_ENSURE_SUCCESS(rv, rv);
@@ -8797,7 +8806,7 @@ index 2f4f5aab15..72c76a9b24 100644
      rv = file->AppendNative("Mozilla"_ns);
  #  else   // defined(XP_MACOSX)
      rv = file->AppendNative(".mozilla"_ns);
-@@ -1162,6 +1166,12 @@ nsresult nsXREDirProvider::GetUserDataDirectoryHome(nsIFile** aFile,
+@@ -1177,6 +1181,12 @@ nsresult nsXREDirProvider::GetUserDataDirectoryHome(nsIFile** aFile,
    NS_ENSURE_SUCCESS(rv, rv);
  
    MOZ_TRY(NS_NewLocalFile(path, getter_AddRefs(localDir)));
@@ -8810,7 +8819,7 @@ index 2f4f5aab15..72c76a9b24 100644
  #elif defined(XP_UNIX)
    const char* homeDir = PR_GetEnv("HOME");
    if (!homeDir || !*homeDir) return NS_ERROR_FAILURE;
-@@ -1281,7 +1291,7 @@ nsresult nsXREDirProvider::AppendSysUserExtensionPath(nsIFile* aFile) {
+@@ -1296,7 +1306,7 @@ nsresult nsXREDirProvider::AppendSysUserExtensionPath(nsIFile* aFile) {
  
    nsresult rv;
  
@@ -8819,7 +8828,7 @@ index 2f4f5aab15..72c76a9b24 100644
  
    static const char* const sXR = "Mozilla";
    rv = aFile->AppendNative(nsDependentCString(sXR));
-@@ -1594,7 +1604,7 @@ nsresult nsXREDirProvider::AppendProfilePath(nsIFile* aFile, bool aLocal) {
+@@ -1609,7 +1619,7 @@ nsresult nsXREDirProvider::AppendProfilePath(nsIFile* aFile, bool aLocal) {
    }
    NS_ENSURE_SUCCESS(rv, rv);
  
@@ -8829,7 +8838,7 @@ index 2f4f5aab15..72c76a9b24 100644
      rv = AppendProfileString(aFile, profile.get());
    } else {
 diff --git a/tools/profiler/core/ProfilerUtils.cpp b/tools/profiler/core/ProfilerUtils.cpp
-index 64e7831e34..88cc85b5ce 100644
+index 64e7831..88cc85b 100644
 --- a/tools/profiler/core/ProfilerUtils.cpp
 +++ b/tools/profiler/core/ProfilerUtils.cpp
 @@ -86,6 +86,15 @@ ProfilerThreadId profiler_current_thread_id() {
@@ -8849,7 +8858,7 @@ index 64e7831e34..88cc85b5ce 100644
  #  else
  
 diff --git a/uriloader/exthandler/moz.build b/uriloader/exthandler/moz.build
-index a88b18c4d4..665e7744e0 100644
+index 9a40d20..369c89f 100644
 --- a/uriloader/exthandler/moz.build
 +++ b/uriloader/exthandler/moz.build
 @@ -82,7 +82,7 @@ else:
@@ -8862,7 +8871,7 @@ index a88b18c4d4..665e7744e0 100644
          "unix/nsGNOMERegistry.cpp",
          "unix/nsMIMEInfoUnix.cpp",
 diff --git a/widget/GfxInfoOperatingSystemDefs.inc b/widget/GfxInfoOperatingSystemDefs.inc
-index 3eb43a93a8..3dd49a769c 100644
+index 3eb43a9..3dd49a7 100644
 --- a/widget/GfxInfoOperatingSystemDefs.inc
 +++ b/widget/GfxInfoOperatingSystemDefs.inc
 @@ -32,3 +32,4 @@ GFXINFO_OS(MacOS10_15, "Darwin 19")
@@ -8871,7 +8880,7 @@ index 3eb43a93a8..3dd49a769c 100644
  GFXINFO_OS(Ios, "Ios")
 +GFXINFO_OS(Haiku, "Haiku")
 diff --git a/widget/ScrollbarDrawing.h b/widget/ScrollbarDrawing.h
-index a56bcef9cc..b99cdd7b73 100644
+index a56bcef..b99cdd7 100644
 --- a/widget/ScrollbarDrawing.h
 +++ b/widget/ScrollbarDrawing.h
 @@ -33,6 +33,7 @@ class ScrollbarDrawing {
@@ -8884,7 +8893,7 @@ index a56bcef9cc..b99cdd7b73 100644
    explicit ScrollbarDrawing(Kind aKind) : mKind(aKind) {}
 diff --git a/widget/ScrollbarDrawingHaiku.cpp b/widget/ScrollbarDrawingHaiku.cpp
 new file mode 100644
-index 0000000000..f8a59a17d9
+index 0000000..f8a59a1
 --- /dev/null
 +++ b/widget/ScrollbarDrawingHaiku.cpp
 @@ -0,0 +1,688 @@
@@ -9578,7 +9587,7 @@ index 0000000000..f8a59a17d9
 +}
 diff --git a/widget/ScrollbarDrawingHaiku.h b/widget/ScrollbarDrawingHaiku.h
 new file mode 100644
-index 0000000000..b09f6cfafa
+index 0000000..b09f6cf
 --- /dev/null
 +++ b/widget/ScrollbarDrawingHaiku.h
 @@ -0,0 +1,62 @@
@@ -9645,7 +9654,7 @@ index 0000000000..b09f6cfafa
 +
 +#endif  // mozilla_widget_ScrollbarDrawingHaiku_h
 diff --git a/widget/Theme.cpp b/widget/Theme.cpp
-index 93c947bb8d..6879b194d9 100644
+index 93c947b..6879b19 100644
 --- a/widget/Theme.cpp
 +++ b/widget/Theme.cpp
 @@ -10,6 +10,7 @@
@@ -9678,7 +9687,7 @@ index 93c947bb8d..6879b194d9 100644
    return MakeUnique<ScrollbarDrawingAndroid>();
  #else
 diff --git a/widget/gtk/moz.build b/widget/gtk/moz.build
-index e4be8ea072..0f1752ee8e 100644
+index a7dbfd4..b429d3a 100644
 --- a/widget/gtk/moz.build
 +++ b/widget/gtk/moz.build
 @@ -26,7 +26,9 @@ if CONFIG["COMPILE_ENVIRONMENT"]:
@@ -9693,7 +9702,7 @@ index e4be8ea072..0f1752ee8e 100644
  
  EXPORTS += [
 diff --git a/widget/gtk/nsWaylandDisplay.cpp b/widget/gtk/nsWaylandDisplay.cpp
-index f64d7fee0b..0ef9389c37 100644
+index f64d7fe..0ef9389 100644
 --- a/widget/gtk/nsWaylandDisplay.cpp
 +++ b/widget/gtk/nsWaylandDisplay.cpp
 @@ -24,7 +24,9 @@
@@ -9778,7 +9787,7 @@ index f64d7fee0b..0ef9389c37 100644
  void WlCompositorSilentDisconnectHandler(clock_t aFailureTime) {
 diff --git a/widget/haiku/GfxInfo.cpp b/widget/haiku/GfxInfo.cpp
 new file mode 100644
-index 0000000000..4000f2e9ac
+index 0000000..4000f2e
 --- /dev/null
 +++ b/widget/haiku/GfxInfo.cpp
 @@ -0,0 +1,121 @@
@@ -9905,7 +9914,7 @@ index 0000000000..4000f2e9ac
 +}
 diff --git a/widget/haiku/GfxInfo.h b/widget/haiku/GfxInfo.h
 new file mode 100644
-index 0000000000..4c4fdf193c
+index 0000000..4c4fdf1
 --- /dev/null
 +++ b/widget/haiku/GfxInfo.h
 @@ -0,0 +1,134 @@
@@ -10045,7 +10054,7 @@ index 0000000000..4c4fdf193c
 +#endif  // mozilla_widget_GfxInfo_h
 diff --git a/widget/haiku/HaikuAlerts.cpp b/widget/haiku/HaikuAlerts.cpp
 new file mode 100644
-index 0000000000..007a599b45
+index 0000000..afb2735
 --- /dev/null
 +++ b/widget/haiku/HaikuAlerts.cpp
 @@ -0,0 +1,215 @@
@@ -10186,8 +10195,8 @@ index 0000000000..007a599b45
 +    return NS_ERROR_FAILURE;
 +  }
 +
-+  notification.SetGroup(BString("Icedove"));
-+  notification.SetTitle(BString(u8Title.IsEmpty() ? "Icedove" : u8Title.get()));
++  notification.SetGroup(BString("LibreWolf"));
++  notification.SetTitle(BString(u8Title.IsEmpty() ? "LibreWolf" : u8Title.get()));
 +  notification.SetContent(BString(u8Text.get()));
 +
 +  if (!u8Name.IsEmpty()) {
@@ -10266,7 +10275,7 @@ index 0000000000..007a599b45
 +}
 diff --git a/widget/haiku/HaikuAlerts.h b/widget/haiku/HaikuAlerts.h
 new file mode 100644
-index 0000000000..1fb972996d
+index 0000000..1fb9729
 --- /dev/null
 +++ b/widget/haiku/HaikuAlerts.h
 @@ -0,0 +1,39 @@
@@ -10311,10 +10320,10 @@ index 0000000000..1fb972996d
 +#endif  // mozilla_widget_HaikuAlerts_h
 diff --git a/widget/haiku/HaikuApplication.cpp b/widget/haiku/HaikuApplication.cpp
 new file mode 100644
-index 0000000000..beffe7952f
+index 0000000..9741173
 --- /dev/null
 +++ b/widget/haiku/HaikuApplication.cpp
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,213 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -10333,7 +10342,7 @@ index 0000000000..beffe7952f
 +HaikuApplication* HaikuApplication::sInstance = nullptr;
 +sem_id HaikuApplication::sGeckoTerminatedSem = B_BAD_SEM_ID;
 +
-+static const char* kFirefoxSignature = "application/x-vnd.icedove";
++static const char* kFirefoxSignature = "application/x-vnd.librewolf";
 +static sem_id sInitSem = B_BAD_SEM_ID;
 +
 +void HaikuApplication::EnsureInitialized() {
@@ -10370,10 +10379,17 @@ index 0000000000..beffe7952f
 +    return;
 +  }
 +
++  thread_id appThread = sInstance->mThread;
++
 +  if (sInstance->LockLooper()) {
 +    sInstance->Quit();
++    sInstance->UnlockLooper();
 +  }
-+  sInstance = nullptr;
++
++  if (appThread >= B_OK) {
++    status_t status;
++    wait_for_thread(appThread, &status);
++  }
 +}
 +
 +void HaikuApplication::NotifyGeckoExited() {
@@ -10383,9 +10399,12 @@ index 0000000000..beffe7952f
 +}
 +
 +int32 HaikuApplication::sAppThreadFunc(void* aData) {
-+  sInstance = new HaikuApplication(kFirefoxSignature);
++  auto* app = new HaikuApplication(kFirefoxSignature);
++  sInstance = app;
 +  sInstance->mThread = find_thread(nullptr);
 +  sInstance->Run();
++  delete app;
++  sInstance = nullptr;
 +  return B_OK;
 +}
 +
@@ -10520,7 +10539,7 @@ index 0000000000..beffe7952f
 +}  // namespace mozilla::widget
 diff --git a/widget/haiku/HaikuApplication.h b/widget/haiku/HaikuApplication.h
 new file mode 100644
-index 0000000000..9287600c13
+index 0000000..9287600
 --- /dev/null
 +++ b/widget/haiku/HaikuApplication.h
 @@ -0,0 +1,40 @@
@@ -10566,7 +10585,7 @@ index 0000000000..9287600c13
 +#endif  // mozilla_widget_HaikuApplication_h
 diff --git a/widget/haiku/HaikuCursor.cpp b/widget/haiku/HaikuCursor.cpp
 new file mode 100644
-index 0000000000..194370a95f
+index 0000000..194370a
 --- /dev/null
 +++ b/widget/haiku/HaikuCursor.cpp
 @@ -0,0 +1,113 @@
@@ -10685,7 +10704,7 @@ index 0000000000..194370a95f
 +}  // namespace mozilla::widget
 diff --git a/widget/haiku/HaikuCursor.h b/widget/haiku/HaikuCursor.h
 new file mode 100644
-index 0000000000..6b3068020d
+index 0000000..6b30680
 --- /dev/null
 +++ b/widget/haiku/HaikuCursor.h
 @@ -0,0 +1,33 @@
@@ -10724,7 +10743,7 @@ index 0000000000..6b3068020d
 +#endif  // mozilla_widget_HaikuCursor_h
 diff --git a/widget/haiku/HaikuIMEHandler.cpp b/widget/haiku/HaikuIMEHandler.cpp
 new file mode 100644
-index 0000000000..7388fbec0e
+index 0000000..7388fbe
 --- /dev/null
 +++ b/widget/haiku/HaikuIMEHandler.cpp
 @@ -0,0 +1,211 @@
@@ -10941,7 +10960,7 @@ index 0000000000..7388fbec0e
 +}  // namespace mozilla::widget
 diff --git a/widget/haiku/HaikuIMEHandler.h b/widget/haiku/HaikuIMEHandler.h
 new file mode 100644
-index 0000000000..4f6eabf91c
+index 0000000..4f6eabf
 --- /dev/null
 +++ b/widget/haiku/HaikuIMEHandler.h
 @@ -0,0 +1,52 @@
@@ -10999,7 +11018,7 @@ index 0000000000..4f6eabf91c
 +#endif  // mozilla_widget_HaikuIMEHandler_h
 diff --git a/widget/haiku/HaikuKeyboard.cpp b/widget/haiku/HaikuKeyboard.cpp
 new file mode 100644
-index 0000000000..5588bb3ddd
+index 0000000..5588bb3
 --- /dev/null
 +++ b/widget/haiku/HaikuKeyboard.cpp
 @@ -0,0 +1,356 @@
@@ -11361,7 +11380,7 @@ index 0000000000..5588bb3ddd
 +}  // namespace mozilla::widget
 diff --git a/widget/haiku/HaikuKeyboard.h b/widget/haiku/HaikuKeyboard.h
 new file mode 100644
-index 0000000000..4be7028a4a
+index 0000000..4be7028
 --- /dev/null
 +++ b/widget/haiku/HaikuKeyboard.h
 @@ -0,0 +1,30 @@
@@ -11397,7 +11416,7 @@ index 0000000000..4be7028a4a
 +#endif  // mozilla_widget_HaikuKeyboard_h
 diff --git a/widget/haiku/HaikuUtils.cpp b/widget/haiku/HaikuUtils.cpp
 new file mode 100644
-index 0000000000..607a5937f0
+index 0000000..607a593
 --- /dev/null
 +++ b/widget/haiku/HaikuUtils.cpp
 @@ -0,0 +1,155 @@
@@ -11558,7 +11577,7 @@ index 0000000000..607a5937f0
 +}  // namespace mozilla::widget
 diff --git a/widget/haiku/HaikuUtils.h b/widget/haiku/HaikuUtils.h
 new file mode 100644
-index 0000000000..a700e00910
+index 0000000..a700e00
 --- /dev/null
 +++ b/widget/haiku/HaikuUtils.h
 @@ -0,0 +1,74 @@
@@ -11638,10 +11657,10 @@ index 0000000000..a700e00910
 +#endif  // mozilla_widget_HaikuUtils_h
 diff --git a/widget/haiku/HaikuView.cpp b/widget/haiku/HaikuView.cpp
 new file mode 100644
-index 0000000000..1c7499f6a8
+index 0000000..02b40ce
 --- /dev/null
 +++ b/widget/haiku/HaikuView.cpp
-@@ -0,0 +1,584 @@
+@@ -0,0 +1,586 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -11707,7 +11726,9 @@ index 0000000000..1c7499f6a8
 +                         window_feel aFeel, uint32 aFlags, nsWindow* aGeckoWindow)
 +    : BWindow(aFrame, aTitle, aLook, aFeel, aFlags),
 +      mGeckoWindow(aGeckoWindow) {
-+  RemoveShortcut('W', B_COMMAND_KEY);
++  if (aFeel == B_NORMAL_WINDOW_FEEL || aFeel == B_FLOATING_ALL_WINDOW_FEEL) {
++    RemoveShortcut('W', B_COMMAND_KEY);
++  }
 +  RemoveShortcut('Q', B_COMMAND_KEY);
 +  RemoveShortcut('X', B_COMMAND_KEY);
 +  RemoveShortcut('C', B_COMMAND_KEY);
@@ -12228,7 +12249,7 @@ index 0000000000..1c7499f6a8
 +}
 diff --git a/widget/haiku/HaikuView.h b/widget/haiku/HaikuView.h
 new file mode 100644
-index 0000000000..a70912e7d7
+index 0000000..a70912e
 --- /dev/null
 +++ b/widget/haiku/HaikuView.h
 @@ -0,0 +1,73 @@
@@ -12307,7 +12328,7 @@ index 0000000000..a70912e7d7
 +#endif  // mozilla_widget_HaikuView_h
 diff --git a/widget/haiku/HaikuWindowBuffer.cpp b/widget/haiku/HaikuWindowBuffer.cpp
 new file mode 100644
-index 0000000000..20293096ce
+index 0000000..2029309
 --- /dev/null
 +++ b/widget/haiku/HaikuWindowBuffer.cpp
 @@ -0,0 +1,196 @@
@@ -12509,7 +12530,7 @@ index 0000000000..20293096ce
 +}  // namespace mozilla::widget
 diff --git a/widget/haiku/HaikuWindowBuffer.h b/widget/haiku/HaikuWindowBuffer.h
 new file mode 100644
-index 0000000000..d2bf8ca0f4
+index 0000000..d2bf8ca
 --- /dev/null
 +++ b/widget/haiku/HaikuWindowBuffer.h
 @@ -0,0 +1,50 @@
@@ -12565,7 +12586,7 @@ index 0000000000..d2bf8ca0f4
 +#endif  // mozilla_widget_HaikuWindowBuffer_h
 diff --git a/widget/haiku/NativeKeyBindings.cpp b/widget/haiku/NativeKeyBindings.cpp
 new file mode 100644
-index 0000000000..112e5004ca
+index 0000000..112e500
 --- /dev/null
 +++ b/widget/haiku/NativeKeyBindings.cpp
 @@ -0,0 +1,198 @@
@@ -12769,7 +12790,7 @@ index 0000000000..112e5004ca
 +}  // namespace mozilla::widget
 diff --git a/widget/haiku/NativeKeyBindings.h b/widget/haiku/NativeKeyBindings.h
 new file mode 100644
-index 0000000000..12853ca2a7
+index 0000000..12853ca
 --- /dev/null
 +++ b/widget/haiku/NativeKeyBindings.h
 @@ -0,0 +1,42 @@
@@ -12817,7 +12838,7 @@ index 0000000000..12853ca2a7
 +#endif  // mozilla_widget_NativeKeyBindings_h
 diff --git a/widget/haiku/ScreenHelperHaiku.cpp b/widget/haiku/ScreenHelperHaiku.cpp
 new file mode 100644
-index 0000000000..29041eb03d
+index 0000000..29041eb
 --- /dev/null
 +++ b/widget/haiku/ScreenHelperHaiku.cpp
 @@ -0,0 +1,62 @@
@@ -12885,7 +12906,7 @@ index 0000000000..29041eb03d
 +}  // namespace mozilla::widget
 diff --git a/widget/haiku/ScreenHelperHaiku.h b/widget/haiku/ScreenHelperHaiku.h
 new file mode 100644
-index 0000000000..b1a8c472b7
+index 0000000..b1a8c47
 --- /dev/null
 +++ b/widget/haiku/ScreenHelperHaiku.h
 @@ -0,0 +1,28 @@
@@ -12919,7 +12940,7 @@ index 0000000000..b1a8c472b7
 +#endif  // mozilla_widget_ScreenHelperHaiku_h
 diff --git a/widget/haiku/components.conf b/widget/haiku/components.conf
 new file mode 100644
-index 0000000000..b30de6b34b
+index 0000000..b30de6b
 --- /dev/null
 +++ b/widget/haiku/components.conf
 @@ -0,0 +1,122 @@
@@ -13047,7 +13068,7 @@ index 0000000000..b30de6b34b
 +]
 diff --git a/widget/haiku/moz.build b/widget/haiku/moz.build
 new file mode 100644
-index 0000000000..0dfa144071
+index 0000000..0dfa144
 --- /dev/null
 +++ b/widget/haiku/moz.build
 @@ -0,0 +1,65 @@
@@ -13118,10 +13139,10 @@ index 0000000000..0dfa144071
 +
 diff --git a/widget/haiku/nsAppShell.cpp b/widget/haiku/nsAppShell.cpp
 new file mode 100644
-index 0000000000..9b4b742916
+index 0000000..4851389
 --- /dev/null
 +++ b/widget/haiku/nsAppShell.cpp
-@@ -0,0 +1,255 @@
+@@ -0,0 +1,253 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -13287,9 +13308,7 @@ index 0000000000..9b4b742916
 +
 +NS_IMETHODIMP nsAppShell::Exit(void) {
 +  ScheduleNativeEventCallback();
-+  nsresult rv = nsBaseAppShell::Exit();
-+  HaikuApplication::NotifyGeckoExited();
-+  return rv;
++  return nsBaseAppShell::Exit();
 +}
 +
 +void nsAppShell::DispatchRelaunch() {
@@ -13322,7 +13341,7 @@ index 0000000000..9b4b742916
 +        nsCOMPtr<nsICommandLineRunner> cmdLine(new nsCommandLine());
 +
 +        nsTArray<nsCString> args;
-+        args.AppendElement("icedove"_ns);
++        args.AppendElement("librewolf"_ns);
 +        for (const auto& path : paths) {
 +          args.AppendElement("-url"_ns);
 +          args.AppendElement(path);
@@ -13379,7 +13398,7 @@ index 0000000000..9b4b742916
 +}
 diff --git a/widget/haiku/nsAppShell.h b/widget/haiku/nsAppShell.h
 new file mode 100644
-index 0000000000..7a194bf1b3
+index 0000000..7a194bf
 --- /dev/null
 +++ b/widget/haiku/nsAppShell.h
 @@ -0,0 +1,50 @@
@@ -13435,7 +13454,7 @@ index 0000000000..7a194bf1b3
 +#endif  // mozilla_widget_nsAppShell_h
 diff --git a/widget/haiku/nsBidiKeyboard.cpp b/widget/haiku/nsBidiKeyboard.cpp
 new file mode 100644
-index 0000000000..883e51a5ab
+index 0000000..883e51a
 --- /dev/null
 +++ b/widget/haiku/nsBidiKeyboard.cpp
 @@ -0,0 +1,29 @@
@@ -13470,7 +13489,7 @@ index 0000000000..883e51a5ab
 +}
 diff --git a/widget/haiku/nsBidiKeyboard.h b/widget/haiku/nsBidiKeyboard.h
 new file mode 100644
-index 0000000000..a738874925
+index 0000000..a738874
 --- /dev/null
 +++ b/widget/haiku/nsBidiKeyboard.h
 @@ -0,0 +1,21 @@
@@ -13497,7 +13516,7 @@ index 0000000000..a738874925
 +#endif  // mozilla_widget_nsBidiKeyboard_h
 diff --git a/widget/haiku/nsClipboardHaiku.cpp b/widget/haiku/nsClipboardHaiku.cpp
 new file mode 100644
-index 0000000000..c458268873
+index 0000000..c458268
 --- /dev/null
 +++ b/widget/haiku/nsClipboardHaiku.cpp
 @@ -0,0 +1,304 @@
@@ -13807,7 +13826,7 @@ index 0000000000..c458268873
 +}
 diff --git a/widget/haiku/nsClipboardHaiku.h b/widget/haiku/nsClipboardHaiku.h
 new file mode 100644
-index 0000000000..d95c23cc5f
+index 0000000..d95c23c
 --- /dev/null
 +++ b/widget/haiku/nsClipboardHaiku.h
 @@ -0,0 +1,51 @@
@@ -13864,7 +13883,7 @@ index 0000000000..d95c23cc5f
 +#endif  // mozilla_widget_nsClipboardHaiku_h
 diff --git a/widget/haiku/nsDeviceContextSpecHaiku.cpp b/widget/haiku/nsDeviceContextSpecHaiku.cpp
 new file mode 100644
-index 0000000000..47a84f75af
+index 0000000..ba16551
 --- /dev/null
 +++ b/widget/haiku/nsDeviceContextSpecHaiku.cpp
 @@ -0,0 +1,110 @@
@@ -13873,12 +13892,12 @@ index 0000000000..47a84f75af
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 +
 +#include "nsDeviceContextSpecHaiku.h"
-+#include "mozilla/gfx/PrintTargetPDF.h"
 +#include "mozilla/gfx/PrintPromise.h"
++#include "mozilla/gfx/PrintTargetSkPDF.h"
 +#include "nsComponentManagerUtils.h"
-+#include "nsNetUtil.h"
 +#include "nsIFile.h"
 +#include "nsIFileStreams.h"
++#include "nsNetUtil.h"
 +#include "prio.h"
 +
 +using namespace mozilla;
@@ -13953,7 +13972,7 @@ index 0000000000..47a84f75af
 +    return nullptr;
 +  }
 +
-+  return PrintTargetPDF::CreateOrNull(stream, IntSize::Ceil(width, height));
++  return PrintTargetSkPDF::CreateOrNull(stream, IntSize::Ceil(width, height));
 +}
 +
 +NS_IMETHODIMP
@@ -13980,7 +13999,7 @@ index 0000000000..47a84f75af
 +}
 diff --git a/widget/haiku/nsDeviceContextSpecHaiku.h b/widget/haiku/nsDeviceContextSpecHaiku.h
 new file mode 100644
-index 0000000000..cc8edde85a
+index 0000000..cc8edde
 --- /dev/null
 +++ b/widget/haiku/nsDeviceContextSpecHaiku.h
 @@ -0,0 +1,36 @@
@@ -14022,7 +14041,7 @@ index 0000000000..cc8edde85a
 +#endif  // nsDeviceContextSpecHaiku_h_
 diff --git a/widget/haiku/nsDragService.cpp b/widget/haiku/nsDragService.cpp
 new file mode 100644
-index 0000000000..2ebc9385ce
+index 0000000..2ebc938
 --- /dev/null
 +++ b/widget/haiku/nsDragService.cpp
 @@ -0,0 +1,805 @@
@@ -14833,7 +14852,7 @@ index 0000000000..2ebc9385ce
 +}
 diff --git a/widget/haiku/nsDragService.h b/widget/haiku/nsDragService.h
 new file mode 100644
-index 0000000000..e1065c079f
+index 0000000..e1065c0
 --- /dev/null
 +++ b/widget/haiku/nsDragService.h
 @@ -0,0 +1,112 @@
@@ -14951,7 +14970,7 @@ index 0000000000..e1065c079f
 +#endif  // mozilla_widget_nsDragService_h
 diff --git a/widget/haiku/nsFilePicker.cpp b/widget/haiku/nsFilePicker.cpp
 new file mode 100644
-index 0000000000..c41cd9b169
+index 0000000..c41cd9b
 --- /dev/null
 +++ b/widget/haiku/nsFilePicker.cpp
 @@ -0,0 +1,322 @@
@@ -15279,7 +15298,7 @@ index 0000000000..c41cd9b169
 +}
 diff --git a/widget/haiku/nsFilePicker.h b/widget/haiku/nsFilePicker.h
 new file mode 100644
-index 0000000000..a678e53cf7
+index 0000000..a678e53
 --- /dev/null
 +++ b/widget/haiku/nsFilePicker.h
 @@ -0,0 +1,67 @@
@@ -15352,7 +15371,7 @@ index 0000000000..a678e53cf7
 +#endif  // mozilla_widget_nsFilePicker_h
 diff --git a/widget/haiku/nsLookAndFeel.cpp b/widget/haiku/nsLookAndFeel.cpp
 new file mode 100644
-index 0000000000..a1933bd730
+index 0000000..a1933bd
 --- /dev/null
 +++ b/widget/haiku/nsLookAndFeel.cpp
 @@ -0,0 +1,512 @@
@@ -15870,7 +15889,7 @@ index 0000000000..a1933bd730
 +}
 diff --git a/widget/haiku/nsLookAndFeel.h b/widget/haiku/nsLookAndFeel.h
 new file mode 100644
-index 0000000000..8f7dfd43b8
+index 0000000..8f7dfd4
 --- /dev/null
 +++ b/widget/haiku/nsLookAndFeel.h
 @@ -0,0 +1,47 @@
@@ -15923,7 +15942,7 @@ index 0000000000..8f7dfd43b8
 +#endif  // mozilla_widget_nsLookAndFeel_h
 diff --git a/widget/haiku/nsPrintSettingsServiceHaiku.cpp b/widget/haiku/nsPrintSettingsServiceHaiku.cpp
 new file mode 100644
-index 0000000000..c4fad745c2
+index 0000000..c4fad74
 --- /dev/null
 +++ b/widget/haiku/nsPrintSettingsServiceHaiku.cpp
 @@ -0,0 +1,26 @@
@@ -15955,7 +15974,7 @@ index 0000000000..c4fad745c2
 +}
 diff --git a/widget/haiku/nsPrintSettingsServiceHaiku.h b/widget/haiku/nsPrintSettingsServiceHaiku.h
 new file mode 100644
-index 0000000000..d61a558d51
+index 0000000..d61a558
 --- /dev/null
 +++ b/widget/haiku/nsPrintSettingsServiceHaiku.h
 @@ -0,0 +1,19 @@
@@ -15980,7 +15999,7 @@ index 0000000000..d61a558d51
 +#endif  // nsPrintSettingsServiceHaiku_h_
 diff --git a/widget/haiku/nsPrinterListHaiku.cpp b/widget/haiku/nsPrinterListHaiku.cpp
 new file mode 100644
-index 0000000000..418c641a7a
+index 0000000..418c641
 --- /dev/null
 +++ b/widget/haiku/nsPrinterListHaiku.cpp
 @@ -0,0 +1,45 @@
@@ -16031,7 +16050,7 @@ index 0000000000..418c641a7a
 +}
 diff --git a/widget/haiku/nsPrinterListHaiku.h b/widget/haiku/nsPrinterListHaiku.h
 new file mode 100644
-index 0000000000..6124d2328a
+index 0000000..6124d23
 --- /dev/null
 +++ b/widget/haiku/nsPrinterListHaiku.h
 @@ -0,0 +1,31 @@
@@ -16068,7 +16087,7 @@ index 0000000000..6124d2328a
 +#endif  // nsPrinterListHaiku_h_
 diff --git a/widget/haiku/nsSound.cpp b/widget/haiku/nsSound.cpp
 new file mode 100644
-index 0000000000..720a376751
+index 0000000..720a376
 --- /dev/null
 +++ b/widget/haiku/nsSound.cpp
 @@ -0,0 +1,69 @@
@@ -16143,7 +16162,7 @@ index 0000000000..720a376751
 +}
 diff --git a/widget/haiku/nsSound.h b/widget/haiku/nsSound.h
 new file mode 100644
-index 0000000000..df30628ffc
+index 0000000..df30628
 --- /dev/null
 +++ b/widget/haiku/nsSound.h
 @@ -0,0 +1,23 @@
@@ -16172,7 +16191,7 @@ index 0000000000..df30628ffc
 +#endif  // mozilla_widget_nsSound_h_
 diff --git a/widget/haiku/nsUserIdleServiceHaiku.cpp b/widget/haiku/nsUserIdleServiceHaiku.cpp
 new file mode 100644
-index 0000000000..41f1adaae8
+index 0000000..41f1ada
 --- /dev/null
 +++ b/widget/haiku/nsUserIdleServiceHaiku.cpp
 @@ -0,0 +1,14 @@
@@ -16192,7 +16211,7 @@ index 0000000000..41f1adaae8
 +}
 diff --git a/widget/haiku/nsUserIdleServiceHaiku.h b/widget/haiku/nsUserIdleServiceHaiku.h
 new file mode 100644
-index 0000000000..6f5ba3c607
+index 0000000..6f5ba3c
 --- /dev/null
 +++ b/widget/haiku/nsUserIdleServiceHaiku.h
 @@ -0,0 +1,29 @@
@@ -16227,7 +16246,7 @@ index 0000000000..6f5ba3c607
 +#endif  // mozilla_widget_nsUserIdleServiceHaiku_h
 diff --git a/widget/haiku/nsWidgetFactory.cpp b/widget/haiku/nsWidgetFactory.cpp
 new file mode 100644
-index 0000000000..7ab3e9dbc0
+index 0000000..7ab3e9d
 --- /dev/null
 +++ b/widget/haiku/nsWidgetFactory.cpp
 @@ -0,0 +1,56 @@
@@ -16289,7 +16308,7 @@ index 0000000000..7ab3e9dbc0
 +}  // namespace mozilla::a11y
 diff --git a/widget/haiku/nsWidgetFactory.h b/widget/haiku/nsWidgetFactory.h
 new file mode 100644
-index 0000000000..654df7ab36
+index 0000000..654df7a
 --- /dev/null
 +++ b/widget/haiku/nsWidgetFactory.h
 @@ -0,0 +1,16 @@
@@ -16311,10 +16330,10 @@ index 0000000000..654df7ab36
 +#endif  // mozilla_widget_nsWidgetFactory_h
 diff --git a/widget/haiku/nsWindow.cpp b/widget/haiku/nsWindow.cpp
 new file mode 100644
-index 0000000000..30060ea641
+index 0000000..33dcd8d
 --- /dev/null
 +++ b/widget/haiku/nsWindow.cpp
-@@ -0,0 +1,1192 @@
+@@ -0,0 +1,1291 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -16323,6 +16342,7 @@ index 0000000000..30060ea641
 +
 +#include <cctype>
 +#include <cstdio>
++#include <cmath>
 +#include <algorithm>
 +
 +#include "HaikuKeyboard.h"
@@ -16376,6 +16396,8 @@ index 0000000000..30060ea641
 +      mIMEHandler(nullptr),
 +      mClientSize(0, 0),
 +      mSizeMode(nsSizeMode_Normal),
++      mDragStartMouseOffset(0, 0),
++      mIsDraggingWindow(false),
 +      mVisible(false),
 +      mEnabled(true),
 +      mIsPopup(false),
@@ -16474,7 +16496,7 @@ index 0000000000..30060ea641
 +  switch (aInitData.mWindowType) {
 +    case WindowType::Popup: {
 +      wlook = B_NO_BORDER_WINDOW_LOOK;
-+      wfeel = B_FLOATING_APP_WINDOW_FEEL;
++      wfeel = window_feel(1025);
 +      wflag = B_AVOID_FOCUS |
 +              B_NO_WORKSPACE_ACTIVATION |
 +              B_NOT_ANCHORED_ON_ACTIVATE |
@@ -16482,12 +16504,6 @@ index 0000000000..30060ea641
 +              B_NOT_RESIZABLE |
 +              B_NOT_ZOOMABLE |
 +              B_NOT_MINIMIZABLE;
-+      break;
-+    }
-+    case WindowType::Dialog: {
-+      wlook = B_TITLED_WINDOW_LOOK;
-+      wfeel = B_NORMAL_WINDOW_FEEL;
-+      wflag = B_ASYNCHRONOUS_CONTROLS | B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE;
 +      break;
 +    }
 +    case WindowType::Invisible: {
@@ -16498,16 +16514,23 @@ index 0000000000..30060ea641
 +              B_NOT_MOVABLE | B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE;
 +      break;
 +    }
++    case WindowType::Dialog:
++    case WindowType::TopLevel:
 +    default: {
-+      if (aInitData.mBorderStyle == BorderStyle::None) {
++      if (aInitData.mAlwaysOnTop) {
++        wlook = B_MODAL_WINDOW_LOOK;
++        wfeel = B_FLOATING_ALL_WINDOW_FEEL;
++      } else if (aParent) {
++        wlook = B_TITLED_WINDOW_LOOK;
++        wfeel = B_FLOATING_APP_WINDOW_FEEL;
++        if (aInitData.mWindowType == WindowType::Dialog) {
++          wflag = B_ASYNCHRONOUS_CONTROLS | B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE;
++        }
++      } else if (aInitData.mBorderStyle == BorderStyle::None) {
 +        wlook = B_NO_BORDER_WINDOW_LOOK;
++        wfeel = B_NORMAL_WINDOW_FEEL;
 +      } else {
 +        wlook = B_TITLED_WINDOW_LOOK;
-+      }
-+
-+      if (aInitData.mAlwaysOnTop) {
-+        wfeel = B_FLOATING_ALL_WINDOW_FEEL;
-+      } else {
 +        wfeel = B_NORMAL_WINDOW_FEEL;
 +      }
 +      break;
@@ -16531,7 +16554,8 @@ index 0000000000..30060ea641
 +
 +  BRect frame(posX, posY, posX + initialWidth - 1, posY + initialHeight - 1);
 +
-+  const char* title = mIsPopup ? "" : "Icedove";
++  const char* title = mIsPopup ? "" : "LibreWolf";
++
 +  mWindow = new HaikuWindow(frame, title, wlook, wfeel, wflag, this);
 +
 +  if (mIsPopup) {
@@ -16928,8 +16952,9 @@ index 0000000000..30060ea641
 +}
 +
 +nsresult nsWindow::SetTitle(const nsAString& aTitle) {
++  NS_ConvertUTF16toUTF8 utf8(aTitle);
++
 +  if (mWindow && mWindow->LockWithTimeout(50000) == B_OK) {
-+    NS_ConvertUTF16toUTF8 utf8(aTitle);
 +    mWindow->SetTitle(utf8.get());
 +    mWindow->Unlock();
 +  }
@@ -16946,6 +16971,37 @@ index 0000000000..30060ea641
 +
 +float nsWindow::GetDPI() {
 +  return 96.0f;
++}
++
++void nsWindow::SetCustomTitlebar(bool aCustom) {
++}
++
++void nsWindow::HideWindowChrome(bool aShouldHide) {
++}
++
++void nsWindow::SetWindowClass(const nsAString& xulWinType,
++                            const nsAString& xulWinClass,
++                            const nsAString& xulWinName) {
++  NS_ConvertUTF16toUTF8 u8Type(xulWinType);
++
++  if (u8Type.EqualsLiteral("Browser:About")) {
++    if (mWindow && mWindow->LockWithTimeout(10000) == B_OK) {
++      mWindow->SetFeel(B_FLOATING_APP_WINDOW_FEEL);
++      mWindow->AddShortcut('W', B_COMMAND_KEY, new BMessage(B_QUIT_REQUESTED));
++      mWindow->Unlock();
++    }
++  } else if (u8Type.EqualsLiteral("Toolkit:PictureInPicture") ||
++             u8Type.EqualsLiteral("PictureInPicture")) {
++    if (mWindow && mWindow->LockWithTimeout(10000) == B_OK) {
++      mWindow->SetLook(B_MODAL_WINDOW_LOOK);
++      mWindow->SetFeel(B_FLOATING_ALL_WINDOW_FEEL);
++      mWindow->Unlock();
++    }
++  }
++}
++
++void nsWindow::UpdateWindowDraggingRegion(const LayoutDeviceIntRegion& aRegion) {
++  mDraggableRegion = aRegion;
 +}
 +
 +mozilla::widget::TextEventDispatcherListener*
@@ -17087,6 +17143,13 @@ index 0000000000..30060ea641
 +          return;
 +        }
 +
++        if (aMinimize) {
++          nsIRollupListener* rollupListener = nsIWidget::GetActiveRollupListener();
++          if (rollupListener) {
++            rollupListener->Rollup({});
++          }
++        }
++
 +        if (aMinimize && self->mSizeMode == nsSizeMode_Normal) {
 +          self->UpdateBounds();
 +          self->mRestoredBounds = Some(self->mBounds);
@@ -17107,9 +17170,12 @@ index 0000000000..30060ea641
 +        }
 +
 +        if (!aActive) {
-+          nsIRollupListener* rollupListener = nsIWidget::GetActiveRollupListener();
-+          if (rollupListener) {
-+            rollupListener->Rollup({});
++          self->mIsDraggingWindow = false;
++          if (!self->mIsPopup) {
++            nsIRollupListener* rollupListener = nsIWidget::GetActiveRollupListener();
++            if (rollupListener) {
++              rollupListener->Rollup({});
++            }
 +          }
 +        } else if (self->mSizeMode == nsSizeMode_Minimized) {
 +          self->mSizeMode = nsSizeMode_Normal;
@@ -17133,6 +17199,11 @@ index 0000000000..30060ea641
 +        if (self->mOnDestroyCalled || !self->mWidgetListener) {
 +          return;
 +        }
++
++        if (self->mWidgetListener) {
++          self->mWidgetListener->WindowActivated();
++        }
++
 +        self->mWidgetListener->RequestWindowClose(self);
 +      }));
 +}
@@ -17145,16 +17216,34 @@ index 0000000000..30060ea641
 +          return;
 +        }
 +
++        bool consumeEvent = false;
 +        nsIRollupListener* rollupListener = nsIWidget::GetActiveRollupListener();
 +        if (rollupListener) {
 +          nsCOMPtr<nsIWidget> rollupWidget = rollupListener->GetRollupWidget();
 +          if (rollupWidget && rollupWidget != self) {
-+            rollupListener->Rollup({});
++            LayoutDeviceIntPoint screenPoint{
++                int32_t(aX) + self->mBounds.x,
++                int32_t(aY) + self->mBounds.y
++            };
++            nsIRollupListener::RollupOptions options;
++            options.mPoint = &screenPoint;
++            consumeEvent = rollupListener->Rollup(options);
 +          }
++        }
++
++        if (consumeEvent) {
++          return;
 +        }
 +
 +        if (self->mOnDestroyCalled || !self->mWidgetListener) {
 +          return;
++        }
++
++        if ((aChangedButton & B_PRIMARY_MOUSE_BUTTON) &&
++            self->mDraggableRegion.Contains(int32_t(aX), int32_t(aY)) &&
++            self->mSizeMode != nsSizeMode_Fullscreen) {
++          self->mIsDraggingWindow = true;
++          self->mDragStartMouseOffset = LayoutDeviceIntPoint(int32_t(aX), int32_t(aY));
 +        }
 +
 +        MouseButton button = MouseButton::ePrimary;
@@ -17200,6 +17289,10 @@ index 0000000000..30060ea641
 +          return;
 +        }
 +
++        if (self->mIsDraggingWindow && !(aRemainingButtons & B_PRIMARY_MOUSE_BUTTON)) {
++          self->mIsDraggingWindow = false;
++        }
++
 +        MouseButton button = MouseButton::ePrimary;
 +        if (aReleasedButton & B_SECONDARY_MOUSE_BUTTON) {
 +          button = MouseButton::eSecondary;
@@ -17225,6 +17318,31 @@ index 0000000000..30060ea641
 +      "nsWindow::OnHaikuMouseMoved", [self, aX, aY, aButtons, aModifiers]() {
 +        if (self->mOnDestroyCalled || !self->mWidgetListener) {
 +          return;
++        }
++
++        if (self->mIsDraggingWindow) {
++          if (!(aButtons & B_PRIMARY_MOUSE_BUTTON)) {
++            self->mIsDraggingWindow = false;
++          } else if (self->mWindow && self->mView) {
++            BPoint screenMouse(0, 0);
++            uint32 btns = 0;
++            if (self->mWindow->LockWithTimeout(10000) == B_OK) {
++              self->mView->GetMouse(&screenMouse, &btns, false);
++              self->mView->ConvertToScreen(&screenMouse);
++              self->mWindow->Unlock();
++
++              int32_t newX = int32_t(std::round(screenMouse.x)) - self->mDragStartMouseOffset.x;
++              int32_t newY = int32_t(std::round(screenMouse.y)) - self->mDragStartMouseOffset.y;
++
++              if (self->mWindow->LockWithTimeout(10000) == B_OK) {
++                self->mWindow->MoveTo(newX, newY);
++                self->UpdateBounds();
++                self->mWindow->Unlock();
++              }
++
++              self->NotifyWindowMoved(self->mBounds.TopLeft());
++            }
++          }
 +        }
 +
 +        WidgetMouseEvent event(true, eMouseMove, self, WidgetMouseEvent::eReal);
@@ -17509,10 +17627,10 @@ index 0000000000..30060ea641
 +}
 diff --git a/widget/haiku/nsWindow.h b/widget/haiku/nsWindow.h
 new file mode 100644
-index 0000000000..412ca1dbd2
+index 0000000..0fc49d4
 --- /dev/null
 +++ b/widget/haiku/nsWindow.h
-@@ -0,0 +1,168 @@
+@@ -0,0 +1,180 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -17607,6 +17725,14 @@ index 0000000000..412ca1dbd2
 +    return mInputContext;
 +  }
 +
++  void SetCustomTitlebar(bool aCustom) override;
++  void HideWindowChrome(bool aShouldHide) override;
++  void SetWindowClass(const nsAString& xulWinType,
++                      const nsAString& xulWinClass,
++                      const nsAString& xulWinName) override;
++
++  void UpdateWindowDraggingRegion(const LayoutDeviceIntRegion& aRegion) override;
++
 +  MOZ_CAN_RUN_SCRIPT bool GetEditCommands(
 +      mozilla::NativeKeyBindingsType aType,
 +      const mozilla::WidgetKeyboardEvent& aEvent,
@@ -17670,6 +17796,10 @@ index 0000000000..412ca1dbd2
 +  nsSizeMode mSizeMode;
 +  InputContext mInputContext;
 +
++  LayoutDeviceIntRegion mDraggableRegion;
++  LayoutDeviceIntPoint mDragStartMouseOffset;
++  bool mIsDraggingWindow;
++
 +  bool mVisible;
 +  bool mEnabled;
 +  bool mIsPopup;
@@ -17682,7 +17812,7 @@ index 0000000000..412ca1dbd2
 +
 +#endif  // mozilla_widget_nsWindow_h
 diff --git a/widget/headless/HeadlessCompositorWidgetParent.h b/widget/headless/HeadlessCompositorWidgetParent.h
-index 021b162fcb..5c5be7e79c 100644
+index 021b162..5c5be7e 100644
 --- a/widget/headless/HeadlessCompositorWidgetParent.h
 +++ b/widget/headless/HeadlessCompositorWidgetParent.h
 @@ -30,7 +30,7 @@ class HeadlessCompositorWidgetParent final : public PCompositorWidgetParent,
@@ -17695,7 +17825,7 @@ index 021b162fcb..5c5be7e79c 100644
  #ifdef XP_WIN
    // Windows PCompositorWidget messages which have no native-window work to do
 diff --git a/widget/moz.build b/widget/moz.build
-index 67a8082de9..f343fc0c8f 100644
+index 5aaa779..9e777f7 100644
 --- a/widget/moz.build
 +++ b/widget/moz.build
 @@ -53,7 +53,7 @@ XPCOM_MANIFESTS += [
@@ -17715,7 +17845,7 @@ index 67a8082de9..f343fc0c8f 100644
      "ScrollbarDrawingWin.cpp",
      "ScrollbarDrawingWin11.cpp",
      "SharedWidgetUtils.cpp",
-@@ -328,17 +329,17 @@ EXPORTS.ipc = [
+@@ -333,17 +334,17 @@ EXPORTS.ipc = [
  if CONFIG["MOZ_X11"] or CONFIG["MOZ_WAYLAND"]:
      DIRS += ["x11"]
  
@@ -17737,7 +17867,7 @@ index 67a8082de9..f343fc0c8f 100644
          "nsNativeTheme.cpp",
      ]
 diff --git a/xpcom/base/nsSystemInfo.cpp b/xpcom/base/nsSystemInfo.cpp
-index 64a42ed18f..f2edfe29fd 100644
+index 64a42ed..f2edfe2 100644
 --- a/xpcom/base/nsSystemInfo.cpp
 +++ b/xpcom/base/nsSystemInfo.cpp
 @@ -86,6 +86,11 @@
@@ -17872,7 +18002,7 @@ index 64a42ed18f..f2edfe29fd 100644
  }
  
 diff --git a/xpcom/build/BinaryPath.h b/xpcom/build/BinaryPath.h
-index 8e6b58eced..4dd9e1e0ae 100644
+index 8e6b58e..4dd9e1e 100644
 --- a/xpcom/build/BinaryPath.h
 +++ b/xpcom/build/BinaryPath.h
 @@ -22,6 +22,10 @@
@@ -17909,10 +18039,10 @@ index 8e6b58eced..4dd9e1e0ae 100644
  #  error Oops, you need platform-specific code here
  #endif
 diff --git a/xpcom/io/nsLocalFileUnix.cpp b/xpcom/io/nsLocalFileUnix.cpp
-index b40865bbc2..bc34fde912 100644
+index 2469756..a47f0b4 100644
 --- a/xpcom/io/nsLocalFileUnix.cpp
 +++ b/xpcom/io/nsLocalFileUnix.cpp
-@@ -53,6 +53,16 @@
+@@ -54,6 +54,16 @@
  #  endif
  #endif
  
@@ -17929,7 +18059,7 @@ index b40865bbc2..bc34fde912 100644
  #ifdef MOZ_WIDGET_COCOA
  #  include <Carbon/Carbon.h>
  
-@@ -2399,6 +2409,43 @@ nsLocalFile::Reveal() {
+@@ -2407,6 +2417,43 @@ nsLocalFile::Reveal() {
      return NS_ERROR_FAILURE;
    }
    return giovfs->RevealFile(this);
@@ -17973,7 +18103,7 @@ index b40865bbc2..bc34fde912 100644
  #elif defined(MOZ_WIDGET_COCOA)
    CFURLRef url;
    if (NS_SUCCEEDED(GetCFURL(&url))) {
-@@ -2425,6 +2472,27 @@ nsLocalFile::Launch() {
+@@ -2433,6 +2480,27 @@ nsLocalFile::Launch() {
    }
  
    return giovfs->LaunchFile(mPath);
@@ -18002,7 +18132,7 @@ index b40865bbc2..bc34fde912 100644
    // Not supported on GeckoView
    return NS_ERROR_NOT_IMPLEMENTED;
 diff --git a/xpcom/reflect/xptcall/md/unix/moz.build b/xpcom/reflect/xptcall/md/unix/moz.build
-index 7cbe99b976..6be22c4474 100644
+index fd75f9d..e187128 100644
 --- a/xpcom/reflect/xptcall/md/unix/moz.build
 +++ b/xpcom/reflect/xptcall/md/unix/moz.build
 @@ -26,6 +26,7 @@ if CONFIG["OS_ARCH"] in (
@@ -18014,7 +18144,7 @@ index 7cbe99b976..6be22c4474 100644
      "OpenBSD",
      "SunOS",
 diff --git a/xpcom/threads/nsProcessCommon.cpp b/xpcom/threads/nsProcessCommon.cpp
-index 8112a54313..ec1760f6ae 100644
+index 8112a54..ec1760f 100644
 --- a/xpcom/threads/nsProcessCommon.cpp
 +++ b/xpcom/threads/nsProcessCommon.cpp
 @@ -38,7 +38,11 @@
