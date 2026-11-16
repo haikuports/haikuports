@@ -1,0 +1,126 @@
+SUMMARY="Foreign Function Interface for Python calling C code"
+DESCRIPTION="CFFI is a Python module which allows to call C code."
+HOMEPAGE="https://cffi.readthedocs.io/
+	https://pypi.org/project/cffi/"
+COPYRIGHT="2012-2021 Armin Rigo, Maciej Fijalkowski"
+LICENSE="MIT"
+REVISION="1"
+SOURCE_URI="https://files.pythonhosted.org/packages/source/${portBaseName:0:1}/$portBaseName/$portBaseName-$portVersion.tar.gz"
+CHECKSUM_SHA256="dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be"
+PATCHES="cffi-$portVersion.patchset"
+
+ARCHITECTURES="all !x86_gcc2"
+SECONDARY_ARCHITECTURES="x86"
+
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel
+	devel:libffi$secondaryArchSuffix
+	"
+BUILD_PREREQUIRES="
+	cmd:gcc$secondaryArchSuffix
+	"
+
+PYTHON_VERSIONS=(3.10 3.14)
+defaultVersion=3.14
+
+for pythonVersion in ${PYTHON_VERSIONS[@]}; do
+	pythonPackage=python${pythonVersion//.}
+
+	# Not renaming 3.10 packages to avoid needing massive packages rebuilds.
+	# No need for REPLACES then. ToDo: remove the conditional after dropping 3.10.
+	if [ $pythonVersion != 3.10 ]; then
+		# Allows using dot in sub-package names (eg: "_python3.14" vs "_python314"):
+		eval "PACKAGE_NAME_$pythonPackage=${portName}_python$pythonVersion"
+
+		eval "PROVIDES_$pythonPackage=\"
+			${portName}_python$pythonVersion = $portVersion
+			\""
+	fi
+
+	eval "PROVIDES_$pythonPackage+=\"
+		${portName}_$pythonPackage = $portVersion
+		cmd:cffi_gen_src_$pythonVersion = $portVersion
+		\""
+
+	# Provide non-suffixed cmd only for the default Python version
+	if [ $pythonVersion = $defaultVersion ]; then
+		eval "PROVIDES_${pythonPackage}+=\"
+			cmd:cffi_gen_src = $portVersion
+			\""
+	fi
+
+	if [ -n "$secondaryArchSuffix" ]; then
+		eval "PROVIDES_$pythonPackage+=\"
+			${portBaseName}_python$pythonVersion = $portVersion
+			${portBaseName}_$pythonPackage = $portVersion
+			\""
+	fi
+
+	eval "REQUIRES_$pythonPackage=\"
+		haiku$secondaryArchSuffix
+		pycparser_$pythonPackage
+		cmd:python$pythonVersion
+		lib:libffi$secondaryArchSuffix
+		\""
+
+	BUILD_REQUIRES+="
+		build_$pythonPackage
+		installer_$pythonPackage
+		setuptools_$pythonPackage
+		wheel_$pythonPackage
+		"
+	BUILD_PREREQUIRES+="
+		cmd:python$pythonVersion
+		"
+
+	TEST_REQUIRES="
+		cffi_$pythonPackage
+		pytest_$pythonPackage
+		"
+done
+
+
+INSTALL()
+{
+	for i in "${!PYTHON_VERSIONS[@]}"; do
+		pythonVersion=${PYTHON_VERSIONS[$i]}
+		pythonPackage=python${pythonVersion//.}
+
+		python=python$pythonVersion
+		installLocation=$prefix/lib/$python/vendor-packages/
+
+		export PYTHONPATH=$installLocation:$PYTHONPATH
+		mkdir -p $installLocation
+
+		rm -rf build
+
+		$python setup.py build install \
+			--root=/ --prefix=$prefix
+
+		# Version suffix all the scripts
+		for f in $prefix/bin/*; do
+			mv $f $f-$pythonVersion
+		done
+
+		# And provide suffix-less symlinks for the default version
+		if [ $pythonVersion = $defaultVersion ]; then
+			for f in $prefix/bin/*; do
+				ln -sr $f ${f%-$pythonVersion}
+			done
+		fi
+
+		packageEntries $pythonPackage \
+			$prefix/lib/$python \
+			$prefix/bin
+	done
+}
+
+# Results for reference:
+# 6 failed, 1913 passed, 120 skipped, 4 xfailed, 567 warnings in 1034.70s (0:17:14)
+# failures are harmless, due to tests expecting dl/libm/libc names instead of what Haiku provides.
+TEST()
+{
+	for i in "${!PYTHON_VERSIONS[@]}"; do
+		pytest c/ testing/
+	done
+}

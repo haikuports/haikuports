@@ -1,0 +1,603 @@
+From 5c72018afce8dec8d10b8f37675620053fc6eb74 Mon Sep 17 00:00:00 2001
+From: Calvin Hill <calvin@hakobaito.co.uk>
+Date: Sat, 28 Oct 2023 23:36:20 +0100
+Subject: [PATCH] swift: Add support patches for Haiku for swift 5.9
+
+---
+ CMakeLists.txt                                |  2 +-
+ cmake/modules/AddPureSwift.cmake              |  4 +-
+ cmake/modules/AddSwift.cmake                  |  2 +-
+ cmake/modules/SwiftUtils.cmake                |  2 +-
+ include/swift/AST/PlatformKinds.def           |  1 +
+ lib/AST/PlatformKind.cpp                      |  3 +
+ lib/Basic/Default/TaskQueue.inc               |  2 +-
+ lib/CMakeLists.txt                            |  2 +-
+ lib/ClangImporter/ClangImporter.cpp           | 11 +++
+ lib/ClangImporter/ClangIncludePaths.cpp       | 17 +++--
+ lib/IRGen/TBDGen.cpp                          |  2 +
+ lib/Macros/CMakeLists.txt                     |  2 +-
+ lib/PrintAsClang/DeclAndTypePrinter.cpp       |  3 +
+ lib/SymbolGraphGen/AvailabilityMixin.cpp      |  2 +
+ stdlib/cmake/modules/AddSwiftStdlib.cmake     |  4 +
+ stdlib/cmake/modules/SwiftSource.cmake        |  4 +-
+ .../StdlibUnittest/StdlibUnittest.swift       |  5 ++
+ .../SwiftPrivateLibcExtras/Subprocess.swift   |  7 ++
+ .../ThreadBarriers.swift                      |  6 ++
+ .../SwiftReflectionTest/CMakeLists.txt        |  1 +
+ stdlib/public/Platform/POSIXError.swift       | 76 +++++++++++++++++++
+ .../public/SwiftShims/swift/shims/LibcShims.h |  4 +-
+ stdlib/public/core/CTypes.swift               |  1 +
+ stdlib/public/runtime/Backtrace.cpp           |  4 +
+ .../cmake/modules/AddSwiftSourceKit.cmake     |  2 +-
+ .../lib/SwiftLang/SwiftDocSupport.cpp         |  3 +
+ tools/libSwiftScan/CMakeLists.txt             |  4 +-
+ .../swift-dependency-tool.cpp                 |  4 +-
+ 28 files changed, 158 insertions(+), 22 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f8e678b9..8d1761b1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -959,7 +959,7 @@ if(SWIFT_PATH_TO_EARLYSWIFTSYNTAX_BUILD_DIR)
+     set(SWIFT_SWIFT_PARSER TRUE)
+     include(${SWIFT_PATH_TO_EARLYSWIFTSYNTAX_TARGETS})
+ 
+-    if(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD" AND NOT BOOTSTRAPPING_MODE STREQUAL "HOSTTOOLS")
++    if(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD|HAIKU" AND NOT BOOTSTRAPPING_MODE STREQUAL "HOSTTOOLS")
+       # Only "HOSTTOOLS" is supported in Linux when Swift parser integration is enabled.
+       message(WARNING "Force setting BOOTSTRAPPING=HOSTTOOLS because Swift parser integration is enabled")
+       set(BOOTSTRAPPING_MODE "HOSTTOOLS")
+diff --git a/cmake/modules/AddPureSwift.cmake b/cmake/modules/AddPureSwift.cmake
+index 17f57923..0471b325 100644
+--- a/cmake/modules/AddPureSwift.cmake
++++ b/cmake/modules/AddPureSwift.cmake
+@@ -66,7 +66,7 @@ function(_add_host_swift_compile_options name)
+ endfunction()
+ 
+ function(_set_pure_swift_link_flags name relpath_to_lib_dir)
+-  if(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD")
++  if(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD|HAIKU")
+     # Don't add builder's stdlib RPATH automatically.
+     target_compile_options(${name} PRIVATE
+       $<$<COMPILE_LANGUAGE:Swift>:-no-toolchain-stdlib-rpath>
+@@ -291,7 +291,7 @@ function(add_pure_swift_host_tool name)
+     set_property(TARGET ${name}
+       APPEND PROPERTY INSTALL_RPATH
+         "@executable_path/../lib/swift/host")
+-  elseif(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD")
++  elseif(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD|HAIKU")
+     set_property(TARGET ${name}
+       APPEND PROPERTY INSTALL_RPATH
+         "$ORIGIN/../lib/swift/host")
+diff --git a/cmake/modules/AddSwift.cmake b/cmake/modules/AddSwift.cmake
+index 76702543..489e96e0 100644
+--- a/cmake/modules/AddSwift.cmake
++++ b/cmake/modules/AddSwift.cmake
+@@ -532,7 +532,7 @@ function(_add_swift_runtime_link_flags target relpath_to_lib_dir bootstrapping)
+     set_property(TARGET ${target} APPEND_STRING PROPERTY
+                  LINK_FLAGS " -lobjc ")
+ 
+-  elseif(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD")
++  elseif(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD|HAIKU")
+     set(swiftrt "swiftImageRegistrationObject${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_OBJECT_FORMAT}-${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR}-${SWIFT_HOST_VARIANT_ARCH}")
+     if(${ASRLF_BOOTSTRAPPING_MODE} MATCHES "HOSTTOOLS|CROSSCOMPILE")
+       # At build time and run time, link against the swift libraries in the
+diff --git a/cmake/modules/SwiftUtils.cmake b/cmake/modules/SwiftUtils.cmake
+index 7e682f7f..738ddb47 100644
+--- a/cmake/modules/SwiftUtils.cmake
++++ b/cmake/modules/SwiftUtils.cmake
+@@ -108,7 +108,7 @@ function(get_bootstrapping_swift_lib_dir bs_lib_dir bootstrapping)
+       get_bootstrapping_path(bs_lib_dir ${lib_dir} "1")
+     endif()
+   elseif(BOOTSTRAPPING_MODE STREQUAL "HOSTTOOLS")
+-    if(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD")
++    if(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD|HAIKU")
+       # Compiler's INSTALL_RPATH is set to libs in the build directory
+       # For building stdlib, use stdlib in the builder's resource directory
+       # because the runtime may not be built yet.
+diff --git a/include/swift/AST/PlatformKinds.def b/include/swift/AST/PlatformKinds.def
+index 017f09b7..f4d9b3fb 100644
+--- a/include/swift/AST/PlatformKinds.def
++++ b/include/swift/AST/PlatformKinds.def
+@@ -33,6 +33,7 @@ AVAILABILITY_PLATFORM(macOSApplicationExtension, "application extensions for mac
+ AVAILABILITY_PLATFORM(macCatalyst, "Mac Catalyst")
+ AVAILABILITY_PLATFORM(macCatalystApplicationExtension, "application extensions for Mac Catalyst")
+ AVAILABILITY_PLATFORM(OpenBSD, "OpenBSD")
++AVAILABILITY_PLATFORM(Haiku, "Haiku")
+ AVAILABILITY_PLATFORM(Windows, "Windows")
+ 
+ #undef AVAILABILITY_PLATFORM
+diff --git a/lib/AST/PlatformKind.cpp b/lib/AST/PlatformKind.cpp
+index 83ae9f4f..9f74cdb3 100644
+--- a/lib/AST/PlatformKind.cpp
++++ b/lib/AST/PlatformKind.cpp
+@@ -97,6 +97,7 @@ static bool isApplicationExtensionPlatform(PlatformKind Platform) {
+   case PlatformKind::tvOS:
+   case PlatformKind::watchOS:
+   case PlatformKind::OpenBSD:
++  case PlatformKind::Haiku:
+   case PlatformKind::Windows:
+   case PlatformKind::none:
+     return false;
+@@ -133,6 +134,8 @@ static bool isPlatformActiveForTarget(PlatformKind Platform,
+       return Target.isWatchOS();
+     case PlatformKind::OpenBSD:
+       return Target.isOSOpenBSD();
++    case PlatformKind::Haiku:
++      return Target.isOSHaiku();
+     case PlatformKind::Windows:
+       return Target.isOSWindows();
+     case PlatformKind::none:
+diff --git a/lib/Basic/Default/TaskQueue.inc b/lib/Basic/Default/TaskQueue.inc
+index fd590e81..b7d3afd9 100644
+--- a/lib/Basic/Default/TaskQueue.inc
++++ b/lib/Basic/Default/TaskQueue.inc
+@@ -55,7 +55,7 @@ unsigned TaskQueue::getNumberOfParallelTasks() const {
+ void TaskQueue::addTask(const char *ExecPath, ArrayRef<const char *> Args,
+                         ArrayRef<const char *> Env, void *Context,
+                         bool SeparateErrors) {
+-  auto T = make_unique<Task>(ExecPath, Args, Env, Context, SeparateErrors);
++  auto T = std::make_unique<Task>(ExecPath, Args, Env, Context, SeparateErrors);
+   QueuedTasks.push(std::move(T));
+ }
+ 
+diff --git a/lib/CMakeLists.txt b/lib/CMakeLists.txt
+index 846d1653..2bf75556 100644
+--- a/lib/CMakeLists.txt
++++ b/lib/CMakeLists.txt
+@@ -57,7 +57,7 @@ if (SWIFT_SWIFT_PARSER)
+   # be found via RPATH.
+   foreach (sharedlib ${SWIFT_SYNTAX_SHARED_LIBRARIES})
+     set(add_origin_rpath)
+-    if(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD")
++    if(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD|HAIKU")
+       # At runtime, use swiftCore in the current toolchain.
+       swift_get_set_rpath_script_file(setrpath_command)
+       set(add_origin_rpath COMMAND ${CMAKE_COMMAND}
+diff --git a/lib/ClangImporter/ClangImporter.cpp b/lib/ClangImporter/ClangImporter.cpp
+index c093cd8f..2cde306d 100644
+--- a/lib/ClangImporter/ClangImporter.cpp
++++ b/lib/ClangImporter/ClangImporter.cpp
+@@ -2212,6 +2212,10 @@ PlatformAvailability::PlatformAvailability(const LangOptions &langOpts)
+     deprecatedAsUnavailableMessage = "";
+     break;
+ 
++  case PlatformKind::Haiku:
++    deprecatedAsUnavailableMessage = "";
++    break;
++
+   case PlatformKind::Windows:
+     deprecatedAsUnavailableMessage = "";
+     break;
+@@ -2252,6 +2256,9 @@ bool PlatformAvailability::isPlatformRelevant(StringRef name) const {
+   case PlatformKind::OpenBSD:
+     return name == "openbsd";
+ 
++  case PlatformKind::Haiku:
++    return name == "haiku";
++
+   case PlatformKind::Windows:
+     return name == "windows";
+ 
+@@ -2319,6 +2326,10 @@ bool PlatformAvailability::treatDeprecatedAsUnavailable(
+     // No deprecation filter on OpenBSD
+     return false;
+ 
++  case PlatformKind::Haiku:
++    // No deprecation filter on Haiku
++    return false;
++
+   case PlatformKind::Windows:
+     // No deprecation filter on Windows
+     return false;
+diff --git a/lib/ClangImporter/ClangIncludePaths.cpp b/lib/ClangImporter/ClangIncludePaths.cpp
+index dc368b03..e685ba69 100644
+--- a/lib/ClangImporter/ClangIncludePaths.cpp
++++ b/lib/ClangImporter/ClangIncludePaths.cpp
+@@ -192,7 +192,7 @@ createClangArgs(const ASTContext &ctx, clang::driver::Driver &clangDriver) {
+ 
+ static bool shouldInjectGlibcModulemap(const llvm::Triple &triple) {
+   return triple.isOSGlibc() || triple.isOSOpenBSD() || triple.isOSFreeBSD() ||
+-         triple.isAndroid();
++         triple.isAndroid() || triple.isOSHaiku();
+ }
+ 
+ static SmallVector<std::pair<std::string, std::string>, 2> getGlibcFileMapping(
+@@ -217,12 +217,17 @@ static SmallVector<std::pair<std::string, std::string>, 2> getGlibcFileMapping(
+   // Ideally we would check that all of the headers referenced from the
+   // modulemap are present.
+   Path glibcDir;
+-  if (auto dir = findFirstIncludeDir(
+-          parsedIncludeArgs, {"inttypes.h", "unistd.h", "stdint.h"}, vfs)) {
+-    glibcDir = dir.value();
++
++  if(triple.isOSHaiku() == true) {
++    glibcDir = "/boot/system/develop/headers/posix/";
+   } else {
+-    ctx.Diags.diagnose(SourceLoc(), diag::glibc_not_found, triple.str());
+-    return {};
++    if (auto dir = findFirstIncludeDir(
++            parsedIncludeArgs, {"inttypes.h", "unistd.h", "stdint.h"}, vfs)) {
++      glibcDir = dir.value();
++    } else {
++      ctx.Diags.diagnose(SourceLoc(), diag::glibc_not_found, triple.str());
++      return {};
++    }
+   }
+ 
+   Path actualModuleMapPath;
+diff --git a/lib/IRGen/TBDGen.cpp b/lib/IRGen/TBDGen.cpp
+index a4d8c722..e1b2341b 100644
+--- a/lib/IRGen/TBDGen.cpp
++++ b/lib/IRGen/TBDGen.cpp
+@@ -235,6 +235,8 @@ getLinkerPlatformId(OriginallyDefinedInAttr::ActiveVersion Ver) {
+   switch(Ver.Platform) {
+   case swift::PlatformKind::none:
+     llvm_unreachable("cannot find platform kind");
++  case swift::PlatformKind::Haiku:
++    llvm_unreachable("not used for this platform");
+   case swift::PlatformKind::OpenBSD:
+     llvm_unreachable("not used for this platform");
+   case swift::PlatformKind::Windows:
+diff --git a/lib/Macros/CMakeLists.txt b/lib/Macros/CMakeLists.txt
+index 3598a4e9..f870e8a0 100644
+--- a/lib/Macros/CMakeLists.txt
++++ b/lib/Macros/CMakeLists.txt
+@@ -45,7 +45,7 @@ function(add_swift_macro_library name)
+   _set_pure_swift_link_flags(${name} "${relpath_to_lib}")
+ 
+   # Add rpath to 'lib/host'
+-  if(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD")
++  if(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD|HAIKU")
+     set_property(TARGET ${name}
+       APPEND PROPERTY INSTALL_RPATH "$ORIGIN/..")
+   endif()
+diff --git a/lib/PrintAsClang/DeclAndTypePrinter.cpp b/lib/PrintAsClang/DeclAndTypePrinter.cpp
+index 4661cd62..c1d90a14 100644
+--- a/lib/PrintAsClang/DeclAndTypePrinter.cpp
++++ b/lib/PrintAsClang/DeclAndTypePrinter.cpp
+@@ -1708,6 +1708,9 @@ public:
+       case PlatformKind::OpenBSD:
+         plat = "openbsd";
+         break;
++      case PlatformKind::Haiku:
++        plat = "haiku";
++        break;
+       case PlatformKind::Windows:
+         plat = "windows";
+         break;
+diff --git a/lib/SymbolGraphGen/AvailabilityMixin.cpp b/lib/SymbolGraphGen/AvailabilityMixin.cpp
+index 03b6e963..cfe3291f 100644
+--- a/lib/SymbolGraphGen/AvailabilityMixin.cpp
++++ b/lib/SymbolGraphGen/AvailabilityMixin.cpp
+@@ -59,6 +59,8 @@ StringRef getDomain(const AvailableAttr &AvAttr) {
+       return { "watchOSAppExtension" };
+     case swift::PlatformKind::OpenBSD:
+       return { "OpenBSD" };
++    case swift::PlatformKind::Haiku:
++      return { "Haiku" };
+     case swift::PlatformKind::Windows:
+       return { "Windows" };
+     case swift::PlatformKind::none:
+diff --git a/stdlib/cmake/modules/AddSwiftStdlib.cmake b/stdlib/cmake/modules/AddSwiftStdlib.cmake
+index c3567895..86dd0b69 100644
+--- a/stdlib/cmake/modules/AddSwiftStdlib.cmake
++++ b/stdlib/cmake/modules/AddSwiftStdlib.cmake
+@@ -1174,6 +1174,10 @@ function(add_swift_target_library_single target name)
+     set_target_properties("${target}"
+       PROPERTIES
+       INSTALL_RPATH "$ORIGIN")
++  elseif("${SWIFTLIB_SINGLE_SDK}" STREQUAL "HAIKU")
++      set_target_properties("${target}"
++        PROPERTIES
++        INSTALL_RPATH "$ORIGIN")
+   endif()
+ 
+   set_target_properties("${target}" PROPERTIES BUILD_WITH_INSTALL_RPATH YES)
+diff --git a/stdlib/cmake/modules/SwiftSource.cmake b/stdlib/cmake/modules/SwiftSource.cmake
+index e91471ae..ead1f67b 100644
+--- a/stdlib/cmake/modules/SwiftSource.cmake
++++ b/stdlib/cmake/modules/SwiftSource.cmake
+@@ -802,7 +802,7 @@ function(_compile_swift_files
+   set(custom_env "PYTHONIOENCODING=UTF8")
+   if(SWIFTFILE_IS_STDLIB OR
+      # Linux "hosttools" build require builder's runtime before building the runtime.
+-     (BOOTSTRAPPING_MODE STREQUAL "HOSTTOOLS" AND SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD")
++     (BOOTSTRAPPING_MODE STREQUAL "HOSTTOOLS" AND SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD|HAIKU")
+   )
+     get_bootstrapping_swift_lib_dir(bs_lib_dir "${SWIFTFILE_BOOTSTRAPPING}")
+     if(bs_lib_dir)
+@@ -811,7 +811,7 @@ function(_compile_swift_files
+       # stdlib in the current stage is not built yet.
+       if(SWIFT_HOST_VARIANT_SDK IN_LIST SWIFT_APPLE_PLATFORMS)
+         list(APPEND custom_env "DYLD_LIBRARY_PATH=${bs_lib_dir}")
+-      elseif(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD")
++      elseif(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD|HAIKU")
+         list(APPEND custom_env "LD_LIBRARY_PATH=${bs_lib_dir}")
+       endif()
+     endif()
+diff --git a/stdlib/private/StdlibUnittest/StdlibUnittest.swift b/stdlib/private/StdlibUnittest/StdlibUnittest.swift
+index d6e3f90b..d2af6755 100644
+--- a/stdlib/private/StdlibUnittest/StdlibUnittest.swift
++++ b/stdlib/private/StdlibUnittest/StdlibUnittest.swift
+@@ -35,6 +35,11 @@ import ObjectiveC
+ import _Concurrency
+ #endif
+ 
++// HAIKU
++#if os(Haiku)
++let EINTR = ((-2147483647 - 1) + 0x7000) + 10
++#endif
++
+ extension String {
+   /// Returns the lines in `self`.
+   public var _lines : [String] {
+diff --git a/stdlib/private/SwiftPrivateLibcExtras/Subprocess.swift b/stdlib/private/SwiftPrivateLibcExtras/Subprocess.swift
+index 41980a77..363b1c4a 100644
+--- a/stdlib/private/SwiftPrivateLibcExtras/Subprocess.swift
++++ b/stdlib/private/SwiftPrivateLibcExtras/Subprocess.swift
+@@ -22,6 +22,11 @@ import CRT
+ import WinSDK
+ #endif
+ 
++// HAIKU
++#if os(Haiku)
++let EINTR = ((-2147483647 - 1) + 0x7000) + 10
++#endif
++
+ #if !os(WASI)
+ // No signals support on WASI yet, see https://github.com/WebAssembly/WASI/issues/166.
+ internal func _signalToString(_ signal: Int) -> String {
+@@ -238,6 +243,8 @@ var environ: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?> {
+   return __p_environ().pointee
+   #elseif os(Linux)
+   return __environ
++  #elseif os(Haiku)
++  return __environ
+   #else
+   #error("unsupported platform")
+   #endif
+diff --git a/stdlib/private/SwiftPrivateThreadExtras/ThreadBarriers.swift b/stdlib/private/SwiftPrivateThreadExtras/ThreadBarriers.swift
+index 7133d1b8..af3d42d5 100644
+--- a/stdlib/private/SwiftPrivateThreadExtras/ThreadBarriers.swift
++++ b/stdlib/private/SwiftPrivateThreadExtras/ThreadBarriers.swift
+@@ -21,6 +21,12 @@ import CRT
+ import WinSDK
+ #endif
+ 
++// HAIKU
++#if os(Haiku)
++let EINVAL: Int32 = ((-2147483647 - 1) + 0x7000) + 22
++#endif
++
++
+ //
+ // Implement pthread barriers.
+ //
+diff --git a/stdlib/private/SwiftReflectionTest/CMakeLists.txt b/stdlib/private/SwiftReflectionTest/CMakeLists.txt
+index 27a7013f..1f9b45a2 100644
+--- a/stdlib/private/SwiftReflectionTest/CMakeLists.txt
++++ b/stdlib/private/SwiftReflectionTest/CMakeLists.txt
+@@ -11,6 +11,7 @@ if (SWIFT_INCLUDE_TESTS)
+     SWIFT_MODULE_DEPENDS_LINUX Glibc
+     SWIFT_MODULE_DEPENDS_FREEBSD Glibc
+     SWIFT_MODULE_DEPENDS_OPENBSD Glibc
++    SWIFT_MODULE_DEPENDS_HAIKU Glibc
+     SWIFT_MODULE_DEPENDS_WINDOWS CRT
+     INSTALL_IN_COMPONENT stdlib-experimental
+     DARWIN_INSTALL_NAME_DIR "${SWIFT_DARWIN_STDLIB_PRIVATE_INSTALL_NAME_DIR}")
+diff --git a/stdlib/public/Platform/POSIXError.swift b/stdlib/public/Platform/POSIXError.swift
+index 84777cb3..572c5a4a 100644
+--- a/stdlib/public/Platform/POSIXError.swift
++++ b/stdlib/public/Platform/POSIXError.swift
+@@ -1084,4 +1084,80 @@ public enum POSIXErrorCode : Int32 {
+ #endif
+ }
+ 
++#elseif os(Haiku)
++
++/// Enumeration describing POSIX error codes.
++public enum POSIXErrorCode : Int32 {
++    case ENOMEM	          = 0
++    case E2BIG			      = 1
++    case ECHILD			      = 2
++    case EDEADLK			    = 3
++    case EFBIG			      = 4
++    case EMLINK			      = 5
++    case ENFILE			      = 6
++    case ENODEV			      = 7
++    case ENOLCK			      = 8
++    case ENOSYS			      = 9
++    case ENOTTY			      = 10
++    case ENXIO			      = 11
++    case ESPIPE			      = 12
++    case ESRCH			      = 13
++    case EFPOS			      = 14
++    case ESIGPARM		      = 15
++    case EDOM			        = 16
++    case ERANGE			      = 17
++    case EPROTOTYPE		    = 18
++    case EPROTONOSUPPORT	= 19
++    case EPFNOSUPPORT	    = 20
++    case EAFNOSUPPORT	    = 21
++    case EADDRINUSE		    = 22
++    case EADDRNOTAVAIL	  = 23
++    case ENETDOWN		      = 24
++    case ENETUNREACH		  = 25
++    case ENETRESET		    = 26
++    case ECONNABORTED	    = 27
++    case ECONNRESET		    = 28
++    case EISCONN			    = 29
++    case ENOTCONN		      = 30
++    case ESHUTDOWN		    = 31
++    case ECONNREFUSED	    = 32
++    case EHOSTUNREACH	    = 33
++    case ENOPROTOOPT		  = 34
++    case ENOBUFS			    = 35
++    case EINPROGRESS		  = 36
++    case EALREADY		      = 37
++    case EILSEQ			      = 38
++    case ENOMSG			      = 39
++    case ESTALE			      = 40
++    case EOVERFLOW		    = 41
++    case EMSGSIZE		      = 42
++    case EOPNOTSUPP		    = 43
++    case ENOTSOCK		      = 44
++    case EHOSTDOWN		    = 45
++    case EBADMSG			    = 46
++    case ECANCELED		    = 47
++    case EDESTADDRREQ	    = 48
++    case EDQUOT			      = 49
++    case EIDRM			      = 50
++    case EMULTIHOP		    = 51
++    case ENODATA			    = 52
++    case ENOLINK			    = 53
++    case ENOSR			      = 54
++    case ENOSTR			      = 55
++    case ENOTSUP			    = 56
++    case EPROTO			      = 57
++    case ETIME			      = 58
++    case ETXTBSY			    = 59
++    case ENOATTR			    = 60
++    case ENOTRECOVERABLE	= 61
++    case EOWNERDEAD		    = 62
++    case EINTR            = 63
++
++  // /// Operation would block.
++  // public static var EWOULDBLOCK: POSIXErrorCode { return .EAGAIN }
++
++  // /// Operation not supported on transport endpoint
++  // public static var EOPNOTSUPP: POSIXErrorCode { return .ENOTSUP }
++}
++
+ #endif
+diff --git a/stdlib/public/SwiftShims/swift/shims/LibcShims.h b/stdlib/public/SwiftShims/swift/shims/LibcShims.h
+index 1e4132f6..6aaac660 100644
+--- a/stdlib/public/SwiftShims/swift/shims/LibcShims.h
++++ b/stdlib/public/SwiftShims/swift/shims/LibcShims.h
+@@ -117,6 +117,8 @@ static inline __swift_size_t _swift_stdlib_malloc_size(const void *ptr) {
+   extern __swift_size_t _msize(void *ptr);
+   return _msize(CONST_CAST(void *, ptr));
+ }
++#elif defined(__HAIKU__)
++typedef __swift_uint32_t __swift_mode_t;
+ #else
+ #define HAS_MALLOC_SIZE 0
+ 
+@@ -170,7 +172,7 @@ long double _stdlib_squareRootl(long double _self) {
+ // Apple's math.h does not declare lgamma_r() etc by default, but they're
+ // unconditionally exported by libsystem_m.dylib in all OS versions that
+ // support Swift development; we simply need to provide declarations here.
+-#if defined(__APPLE__)
++#if defined(__APPLE__) || defined(__HAIKU__)
+ float lgammaf_r(float x, int *psigngam);
+ double lgamma_r(double x, int *psigngam);
+ long double lgammal_r(long double x, int *psigngam);
+diff --git a/stdlib/public/core/CTypes.swift b/stdlib/public/core/CTypes.swift
+index 5e639149..dee0b81b 100644
+--- a/stdlib/public/core/CTypes.swift
++++ b/stdlib/public/core/CTypes.swift
+@@ -80,6 +80,7 @@ public typealias CLongDouble = Double
+ // On Windows, long double is always Double.
+ public typealias CLongDouble = Double
+ #elseif os(Linux)
++#elseif os(Haiku)
+ // On Linux/x86, long double is Float80.
+ // TODO: Fill in definitions for additional architectures as needed. IIRC
+ // armv7 should map to Double, but arm64 and ppc64le should map to Float128,
+diff --git a/stdlib/public/runtime/Backtrace.cpp b/stdlib/public/runtime/Backtrace.cpp
+index 53d66395..0139a9d1 100644
+--- a/stdlib/public/runtime/Backtrace.cpp
++++ b/stdlib/public/runtime/Backtrace.cpp
+@@ -258,6 +258,10 @@ bool isPrivileged() {
+ bool isPrivileged() {
+   return issetugid();
+ }
++#elif defined(__HAIKU__)
++bool isPrivileged() {
++  return 1;
++}
+ #elif _WIN32
+ bool isPrivileged() {
+   return false;
+diff --git a/tools/SourceKit/cmake/modules/AddSwiftSourceKit.cmake b/tools/SourceKit/cmake/modules/AddSwiftSourceKit.cmake
+index 09f7c437..d51c8d14 100644
+--- a/tools/SourceKit/cmake/modules/AddSwiftSourceKit.cmake
++++ b/tools/SourceKit/cmake/modules/AddSwiftSourceKit.cmake
+@@ -121,7 +121,7 @@ function(add_sourcekit_swift_runtime_link_flags target path HAS_SWIFT_MODULES)
+       file(RELATIVE_PATH relative_hostlib_path "${path}" "${SWIFTLIB_DIR}/host")
+       list(APPEND RPATH_LIST "@loader_path/${relative_hostlib_path}")
+     endif()
+-  elseif(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD" AND HAS_SWIFT_MODULES AND ASKD_BOOTSTRAPPING_MODE)
++  elseif(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|HAIKU" AND HAS_SWIFT_MODULES AND ASKD_BOOTSTRAPPING_MODE)
+     set(swiftrt "swiftImageRegistrationObject${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_OBJECT_FORMAT}-${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR}-${SWIFT_HOST_VARIANT_ARCH}")
+     if(${ASKD_BOOTSTRAPPING_MODE} MATCHES "HOSTTOOLS|CROSSCOMPILE")
+       # At build time and run time, link against the swift libraries in the
+diff --git a/tools/SourceKit/lib/SwiftLang/SwiftDocSupport.cpp b/tools/SourceKit/lib/SwiftLang/SwiftDocSupport.cpp
+index 18cd8a48..54864249 100644
+--- a/tools/SourceKit/lib/SwiftLang/SwiftDocSupport.cpp
++++ b/tools/SourceKit/lib/SwiftLang/SwiftDocSupport.cpp
+@@ -687,6 +687,7 @@ static void reportAttributes(ASTContext &Ctx,
+   static UIdent PlatformtvOSAppExt("source.availability.platform.tvos_app_extension");
+   static UIdent PlatformWatchOSAppExt("source.availability.platform.watchos_app_extension");
+   static UIdent PlatformOpenBSD("source.availability.platform.openbsd");
++  static UIdent PlatformHaiku("source.availability.platform.haiku");
+   static UIdent PlatformWindows("source.availability.platform.windows");
+   std::vector<const DeclAttribute*> Scratch;
+ 
+@@ -718,6 +719,8 @@ static void reportAttributes(ASTContext &Ctx,
+         PlatformUID = PlatformWatchOSAppExt; break;
+       case PlatformKind::OpenBSD:
+         PlatformUID = PlatformOpenBSD; break;
++      case PlatformKind::Haiku:
++        PlatformUID = PlatformHaiku; break;
+       case PlatformKind::Windows:
+         PlatformUID = PlatformWindows; break;
+       }
+diff --git a/tools/libSwiftScan/CMakeLists.txt b/tools/libSwiftScan/CMakeLists.txt
+index 78a6169b..b637bf01 100644
+--- a/tools/libSwiftScan/CMakeLists.txt
++++ b/tools/libSwiftScan/CMakeLists.txt
+@@ -30,7 +30,7 @@ set_target_properties(libSwiftScan
+     PROPERTIES
+     OUTPUT_NAME ${SWIFT_SCAN_LIB_NAME})
+ 
+-if(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD" AND BOOTSTRAPPING_MODE STREQUAL "HOSTTOOLS")
++if(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD|HAIKU" AND BOOTSTRAPPING_MODE STREQUAL "HOSTTOOLS")
+   # Runtime INSTALL_RPATH are set by 'add_swift_host_library', but that expects
+   # libSwiftScan be installed in 'lib'. But since it's actually installed in 'lib/swift/host',
+   # we need to have correct runtime path to 'lib/swift/{platform}'.
+@@ -52,7 +52,7 @@ if(SWIFT_SWIFT_PARSER)
+     set_property(
+       TARGET libSwiftScan
+       APPEND PROPERTY INSTALL_RPATH "@loader_path/../host")
+-  elseif(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD")
++  elseif(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD|HAIKU")
+     set_property(
+       TARGET libSwiftScan
+       APPEND PROPERTY INSTALL_RPATH "$ORIGIN/swift/host")
+diff --git a/tools/swift-dependency-tool/swift-dependency-tool.cpp b/tools/swift-dependency-tool/swift-dependency-tool.cpp
+index cd4854b2..4b21cb73 100644
+--- a/tools/swift-dependency-tool/swift-dependency-tool.cpp
++++ b/tools/swift-dependency-tool/swift-dependency-tool.cpp
+@@ -30,7 +30,7 @@ using namespace fine_grained_dependencies;
+ 
+ // This introduces a redefinition wherever std::is_same_t<size_t, uint64_t>
+ // holds.
+-#if !(defined(__linux__) || defined(_WIN64) || defined(__FreeBSD__))
++#if !(defined(__linux__) || defined(_WIN64) || defined(__FreeBSD__) || defined(__HAIKU__))
+ LLVM_YAML_DECLARE_SCALAR_TRAITS(size_t, QuotingType::None)
+ #endif
+ LLVM_YAML_DECLARE_ENUM_TRAITS(swift::fine_grained_dependencies::NodeKind)
+@@ -90,7 +90,7 @@ namespace llvm {
+ namespace yaml {
+ // This introduces a redefinition wherever std::is_same_t<size_t, uint64_t>
+ // holds.
+-#if !(defined(__linux__) || defined(_WIN64) || defined(__FreeBSD__))
++#if !(defined(__linux__) || defined(_WIN64) || defined(__FreeBSD__) || defined(__HAIKU__))
+ void ScalarTraits<size_t>::output(const size_t &Val, void *, raw_ostream &out) {
+   out << Val;
+ }
+-- 
+2.42.0
+

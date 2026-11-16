@@ -1,0 +1,156 @@
+SUMMARY="A generic-purpose lossless compression algorithm"
+DESCRIPTION="A generic-purpose lossless compression algorithm that \
+compresses data using a combination of a modern variant of the LZ77 algorithm, \
+Huffman coding and 2nd order context modeling, with a compression ratio \
+comparable to the best currently available general-purpose compression \
+methods. It is similar in speed with deflate but offers more dense compression."
+HOMEPAGE="https://github.com/google/brotli"
+COPYRIGHT="2009, 2010, 2013-2026 Brotli Authors"
+LICENSE="MIT"
+REVISION="2"
+SOURCE_URI="https://github.com/google/brotli/archive/v$portVersion.tar.gz"
+CHECKSUM_SHA256="98d35d11a78dc453aebb7d10c3748f3f73ff78c8267c0dc697b8631f67bf7e8f"
+SOURCE_FILENAME="brotli-$portVersion.tar.gz"
+
+ARCHITECTURES="all !x86_gcc2"
+SECONDARY_ARCHITECTURES="x86"
+
+# For now the library will follow $portVersion,
+# but upstream said that will change in the future.
+libVersion="$portVersion"
+libVersionCompat="$libVersion compat >= ${libVersion%%.*}"
+
+PROVIDES="
+	brotli$secondaryArchSuffix = $portVersion
+	cmd:brotli$secondaryArchSuffix = $portVersion
+	lib:libbrotlicommon$secondaryArchSuffix = $libVersionCompat
+	lib:libbrotlidec$secondaryArchSuffix = $libVersionCompat
+	lib:libbrotlienc$secondaryArchSuffix = $libVersionCompat
+	"
+REQUIRES="
+	haiku$secondaryArchSuffix
+	"
+
+PROVIDES_devel="
+	brotli${secondaryArchSuffix}_devel = $portVersion
+	devel:libbrotlicommon$secondaryArchSuffix = $libVersionCompat
+	devel:libbrotlidec$secondaryArchSuffix = $libVersionCompat
+	devel:libbrotlienc$secondaryArchSuffix = $libVersionCompat
+	"
+REQUIRES_devel="
+	brotli$secondaryArchSuffix == $portVersion base
+	"
+
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel
+	"
+BUILD_PREREQUIRES="
+	cmd:cmake
+	cmd:g++$secondaryArchSuffix
+	cmd:gcc$secondaryArchSuffix
+	cmd:make
+	"
+
+PYTHON_VERSIONS+=(3.10 3.14)
+
+for pythonVersion in "${PYTHON_VERSIONS[@]}"; do
+	pythonPackage=python${pythonVersion//.}
+
+	# Not renaming 3.10 packages to avoid needing massive packages rebuilds.
+	# No need for REPLACES then. ToDo: remove the conditional after dropping 3.10.
+	if [ $pythonVersion != 3.10 ]; then
+		# Allows using dot in sub-package names (eg: "_python3.14" vs "_python314"):
+		eval "PACKAGE_NAME_$pythonPackage=${portName}_python$pythonVersion"
+
+		eval "PROVIDES_$pythonPackage=\"
+			${portName}_python$pythonVersion = $portVersion
+			\""
+		if [ -n "$secondaryArchSuffix" ]; then
+			eval "PROVIDES_$pythonPackage+=\"
+			${portBaseName}_python$pythonVersion = $portVersion
+			\""
+		fi
+	fi
+
+	eval "PROVIDES_${pythonPackage}+=\"
+		${portName}_$pythonPackage = $portVersion
+		\""
+	if [ -n "$secondaryArchSuffix" ]; then
+		eval "PROVIDES_$pythonPackage+=\"
+			${portBaseName}_$pythonPackage = $portVersion
+			\""
+	fi
+
+	eval "REQUIRES_$pythonPackage=\"
+		haiku$secondaryArchSuffix
+		cmd:python$pythonVersion
+		\""
+	BUILD_REQUIRES+="
+		setuptools_$pythonPackage
+		"
+	BUILD_PREREQUIRES+="
+		cmd:python$pythonVersion
+		"
+done
+
+BUILD()
+{
+	cmake \
+		-B build -S . \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_LIBDIR=$libDir \
+		-DCMAKE_INSTALL_BINDIR=$binDir \
+		-DCMAKE_INSTALL_INCLUDEDIR=$includeDir \
+		-DCMAKE_INSTALL_MANDIR=$manDir \
+		-DBROTLI_DISABLE_TESTS=OFF
+
+	make -C build $jobArgs
+
+	for pythonVersion in "${PYTHON_VERSIONS[@]}"; do
+		python=python$pythonVersion
+
+		$python setup.py build
+	done
+}
+
+INSTALL()
+{
+	make -C build install
+
+	for pythonVersion in "${PYTHON_VERSIONS[@]}"; do
+		pythonPackage=python${pythonVersion//.}
+		python=python$pythonVersion
+
+		$python setup.py install \
+			--root=/ --prefix=$prefix
+
+		packageEntries $pythonPackage \
+			"$prefix"/lib/$python
+	done
+
+	install -d -m 755 "$manDir"/man{1,3}
+	install -t "$manDir/man1" docs/brotli.1
+	install -t "$manDir/man3" docs/*.3
+
+	prepareInstalledDevelLibs libbrotli{common,dec,enc}
+	fixPkgconfig
+
+	packageEntries devel \
+		"$manDir/man3" \
+		"$developDir"
+}
+
+TEST()
+{
+	for pythonVersion in "${PYTHON_VERSIONS[@]}"; do
+		python=python$pythonVersion
+
+		# Can't use a wildcard here because `uname -r` contains a '~' which can't be expanded correctly.
+		export PYTHONPATH=$PWD/bin/lib.haiku-$(uname -r)-$(uname -m)-cpython-${pythonVersion//.}
+
+		$python -m unittest discover python "*_test.py"
+	done
+
+	sed -i -e "s|/packages/brotli-.*/cmd~cmake/bin/cmake|/bin/cmake|g" build/CTestTestfile.cmake
+	ctest --test-dir build --output-on-failure
+}

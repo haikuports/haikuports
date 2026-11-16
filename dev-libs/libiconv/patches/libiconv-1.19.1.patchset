@@ -1,0 +1,954 @@
+From 082337054597af61b715dac491428eb4a9f7ae66 Mon Sep 17 00:00:00 2001
+From: Robert Kausch <robert.kausch@freac.org>
+Date: Thu, 13 Oct 2022 00:05:46 +0000
+Subject: gcc2 fixes
+
+
+diff --git a/srclib/canonicalize-lgpl.c b/srclib/canonicalize-lgpl.c
+index 92c9624..471494c 100644
+--- a/srclib/canonicalize-lgpl.c
++++ b/srclib/canonicalize-lgpl.c
+@@ -191,6 +191,20 @@ struct realpath_bufs
+ static char *
+ realpath_stk (const char *name, char *resolved, struct realpath_bufs *bufs)
+ {
++  char *rname = bufs->rname.data;
++
++  /* This is always zero for Posix hosts, but can be 2 for MS-Windows
++     and MS-DOS X:/foo/bar file names.  */
++  idx_t prefix_len;
++
++  char *dest;
++  char const *start;
++
++  bool failed = true;
++
++  int num_links = 0;
++  bool end_in_extra_buffer = false;
++
+   if (name == NULL)
+     {
+       /* As per Single Unix Specification V2 we must return an error if
+@@ -209,17 +223,6 @@ realpath_stk (const char *name, char *resolved, struct realpath_bufs *bufs)
+       return NULL;
+     }
+ 
+-  char *rname = bufs->rname.data;
+-
+-  /* This is always zero for Posix hosts, but can be 2 for MS-Windows
+-     and MS-DOS X:/foo/bar file names.  */
+-  idx_t prefix_len;
+-
+-  char *dest;
+-  char const *start;
+-
+-  bool failed = true;
+-
+   if (!IS_ABSOLUTE_FILE_NAME (name))
+     {
+       while (!__getcwd (bufs->rname.data, bufs->rname.length))
+@@ -252,23 +255,21 @@ realpath_stk (const char *name, char *resolved, struct realpath_bufs *bufs)
+       start = name + prefix_len;
+     }
+ 
+-  int num_links = 0;
+-  bool end_in_extra_buffer = false;
+-
+   for (; *start;)
+     {
++      idx_t startlen;
++      char const *end;
+       /* Skip sequence of multiple file name separators.  */
+       while (ISSLASH (*start))
+         ++start;
+ 
+       /* Find end of component.  */
+-      char const *end;
+       for (end = start; *end && !ISSLASH (*end); ++end)
+         /* Nothing.  */;
+ 
+       /* Length of this file name component; it can be zero if a file
+          name ends in '/'.  */
+-      idx_t startlen = end - start;
++      startlen = end - start;
+ 
+       if (startlen == 0)
+         break;
+@@ -302,13 +303,13 @@ realpath_stk (const char *name, char *resolved, struct realpath_bufs *bufs)
+ 
+           dest = __mempcpy (dest, start, startlen);
+           *dest = '\0';
+-
++         {
+           char *buf;
+           ssize_t n;
+           while (true)
+             {
+-              buf = bufs->link.data;
+               idx_t bufsize = bufs->link.length;
++              buf = bufs->link.data;
+               n = __readlink (rname, buf, bufsize - 1);
+               if (n < bufsize - 1)
+                 break;
+@@ -317,6 +318,9 @@ realpath_stk (const char *name, char *resolved, struct realpath_bufs *bufs)
+             }
+           if (0 <= n)
+             {
++              char *extra_buf = bufs->extra.data;
++              idx_t end_idx IF_LINT (= 0);
++              size_t len;
+               if (++num_links > MIN_ELOOP_THRESHOLD)
+                 {
+                   __set_errno (ELOOP);
+@@ -325,11 +329,9 @@ realpath_stk (const char *name, char *resolved, struct realpath_bufs *bufs)
+ 
+               buf[n] = '\0';
+ 
+-              char *extra_buf = bufs->extra.data;
+-              idx_t end_idx IF_LINT (= 0);
+               if (end_in_extra_buffer)
+                 end_idx = end - extra_buf;
+-              size_t len = strlen (end);
++              len = strlen (end);
+               if (INT_ADD_OVERFLOW (len, n))
+                 {
+                   __set_errno (ENOMEM);
+@@ -380,6 +382,7 @@ realpath_stk (const char *name, char *resolved, struct realpath_bufs *bufs)
+                       ? dir_check (rname, dest)
+                       : errno == EINVAL))
+             goto error;
++          }
+         }
+ 
+       start = end;
+diff --git a/srclib/careadlinkat.c b/srclib/careadlinkat.c
+index c5e8add..5fabd2e 100644
+--- a/srclib/careadlinkat.c
++++ b/srclib/careadlinkat.c
+@@ -69,7 +69,7 @@ readlink_stk (int fd, char const *filename,
+       buffer = stack_buf;
+       buffer_size = STACK_BUF_SIZE;
+     }
+-
++  {
+   char *buf = buffer;
+   idx_t buf_size_max = MIN (IDX_MAX, MIN (SSIZE_MAX, SIZE_MAX));
+   idx_t buf_size = MIN (buffer_size, buf_size_max);
+@@ -78,6 +78,7 @@ readlink_stk (int fd, char const *filename,
+     {
+       /* Attempt to read the link into the current buffer.  */
+       idx_t link_length = preadlinkat (fd, filename, buf, buf_size);
++      idx_t link_size = link_length;
+       if (link_length < 0)
+         {
+           if (buf != buffer)
+@@ -89,8 +90,6 @@ readlink_stk (int fd, char const *filename,
+           return NULL;
+         }
+ 
+-      idx_t link_size = link_length;
+-
+       if (link_size < buf_size)
+         {
+           buf[link_size++] = '\0';
+@@ -130,6 +129,7 @@ readlink_stk (int fd, char const *filename,
+ 
+   if (alloc->die)
+     alloc->die (buf_size);
++  }
+   errno = ENOMEM;
+   return NULL;
+ }
+diff --git a/srclib/malloc.c b/srclib/malloc.c
+index f7d1192..06034bd 100644
+--- a/srclib/malloc.c
++++ b/srclib/malloc.c
+@@ -31,6 +31,7 @@
+ void *
+ rpl_malloc (size_t n)
+ {
++  void *result;
+ #if !HAVE_MALLOC_0_NONNULL
+   if (n == 0)
+     n = 1;
+@@ -45,7 +46,7 @@ rpl_malloc (size_t n)
+     }
+ #endif
+ 
+-  void *result = malloc (n);
++  result = malloc (n);
+ 
+ #if !HAVE_MALLOC_POSIX
+   if (result == NULL)
+diff --git a/srclib/malloc/scratch_buffer_set_array_size.c b/srclib/malloc/scratch_buffer_set_array_size.c
+index 93c7cb1..24314c9 100644
+--- a/srclib/malloc/scratch_buffer_set_array_size.c
++++ b/srclib/malloc/scratch_buffer_set_array_size.c
+@@ -29,6 +29,7 @@ __libc_scratch_buffer_set_array_size (struct scratch_buffer *buffer,
+ 				      size_t nelem, size_t size)
+ {
+   size_t new_length = nelem * size;
++  char *new_ptr;
+ 
+   /* Avoid overflow check if both values are small. */
+   if ((nelem | size) >> (sizeof (size_t) * CHAR_BIT / 2) != 0
+@@ -48,7 +49,7 @@ __libc_scratch_buffer_set_array_size (struct scratch_buffer *buffer,
+   /* Discard old buffer.  */
+   scratch_buffer_free (buffer);
+ 
+-  char *new_ptr = malloc (new_length);
++  new_ptr = malloc (new_length);
+   if (new_ptr == NULL)
+     {
+       /* Buffer must remain valid to free.  */
+diff --git a/srclib/malloca.c b/srclib/malloca.c
+index 943140c..8376f8b 100644
+--- a/srclib/malloca.c
++++ b/srclib/malloca.c
+@@ -68,16 +68,19 @@ mmalloca (size_t n)
+           /* The ckd_add avoids signed integer overflow on
+              theoretical platforms where UINTPTR_MAX <= INT_MAX.  */
+           uintptr_t umemplus;
++          idx_t offset;
++          void *p;
++          small_t *sp;
+           ckd_add (&umemplus, umem, sizeof (small_t) + sa_alignment_max - 1);
+-          idx_t offset = (umemplus - umemplus % (2 * sa_alignment_max)
++          offset = (umemplus - umemplus % (2 * sa_alignment_max)
+                           + sa_alignment_max - umem);
+-          void *p = mem + offset;
++          p = mem + offset;
+           /* Here p >= mem + sizeof (small_t),
+              and p <= mem + sizeof (small_t) + 2 * sa_alignment_max - 1
+              hence p + n <= mem + nplus.
+              So, the memory range [p, p+n) lies in the allocated memory range
+              [mem, mem + nplus).  */
+-          small_t *sp = p;
++          sp = p;
+ # if defined __CHERI_PURE_CAPABILITY__
+           sp[-1] = umem;
+           p = (char *) cheri_bounds_set ((char *) p - sizeof (small_t),
+diff --git a/srclib/readlink.c b/srclib/readlink.c
+index f9fd853..6cb028d 100644
+--- a/srclib/readlink.c
++++ b/srclib/readlink.c
+@@ -55,6 +55,7 @@ rpl_readlink (char const *file, char *buf, size_t bufsize)
+ {
+ # if READLINK_TRAILING_SLASH_BUG
+   size_t file_len = strlen (file);
++  ssize_t r;
+   if (file_len && file[file_len - 1] == '/')
+     {
+       /* Even if FILE without the slash is a symlink to a directory,
+@@ -69,7 +70,7 @@ rpl_readlink (char const *file, char *buf, size_t bufsize)
+     }
+ # endif /* READLINK_TRAILING_SLASH_BUG */
+ 
+-  ssize_t r = readlink (file, buf, bufsize);
++  r = readlink (file, buf, bufsize);
+ 
+ # if READLINK_TRUNCATE_BUG
+   if (r < 0 && errno == ERANGE)
+diff --git a/srclib/realloc.c b/srclib/realloc.c
+index 0b42582..3b07f85 100644
+--- a/srclib/realloc.c
++++ b/srclib/realloc.c
+@@ -38,6 +38,7 @@ void *
+ rpl_realloc (void *p, size_t n)
+ {
+   size_t n1 = n;
++  void *result;
+ 
+   if (n == 0)
+     {
+@@ -88,7 +89,7 @@ rpl_realloc (void *p, size_t n)
+     }
+ # endif
+ 
+-  void *result = realloc (p, n1);
++  result = realloc (p, n1);
+ 
+ # if !HAVE_REALLOC_POSIX
+   if (result == NULL)
+-- 
+2.56.0
+
+
+From d4dc5c93567fddd125f06633cb542a3f406541ee Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Thu, 19 Jun 2025 17:28:15 +0200
+Subject: more gcc2 fixes
+
+
+diff --git a/lib/ebcdic1132.h b/lib/ebcdic1132.h
+index 7c53dbb..7a3365f 100644
+--- a/lib/ebcdic1132.h
++++ b/lib/ebcdic1132.h
+@@ -76,9 +76,10 @@ static int
+ ebcdic1132_mbtowc (conv_t conv, ucs4_t *pwc, const unsigned char *s, size_t n)
+ {
+   unsigned char c = *s;
++  unsigned short wc;
+   if (conv->isurface & ICONV_SURFACE_EBCDIC_ZOS_UNIX)
+     c = swap_x15_x25 (c);
+-  unsigned short wc = ebcdic1132_2uni[c];
++  wc = ebcdic1132_2uni[c];
+   if (wc != 0xfffd) {
+     *pwc = (ucs4_t) wc;
+     return 1;
+diff --git a/lib/ebcdic1137.h b/lib/ebcdic1137.h
+index b4b7374..03fdcc2 100644
+--- a/lib/ebcdic1137.h
++++ b/lib/ebcdic1137.h
+@@ -76,9 +76,10 @@ static int
+ ebcdic1137_mbtowc (conv_t conv, ucs4_t *pwc, const unsigned char *s, size_t n)
+ {
+   unsigned char c = *s;
++  unsigned short wc;
+   if (conv->isurface & ICONV_SURFACE_EBCDIC_ZOS_UNIX)
+     c = swap_x15_x25 (c);
+-  unsigned short wc = ebcdic1137_2uni[c];
++  wc = ebcdic1137_2uni[c];
+   if (wc != 0xfffd) {
+     *pwc = (ucs4_t) wc;
+     return 1;
+diff --git a/lib/ebcdic12712.h b/lib/ebcdic12712.h
+index e7a5650..0879e4b 100644
+--- a/lib/ebcdic12712.h
++++ b/lib/ebcdic12712.h
+@@ -76,9 +76,10 @@ static int
+ ebcdic12712_mbtowc (conv_t conv, ucs4_t *pwc, const unsigned char *s, size_t n)
+ {
+   unsigned char c = *s;
++  unsigned short wc;
+   if (conv->isurface & ICONV_SURFACE_EBCDIC_ZOS_UNIX)
+     c = swap_x15_x25 (c);
+-  unsigned short wc = ebcdic12712_2uni[c];
++  wc = ebcdic12712_2uni[c];
+   if (wc != 0xfffd) {
+     *pwc = (ucs4_t) wc;
+     return 1;
+diff --git a/lib/ebcdic16804.h b/lib/ebcdic16804.h
+index 57a2031..fff9198 100644
+--- a/lib/ebcdic16804.h
++++ b/lib/ebcdic16804.h
+@@ -76,9 +76,10 @@ static int
+ ebcdic16804_mbtowc (conv_t conv, ucs4_t *pwc, const unsigned char *s, size_t n)
+ {
+   unsigned char c = *s;
++  unsigned short wc;
+   if (conv->isurface & ICONV_SURFACE_EBCDIC_ZOS_UNIX)
+     c = swap_x15_x25 (c);
+-  unsigned short wc = ebcdic16804_2uni[c];
++  wc = ebcdic16804_2uni[c];
+   if (wc != 0xfffd) {
+     *pwc = (ucs4_t) wc;
+     return 1;
+diff --git a/lib/ebcdic423.h b/lib/ebcdic423.h
+index 7782148..0a91124 100644
+--- a/lib/ebcdic423.h
++++ b/lib/ebcdic423.h
+@@ -76,9 +76,10 @@ static int
+ ebcdic423_mbtowc (conv_t conv, ucs4_t *pwc, const unsigned char *s, size_t n)
+ {
+   unsigned char c = *s;
++  unsigned short wc;
+   if (conv->isurface & ICONV_SURFACE_EBCDIC_ZOS_UNIX)
+     c = swap_x15_x25 (c);
+-  unsigned short wc = ebcdic423_2uni[c];
++  wc = ebcdic423_2uni[c];
+   if (wc != 0xfffd) {
+     *pwc = (ucs4_t) wc;
+     return 1;
+diff --git a/lib/ebcdic424.h b/lib/ebcdic424.h
+index afcbba9..4e23220 100644
+--- a/lib/ebcdic424.h
++++ b/lib/ebcdic424.h
+@@ -76,9 +76,10 @@ static int
+ ebcdic424_mbtowc (conv_t conv, ucs4_t *pwc, const unsigned char *s, size_t n)
+ {
+   unsigned char c = *s;
++  unsigned short wc;
+   if (conv->isurface & ICONV_SURFACE_EBCDIC_ZOS_UNIX)
+     c = swap_x15_x25 (c);
+-  unsigned short wc = ebcdic424_2uni[c];
++  wc = ebcdic424_2uni[c];
+   if (wc != 0xfffd) {
+     *pwc = (ucs4_t) wc;
+     return 1;
+diff --git a/lib/ebcdic425.h b/lib/ebcdic425.h
+index de7440b..248931e 100644
+--- a/lib/ebcdic425.h
++++ b/lib/ebcdic425.h
+@@ -76,9 +76,10 @@ static int
+ ebcdic425_mbtowc (conv_t conv, ucs4_t *pwc, const unsigned char *s, size_t n)
+ {
+   unsigned char c = *s;
++  unsigned short wc;
+   if (conv->isurface & ICONV_SURFACE_EBCDIC_ZOS_UNIX)
+     c = swap_x15_x25 (c);
+-  unsigned short wc = ebcdic425_2uni[c];
++  wc = ebcdic425_2uni[c];
+   if (wc != 0xfffd) {
+     *pwc = (ucs4_t) wc;
+     return 1;
+diff --git a/lib/ebcdic4971.h b/lib/ebcdic4971.h
+index cfef3bb..f9fbaeb 100644
+--- a/lib/ebcdic4971.h
++++ b/lib/ebcdic4971.h
+@@ -76,9 +76,10 @@ static int
+ ebcdic4971_mbtowc (conv_t conv, ucs4_t *pwc, const unsigned char *s, size_t n)
+ {
+   unsigned char c = *s;
++  unsigned short wc;
+   if (conv->isurface & ICONV_SURFACE_EBCDIC_ZOS_UNIX)
+     c = swap_x15_x25 (c);
+-  unsigned short wc = ebcdic4971_2uni[c];
++  wc = ebcdic4971_2uni[c];
+   if (wc != 0xfffd) {
+     *pwc = (ucs4_t) wc;
+     return 1;
+diff --git a/lib/ebcdic875.h b/lib/ebcdic875.h
+index 759c14e..aea5b93 100644
+--- a/lib/ebcdic875.h
++++ b/lib/ebcdic875.h
+@@ -76,9 +76,10 @@ static int
+ ebcdic875_mbtowc (conv_t conv, ucs4_t *pwc, const unsigned char *s, size_t n)
+ {
+   unsigned char c = *s;
++  unsigned short wc;
+   if (conv->isurface & ICONV_SURFACE_EBCDIC_ZOS_UNIX)
+     c = swap_x15_x25 (c);
+-  unsigned short wc = ebcdic875_2uni[c];
++  wc = ebcdic875_2uni[c];
+   if (wc != 0xfffd) {
+     *pwc = (ucs4_t) wc;
+     return 1;
+diff --git a/lib/ebcdic905.h b/lib/ebcdic905.h
+index c3cef74..0213d28 100644
+--- a/lib/ebcdic905.h
++++ b/lib/ebcdic905.h
+@@ -76,9 +76,10 @@ static int
+ ebcdic905_mbtowc (conv_t conv, ucs4_t *pwc, const unsigned char *s, size_t n)
+ {
+   unsigned char c = *s;
++  unsigned short wc;
+   if (conv->isurface & ICONV_SURFACE_EBCDIC_ZOS_UNIX)
+     c = swap_x15_x25 (c);
+-  unsigned short wc = ebcdic905_2uni[c];
++  wc = ebcdic905_2uni[c];
+   if (wc != 0xfffd) {
+     *pwc = (ucs4_t) wc;
+     return 1;
+diff --git a/src/iconv.c b/src/iconv.c
+index d73f14e..6646b53 100644
+--- a/src/iconv.c
++++ b/src/iconv.c
+@@ -1018,6 +1018,7 @@ int main (int argc, char* argv[])
+     iconvlist(print_one,NULL);
+     status = 0;
+   } else {
++    const char *envvar_value;
+ #if O_BINARY
+     SET_BINARY(fileno(stdout));
+ #endif
+@@ -1053,7 +1054,7 @@ int main (int argc, char* argv[])
+     }
+     /* For EBCDIC encodings, determine how to map 0x15 (which encodes the
+        "newline function", see the Unicode standard, chapter 5).  */
+-    const char *envvar_value = getenv("ICONV_EBCDIC_ZOS_UNIX");
++    envvar_value = getenv("ICONV_EBCDIC_ZOS_UNIX");
+     if (envvar_value != NULL && envvar_value[0] != '\0') {
+       unsigned int surface;
+       iconvctl(cd, ICONV_GET_FROM_SURFACE, &surface);
+diff --git a/srclib/canonicalize-lgpl.c b/srclib/canonicalize-lgpl.c
+index 471494c..461d9bc 100644
+--- a/srclib/canonicalize-lgpl.c
++++ b/srclib/canonicalize-lgpl.c
+@@ -437,10 +437,11 @@ char *
+ __realpath (const char *name, char *resolved)
+ {
+   struct realpath_bufs bufs;
++  char *result;
+   scratch_buffer_init (&bufs.rname);
+   scratch_buffer_init (&bufs.extra);
+   scratch_buffer_init (&bufs.link);
+-  char *result = realpath_stk (name, resolved, &bufs);
++  result = realpath_stk (name, resolved, &bufs);
+   scratch_buffer_free (&bufs.link);
+   scratch_buffer_free (&bufs.extra);
+   scratch_buffer_free (&bufs.rname);
+diff --git a/srclib/realloc.c b/srclib/realloc.c
+index 3b07f85..24e70bc 100644
+--- a/srclib/realloc.c
++++ b/srclib/realloc.c
+@@ -38,6 +38,9 @@ void *
+ rpl_realloc (void *p, size_t n)
+ {
+   size_t n1 = n;
++# if !HAVE_MALLOC_PTRDIFF
++  ptrdiff_t signed_n;
++# endif
+   void *result;
+ 
+   if (n == 0)
+@@ -81,7 +84,6 @@ rpl_realloc (void *p, size_t n)
+     }
+ 
+ # if !HAVE_MALLOC_PTRDIFF
+-  ptrdiff_t signed_n;
+   if (ckd_add (&signed_n, n, 0))
+     {
+       errno = ENOMEM;
+-- 
+2.56.0
+
+
+From ee6811bcb7324a92e14fd627c1675cefd559cf95 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Thu, 19 Jun 2025 17:41:47 +0200
+Subject: gcc2 fixes for tests
+
+
+diff --git a/tests/test-bom-state.c b/tests/test-bom-state.c
+index fa36f43..3d8d946 100644
+--- a/tests/test-bom-state.c
++++ b/tests/test-bom-state.c
+@@ -47,17 +47,18 @@ static void test_one_input (const char *fromcode,
+ {
+   char outbuf1[3];
+   char outbuf2[3];
++  char *inbuf = (char *) input;
++  size_t inbytesleft = input_size;
++  char *outbuf = outbuf1;
++  size_t outbytesleft = sizeof (outbuf1);
++  size_t ret;
+ 
+   iconv_t cd = iconv_open ("UTF-8", fromcode);
+   if (cd == (iconv_t)(-1))
+     abort ();
+ 
+   /* Convert the first character.  */
+-  char *inbuf = (char *) input;
+-  size_t inbytesleft = input_size;
+-  char *outbuf = outbuf1;
+-  size_t outbytesleft = sizeof (outbuf1);
+-  size_t ret = iconv (cd, &inbuf, &inbytesleft, &outbuf, &outbytesleft);
++  ret = iconv (cd, &inbuf, &inbytesleft, &outbuf, &outbytesleft);
+   if (!(ret == (size_t)(-1) && errno == E2BIG && outbytesleft == 0))
+     abort ();
+   if (!(memcmp (outbuf1, "\xe2\x94\xa6", 3) == 0)) /* should be U+2526 */
+diff --git a/tests/test-discard.c b/tests/test-discard.c
+index 296f6ef..a3d6f89 100644
+--- a/tests/test-discard.c
++++ b/tests/test-discard.c
+@@ -59,6 +59,7 @@ static void test_default (iconv_t cd)
+       abort ();
+   }
+   #ifdef _LIBICONV_VERSION
++  {
+   int x;
+   if (iconvctl (cd, ICONV_GET_TRANSLITERATE, &x) != 0)
+     abort ();
+@@ -76,6 +77,7 @@ static void test_default (iconv_t cd)
+     abort ();
+   if (x != 0)
+     abort ();
++  }
+   #endif
+ }
+ 
+@@ -108,6 +110,7 @@ static void test_translit (iconv_t cd)
+       abort ();
+   }
+   #ifdef _LIBICONV_VERSION
++  {
+   int x;
+   if (iconvctl (cd, ICONV_GET_TRANSLITERATE, &x) != 0)
+     abort ();
+@@ -125,6 +128,7 @@ static void test_translit (iconv_t cd)
+     abort ();
+   if (x != 0)
+     abort ();
++  }
+   #endif
+ }
+ 
+@@ -167,6 +171,7 @@ static void test_ignore (iconv_t cd)
+       abort ();
+   }
+   #ifdef _LIBICONV_VERSION
++  {
+   int x;
+   if (iconvctl (cd, ICONV_GET_TRANSLITERATE, &x) != 0)
+     abort ();
+@@ -184,6 +189,7 @@ static void test_ignore (iconv_t cd)
+     abort ();
+   if (x != 1)
+     abort ();
++  }
+   #endif
+ }
+ 
+@@ -216,6 +222,7 @@ static void test_ignore_translit (iconv_t cd)
+       abort ();
+   }
+   #ifdef _LIBICONV_VERSION
++  {
+   int x;
+   if (iconvctl (cd, ICONV_GET_TRANSLITERATE, &x) != 0)
+     abort ();
+@@ -233,6 +240,7 @@ static void test_ignore_translit (iconv_t cd)
+     abort ();
+   if (x != 1)
+     abort ();
++  }
+   #endif
+ }
+ 
+@@ -265,6 +273,7 @@ static void test_nid (iconv_t cd)
+       abort ();
+   }
+   #ifdef _LIBICONV_VERSION
++  {
+   int x;
+   if (iconvctl (cd, ICONV_GET_TRANSLITERATE, &x) != 0)
+     abort ();
+@@ -282,6 +291,7 @@ static void test_nid (iconv_t cd)
+     abort ();
+   if (x != 0)
+     abort ();
++  }
+   #endif
+ }
+ 
+@@ -314,6 +324,7 @@ static void test_nid_translit (iconv_t cd)
+       abort ();
+   }
+   #ifdef _LIBICONV_VERSION
++  {
+   int x;
+   if (iconvctl (cd, ICONV_GET_TRANSLITERATE, &x) != 0)
+     abort ();
+@@ -331,6 +342,7 @@ static void test_nid_translit (iconv_t cd)
+     abort ();
+   if (x != 0)
+     abort ();
++  }
+   #endif
+ }
+ 
+@@ -363,6 +375,7 @@ static void test_invd (iconv_t cd)
+       abort ();
+   }
+   #ifdef _LIBICONV_VERSION
++  {
+   int x;
+   if (iconvctl (cd, ICONV_GET_TRANSLITERATE, &x) != 0)
+     abort ();
+@@ -380,6 +393,7 @@ static void test_invd (iconv_t cd)
+     abort ();
+   if (x != 0)
+     abort ();
++  }
+   #endif
+ }
+ 
+@@ -412,6 +426,7 @@ static void test_invd_translit (iconv_t cd)
+       abort ();
+   }
+   #ifdef _LIBICONV_VERSION
++  {
+   int x;
+   if (iconvctl (cd, ICONV_GET_TRANSLITERATE, &x) != 0)
+     abort ();
+@@ -429,6 +444,7 @@ static void test_invd_translit (iconv_t cd)
+     abort ();
+   if (x != 0)
+     abort ();
++  }
+   #endif
+ }
+ 
+-- 
+2.56.0
+
+
+From 45284c0c96db96cc91c45c558d6deaca2801d977 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Sat, 7 Nov 2026 15:58:06 +0100
+Subject: add Haiku native implementation of find_executable
+
+
+diff --git a/srclib/progreloc.c b/srclib/progreloc.c
+index 3596043..e6bfd6f 100644
+--- a/srclib/progreloc.c
++++ b/srclib/progreloc.c
+@@ -49,6 +49,10 @@
+ # include <os2.h>
+ #endif
+ 
++#ifdef __HAIKU__
++# include <image.h>
++#endif
++
+ #include "relocatable.h"
+ 
+ #ifdef NO_XMALLOC
+@@ -334,6 +338,15 @@ find_executable (const char *argv0)
+       && location[0] == '/')
+     return canonicalize_file_name (location);
+ # endif
++# ifdef __HAIKU__
++  {
++    image_info info;
++    int32 cookie = 0;
++    while (get_next_image_info (B_CURRENT_TEAM, &cookie, &info) == B_OK)
++      if (info.type == B_APP_IMAGE)
++        return xstrdup (info.name);
++  }
++# else /* disable the fallback code to avoid unnecessary gcc2 changes */
+   /* Guess the executable's full path.  We assume the executable has been
+      called via execlp() or execvp() with properly set up argv[0].  The
+      login(1) convention to add a '-' prefix to argv[0] is not supported.  */
+@@ -397,6 +410,7 @@ find_executable (const char *argv0)
+     if (maybe_executable (argv0))
+       return canonicalize_file_name (argv0);
+   }
++# endif
+   /* No way to find the executable.  */
+   return NULL;
+ #endif
+-- 
+2.56.0
+
+
+From 23916a8ad8cf94eabea942b6123704252a3da773 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Joachim=20Mairb=C3=B6ck?= <j.mairboeck@gmail.com>
+Date: Sat, 7 Nov 2026 15:59:41 +0100
+Subject: gcc2 fixes part 3
+
+
+diff --git a/srclib/basename-lgpl.c b/srclib/basename-lgpl.c
+index 53f3bae..528186a 100644
+--- a/srclib/basename-lgpl.c
++++ b/srclib/basename-lgpl.c
+@@ -29,11 +29,12 @@ char *
+ last_component (char const *name)
+ {
+   char const *base = name + FILE_SYSTEM_PREFIX_LEN (name);
++  bool last_was_slash = false;
++  char const *p;
+   while (ISSLASH (*base))
+     base++;
+ 
+-  bool last_was_slash = false;
+-  for (char const *p = base; *p; p++)
++  for (p = base; *p; p++)
+     {
+       if (ISSLASH (*p))
+         last_was_slash = true;
+@@ -51,6 +52,7 @@ size_t
+ base_len (char const *name)
+ {
+   size_t len;
++  size_t prefix_len = FILE_SYSTEM_PREFIX_LEN (name);
+   for (len = strlen (name);  1 < len && ISSLASH (name[len - 1]);  len--)
+     continue;
+ 
+@@ -58,7 +60,6 @@ base_len (char const *name)
+       && ISSLASH (name[0]) && ISSLASH (name[1]) && ! name[2])
+     return 2;
+ 
+-  size_t prefix_len = FILE_SYSTEM_PREFIX_LEN (name);
+   if (FILE_SYSTEM_DRIVE_PREFIX_CAN_BE_RELATIVE && prefix_len
+       && len == prefix_len && ISSLASH (name[prefix_len]))
+     return prefix_len + 1;
+diff --git a/srclib/dup2.c b/srclib/dup2.c
+index b9a5526..bdc4b10 100644
+--- a/srclib/dup2.c
++++ b/srclib/dup2.c
+@@ -176,6 +176,7 @@ klibc_dup2 (int fd, int desired_fd)
+ int
+ rpl_dup2 (int fd, int desired_fd)
+ {
++  int result;
+ #ifdef F_GETFL
+   /* On Linux kernels 2.6.26-2.6.29, dup2 (fd, fd) returns -EBADF.
+      On Cygwin 1.5.x, dup2 (1, 1) returns 0.
+@@ -191,7 +192,7 @@ rpl_dup2 (int fd, int desired_fd)
+     return fcntl (fd, F_GETFL) == -1 ? -1 : fd;
+ #endif
+ 
+-  int result = dup2 (fd, desired_fd);
++  result = dup2 (fd, desired_fd);
+ 
+   /* Correct an errno value on FreeBSD 6.1 and Cygwin 1.5.x.  */
+   if (result < 0 && errno == EMFILE)
+diff --git a/srclib/gettext.h b/srclib/gettext.h
+index 2f4b1c9..8e5293f 100644
+--- a/srclib/gettext.h
++++ b/srclib/gettext.h
+@@ -478,11 +478,12 @@ dcpgettext_expr (const char *domain,
+   if (msg_ctxt_id != NULL)
+ #endif
+     {
++      int found_translation;
+       memcpy (msg_ctxt_id, msgctxt, msgctxt_len - 1);
+       msg_ctxt_id[msgctxt_len - 1] = '\004';
+       memcpy (msg_ctxt_id + msgctxt_len, msgid, msgid_len);
+       translation = dcgettext (domain, msg_ctxt_id, category);
+-      int found_translation = (translation != msg_ctxt_id);
++      found_translation = (translation != msg_ctxt_id);
+ #if !_LIBGETTEXT_HAVE_VARIABLE_SIZE_ARRAYS
+       if (msg_ctxt_id != buf)
+         free (msg_ctxt_id);
+@@ -523,11 +524,12 @@ dcnpgettext_expr (const char *domain,
+   if (msg_ctxt_id != NULL)
+ #endif
+     {
++      int found_translation;
+       memcpy (msg_ctxt_id, msgctxt, msgctxt_len - 1);
+       msg_ctxt_id[msgctxt_len - 1] = '\004';
+       memcpy (msg_ctxt_id + msgctxt_len, msgid, msgid_len);
+       translation = dcngettext (domain, msg_ctxt_id, msgid_plural, n, category);
+-      int found_translation = !(translation == msg_ctxt_id || translation == msgid_plural);
++      found_translation = !(translation == msg_ctxt_id || translation == msgid_plural);
+ #if !_LIBGETTEXT_HAVE_VARIABLE_SIZE_ARRAYS
+       if (msg_ctxt_id != buf)
+         free (msg_ctxt_id);
+diff --git a/srclib/open.c b/srclib/open.c
+index c3b5648..7b3ec03 100644
+--- a/srclib/open.c
++++ b/srclib/open.c
+@@ -71,6 +71,16 @@ int
+ open (const char *filename, int flags, ...)
+ {
+   mode_t mode = 0;
++  bool check_for_slash_bug;
++  bool check_directory;
++
++  /* 0 = unknown, 1 = yes, -1 = no.  */
++#if GNULIB_defined_O_CLOEXEC
++  int have_cloexec = -1;
++#else
++  static int have_cloexec;
++#endif
++  int fd;
+ 
+   if (flags & O_CREAT)
+     {
+@@ -116,7 +126,6 @@ open (const char *filename, int flags, ...)
+          directories,
+        - if O_WRONLY or O_RDWR is specified, open() must fail because the
+          file does not contain a '.' directory.  */
+-  bool check_for_slash_bug;
+   if (OPEN_TRAILING_SLASH_BUG)
+     {
+       size_t len = strlen (filename);
+@@ -138,7 +147,7 @@ open (const char *filename, int flags, ...)
+      stat first lest we hang trying to open a fifo.  Although there is
+      a race between this and opening the file, we can do no better.
+      After opening the file we will check again with fstat.  */
+-  bool check_directory =
++  check_directory =
+     (check_for_slash_bug
+      || (!HAVE_WORKING_O_DIRECTORY && flags & O_DIRECTORY));
+   if (check_directory)
+@@ -156,14 +165,7 @@ open (const char *filename, int flags, ...)
+         }
+     }
+ 
+-  /* 0 = unknown, 1 = yes, -1 = no.  */
+-#if GNULIB_defined_O_CLOEXEC
+-  int have_cloexec = -1;
+-#else
+-  static int have_cloexec;
+-#endif
+-
+-  int fd = orig_open (filename,
++  fd = orig_open (filename,
+                       flags & ~(have_cloexec < 0 ? O_CLOEXEC : 0), mode);
+ 
+   if (flags & O_CLOEXEC)
+diff --git a/srclib/progreloc.c b/srclib/progreloc.c
+index e6bfd6f..09c7c4b 100644
+--- a/srclib/progreloc.c
++++ b/srclib/progreloc.c
+@@ -423,11 +423,12 @@ static void
+ prepare_relocate (const char *orig_installprefix, const char *orig_installdir,
+                   const char *argv0)
+ {
++  char *curr_prefix;
+   /* Determine the full pathname of the current executable.  */
+   executable_fullname = find_executable (argv0);
+ 
+   /* Determine the current installation prefix from it.  */
+-  char *curr_prefix = compute_curr_prefix (orig_installprefix, orig_installdir,
++  curr_prefix = compute_curr_prefix (orig_installprefix, orig_installdir,
+                                            executable_fullname);
+   if (curr_prefix != NULL)
+     {
+diff --git a/srclib/relocatable.c b/srclib/relocatable.c
+index 99a78ac..88ecd3c 100644
+--- a/srclib/relocatable.c
++++ b/srclib/relocatable.c
+@@ -138,10 +138,11 @@ set_this_relocation_prefix (const char *orig_prefix_arg,
+          relocation is a nop.  */
+       && strcmp (orig_prefix_arg, curr_prefix_arg) != 0)
+     {
++      char *memory;
+       /* Duplicate the argument strings.  */
+       orig_prefix_len = strlen (orig_prefix_arg);
+       curr_prefix_len = strlen (curr_prefix_arg);
+-      char *memory = (char *) xmalloc (orig_prefix_len + 1 + curr_prefix_len + 1);
++      memory = (char *) xmalloc (orig_prefix_len + 1 + curr_prefix_len + 1);
+ #ifdef NO_XMALLOC
+       if (memory != NULL)
+ #endif
+@@ -198,6 +199,9 @@ compute_curr_prefix (const char *orig_installprefix,
+                      const char *orig_installdir,
+                      const char *curr_pathname)
+ {
++  const char *rel_installdir;
++  char *curr_installdir;
++
+   if (curr_pathname == NULL)
+     return NULL;
+ 
+@@ -208,10 +212,9 @@ compute_curr_prefix (const char *orig_installprefix,
+       != 0)
+     /* Shouldn't happen - nothing should be installed outside $(prefix).  */
+     return NULL;
+-  const char *rel_installdir = orig_installdir + strlen (orig_installprefix);
++  rel_installdir = orig_installdir + strlen (orig_installprefix);
+ 
+   /* Determine the current installation directory.  */
+-  char *curr_installdir;
+   {
+     const char *p_base = curr_pathname + FILE_SYSTEM_PREFIX_LEN (curr_pathname);
+     const char *p = curr_pathname + strlen (curr_pathname);
+diff --git a/srclib/strerror.c b/srclib/strerror.c
+index f92a739..4b7876a 100644
+--- a/srclib/strerror.c
++++ b/srclib/strerror.c
+@@ -46,6 +46,7 @@ strerror (int n)
+   /* Cast away const, due to the historical signature of strerror;
+      callers should not be modifying the string.  */
+   const char *msg = strerror_override (n);
++  size_t len;
+   if (msg)
+     return (char *) msg;
+ 
+@@ -66,7 +67,7 @@ strerror (int n)
+     }
+ 
+   /* Fix STACKBUF_LEN if this ever aborts.  */
+-  size_t len = strlen (msg);
++  len = strlen (msg);
+   if (sizeof buf <= len)
+     abort ();
+ 
+-- 
+2.56.0
+
