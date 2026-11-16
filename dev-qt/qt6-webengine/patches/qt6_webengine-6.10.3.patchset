@@ -1,0 +1,3566 @@
+From 4d51301e152f7b4ad68a3b762252d2918f041177 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Wed, 11 Nov 2026 21:39:21 -0300
+Subject: Haiku: build system knows the OS
+
+Qt's CMake takes Haiku where FreeBSD's patches added FreeBSD, with GCC
+as its compiler; GN gets current_os "haiku", is_haiku, and Haiku counts
+as is_linux and is_bsd so it follows the BSD paths; build_config.h gets
+OS_HAIKU / IS_HAIKU (and IS_BSD, IS_POSIX). The host toolchain's
+FreeBSD placeholders are emptied.
+---
+ cmake/Functions.cmake                            |  2 +-
+ cmake/QtToolchainHelpers.cmake                   |  8 +++++---
+ configure.cmake                                  |  3 ++-
+ src/3rdparty/chromium/build/build_config.h       | 16 +++++++++++++---
+ .../chromium/build/config/BUILDCONFIG.gn         | 15 ++++++++++-----
+ src/core/CMakeLists.txt                          | 10 +++++-----
+ src/host/BUILD.toolchain.gn.in                   |  6 +++---
+ 7 files changed, 39 insertions(+), 21 deletions(-)
+
+diff --git a/cmake/Functions.cmake b/cmake/Functions.cmake
+index d6caf3a..392bc52 100644
+--- a/cmake/Functions.cmake
++++ b/cmake/Functions.cmake
+@@ -143,7 +143,7 @@ function(add_linker_options target buildDir completeStatic)
+     set(libs_rsp "${buildDir}/${ninjaTarget}_libs.rsp")
+     set(ldir_rsp "${buildDir}/${ninjaTarget}_ldir.rsp")
+     set_target_properties(${cmakeTarget} PROPERTIES STATIC_LIBRARY_OPTIONS "@${objects_rsp}")
+-    if(LINUX OR ANDROID OR FREEBSD)
++    if(LINUX OR ANDROID OR FREEBSD OR HAIKU)
+          get_gn_arch(cpu ${TEST_architecture_arch})
+          if(CMAKE_CROSSCOMPILING AND cpu STREQUAL "arm" AND ${config} STREQUAL "Debug")
+              target_link_options(${cmakeTarget} PRIVATE "LINKER:--long-plt")
+diff --git a/cmake/QtToolchainHelpers.cmake b/cmake/QtToolchainHelpers.cmake
+index 0e0ce60..3fc744a 100644
+--- a/cmake/QtToolchainHelpers.cmake
++++ b/cmake/QtToolchainHelpers.cmake
+@@ -97,6 +97,8 @@ function(get_gn_os result)
+         set(${result} "ios" PARENT_SCOPE)
+     elseif(FREEBSD)
+         set(${result} "freebsd" PARENT_SCOPE)
++    elseif(HAIKU)
++        set(${result} "haiku" PARENT_SCOPE)
+     else()
+         message(DEBUG "Unrecognized OS")
+     endif()
+@@ -420,7 +422,7 @@ macro(append_compiler_linker_sdk_setup)
+                 use_libcxx=true
+             )
+         endif()
+-        if(DEFINED QT_FEATURE_stdlib_libcpp AND (LINUX OR FREEBSD))
++        if(DEFINED QT_FEATURE_stdlib_libcpp AND (LINUX OR FREEBSD OR HAIKU))
+             extend_gn_list(gnArgArg ARGS use_libcxx
+                 CONDITION QT_FEATURE_stdlib_libcpp
+             )
+@@ -461,7 +463,7 @@ macro(append_compiler_linker_sdk_setup)
+         )
+     endif()
+     get_gn_arch(cpu ${TEST_architecture_arch})
+-    if((LINUX OR FREEBSD) AND CMAKE_CROSSCOMPILING AND cpu STREQUAL "arm")
++    if((LINUX OR FREEBSD OR HAIKU) AND CMAKE_CROSSCOMPILING AND cpu STREQUAL "arm")
+ 
+         extend_gn_list_cflag(gnArgArg
+             ARG arm_tune
+@@ -570,7 +572,7 @@ macro(append_toolchain_setup)
+         endif()
+         unset(host_cpu)
+         unset(target_cpu)
+-    elseif(LINUX OR FREEBSD)
++    elseif(LINUX OR FREEBSD OR HAIKU)
+         get_gn_arch(cpu ${TEST_architecture_arch})
+         list(APPEND gnArgArg
+             custom_toolchain="${buildDir}/target_toolchain:target"
+diff --git a/configure.cmake b/configure.cmake
+index 8dc75a3..04d3d97 100644
+--- a/configure.cmake
++++ b/configure.cmake
+@@ -304,7 +304,7 @@ unset(targets_to_check)
+ 
+ qt_webengine_configure_check("supported-platform"
+     MODULES QtWebEngine
+-    CONDITION LINUX OR WIN32 OR MACOS OR FREEBSD
++    CONDITION LINUX OR WIN32 OR MACOS OR FREEBSD OR HAIKU
+     MESSAGE "Build can be done only on Linux, Windows or macOS."
+ )
+ qt_webengine_configure_check("supported-platform"
+@@ -421,6 +421,7 @@ qt_webengine_configure_check("compiler"
+         (LINUX AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang") OR
+         (FREEBSD AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR
+         (FREEBSD AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang") OR
++        (HAIKU AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR
+         (MACOS AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+     MESSAGE
+         "${CMAKE_CXX_COMPILER_ID} compiler is not supported."
+diff --git a/src/3rdparty/chromium/build/build_config.h b/src/3rdparty/chromium/build/build_config.h
+index 8d4895b..4be494c 100644
+--- a/src/3rdparty/chromium/build/build_config.h
++++ b/src/3rdparty/chromium/build/build_config.h
+@@ -115,6 +115,8 @@
+ #define OS_ASMJS 1
+ #elif defined(__MVS__)
+ #define OS_ZOS 1
++#elif defined(__HAIKU__)
++#define OS_HAIKU 1
+ #else
+ #error Please add support for your platform in build/build_config.h
+ #endif
+@@ -126,8 +128,10 @@
+ #endif
+ 
+ // For access to standard BSD features, use OS_BSD instead of a
+-// more specific macro.
+-#if defined(OS_FREEBSD) || defined(OS_NETBSD) || defined(OS_OPENBSD)
++// more specific macro. Haiku counts as one: the BSD exceptions to the
++// Linux code are the ones it needs, OS_HAIKU marks where it differs.
++#if defined(OS_FREEBSD) || defined(OS_NETBSD) || defined(OS_OPENBSD) || \
++    defined(OS_HAIKU)
+ #define OS_BSD 1
+ #endif
+ 
+@@ -137,7 +141,7 @@
+     defined(OS_FREEBSD) || defined(OS_IOS) || defined(OS_LINUX) ||  \
+     defined(OS_CHROMEOS) || defined(OS_MAC) || defined(OS_NACL) ||  \
+     defined(OS_NETBSD) || defined(OS_OPENBSD) || defined(OS_QNX) || \
+-    defined(OS_SOLARIS) || defined(OS_ZOS)
++    defined(OS_SOLARIS) || defined(OS_ZOS) || defined(OS_HAIKU)
+ #define OS_POSIX 1
+ #endif
+ 
+@@ -190,6 +194,12 @@
+ #define BUILDFLAG_INTERNAL_IS_FUCHSIA() (0)
+ #endif
+ 
++#if defined(OS_HAIKU)
++#define BUILDFLAG_INTERNAL_IS_HAIKU() (1)
++#else
++#define BUILDFLAG_INTERNAL_IS_HAIKU() (0)
++#endif
++
+ #if defined(OS_IOS)
+ #define BUILDFLAG_INTERNAL_IS_IOS() (1)
+ #else
+diff --git a/src/3rdparty/chromium/build/config/BUILDCONFIG.gn b/src/3rdparty/chromium/build/config/BUILDCONFIG.gn
+index 633dbdf..640d620 100644
+--- a/src/3rdparty/chromium/build/config/BUILDCONFIG.gn
++++ b/src/3rdparty/chromium/build/config/BUILDCONFIG.gn
+@@ -136,12 +136,12 @@ declare_args() {
+   is_official_build = false
+ 
+   # Set to true when compiling with the Clang compiler.
+-  is_clang = current_os != "linux" || current_os == "openbsd" ||
++  is_clang = current_os != "haiku" && (current_os != "linux" || current_os == "openbsd" ||
+              current_os == "freebsd" ||
+              (current_cpu != "s390x" && current_cpu != "s390" &&
+               current_cpu != "ppc64" && current_cpu != "ppc" &&
+               current_cpu != "mips" && current_cpu != "mips64" &&
+-              current_cpu != "riscv64")
++              current_cpu != "riscv64"))
+ 
+   # Helpers set from qt
+   is_mingw = false
+@@ -298,7 +298,8 @@ if (target_os == "android") {
+   _default_toolchain = "//build/toolchain/aix:$target_cpu"
+ } else if (target_os == "zos") {
+   _default_toolchain = "//build/toolchain/zos:$target_cpu"
+-} else if (target_os == "openbsd" || target_os == "freebsd") {
++} else if (target_os == "openbsd" || target_os == "freebsd" ||
++           target_os == "haiku") {
+   _default_toolchain = host_toolchain
+ } else {
+   assert(false, "Unsupported target_os: $target_os")
+@@ -334,11 +335,15 @@ is_android = current_os == "android"
+ is_chromeos = current_os == "chromeos"
+ is_fuchsia = current_os == "fuchsia"
+ is_ios = current_os == "ios"
++# Haiku takes the Linux paths, and the BSD exceptions to them, unless a
++# file asks for is_haiku.
+ is_linux = current_os == "linux" || current_os == "openbsd" ||
+-           current_os == "freebsd"
++           current_os == "freebsd" || current_os == "haiku"
+ is_openbsd = current_os == "openbsd"
+ is_freebsd = current_os == "freebsd"
+-is_bsd = current_os == "openbsd" || current_os == "freebsd"
++is_bsd = current_os == "openbsd" || current_os == "freebsd" ||
++         current_os == "haiku"
++is_haiku = current_os == "haiku"
+ is_mac = current_os == "mac"
+ is_nacl = current_os == "nacl"
+ is_watchos = current_os == "watchos"
+diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
+index 8e2786d..143ba52 100644
+--- a/src/core/CMakeLists.txt
++++ b/src/core/CMakeLists.txt
+@@ -21,7 +21,7 @@ add_subdirectory(tools/qwebengine_convert_dict)
+ #   TOOLCHAIN SETUP
+ ##
+ 
+-if(LINUX OR WIN32 OR FREEBSD)
++if(LINUX OR WIN32 OR FREEBSD OR HAIKU)
+     setup_toolchains()
+ endif()
+ 
+@@ -213,7 +213,7 @@ foreach(arch ${archs})
+                 accessibility_activation_observer.cpp accessibility_activation_observer.h
+         )
+ 
+-        extend_gn_target(${buildGn} CONDITION LINUX OR FREEBSD
++        extend_gn_target(${buildGn} CONDITION LINUX OR FREEBSD OR HAIKU
+             SOURCES
+                 ozone/gl_ozone_qt.cpp ozone/gl_ozone_qt.h
+                 ozone/ozone_util_qt.cpp ozone/ozone_util_qt.h
+@@ -221,7 +221,7 @@ foreach(arch ${archs})
+                 ozone/surface_factory_qt.cpp ozone/surface_factory_qt.h
+         )
+ 
+-        extend_gn_target(${buildGn} CONDITION (LINUX OR FREEBSD) AND QT_FEATURE_opengl
++        extend_gn_target(${buildGn} CONDITION (LINUX OR FREEBSD OR HAIKU) AND QT_FEATURE_opengl
+             SOURCES
+                 ozone/gl_helper.cpp ozone/gl_helper.h
+         )
+@@ -231,7 +231,7 @@ foreach(arch ${archs})
+                 ozone/glx_helper.cpp ozone/glx_helper.h
+         )
+ 
+-        extend_gn_target(${buildGn} CONDITION (LINUX OR FREEBSD) AND QT_FEATURE_opengl AND QT_FEATURE_egl
++        extend_gn_target(${buildGn} CONDITION (LINUX OR FREEBSD OR HAIKU) AND QT_FEATURE_opengl AND QT_FEATURE_egl
+             SOURCES
+                 ozone/egl_helper.cpp ozone/egl_helper.h
+         )
+@@ -462,7 +462,7 @@ foreach(arch ${archs})
+             CONDITION QT_FEATURE_webenginedriver
+         )
+ 
+-        if(LINUX OR FREEBSD)
++        if(LINUX OR FREEBSD OR HAIKU)
+             list(APPEND gnArgArg
+                 angle_enable_gl=true
+                 use_gtk=false # GTK toolkit bindings
+diff --git a/src/host/BUILD.toolchain.gn.in b/src/host/BUILD.toolchain.gn.in
+index fd5d678..069b195 100644
+--- a/src/host/BUILD.toolchain.gn.in
++++ b/src/host/BUILD.toolchain.gn.in
+@@ -6,9 +6,9 @@ gcc_toolchain("@GN_TOOLCHAIN@") {
+   ld = "@CMAKE_CXX_COMPILER@"
+   ar = "@CMAKE_AR@"
+   nm = "@CMAKE_NM@"
+-  extra_cppflags = "%%CPPFLAGS%%"
+-  extra_cxxflags = "%%CXXFLAGS%%"
+-  extra_ldflags = "%%LDFLAGS%%"
++  extra_cppflags = ""
++  extra_cxxflags = ""
++  extra_ldflags = ""
+   toolchain_args = {
+     current_os = "@GN_OS@"
+     current_cpu = "@GN_CPU@"
+-- 
+2.53.0
+
+
+From 2506c22853f2cd06fb14e15d1622c8353e1db80d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Wed, 11 Nov 2026 22:21:49 -0300
+Subject: Haiku: gn gen passes; first build fixes
+
+nasm: no /usr/include/string.h to probe (and no mempcpy).
+devtools-frontend: Node lists no CPUs on Haiku, so terser got no workers
+and rollup never finished; give it a worker count.
+perfetto: Haiku takes the Linux/BSD branch of build_config.h.
+---
+ .../src/scripts/build/rollup.config.mjs             |  5 ++++-
+ src/3rdparty/chromium/third_party/nasm/BUILD.gn     | 13 ++++++++-----
+ .../perfetto/include/perfetto/base/build_config.h   |  3 ++-
+ 3 files changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/src/3rdparty/chromium/third_party/devtools-frontend/src/scripts/build/rollup.config.mjs b/src/3rdparty/chromium/third_party/devtools-frontend/src/scripts/build/rollup.config.mjs
+index 3cf10ad..18e41a9 100644
+--- a/src/3rdparty/chromium/third_party/devtools-frontend/src/scripts/build/rollup.config.mjs
++++ b/src/3rdparty/chromium/third_party/devtools-frontend/src/scripts/build/rollup.config.mjs
+@@ -5,6 +5,7 @@
+ // @ts-check
+ 
+ import terser from '@rollup/plugin-terser';
++import {cpus} from 'node:os';
+ import sourcemaps from 'rollup-plugin-sourcemaps2';
+ 
+ import { devtoolsPlugin } from './devtools_plugin.js';
+@@ -19,7 +20,9 @@ export default commandLineArgs => ({
+     sourcemap: Boolean(commandLineArgs.configSourcemaps),
+   }],
+   plugins: [
+-    terser(),
++    // Node on Haiku lists no CPUs, which leaves terser with no workers to
++    // run on and rollup waiting for ever.
++    terser({maxWorkers: cpus().length || 4}),
+     {
+       name: 'devtools-plugin',
+       resolveId(source, importer) {
+diff --git a/src/3rdparty/chromium/third_party/nasm/BUILD.gn b/src/3rdparty/chromium/third_party/nasm/BUILD.gn
+index 302123f..2679f518 100644
+--- a/src/3rdparty/chromium/third_party/nasm/BUILD.gn
++++ b/src/3rdparty/chromium/third_party/nasm/BUILD.gn
+@@ -63,11 +63,14 @@ config("nasm_config") {
+ 
+   defines = [ "HAVE_CONFIG_H" ]
+ 
+-  _string_h_lines =
+-        read_file("/usr/include/string.h", "list lines")
+-  _mempcpy = filter_include(_string_h_lines, [ "*mempcpy*" ])
+-  if (_mempcpy != []) {
+-    defines += [ "HAVE_MEMPCPY=1" ]
++  # Haiku has no /usr/include, and no mempcpy either.
++  if (!is_haiku) {
++    _string_h_lines =
++          read_file("/usr/include/string.h", "list lines")
++    _mempcpy = filter_include(_string_h_lines, [ "*mempcpy*" ])
++    if (_mempcpy != []) {
++      defines += [ "HAVE_MEMPCPY=1" ]
++    }
+   }
+ 
+   if (is_clang) {
+diff --git a/src/3rdparty/chromium/third_party/perfetto/include/perfetto/base/build_config.h b/src/3rdparty/chromium/third_party/perfetto/include/perfetto/base/build_config.h
+index c08c206..cb324df 100644
+--- a/src/3rdparty/chromium/third_party/perfetto/include/perfetto/base/build_config.h
++++ b/src/3rdparty/chromium/third_party/perfetto/include/perfetto/base/build_config.h
+@@ -57,7 +57,8 @@
+ #define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_MAC() 1
+ #define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_IOS() 0
+ #endif
+-#elif defined(__linux__) || defined(__OpenBSD__) || defined(__FreeBSD__)
++#elif defined(__linux__) || defined(__OpenBSD__) || defined(__FreeBSD__) || \
++    defined(__HAIKU__)
+ #define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_ANDROID() 0
+ #define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_LINUX() 1
+ #define PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_BSD() 1
+-- 
+2.53.0
+
+
+From 1db12c3e30d59ad0b8f72e137c456b545771f4bc Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Wed, 11 Nov 2026 22:31:41 -0300
+Subject: Haiku: PartitionAlloc, Perfetto and Abseil know the OS
+
+PartitionAlloc's own build_config.h gets PA_IS_HAIKU (counted as BSD and
+POSIX, like //build). Perfetto: no CLOCK_BOOTTIME or CLOCK_MONOTONIC_RAW,
+no sys/syscall.h, no dirent d_type (stat instead), and SO_PEERCRED takes
+struct ucred as on Linux. Abseil: thread id from find_thread().
+---
+ .../src/partition_alloc/build_config.h            | 15 +++++++++++++--
+ .../abseil-cpp/absl/base/internal/sysinfo.cc      |  8 ++++++++
+ .../perfetto/include/perfetto/base/thread_utils.h |  2 +-
+ .../perfetto/include/perfetto/base/time.h         |  4 ++--
+ .../third_party/perfetto/src/base/file_utils.cc   | 13 ++++++++++++-
+ .../third_party/perfetto/src/base/unix_socket.cc  |  2 +-
+ 6 files changed, 37 insertions(+), 7 deletions(-)
+
+diff --git a/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/build_config.h b/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/build_config.h
+index 12f5648..826a71b 100644
+--- a/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/build_config.h
++++ b/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/build_config.h
+@@ -106,6 +106,8 @@
+ #define PA_IS_AIX
+ #elif defined(__asmjs__) || defined(__wasm__)
+ #define PA_IS_ASMJS
++#elif defined(__HAIKU__)
++#define PA_IS_HAIKU
+ #endif
+ 
+ // NOTE: Adding a new port? Please follow
+@@ -115,7 +117,9 @@
+ #define PA_IS_APPLE
+ #endif
+ 
+-#if defined(PA_IS_FREEBSD) || defined(PA_IS_NETBSD) || defined(PA_IS_OPENBSD)
++// Haiku follows the BSD paths, as in //build/build_config.h.
++#if defined(PA_IS_FREEBSD) || defined(PA_IS_NETBSD) || defined(PA_IS_OPENBSD) || \
++    defined(PA_IS_HAIKU)
+ #define PA_IS_BSD
+ #endif
+ 
+@@ -123,7 +127,7 @@
+     defined(PA_IS_IOS) || defined(PA_IS_LINUX) || defined(PA_IS_CHROMEOS) ||  \
+     defined(PA_IS_MAC) || defined(PA_IS_NACL) || defined(PA_IS_NETBSD) ||     \
+     defined(PA_IS_OPENBSD) || defined(PA_IS_QNX) || defined(PA_IS_SOLARIS) || \
+-    PA_BUILDFLAG(IS_ANDROID) || PA_BUILDFLAG(IS_CHROMEOS)
++    PA_BUILDFLAG(IS_ANDROID) || PA_BUILDFLAG(IS_CHROMEOS) || defined(PA_IS_HAIKU)
+ #define PA_IS_POSIX
+ #endif
+ 
+@@ -421,6 +425,13 @@
+ #endif
+ #undef PA_IS_FREEBSD
+ 
++#if defined(PA_IS_HAIKU)
++#define PA_BUILDFLAG_INTERNAL_IS_HAIKU() (1)
++#else
++#define PA_BUILDFLAG_INTERNAL_IS_HAIKU() (0)
++#endif
++#undef PA_IS_HAIKU
++
+ #if defined(PA_IS_FUCHSIA)
+ #define PA_BUILDFLAG_INTERNAL_IS_FUCHSIA() (1)
+ #else
+diff --git a/src/3rdparty/chromium/third_party/abseil-cpp/absl/base/internal/sysinfo.cc b/src/3rdparty/chromium/third_party/abseil-cpp/absl/base/internal/sysinfo.cc
+index a1e8bbd..ba254d2 100644
+--- a/src/3rdparty/chromium/third_party/abseil-cpp/absl/base/internal/sysinfo.cc
++++ b/src/3rdparty/chromium/third_party/abseil-cpp/absl/base/internal/sysinfo.cc
+@@ -14,6 +14,10 @@
+ 
+ #include "absl/base/internal/sysinfo.h"
+ 
++#if defined(__HAIKU__)
++#include <OS.h>
++#endif
++
+ #include "absl/base/attributes.h"
+ 
+ #ifdef _WIN32
+@@ -477,6 +481,10 @@ pid_t GetTID() {
+   return getthrid();
+ }
+ 
++#elif defined(__HAIKU__)
++
++pid_t GetTID() { return find_thread(nullptr); }
++
+ #elif defined(__Fuchsia__)
+ 
+ pid_t GetTID() {
+diff --git a/src/3rdparty/chromium/third_party/perfetto/include/perfetto/base/thread_utils.h b/src/3rdparty/chromium/third_party/perfetto/include/perfetto/base/thread_utils.h
+index 7cfab2e..e5aa820 100644
+--- a/src/3rdparty/chromium/third_party/perfetto/include/perfetto/base/thread_utils.h
++++ b/src/3rdparty/chromium/third_party/perfetto/include/perfetto/base/thread_utils.h
+@@ -32,7 +32,7 @@ __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId();
+ #elif PERFETTO_BUILDFLAG(PERFETTO_OS_QNX)
+ #include <sys/types.h>
+ #include <unistd.h>
+-#elif PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX) || \
++#elif (PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX) && !defined(__HAIKU__)) || \
+     PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID)
+ #include <sys/syscall.h>
+ #include <sys/types.h>
+diff --git a/src/3rdparty/chromium/third_party/perfetto/include/perfetto/base/time.h b/src/3rdparty/chromium/third_party/perfetto/include/perfetto/base/time.h
+index 8f58ad2..dd0c6b7 100644
+--- a/src/3rdparty/chromium/third_party/perfetto/include/perfetto/base/time.h
++++ b/src/3rdparty/chromium/third_party/perfetto/include/perfetto/base/time.h
+@@ -227,7 +227,7 @@ inline TimeNanos GetTimeInternalNs(clockid_t clk_id) {
+ // Return ns from boot. Conversely to GetWallTimeNs, this clock counts also time
+ // during suspend (when supported).
+ inline TimeNanos GetBootTimeNs() {
+-#if defined(__FreeBSD__)
++#if defined(__FreeBSD__) || defined(__HAIKU__)
+   return GetTimeInternalNs(kWallTimeClockSource);
+ #else
+   // Determine if CLOCK_BOOTTIME is available on the first call.
+@@ -245,7 +245,7 @@ inline TimeNanos GetWallTimeNs() {
+ }
+ 
+ inline TimeNanos GetWallTimeRawNs() {
+-#if defined(__OpenBSD__)
++#if defined(__OpenBSD__) || defined(__HAIKU__)
+   return GetTimeInternalNs(CLOCK_MONOTONIC);
+ #elif defined(__FreeBSD__)
+   return GetTimeInternalNs(CLOCK_MONOTONIC_FAST);
+diff --git a/src/3rdparty/chromium/third_party/perfetto/src/base/file_utils.cc b/src/3rdparty/chromium/third_party/perfetto/src/base/file_utils.cc
+index f9be6b6..236813b 100644
+--- a/src/3rdparty/chromium/third_party/perfetto/src/base/file_utils.cc
++++ b/src/3rdparty/chromium/third_party/perfetto/src/base/file_utils.cc
+@@ -339,7 +339,18 @@ base::Status ListFilesRecursive(const std::string& dir_path,
+           strcmp(dirent->d_name, "..") == 0) {
+         continue;
+       }
+-#if PERFETTO_BUILDFLAG(PERFETTO_OS_QNX)
++#if defined(__HAIKU__)
++      // Haiku's dirent has no d_type.
++      struct stat dirstat;
++      const std::string full_path = cur_dir + dirent->d_name;
++      PERFETTO_CHECK(stat(full_path.c_str(), &dirstat) == 0);
++      if (S_ISDIR(dirstat.st_mode)) {
++        dir_queue.push_back(full_path + '/');
++      } else if (S_ISREG(dirstat.st_mode)) {
++        PERFETTO_CHECK(full_path.length() > root_dir_path.length());
++        output.push_back(full_path.substr(root_dir_path.length()));
++      }
++#elif PERFETTO_BUILDFLAG(PERFETTO_OS_QNX)
+       struct stat* dirstat;
+       const std::string full_path = cur_dir + dirent->d_name;
+       PERFETTO_CHECK(stat(full_path.c_str(), dirstat) == 0);
+diff --git a/src/3rdparty/chromium/third_party/perfetto/src/base/unix_socket.cc b/src/3rdparty/chromium/third_party/perfetto/src/base/unix_socket.cc
+index 8ea5851..fe0bb98 100644
+--- a/src/3rdparty/chromium/third_party/perfetto/src/base/unix_socket.cc
++++ b/src/3rdparty/chromium/third_party/perfetto/src/base/unix_socket.cc
+@@ -978,7 +978,7 @@ void UnixSocket::ReadPeerCredentialsPosix() {
+   // There is no pid when obtaining peer credentials for QNX
+ #elif !defined(__FreeBSD__) && PERFETTO_BUILDFLAG(PERFETTO_OS_LINUX) || \
+     PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID)
+-#if PERFETTO_BUILDFLAG(PERFETTO_OS_BSD)
++#if PERFETTO_BUILDFLAG(PERFETTO_OS_BSD) && !defined(__HAIKU__)
+   struct sockpeercred user_cred;
+ #else
+   struct ucred user_cred;
+-- 
+2.53.0
+
+
+From 0925c2e7592e3443ac22868d176387692b2ab7bf Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Wed, 11 Nov 2026 22:32:51 -0300
+Subject: Haiku: nasm finds endian.h where Haiku has it
+
+---
+ .../chromium/third_party/nasm/config/config-linux.h       | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/3rdparty/chromium/third_party/nasm/config/config-linux.h b/src/3rdparty/chromium/third_party/nasm/config/config-linux.h
+index c89bcc8..799ce9f 100644
+--- a/src/3rdparty/chromium/third_party/nasm/config/config-linux.h
++++ b/src/3rdparty/chromium/third_party/nasm/config/config-linux.h
+@@ -183,7 +183,11 @@
+ #define HAVE_DECL_STRSEP 1
+ 
+ /* Define to 1 if you have the <endian.h> header file. */
++#ifdef __HAIKU__
++#define HAVE_ENDIAN_H 1
++#else
+ /* #undef HAVE_ENDIAN_H */
++#endif
+ 
+ /* Define to 1 if you have the `faccessat' function. */
+ #define HAVE_FACCESSAT 1
+@@ -330,7 +334,9 @@
+ #define HAVE_ISCNTRL 1
+ 
+ /* Define to 1 if you have the <machine/endian.h> header file. */
++#ifndef __HAIKU__
+ #define HAVE_MACHINE_ENDIAN_H 1
++#endif
+ 
+ /* Define to 1 if you have the <memory.h> header file. */
+ #define HAVE_MEMORY_H 1
+@@ -411,7 +417,9 @@
+ #define HAVE_SYSCONF 1
+ 
+ /* Define to 1 if you have the <sys/endian.h> header file. */
++#ifndef __HAIKU__
+ #define HAVE_SYS_ENDIAN_H 1
++#endif
+ 
+ /* Define to 1 if you have the <sys/mman.h> header file. */
+ #define HAVE_SYS_MMAN_H 1
+-- 
+2.53.0
+
+
+From 8c9d6409f460a5eef21196a8ec1eda1ecfb9c162 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Wed, 11 Nov 2026 22:39:45 -0300
+Subject: Haiku: Skia, the Vulkan loader and libdrm
+
+Haiku's GCC defines no __unix__, so Skia did not pick SK_BUILD_FOR_UNIX
+and fell through to the Mac code. The Vulkan loader counts Haiku as a
+common Unix platform and has no executable path to look up. libdrm gets
+major/minor/makedev, which Haiku lacks (it has no DRM devices).
+---
+ src/3rdparty/chromium/third_party/libdrm/BUILD.gn           | 4 +++-
+ src/3rdparty/chromium/third_party/libdrm/src/xf86drm.c      | 6 ++++++
+ .../third_party/skia/include/private/base/SkFeatures.h      | 3 ++-
+ .../vulkan-loader/src/loader/vk_loader_platform.h           | 4 ++--
+ 4 files changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/src/3rdparty/chromium/third_party/libdrm/BUILD.gn b/src/3rdparty/chromium/third_party/libdrm/BUILD.gn
+index f3a486d..3fdc6fb 100644
+--- a/src/3rdparty/chromium/third_party/libdrm/BUILD.gn
++++ b/src/3rdparty/chromium/third_party/libdrm/BUILD.gn
+@@ -35,7 +35,9 @@ config("libdrm_config") {
+   cflags = [ "-Wno-#pragma-messages" ]
+ 
+   # glibc version >= 2.25 explicitly include <sys/sysmacros.h>
+-  cflags += [ "-DMAJOR_IN_SYSMACROS=1" ]
++  if (!is_haiku) {
++    cflags += [ "-DMAJOR_IN_SYSMACROS=1" ]
++  }
+ 
+   # TODO(b/357680612): unused function 'swap32'.
+   cflags += [ "-Wno-unused-function" ]
+diff --git a/src/3rdparty/chromium/third_party/libdrm/src/xf86drm.c b/src/3rdparty/chromium/third_party/libdrm/src/xf86drm.c
+index 5f0eddc..076d2aa 100644
+--- a/src/3rdparty/chromium/third_party/libdrm/src/xf86drm.c
++++ b/src/3rdparty/chromium/third_party/libdrm/src/xf86drm.c
+@@ -57,6 +57,12 @@
+ #ifdef MAJOR_IN_SYSMACROS
+ #include <sys/sysmacros.h>
+ #endif
++#ifdef __HAIKU__
++/* Haiku has no device numbers to split; there is no DRM device to open. */
++#define major(dev) ((unsigned int)(((dev) >> 8) & 0xfff))
++#define minor(dev) ((unsigned int)((dev) & 0xff))
++#define makedev(maj, min) ((dev_t)(((maj) << 8) | (min)))
++#endif
+ #if HAVE_SYS_SYSCTL_H
+ #include <sys/sysctl.h>
+ #endif
+diff --git a/src/3rdparty/chromium/third_party/skia/include/private/base/SkFeatures.h b/src/3rdparty/chromium/third_party/skia/include/private/base/SkFeatures.h
+index 2452386..2eefb1f 100644
+--- a/src/3rdparty/chromium/third_party/skia/include/private/base/SkFeatures.h
++++ b/src/3rdparty/chromium/third_party/skia/include/private/base/SkFeatures.h
+@@ -22,7 +22,8 @@
+     #elif defined(linux) || defined(__linux) || defined(__FreeBSD__) || \
+           defined(__OpenBSD__) || defined(__sun) || defined(__NetBSD__) || \
+           defined(__DragonFly__) || defined(__Fuchsia__) || \
+-          defined(__GLIBC__) || defined(__GNU__) || defined(__unix__)
++          defined(__GLIBC__) || defined(__GNU__) || defined(__unix__) || \
++          defined(__HAIKU__)
+         #define SK_BUILD_FOR_UNIX
+     #elif TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
+         #define SK_BUILD_FOR_IOS
+diff --git a/src/3rdparty/chromium/third_party/vulkan-loader/src/loader/vk_loader_platform.h b/src/3rdparty/chromium/third_party/vulkan-loader/src/loader/vk_loader_platform.h
+index be1b08a..7499189 100644
+--- a/src/3rdparty/chromium/third_party/vulkan-loader/src/loader/vk_loader_platform.h
++++ b/src/3rdparty/chromium/third_party/vulkan-loader/src/loader/vk_loader_platform.h
+@@ -44,7 +44,7 @@
+ 
+ // Set of platforms with a common set of functionality which is queried throughout the program
+ #if defined(__linux__) || defined(__APPLE__) || defined(__Fuchsia__) || defined(__QNX__) || defined(__FreeBSD__) || \
+-    defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__) || defined(__GNU__)
++    defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__) || defined(__GNU__) || defined(__HAIKU__)
+ #define COMMON_UNIX_PLATFORMS 1
+ #else
+ #define COMMON_UNIX_PLATFORMS 0
+@@ -361,7 +361,7 @@ static inline char *loader_platform_executable_path(char *buffer, size_t size) {
+         buffer = "/usr/local/chrome/chrome";
+   return buffer;
+ }
+-#elif defined(__Fuchsia__)
++#elif defined(__Fuchsia__) || defined(__HAIKU__)
+ static inline char *loader_platform_executable_path(char *buffer, size_t size) { return NULL; }
+ #elif defined(__QNX__)
+ 
+-- 
+2.53.0
+
+
+From a8873dc18d58f3d21229da1af5ccf4f1d8f39ebb Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Wed, 11 Nov 2026 23:21:22 -0300
+Subject: Haiku: V8 platform, Dawn, ANGLE, libsync, pkg-config
+
+V8 gets V8_OS_HAIKU (POSIX, no target OS define, so none of the Linux
+signal/trap-handler code) and platform-haiku.cc, carried forward from
+the Qt 5 port: image list from get_next_image_info, stack start from
+get_thread_info, thread ids and names via find_thread/rename_thread.
+Dawn counts Haiku with the BSDs. ANGLE builds no GL or Vulkan backend on
+Haiku (no EGL/GLX display; it renders in software). libsync compiles to
+ioctls that fail. Chromium's pkg-config wrapper returned nothing on any
+platform it did not know, so no system library had flags: Haiku added
+there and to the other build scripts that look at sys.platform.
+---
+ .../chromium/build/config/linux/pkg-config.py |  2 +-
+ src/3rdparty/chromium/build/landmine_utils.py |  2 +-
+ .../bindings/scripts/bind_gen/style_format.py |  2 +-
+ .../dawn/src/dawn/common/Platform.h           |  2 +-
+ .../libsync/src/include/sync/sync.h           |  2 +-
+ .../chromium/third_party/libsync/src/sync.c   | 11 +++-
+ .../chromium/tools/licenses/licenses.py       |  2 +-
+ src/3rdparty/chromium/v8/BUILD.gn             |  8 ++-
+ src/3rdparty/chromium/v8/include/v8config.h   |  5 ++
+ .../v8/src/base/platform/platform-haiku.cc    | 62 +++++++++++++++++++
+ .../v8/src/base/platform/platform-posix.cc    | 14 ++++-
+ src/core/CMakeLists.txt                       |  8 ++-
+ 12 files changed, 108 insertions(+), 12 deletions(-)
+ create mode 100644 src/3rdparty/chromium/v8/src/base/platform/platform-haiku.cc
+
+diff --git a/src/3rdparty/chromium/build/config/linux/pkg-config.py b/src/3rdparty/chromium/build/config/linux/pkg-config.py
+index 92bfc0a..60dd6b9 100755
+--- a/src/3rdparty/chromium/build/config/linux/pkg-config.py
++++ b/src/3rdparty/chromium/build/config/linux/pkg-config.py
+@@ -113,7 +113,7 @@ def main():
+   # If this is run on non-Linux platforms, just return nothing and indicate
+   # success. This allows us to "kind of emulate" a Linux build from other
+   # platforms.
+-  if not sys.platform.startswith(tuple(['linux', 'darwin', 'freebsd', 'openbsd'])):
++  if not sys.platform.startswith(tuple(['linux', 'darwin', 'freebsd', 'openbsd', 'haiku'])):
+     print("[[],[],[],[],[]]")
+     return 0
+ 
+diff --git a/src/3rdparty/chromium/build/landmine_utils.py b/src/3rdparty/chromium/build/landmine_utils.py
+index b126f4f..eefdf8b 100644
+--- a/src/3rdparty/chromium/build/landmine_utils.py
++++ b/src/3rdparty/chromium/build/landmine_utils.py
+@@ -11,7 +11,7 @@ def IsWindows():
+ 
+ 
+ def IsLinux():
+-  return sys.platform.startswith(('linux', 'freebsd', 'netbsd', 'openbsd'))
++  return sys.platform.startswith(('linux', 'freebsd', 'netbsd', 'openbsd', 'haiku'))
+ 
+ 
+ def IsMac():
+diff --git a/src/3rdparty/chromium/third_party/blink/renderer/bindings/scripts/bind_gen/style_format.py b/src/3rdparty/chromium/third_party/blink/renderer/bindings/scripts/bind_gen/style_format.py
+index cdbf6cb..042d05a 100644
+--- a/src/3rdparty/chromium/third_party/blink/renderer/bindings/scripts/bind_gen/style_format.py
++++ b/src/3rdparty/chromium/third_party/blink/renderer/bindings/scripts/bind_gen/style_format.py
+@@ -30,7 +30,7 @@ def init(root_src_dir, enable_style_format=True):
+ 
+     # Determine //buildtools/<platform>/ directory
+     new_path_platform_suffix = ""
+-    if sys.platform.startswith(("linux","openbsd","freebsd")):
++    if sys.platform.startswith(("linux","openbsd","freebsd","haiku")):
+         platform = "linux64"
+         exe_suffix = ""
+     elif sys.platform.startswith("darwin"):
+diff --git a/src/3rdparty/chromium/third_party/dawn/src/dawn/common/Platform.h b/src/3rdparty/chromium/third_party/dawn/src/dawn/common/Platform.h
+index 44a7cfa..03030c3 100644
+--- a/src/3rdparty/chromium/third_party/dawn/src/dawn/common/Platform.h
++++ b/src/3rdparty/chromium/third_party/dawn/src/dawn/common/Platform.h
+@@ -59,7 +59,7 @@
+ #error "Unsupported Windows platform."
+ #endif
+ 
+-#elif defined(__OpenBSD__) || defined(__FreeBSD__)
++#elif defined(__OpenBSD__) || defined(__FreeBSD__) || defined(__HAIKU__)
+ #define DAWN_PLATFORM_IS_LINUX 1
+ #define DAWN_PLATFORM_IS_BSD 1
+ #define DAWN_PLATFORM_IS_POSIX 1
+diff --git a/src/3rdparty/chromium/third_party/libsync/src/include/sync/sync.h b/src/3rdparty/chromium/third_party/libsync/src/include/sync/sync.h
+index 5f407c0..5321ffa 100644
+--- a/src/3rdparty/chromium/third_party/libsync/src/include/sync/sync.h
++++ b/src/3rdparty/chromium/third_party/libsync/src/include/sync/sync.h
+@@ -22,7 +22,7 @@
+ #include <sys/cdefs.h>
+ #include <stdint.h>
+ 
+-#if !defined(__OpenBSD__) && !defined(__FreeBSD__)
++#if !defined(__OpenBSD__) && !defined(__FreeBSD__) && !defined(__HAIKU__)
+ #include <linux/types.h>
+ #endif
+ 
+diff --git a/src/3rdparty/chromium/third_party/libsync/src/sync.c b/src/3rdparty/chromium/third_party/libsync/src/sync.c
+index cd943d0..dd612f4 100644
+--- a/src/3rdparty/chromium/third_party/libsync/src/sync.c
++++ b/src/3rdparty/chromium/third_party/libsync/src/sync.c
+@@ -29,7 +29,16 @@
+ 
+ #include <sync/sync.h>
+ 
+-#if defined(__OpenBSD__) || defined(__FreeBSD__)
++#if defined(__HAIKU__)
++/* No sync files on Haiku: every ioctl below fails at run time. */
++#include <sys/ioccom.h>
++typedef uint8_t __u8;
++typedef uint32_t __u32;
++typedef int32_t __s32;
++#ifndef ETIME
++#define ETIME ETIMEDOUT
++#endif
++#elif defined(__OpenBSD__) || defined(__FreeBSD__)
+ typedef __uint8_t __u8;
+ typedef __uint32_t __u32;
+ typedef __int32_t __s32;
+diff --git a/src/3rdparty/chromium/tools/licenses/licenses.py b/src/3rdparty/chromium/tools/licenses/licenses.py
+index ee340b9..efb314c 100755
+--- a/src/3rdparty/chromium/tools/licenses/licenses.py
++++ b/src/3rdparty/chromium/tools/licenses/licenses.py
+@@ -808,7 +808,7 @@ def _GnBinary():
+   exe = 'gn'
+   if sys.platform.startswith('linux'):
+     subdir = 'linux64'
+-  elif sys.platform.startswith('freebsd'):
++  elif sys.platform.startswith(('freebsd', 'haiku')):
+     subdir = '../../../../.build/install/bin'
+   elif sys.platform == 'darwin':
+     subdir = 'mac'
+diff --git a/src/3rdparty/chromium/v8/BUILD.gn b/src/3rdparty/chromium/v8/BUILD.gn
+index c87cd55..d400d8f 100644
+--- a/src/3rdparty/chromium/v8/BUILD.gn
++++ b/src/3rdparty/chromium/v8/BUILD.gn
+@@ -6652,7 +6652,13 @@ v8_component("v8_libbase") {
+     }
+   }
+ 
+-  if ((is_linux || is_chromeos) && !is_bsd) {
++  if (is_haiku) {
++    sources += [
++      "src/base/debug/stack_trace_posix.cc",
++      "src/base/platform/platform-haiku.cc",
++    ]
++    libs = [ "execinfo" ]
++  } else if ((is_linux || is_chromeos) && !is_bsd) {
+     sources += [
+       "src/base/debug/stack_trace_posix.cc",
+       "src/base/platform/platform-linux.cc",
+diff --git a/src/3rdparty/chromium/v8/include/v8config.h b/src/3rdparty/chromium/v8/include/v8config.h
+index 406a02b..1aecceb 100644
+--- a/src/3rdparty/chromium/v8/include/v8config.h
++++ b/src/3rdparty/chromium/v8/include/v8config.h
+@@ -171,6 +171,11 @@ path. Add it with -I<path> to the command line
+ # define V8_OS_QNX 1
+ # define V8_OS_STRING "qnx"
+ 
++#elif defined(__HAIKU__)
++# define V8_OS_HAIKU 1
++# define V8_OS_POSIX 1
++# define V8_OS_STRING "haiku"
++
+ #elif defined(_WIN32)
+ # define V8_OS_WIN 1
+ # define V8_OS_STRING "windows"
+diff --git a/src/3rdparty/chromium/v8/src/base/platform/platform-haiku.cc b/src/3rdparty/chromium/v8/src/base/platform/platform-haiku.cc
+new file mode 100644
+index 0000000..b10e777
+--- /dev/null
++++ b/src/3rdparty/chromium/v8/src/base/platform/platform-haiku.cc
+@@ -0,0 +1,62 @@
++// Copyright 2012 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Platform-specific code for Haiku goes here. For the POSIX-compatible
++// parts, the implementation is in platform-posix.cc.
++
++#include <OS.h>
++#include <image.h>
++#include <pthread.h>
++#include <string.h>
++
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "src/base/macros.h"
++#include "src/base/platform/platform-posix-time.h"
++#include "src/base/platform/platform-posix.h"
++#include "src/base/platform/platform.h"
++
++namespace v8 {
++namespace base {
++
++TimezoneCache* OS::CreateTimezoneCache() {
++  return new PosixDefaultTimezoneCache();
++}
++
++std::vector<OS::SharedLibraryAddress> OS::GetSharedLibraryAddresses() {
++  std::vector<SharedLibraryAddress> result;
++  image_info info;
++  int32 cookie = 0;
++  while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
++    const char* sep = strrchr(info.name, '/');
++    std::string lib_name(sep != nullptr ? sep + 1 : info.name);
++    uintptr_t start = reinterpret_cast<uintptr_t>(info.text);
++    result.push_back(
++        SharedLibraryAddress(lib_name, start, start + info.text_size));
++  }
++  return result;
++}
++
++void OS::SignalCodeMovingGC() {}
++
++void OS::AdjustSchedulingParams() {}
++
++std::optional<OS::MemoryRange> OS::GetFirstFreeMemoryRangeWithin(
++    OS::Address boundary_start, OS::Address boundary_end, size_t minimum_size,
++    size_t alignment) {
++  return std::nullopt;
++}
++
++// static
++Stack::StackSlot Stack::ObtainCurrentThreadStackStart() {
++  thread_info info;
++  if (get_thread_info(find_thread(nullptr), &info) != B_OK) return nullptr;
++  // Stacks grow down: the start is the highest address.
++  return info.stack_end;
++}
++
++}  // namespace base
++}  // namespace v8
+diff --git a/src/3rdparty/chromium/v8/src/base/platform/platform-posix.cc b/src/3rdparty/chromium/v8/src/base/platform/platform-posix.cc
+index 0e7e140..078c817 100644
+--- a/src/3rdparty/chromium/v8/src/base/platform/platform-posix.cc
++++ b/src/3rdparty/chromium/v8/src/base/platform/platform-posix.cc
+@@ -71,10 +71,14 @@
+ #include <sys/resource.h>
+ #endif
+ 
+-#if !defined(_AIX) && !defined(V8_OS_FUCHSIA) && !V8_OS_ZOS
++#if !defined(_AIX) && !defined(V8_OS_FUCHSIA) && !V8_OS_ZOS && !V8_OS_HAIKU
+ #include <sys/syscall.h>
+ #endif
+ 
++#if V8_OS_HAIKU
++#include <OS.h>
++#endif
++
+ #if V8_OS_FREEBSD || V8_OS_DARWIN || V8_OS_BSD || V8_OS_SOLARIS
+ #define MAP_ANONYMOUS MAP_ANON
+ #endif
+@@ -867,6 +871,8 @@ int OS::GetCurrentThreadId() {
+   return static_cast<int>(pthread_self());
+ #elif V8_OS_ZOS
+   return gettid();
++#elif V8_OS_HAIKU
++  return static_cast<int>(find_thread(nullptr));
+ #else
+   return static_cast<int>(reinterpret_cast<intptr_t>(pthread_self()));
+ #endif
+@@ -1175,7 +1181,9 @@ Thread::~Thread() {
+ 
+ 
+ static void SetThreadName(const char* name) {
+-#if V8_OS_DRAGONFLYBSD || V8_OS_FREEBSD || V8_OS_OPENBSD
++#if V8_OS_HAIKU
++  rename_thread(find_thread(nullptr), name);
++#elif V8_OS_DRAGONFLYBSD || V8_OS_FREEBSD || V8_OS_OPENBSD
+   pthread_set_name_np(pthread_self(), name);
+ #elif V8_OS_NETBSD
+   static_assert(Thread::kMaxThreadNameLength <= PTHREAD_MAX_NAMELEN_NP);
+@@ -1354,7 +1362,7 @@ void Thread::SetThreadLocal(LocalStorageKey key, void* value) {
+ // keep this version in POSIX as most Linux-compatible derivatives will
+ // support it. MacOS and FreeBSD are different here.
+ #if !defined(V8_OS_FREEBSD) && !defined(V8_OS_DARWIN) && !defined(_AIX) && \
+-    !defined(V8_OS_SOLARIS) && !defined(V8_OS_OPENBSD)
++    !defined(V8_OS_SOLARIS) && !defined(V8_OS_OPENBSD) && !defined(V8_OS_HAIKU)
+ 
+ namespace {
+ #if DEBUG
+diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
+index 143ba52..dbbe94f 100644
+--- a/src/core/CMakeLists.txt
++++ b/src/core/CMakeLists.txt
+@@ -463,8 +463,14 @@ foreach(arch ${archs})
+         )
+ 
+         if(LINUX OR FREEBSD OR HAIKU)
++            # Haiku has neither an EGL nor a GLX display for ANGLE's GL
++            # backend: it renders in software.
++            if(HAIKU)
++                list(APPEND gnArgArg angle_enable_gl=false angle_enable_vulkan=false)
++            else()
++                list(APPEND gnArgArg angle_enable_gl=true)
++            endif()
+             list(APPEND gnArgArg
+-                angle_enable_gl=true
+                 use_gtk=false # GTK toolkit bindings
+                 use_qt5=false # Qt5 toolkit bindings
+                 use_gio=false
+-- 
+2.53.0
+
+
+From 182c35e69884bf988a4cca8abda5579ef602742c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Wed, 11 Nov 2026 23:41:07 -0300
+Subject: Haiku: base/ process and system info, PartitionAlloc threads
+
+base/ gets Haiku versions of the four per-OS files the BSDs have (process
+handle, iterator, metrics, sys_info), built on team_info, area_info,
+team_usage_info and system_info; libkvm/epoll-shim are not linked.
+PartitionAlloc: thread ids from find_thread, stack top from
+get_thread_info, no sys/syscall.h. The export-template self-tests skip
+__declspec on Haiku (its GCC maps __declspec to __attribute__). ANGLE
+gets its null backend, its only one on Haiku.
+---
+ src/3rdparty/chromium/base/BUILD.gn           |  10 +-
+ .../page_allocator_internals_posix.h          |   2 +
+ .../partition_alloc_base/export_template.h    |   6 +-
+ .../partition_alloc_base/rand_util_posix.cc   |   2 +
+ .../threading/platform_thread_posix.cc        |   6 +-
+ .../src/partition_alloc/stack/stack.cc        |  14 +-
+ src/3rdparty/chromium/base/export_template.h  |   4 +
+ .../base/process/process_handle_haiku.cc      |  33 ++++
+ .../chromium/base/process/process_iterator.h  |   4 +
+ .../base/process/process_iterator_haiku.cc    |  54 ++++++
+ .../base/process/process_metrics_haiku.cc     | 159 ++++++++++++++++++
+ .../chromium/base/system/sys_info_haiku.cc    |  94 +++++++++++
+ .../chromium/v8/src/base/export-template.h    |   4 +
+ src/core/CMakeLists.txt                       |   6 +-
+ 14 files changed, 392 insertions(+), 6 deletions(-)
+ create mode 100644 src/3rdparty/chromium/base/process/process_handle_haiku.cc
+ create mode 100644 src/3rdparty/chromium/base/process/process_iterator_haiku.cc
+ create mode 100644 src/3rdparty/chromium/base/process/process_metrics_haiku.cc
+ create mode 100644 src/3rdparty/chromium/base/system/sys_info_haiku.cc
+
+diff --git a/src/3rdparty/chromium/base/BUILD.gn b/src/3rdparty/chromium/base/BUILD.gn
+index 536958f..c6578dc 100644
+--- a/src/3rdparty/chromium/base/BUILD.gn
++++ b/src/3rdparty/chromium/base/BUILD.gn
+@@ -1117,7 +1117,7 @@ jumbo_component("base") {
+   }
+ 
+   # *BSD needs libkvm
+-  if (is_bsd) {
++  if (is_bsd && !is_haiku) {
+     libs += [
+       "kvm",
+       "epoll-shim",
+@@ -2175,6 +2175,14 @@ jumbo_component("base") {
+       "process/process_metrics_openbsd.cc",
+       "system/sys_info_openbsd.cc",
+     ]
++  } else if (is_haiku) {
++    sources += [
++      "process/process_handle_haiku.cc",
++      "process/process_iterator_haiku.cc",
++      "process/process_metrics_haiku.cc",
++      "system/sys_info_haiku.cc",
++    ]
++    libs += [ "execinfo" ]
+   } else if (is_freebsd) {
+     sources += [
+       "process/process_handle_freebsd.cc",
+diff --git a/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_posix.h b/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_posix.h
+index ea85ea1..3c15200 100644
+--- a/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_posix.h
++++ b/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_posix.h
+@@ -6,7 +6,9 @@
+ #define PARTITION_ALLOC_PAGE_ALLOCATOR_INTERNALS_POSIX_H_
+ 
+ #include <sys/mman.h>
++#if !defined(__HAIKU__)
+ #include <sys/syscall.h>
++#endif
+ 
+ #include <algorithm>
+ #include <atomic>
+diff --git a/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/export_template.h b/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/export_template.h
+index f530c99..e9e03f7 100644
+--- a/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/export_template.h
++++ b/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/export_template.h
+@@ -178,10 +178,14 @@
+ 
+ PA_EXPORT_TEMPLATE_TEST(DEFAULT, );  // NOLINT
+ PA_EXPORT_TEMPLATE_TEST(DEFAULT, __attribute__((visibility("default"))));
+-#if !defined(__MINGW32__)
++// Haiku's GCC turns __declspec(x) into __attribute__((x)), which these
++// token-pasting checks cannot take apart.
++#if !defined(__MINGW32__) && !defined(__HAIKU__)
+ PA_EXPORT_TEMPLATE_TEST(EXPORT_DLLEXPORT, __declspec(dllexport));
+ #endif
++#if !defined(__HAIKU__)
+ PA_EXPORT_TEMPLATE_TEST(DEFAULT, __declspec(dllimport));
++#endif
+ 
+ #undef PA_EXPORT_TEMPLATE_TEST
+ #undef PA_EXPORT_TEMPLATE_TEST_DEFAULT_DEFAULT
+diff --git a/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/rand_util_posix.cc b/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/rand_util_posix.cc
+index 206cead..52bc471 100644
+--- a/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/rand_util_posix.cc
++++ b/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/rand_util_posix.cc
+@@ -5,7 +5,9 @@
+ #include "partition_alloc/partition_alloc_base/rand_util.h"
+ 
+ #include <fcntl.h>
++#if !defined(__HAIKU__)
+ #include <sys/syscall.h>
++#endif
+ #include <unistd.h>
+ 
+ #include <cerrno>
+diff --git a/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/threading/platform_thread_posix.cc b/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/threading/platform_thread_posix.cc
+index 625ccdd..c88d36f 100644
+--- a/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/threading/platform_thread_posix.cc
++++ b/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/threading/platform_thread_posix.cc
+@@ -18,7 +18,9 @@
+ #include "partition_alloc/partition_alloc_base/logging.h"
+ #include "partition_alloc/partition_alloc_base/threading/platform_thread_internal_posix.h"
+ 
+-#if PA_BUILDFLAG(IS_LINUX) || PA_BUILDFLAG(IS_CHROMEOS) || PA_BUILDFLAG(IS_BSD)
++#if PA_BUILDFLAG(IS_HAIKU)
++#include <OS.h>
++#elif PA_BUILDFLAG(IS_LINUX) || PA_BUILDFLAG(IS_CHROMEOS) || PA_BUILDFLAG(IS_BSD)
+ #include <sys/syscall.h>
+ 
+ #include <atomic>
+@@ -81,6 +83,8 @@ PlatformThreadId PlatformThread::CurrentId() {
+   // into the kernel.
+ #if PA_BUILDFLAG(IS_APPLE)
+   return pthread_mach_thread_np(pthread_self());
++#elif PA_BUILDFLAG(IS_HAIKU)
++  return find_thread(nullptr);
+ #elif PA_BUILDFLAG(IS_LINUX) || PA_BUILDFLAG(IS_CHROMEOS)
+   static InitAtFork init_at_fork;
+   if (g_thread_id == -1 ||
+diff --git a/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/stack/stack.cc b/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/stack/stack.cc
+index 15072b5..438d2dd 100644
+--- a/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/stack/stack.cc
++++ b/src/3rdparty/chromium/base/allocator/partition_allocator/src/partition_alloc/stack/stack.cc
+@@ -18,7 +18,9 @@
+ #include <pthread.h>
+ #endif
+ 
+-#if PA_BUILDFLAG(IS_BSD)
++#if PA_BUILDFLAG(IS_HAIKU)
++#include <OS.h>
++#elif PA_BUILDFLAG(IS_BSD)
+ #include <pthread_np.h>
+ #endif
+ 
+@@ -54,6 +56,16 @@ void* GetStackTop() {
+   return pthread_get_stackaddr_np(pthread_self());
+ }
+ 
++#elif PA_BUILDFLAG(IS_HAIKU)
++
++void* GetStackTop() {
++  thread_info info;
++  if (get_thread_info(find_thread(nullptr), &info) != B_OK) {
++    return nullptr;
++  }
++  return info.stack_end;
++}
++
+ #elif PA_BUILDFLAG(IS_OPENBSD)
+ 
+ void* GetStackTop() {
+diff --git a/src/3rdparty/chromium/base/export_template.h b/src/3rdparty/chromium/base/export_template.h
+index 248d0d9..01ab35f 100644
+--- a/src/3rdparty/chromium/base/export_template.h
++++ b/src/3rdparty/chromium/base/export_template.h
+@@ -138,8 +138,12 @@
+ 
+ EXPORT_TEMPLATE_TEST(DEFAULT, );
+ EXPORT_TEMPLATE_TEST(DEFAULT, __attribute__((visibility("default"))));
++// Haiku's GCC turns __declspec(x) into __attribute__((x)), which these
++// token-pasting checks cannot take apart.
++#if !defined(__HAIKU__)
+ EXPORT_TEMPLATE_TEST(EXPORT_DLLEXPORT, __declspec(dllexport));
+ EXPORT_TEMPLATE_TEST(DEFAULT, __declspec(dllimport));
++#endif
+ 
+ #undef EXPORT_TEMPLATE_TEST
+ #undef EXPORT_TEMPLATE_TEST_DEFAULT_DEFAULT
+diff --git a/src/3rdparty/chromium/base/process/process_handle_haiku.cc b/src/3rdparty/chromium/base/process/process_handle_haiku.cc
+new file mode 100644
+index 0000000..0b4777d
+--- /dev/null
++++ b/src/3rdparty/chromium/base/process/process_handle_haiku.cc
+@@ -0,0 +1,33 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "base/process/process_handle.h"
++
++#include <OS.h>
++#include <image.h>
++
++#include "base/files/file_path.h"
++
++namespace base {
++
++ProcessId GetParentProcessId(ProcessHandle process) {
++  team_info info;
++  if (get_team_info(process, &info) != B_OK) {
++    return -1;
++  }
++  return info.parent;
++}
++
++FilePath GetProcessExecutablePath(ProcessHandle process) {
++  image_info info;
++  int32 cookie = 0;
++  while (get_next_image_info(process, &cookie, &info) == B_OK) {
++    if (info.type == B_APP_IMAGE) {
++      return FilePath(info.name);
++    }
++  }
++  return FilePath();
++}
++
++}  // namespace base
+diff --git a/src/3rdparty/chromium/base/process/process_iterator.h b/src/3rdparty/chromium/base/process/process_iterator.h
+index 3d0734a..057b3f3 100644
+--- a/src/3rdparty/chromium/base/process/process_iterator.h
++++ b/src/3rdparty/chromium/base/process/process_iterator.h
+@@ -25,6 +25,8 @@
+ #include <windows.h>
+ 
+ #include <tlhelp32.h>
++#elif BUILDFLAG(IS_HAIKU)
++#include <OS.h>
+ #elif BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_OPENBSD)
+ #include <sys/sysctl.h>
+ #elif BUILDFLAG(IS_FREEBSD)
+@@ -116,6 +118,8 @@ class BASE_EXPORT ProcessIterator {
+ #if BUILDFLAG(IS_WIN)
+   HANDLE snapshot_;
+   bool started_iteration_ = false;
++#elif BUILDFLAG(IS_HAIKU)
++  int32 team_cookie_ = 0;
+ #elif BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_BSD)
+   std::vector<kinfo_proc> kinfo_procs_;
+   size_t index_of_kinfo_proc_ = 0;
+diff --git a/src/3rdparty/chromium/base/process/process_iterator_haiku.cc b/src/3rdparty/chromium/base/process/process_iterator_haiku.cc
+new file mode 100644
+index 0000000..4376b85
+--- /dev/null
++++ b/src/3rdparty/chromium/base/process/process_iterator_haiku.cc
+@@ -0,0 +1,54 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "base/process/process_iterator.h"
++
++#include <OS.h>
++#include <unistd.h>
++
++#include <string>
++
++#include "base/process/process_handle.h"
++#include "base/strings/string_split.h"
++
++namespace base {
++
++// Haiku lists teams through a cookie, not a table to copy, so the iterator
++// keeps that cookie in place of the process list.
++ProcessIterator::ProcessIterator(const ProcessFilter* filter)
++    : filter_(filter) {}
++
++ProcessIterator::~ProcessIterator() = default;
++
++bool ProcessIterator::CheckForNextProcess() {
++  team_info info;
++  while (get_next_team_info(&team_cookie_, &info) == B_OK) {
++    if (info.uid != getuid()) {
++      continue;
++    }
++
++    // args holds the command line, space-separated and cut at 64 bytes.
++    std::string args(info.args, strnlen(info.args, sizeof(info.args)));
++    entry_.cmd_line_args_ =
++        SplitString(args, " ", KEEP_WHITESPACE, SPLIT_WANT_NONEMPTY);
++    entry_.pid_ = info.team;
++    entry_.ppid_ = info.parent;
++    entry_.gid_ = info.group_id;
++
++    FilePath exe = GetProcessExecutablePath(info.team);
++    entry_.exe_file_ = exe.empty() ? std::string(info.name)
++                                   : exe.BaseName().value();
++    return true;
++  }
++  return false;
++}
++
++bool NamedProcessIterator::IncludeEntry() {
++  if (executable_name_ != entry().exe_file()) {
++    return false;
++  }
++  return ProcessIterator::IncludeEntry();
++}
++
++}  // namespace base
+diff --git a/src/3rdparty/chromium/base/process/process_metrics_haiku.cc b/src/3rdparty/chromium/base/process/process_metrics_haiku.cc
+new file mode 100644
+index 0000000..9211ff1
+--- /dev/null
++++ b/src/3rdparty/chromium/base/process/process_metrics_haiku.cc
+@@ -0,0 +1,159 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "base/process/process_metrics.h"
++
++#include <OS.h>
++#include <sys/resource.h>
++#include <unistd.h>
++
++#include "base/memory/ptr_util.h"
++#include "base/notreached.h"
++#include "base/values.h"
++
++namespace base {
++
++ProcessMetrics::ProcessMetrics(ProcessHandle process) : process_(process) {}
++
++std::unique_ptr<ProcessMetrics> ProcessMetrics::CreateProcessMetrics(
++    ProcessHandle process) {
++  return WrapUnique(new ProcessMetrics(process));
++}
++
++base::expected<ProcessMemoryInfo, ProcessUsageError>
++ProcessMetrics::GetMemoryInfo() const {
++  team_info team;
++  if (get_team_info(process_, &team) != B_OK) {
++    return base::unexpected(ProcessUsageError::kProcessNotFound);
++  }
++  // The resident set is the RAM behind the team's areas.
++  ProcessMemoryInfo memory_info;
++  area_info area;
++  ssize_t cookie = 0;
++  while (get_next_area_info(process_, &cookie, &area) == B_OK) {
++    memory_info.resident_set_bytes += area.ram_size;
++  }
++  return memory_info;
++}
++
++base::expected<TimeDelta, ProcessCPUUsageError>
++ProcessMetrics::GetCumulativeCPUUsage() {
++  team_usage_info usage;
++  if (get_team_usage_info(process_, B_TEAM_USAGE_SELF, &usage) != B_OK) {
++    return base::unexpected(ProcessCPUUsageError::kProcessNotFound);
++  }
++  return base::ok(Microseconds(usage.user_time + usage.kernel_time));
++}
++
++size_t GetSystemCommitCharge() {
++  system_info info;
++  if (get_system_info(&info) != B_OK) {
++    return 0;
++  }
++  return static_cast<size_t>(info.used_pages * B_PAGE_SIZE / 1024);
++}
++
++int64_t GetNumberOfThreads(ProcessHandle process) {
++  team_info info;
++  if (get_team_info(process, &info) != B_OK) {
++    return 0;
++  }
++  return info.thread_count;
++}
++
++bool GetSystemMemoryInfo(SystemMemoryInfoKB* meminfo) {
++  system_info info;
++  if (get_system_info(&info) != B_OK) {
++    return false;
++  }
++  meminfo->total = static_cast<int>(info.max_pages * B_PAGE_SIZE / 1024);
++  meminfo->free = static_cast<int>(info.free_memory / 1024);
++  meminfo->available = meminfo->free;
++  meminfo->cached = static_cast<int>(info.cached_pages * B_PAGE_SIZE / 1024);
++  meminfo->swap_total =
++      static_cast<int>(info.max_swap_pages * B_PAGE_SIZE / 1024);
++  meminfo->swap_free =
++      static_cast<int>(info.free_swap_pages * B_PAGE_SIZE / 1024);
++  return true;
++}
++
++int ProcessMetrics::GetOpenFdCount() const {
++  // Haiku does not list another team's descriptors.
++  return -1;
++}
++
++int ProcessMetrics::GetOpenFdSoftLimit() const {
++  struct rlimit limit;
++  if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
++    return -1;
++  }
++  return static_cast<int>(limit.rlim_cur);
++}
++
++int ProcessMetrics::GetIdleWakeupsPerSecond() {
++  NOTIMPLEMENTED();
++  return 0;
++}
++
++bool GetSystemDiskInfo(SystemDiskInfo* diskinfo) {
++  NOTIMPLEMENTED();
++  return false;
++}
++
++bool GetVmStatInfo(VmStatInfo* vmstat) {
++  NOTIMPLEMENTED();
++  return false;
++}
++
++SystemDiskInfo::SystemDiskInfo() = default;
++
++SystemDiskInfo::SystemDiskInfo(const SystemDiskInfo& other) = default;
++
++SystemDiskInfo& SystemDiskInfo::operator=(const SystemDiskInfo&) = default;
++
++Value::Dict SystemDiskInfo::ToDict() const {
++  Value::Dict res;
++  // Write out uint64_t variables as doubles: JS has no other option.
++  res.Set("reads", static_cast<double>(reads));
++  res.Set("reads_merged", static_cast<double>(reads_merged));
++  res.Set("sectors_read", static_cast<double>(sectors_read));
++  res.Set("read_time", static_cast<double>(read_time));
++  res.Set("writes", static_cast<double>(writes));
++  res.Set("writes_merged", static_cast<double>(writes_merged));
++  res.Set("sectors_written", static_cast<double>(sectors_written));
++  res.Set("write_time", static_cast<double>(write_time));
++  res.Set("io", static_cast<double>(io));
++  res.Set("io_time", static_cast<double>(io_time));
++  res.Set("weighted_io_time", static_cast<double>(weighted_io_time));
++  return res;
++}
++
++Value::Dict SystemMemoryInfoKB::ToDict() const {
++  Value::Dict res;
++  res.Set("total", total);
++  res.Set("free", free);
++  res.Set("available", available);
++  res.Set("buffers", buffers);
++  res.Set("cached", cached);
++  res.Set("active_anon", active_anon);
++  res.Set("inactive_anon", inactive_anon);
++  res.Set("active_file", active_file);
++  res.Set("inactive_file", inactive_file);
++  res.Set("swap_total", swap_total);
++  res.Set("swap_free", swap_free);
++  res.Set("swap_used", swap_total - swap_free);
++  res.Set("dirty", dirty);
++  res.Set("reclaimable", reclaimable);
++  return res;
++}
++
++Value::Dict VmStatInfo::ToDict() const {
++  Value::Dict res;
++  res.Set("pswpin", static_cast<int>(pswpin));
++  res.Set("pswpout", static_cast<int>(pswpout));
++  res.Set("pgmajfault", static_cast<int>(pgmajfault));
++  return res;
++}
++
++}  // namespace base
+diff --git a/src/3rdparty/chromium/base/system/sys_info_haiku.cc b/src/3rdparty/chromium/base/system/sys_info_haiku.cc
+new file mode 100644
+index 0000000..d76feb7
+--- /dev/null
++++ b/src/3rdparty/chromium/base/system/sys_info_haiku.cc
+@@ -0,0 +1,94 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "base/system/sys_info.h"
++
++#include <OS.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#include <string>
++
++#include "base/check.h"
++#include "base/process/process_metrics.h"
++#include "base/strings/string_util.h"
++
++namespace base {
++
++namespace {
++
++bool GetSystemInfo(system_info* info) {
++  return get_system_info(info) == B_OK;
++}
++
++}  // namespace
++
++int SysInfo::NumberOfProcessors() {
++  system_info info;
++  if (!GetSystemInfo(&info) || info.cpu_count == 0) {
++    return 1;
++  }
++  return static_cast<int>(info.cpu_count);
++}
++
++uint64_t SysInfo::AmountOfPhysicalMemoryImpl() {
++  system_info info;
++  if (!GetSystemInfo(&info)) {
++    return 0;
++  }
++  return info.max_pages * B_PAGE_SIZE;
++}
++
++uint64_t SysInfo::AmountOfAvailablePhysicalMemoryImpl() {
++  system_info info;
++  if (!GetSystemInfo(&info)) {
++    return 0;
++  }
++  return info.free_memory;
++}
++
++uint64_t SysInfo::AmountOfAvailablePhysicalMemory(
++    const SystemMemoryInfoKB& info) {
++  uint64_t res_kb = info.available != 0
++                        ? info.available - info.active_file
++                        : info.free + info.reclaimable + info.inactive_file;
++  return res_kb * 1024;
++}
++
++std::string SysInfo::CPUModelName() {
++  cpu_topology_node_info nodes[64];
++  uint32 count = std::size(nodes);
++  if (get_cpu_topology_info(nodes, &count) != B_OK) {
++    return std::string();
++  }
++  for (uint32 i = 0; i < count; i++) {
++    if (nodes[i].type == B_TOPOLOGY_PACKAGE) {
++      switch (nodes[i].data.package.vendor) {
++        case B_CPU_VENDOR_INTEL:
++          return "Intel";
++        case B_CPU_VENDOR_AMD:
++          return "AMD";
++        default:
++          break;
++      }
++    }
++  }
++  return std::string();
++}
++
++uint64_t SysInfo::MaxSharedMemorySize() {
++  // Haiku shares memory through areas, with no fixed upper size.
++  return 0;
++}
++
++SysInfo::HardwareInfo SysInfo::GetHardwareInfoSync() {
++  HardwareInfo info;
++  info.manufacturer = "Haiku";
++  info.model = HardwareModelName();
++  DCHECK(IsStringUTF8(info.manufacturer));
++  DCHECK(IsStringUTF8(info.model));
++  return info;
++}
++
++}  // namespace base
+diff --git a/src/3rdparty/chromium/v8/src/base/export-template.h b/src/3rdparty/chromium/v8/src/base/export-template.h
+index 861cfe4..c980721 100644
+--- a/src/3rdparty/chromium/v8/src/base/export-template.h
++++ b/src/3rdparty/chromium/v8/src/base/export-template.h
+@@ -153,8 +153,12 @@
+ 
+ EXPORT_TEMPLATE_TEST(DEFAULT, );
+ EXPORT_TEMPLATE_TEST(DEFAULT, __attribute__((visibility("default"))));
++// Haiku's GCC turns __declspec(x) into __attribute__((x)), which these
++// token-pasting checks cannot take apart.
++#if !defined(__HAIKU__)
+ EXPORT_TEMPLATE_TEST(MSVC_HACK, __declspec(dllexport));
+ EXPORT_TEMPLATE_TEST(DEFAULT, __declspec(dllimport));
++#endif
+ 
+ #undef EXPORT_TEMPLATE_TEST
+ #undef EXPORT_TEMPLATE_TEST_DEFAULT_DEFAULT
+diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
+index dbbe94f..b35b1fa 100644
+--- a/src/core/CMakeLists.txt
++++ b/src/core/CMakeLists.txt
+@@ -464,9 +464,11 @@ foreach(arch ${archs})
+ 
+         if(LINUX OR FREEBSD OR HAIKU)
+             # Haiku has neither an EGL nor a GLX display for ANGLE's GL
+-            # backend: it renders in software.
++            # backend: it renders in software, and ANGLE gets its null
++            # backend so it still has one.
+             if(HAIKU)
+-                list(APPEND gnArgArg angle_enable_gl=false angle_enable_vulkan=false)
++                list(APPEND gnArgArg angle_enable_gl=false angle_enable_vulkan=false
++                    angle_enable_null=true)
+             else()
+                 list(APPEND gnArgArg angle_enable_gl=true)
+             endif()
+-- 
+2.53.0
+
+
+From cd9b558c8e338e5650b120f58175cd40392f392b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Wed, 11 Nov 2026 23:54:58 -0300
+Subject: Haiku: link executables without -pie
+
+Haiku's runtime_loader fails on the R_X86_64_TPOFF64 relocations a PIE
+gets for libstdc++'s std::__once_call/__once_callable (std::call_once):
+every C++ host tool (protoc and its plugins) failed to start with "Bad
+data". A non-PIE executable with the same relocations loads fine.
+---
+ src/3rdparty/chromium/build/config/gcc/BUILD.gn | 9 ++++++++-
+ src/3rdparty/chromium/v8/gni/v8.gni             | 2 +-
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/src/3rdparty/chromium/build/config/gcc/BUILD.gn b/src/3rdparty/chromium/build/config/gcc/BUILD.gn
+index fe5273b..01c1332 100644
+--- a/src/3rdparty/chromium/build/config/gcc/BUILD.gn
++++ b/src/3rdparty/chromium/build/config/gcc/BUILD.gn
+@@ -95,7 +95,14 @@ if (is_component_build && !is_android) {
+ # Settings for executables.
+ config("executable_config") {
+   configs = executable_and_shared_library_configs_
+-  ldflags = [ "-pie" ]
++
++  # Haiku's runtime_loader cannot apply the initial-exec TLS relocations
++  # (R_X86_64_TPOFF64 against libstdc++'s std::__once_call) that a PIE gets.
++  if (!is_haiku) {
++    ldflags = [ "-pie" ]
++  } else {
++    ldflags = []
++  }
+   if (is_android) {
+     ldflags += [
+       "-Bdynamic",
+diff --git a/src/3rdparty/chromium/v8/gni/v8.gni b/src/3rdparty/chromium/v8/gni/v8.gni
+index 6428021..c0e14d6 100644
+--- a/src/3rdparty/chromium/v8/gni/v8.gni
++++ b/src/3rdparty/chromium/v8/gni/v8.gni
+@@ -392,7 +392,7 @@ template("v8_executable") {
+         configs -= invoker.remove_configs
+       }
+       configs += invoker.configs
+-      if (is_linux || is_chromeos) {
++      if ((is_linux || is_chromeos) && !is_haiku) {
+         # For enabling ASLR.
+         ldflags = [ "-pie" ]
+       }
+-- 
+2.53.0
+
+
+From a173e0a19b983c9e9d638ff92f87515e91d8e40a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 00:01:49 -0300
+Subject: Haiku: DirReaderPosix falls back (no getdents64, no /proc)
+
+---
+ src/3rdparty/chromium/base/files/dir_reader_posix.h | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/src/3rdparty/chromium/base/files/dir_reader_posix.h b/src/3rdparty/chromium/base/files/dir_reader_posix.h
+index 4363cb7..560369c 100644
+--- a/src/3rdparty/chromium/base/files/dir_reader_posix.h
++++ b/src/3rdparty/chromium/base/files/dir_reader_posix.h
+@@ -17,7 +17,9 @@
+ // seems worse than falling back to enumerating all file descriptors so we will
+ // probably never implement this on the Mac.
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_BSD)
++// Haiku has no getdents64 and no /proc to read with it.
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID) || \
++     BUILDFLAG(IS_BSD)) && !BUILDFLAG(IS_HAIKU)
+ #include "base/files/dir_reader_linux.h"
+ #else
+ #include "base/files/dir_reader_fallback.h"
+@@ -25,7 +27,8 @@
+ 
+ namespace base {
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_BSD)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID) || \
++     BUILDFLAG(IS_BSD)) && !BUILDFLAG(IS_HAIKU)
+ typedef DirReaderLinux DirReaderPosix;
+ #else
+ typedef DirReaderFallback DirReaderPosix;
+-- 
+2.53.0
+
+
+From 9821f012ff27c8e2c4e3a1ed164ccca658cb64c7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 00:15:50 -0300
+Subject: Haiku: message pump on poll(), base/ OS calls, WebRTC, net
+
+MessagePumpEpoll already keeps a poll() list beside its epoll set; Haiku,
+which has no epoll or eventfd, always waits with poll() (epoll_haiku.h
+gives the types and inert calls) and wakes through a pipe. base/:
+random bytes from arc4random_buf (libbsd), stack bases and the debugger
+check from get_thread_info/get_team_info, FILE_EXE from the app image,
+no setproctitle, no sysctl, no syscall.h. WebRTC and the DNS address
+sorter skip BSD headers Haiku lacks (sys/endian.h, in6_var.h).
+---
+ src/3rdparty/chromium/base/BUILD.gn           |  8 ++-
+ .../chromium/base/base_paths_posix.cc         | 16 +++++-
+ .../chromium/base/debug/debugger_posix.cc     | 18 +++++-
+ src/3rdparty/chromium/base/linux_util.cc      |  1 +
+ .../chromium/base/message_loop/epoll_haiku.h  | 56 +++++++++++++++++++
+ .../base/message_loop/message_pump_epoll.cc   | 34 ++++++++++-
+ .../base/message_loop/message_pump_epoll.h    | 13 +++++
+ .../chromium/base/process/launch_posix.cc     |  2 +
+ .../base/process/set_process_title.cc         |  4 +-
+ .../base/profiler/stack_base_address_posix.cc | 15 ++++-
+ src/3rdparty/chromium/base/rand_util_posix.cc |  2 +
+ .../chromium/net/dns/address_sorter_posix.cc  |  6 +-
+ .../third_party/webrtc/rtc_base/byte_order.h  |  2 +-
+ .../webrtc/rtc_base/platform_thread_types.cc  |  2 +
+ 14 files changed, 169 insertions(+), 10 deletions(-)
+ create mode 100644 src/3rdparty/chromium/base/message_loop/epoll_haiku.h
+
+diff --git a/src/3rdparty/chromium/base/BUILD.gn b/src/3rdparty/chromium/base/BUILD.gn
+index c6578dc..4875f3b 100644
+--- a/src/3rdparty/chromium/base/BUILD.gn
++++ b/src/3rdparty/chromium/base/BUILD.gn
+@@ -2182,7 +2182,10 @@ jumbo_component("base") {
+       "process/process_metrics_haiku.cc",
+       "system/sys_info_haiku.cc",
+     ]
+-    libs += [ "execinfo" ]
++    libs += [
++      "bsd",
++      "execinfo",
++    ]
+   } else if (is_freebsd) {
+     sources += [
+       "process/process_handle_freebsd.cc",
+@@ -2378,6 +2381,9 @@ jumbo_component("base") {
+       "message_loop/message_pump_epoll.cc",
+       "message_loop/message_pump_epoll.h",
+     ]
++    if (is_haiku) {
++      sources += [ "message_loop/epoll_haiku.h" ]
++    }
+   }
+ 
+   # Android and MacOS have their own custom shared memory handle
+diff --git a/src/3rdparty/chromium/base/base_paths_posix.cc b/src/3rdparty/chromium/base/base_paths_posix.cc
+index bff1751..2e0cc43 100644
+--- a/src/3rdparty/chromium/base/base_paths_posix.cc
++++ b/src/3rdparty/chromium/base/base_paths_posix.cc
+@@ -23,11 +23,15 @@
+ #include "base/nix/xdg_util.h"
+ #include "base/notreached.h"
+ #include "base/path_service.h"
++#if !defined(__HAIKU__)
+ #include "base/posix/sysctl.h"
++#endif
+ #include "base/process/process_metrics.h"
+ #include "build/build_config.h"
+ 
+-#if BUILDFLAG(IS_BSD)
++#if BUILDFLAG(IS_HAIKU)
++#include <image.h>
++#elif BUILDFLAG(IS_BSD)
+ #include <sys/param.h>
+ #include <sys/sysctl.h>
+ #if BUILDFLAG(IS_OPENBSD)
+@@ -51,6 +55,16 @@ bool PathProviderPosix(int key, FilePath* result) {
+       }
+       *result = bin_dir;
+       return true;
++#elif BUILDFLAG(IS_HAIKU)
++      image_info info;
++      int32 cookie = 0;
++      while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
++        if (info.type == B_APP_IMAGE) {
++          *result = FilePath(info.name);
++          return true;
++        }
++      }
++      NOTREACHED() << "Unable to find the app image.";
+ #elif BUILDFLAG(IS_FREEBSD)
+       std::optional<std::string> bin_dir = StringSysctl({ CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 });
+       if (!bin_dir.has_value() || bin_dir.value().length() <= 1) {
+diff --git a/src/3rdparty/chromium/base/debug/debugger_posix.cc b/src/3rdparty/chromium/base/debug/debugger_posix.cc
+index 7bdf664..a17c969 100644
+--- a/src/3rdparty/chromium/base/debug/debugger_posix.cc
++++ b/src/3rdparty/chromium/base/debug/debugger_posix.cc
+@@ -37,7 +37,9 @@
+ #include <AvailabilityMacros.h>
+ #endif
+ 
+-#if BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_BSD)
++#if BUILDFLAG(IS_HAIKU)
++#include <OS.h>
++#elif BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_BSD)
+ #include <sys/sysctl.h>
+ #endif
+ 
+@@ -66,7 +68,19 @@
+ 
+ namespace base::debug {
+ 
+-#if BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_BSD)
++#if BUILDFLAG(IS_HAIKU)
++
++// A team being debugged has a debugger nub thread. get_team_info() is a
++// plain syscall, so this stays async-signal safe.
++bool BeingDebugged() {
++  team_info info;
++  return get_team_info(B_CURRENT_TEAM, &info) == B_OK &&
++         info.debugger_nub_thread >= 0;
++}
++
++void VerifyDebugger() {}
++
++#elif BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_BSD)
+ 
+ // Based on Apple's recommended method as described in
+ // http://developer.apple.com/qa/qa2004/qa1361.html
+diff --git a/src/3rdparty/chromium/base/linux_util.cc b/src/3rdparty/chromium/base/linux_util.cc
+index d1a9308..6c4baf5 100644
+--- a/src/3rdparty/chromium/base/linux_util.cc
++++ b/src/3rdparty/chromium/base/linux_util.cc
+@@ -26,6 +26,7 @@
+ #include "base/files/dir_reader_posix.h"
+ #include "base/files/file_util.h"
+ #include "base/files/scoped_file.h"
++#include "base/logging.h"
+ #include "base/strings/safe_sprintf.h"
+ #include "base/strings/span_printf.h"
+ #include "base/strings/string_number_conversions.h"
+diff --git a/src/3rdparty/chromium/base/message_loop/epoll_haiku.h b/src/3rdparty/chromium/base/message_loop/epoll_haiku.h
+new file mode 100644
+index 0000000..f622de9
+--- /dev/null
++++ b/src/3rdparty/chromium/base/message_loop/epoll_haiku.h
+@@ -0,0 +1,56 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_MESSAGE_LOOP_EPOLL_HAIKU_H_
++#define BASE_MESSAGE_LOOP_EPOLL_HAIKU_H_
++
++// Haiku has no epoll. MessagePumpEpoll keeps a poll() list next to its epoll
++// interest list and always waits with poll() on Haiku, so the epoll calls it
++// still makes only need to succeed; nothing waits on them.
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdint.h>
++#include <unistd.h>
++
++typedef union epoll_data {
++  void* ptr;
++  int fd;
++  uint32_t u32;
++  uint64_t u64;
++} epoll_data_t;
++
++struct epoll_event {
++  uint32_t events;
++  epoll_data_t data;
++};
++
++#define EPOLLIN 0x001
++#define EPOLLPRI 0x002
++#define EPOLLOUT 0x004
++#define EPOLLERR 0x008
++#define EPOLLHUP 0x010
++#define EPOLLONESHOT (1u << 30)
++
++#define EPOLL_CTL_ADD 1
++#define EPOLL_CTL_DEL 2
++#define EPOLL_CTL_MOD 3
++
++// A real descriptor, so that ScopedFD owns and closes something.
++inline int epoll_create1(int /*flags*/) {
++  return open("/dev/null", O_RDONLY | O_CLOEXEC);
++}
++
++inline int epoll_ctl(int /*epfd*/, int /*op*/, int /*fd*/,
++                     struct epoll_event* /*event*/) {
++  return 0;
++}
++
++inline int epoll_wait(int /*epfd*/, struct epoll_event* /*events*/,
++                      int /*maxevents*/, int /*timeout*/) {
++  errno = ENOSYS;
++  return -1;
++}
++
++#endif  // BASE_MESSAGE_LOOP_EPOLL_HAIKU_H_
+diff --git a/src/3rdparty/chromium/base/message_loop/message_pump_epoll.cc b/src/3rdparty/chromium/base/message_loop/message_pump_epoll.cc
+index 0bb5eff..81a31ca 100644
+--- a/src/3rdparty/chromium/base/message_loop/message_pump_epoll.cc
++++ b/src/3rdparty/chromium/base/message_loop/message_pump_epoll.cc
+@@ -9,7 +9,13 @@
+ 
+ #include "base/message_loop/message_pump_epoll.h"
+ 
++#include "build/build_config.h"
++
++#if BUILDFLAG(IS_HAIKU)
++#include <fcntl.h>
++#else
+ #include <sys/eventfd.h>
++#endif
+ 
+ #include <algorithm>
+ #include <cstddef>
+@@ -144,7 +150,18 @@ MessagePumpEpoll::MessagePumpEpoll() {
+   epoll_.reset(epoll_create1(/*flags=*/0));
+   PCHECK(epoll_.is_valid());
+ 
++#if BUILDFLAG(IS_HAIKU)
++  int wake_pipe[2];
++  PCHECK(pipe(wake_pipe) == 0);
++  for (int fd : wake_pipe) {
++    PCHECK(fcntl(fd, F_SETFL, O_NONBLOCK) == 0);
++    PCHECK(fcntl(fd, F_SETFD, FD_CLOEXEC) == 0);
++  }
++  wake_event_.reset(wake_pipe[0]);
++  wake_write_.reset(wake_pipe[1]);
++#else
+   wake_event_.reset(eventfd(0, EFD_NONBLOCK));
++#endif
+   PCHECK(wake_event_.is_valid());
+ 
+   epoll_event wake{.events = EPOLLIN, .data = {.ptr = &wake_event_}};
+@@ -306,7 +323,12 @@ void MessagePumpEpoll::Quit() {
+ 
+ void MessagePumpEpoll::ScheduleWork() {
+   const uint64_t value = 1;
++#if BUILDFLAG(IS_HAIKU)
++  // A full pipe (EAGAIN) is as good as a write: the reader will wake up.
++  ssize_t n = HANDLE_EINTR(write(wake_write_.get(), &value, sizeof(value)));
++#else
+   ssize_t n = HANDLE_EINTR(write(wake_event_.get(), &value, sizeof(value)));
++#endif
+ 
+   // EAGAIN here implies that the write() would overflow of the event counter,
+   // which is a condition we can safely ignore. It implies that the event
+@@ -459,8 +481,10 @@ bool MessagePumpEpoll::WaitForEpollEvents(TimeDelta timeout) {
+   // to iterate through the list of watched fds. This value is pretty arbitrary,
+   // the internet suggests that under 1000 fds that epoll isn't noticeably
+   // faster than poll but this isn't easy to empirically measure.
++  // Haiku has no epoll: poll() is the only way to wait there.
+   bool use_poll =
+-      g_use_poll.load(std::memory_order_relaxed) && entries_.size() < 500;
++      BUILDFLAG(IS_HAIKU) ||
++      (g_use_poll.load(std::memory_order_relaxed) && entries_.size() < 500);
+ 
+   if (use_poll) {
+     if (!GetEventsPoll(epoll_timeout, &poll_events)) {
+@@ -676,9 +700,17 @@ void MessagePumpEpoll::HandleEvent(int fd,
+ void MessagePumpEpoll::HandleWakeUp() {
+   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+   BeginNativeWorkBatch();
++#if BUILDFLAG(IS_HAIKU)
++  // Unlike an eventfd, the pipe holds one word per wake-up: drain them all.
++  uint64_t values[64];
++  while (HANDLE_EINTR(read(wake_event_.get(), values, sizeof(values))) ==
++         static_cast<ssize_t>(sizeof(values))) {
++  }
++#else
+   uint64_t value;
+   ssize_t n = HANDLE_EINTR(read(wake_event_.get(), &value, sizeof(value)));
+   DPCHECK(n == sizeof(value));
++#endif
+ }
+ 
+ void MessagePumpEpoll::BeginNativeWorkBatch() {
+diff --git a/src/3rdparty/chromium/base/message_loop/message_pump_epoll.h b/src/3rdparty/chromium/base/message_loop/message_pump_epoll.h
+index 83bc592..87f1e0c 100644
+--- a/src/3rdparty/chromium/base/message_loop/message_pump_epoll.h
++++ b/src/3rdparty/chromium/base/message_loop/message_pump_epoll.h
+@@ -6,7 +6,14 @@
+ #define BASE_MESSAGE_LOOP_MESSAGE_PUMP_EPOLL_H_
+ 
+ #include <poll.h>
++
++#include "build/build_config.h"
++
++#if BUILDFLAG(IS_HAIKU)
++#include "base/message_loop/epoll_haiku.h"
++#else
+ #include <sys/epoll.h>
++#endif
+ 
+ #include <cstdint>
+ #include <map>
+@@ -267,8 +274,14 @@ class BASE_EXPORT MessagePumpEpoll : public MessagePump,
+   ScopedFD epoll_;
+ 
+   // An eventfd object used to wake the pump's thread when scheduling new work.
++  // On Haiku, which has no eventfd, the read end of a pipe.
+   ScopedFD wake_event_;
+ 
++#if BUILDFLAG(IS_HAIKU)
++  // The write end of that pipe.
++  ScopedFD wake_write_;
++#endif
++
+   // Tracks when we should next record periodic metrics.
+   base::TimeTicks next_metrics_time_;
+ 
+diff --git a/src/3rdparty/chromium/base/process/launch_posix.cc b/src/3rdparty/chromium/base/process/launch_posix.cc
+index 43e6b35..595e579 100644
+--- a/src/3rdparty/chromium/base/process/launch_posix.cc
++++ b/src/3rdparty/chromium/base/process/launch_posix.cc
+@@ -19,7 +19,9 @@
+ #include <stdint.h>
+ #include <stdlib.h>
+ #include <sys/resource.h>
++#if !defined(__HAIKU__)
+ #include <sys/syscall.h>
++#endif
+ #include <sys/time.h>
+ #include <sys/types.h>
+ #include <sys/wait.h>
+diff --git a/src/3rdparty/chromium/base/process/set_process_title.cc b/src/3rdparty/chromium/base/process/set_process_title.cc
+index edd8c78..37a02f4 100644
+--- a/src/3rdparty/chromium/base/process/set_process_title.cc
++++ b/src/3rdparty/chromium/base/process/set_process_title.cc
+@@ -43,8 +43,10 @@
+ namespace base {
+ 
+ // TODO(jrg): Find out if setproctitle or equivalent is available on Android.
++// Haiku has no setproctitle().
+ #if BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_SOLARIS) && \
+-    !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_FUCHSIA) && !BUILDFLAG(IS_NACL)
++    !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_FUCHSIA) && !BUILDFLAG(IS_NACL) && \
++    !BUILDFLAG(IS_HAIKU)
+ 
+ void SetProcessTitleFromCommandLine(const char** main_argv) {
+   // Build a single string which consists of all the arguments separated
+diff --git a/src/3rdparty/chromium/base/profiler/stack_base_address_posix.cc b/src/3rdparty/chromium/base/profiler/stack_base_address_posix.cc
+index adcc6f8..d47dfc3 100644
+--- a/src/3rdparty/chromium/base/profiler/stack_base_address_posix.cc
++++ b/src/3rdparty/chromium/base/profiler/stack_base_address_posix.cc
+@@ -17,7 +17,9 @@
+ #include "base/files/scoped_file.h"
+ #endif
+ 
+-#if BUILDFLAG(IS_BSD)
++#if BUILDFLAG(IS_HAIKU)
++#include <OS.h>
++#elif BUILDFLAG(IS_BSD)
+ #include <pthread_np.h>
+ #endif
+ 
+@@ -51,7 +53,14 @@ std::optional<uintptr_t> GetAndroidMainThreadStackBaseAddressImpl() {
+ 
+ #if !BUILDFLAG(IS_LINUX)
+ uintptr_t GetThreadStackBaseAddressImpl(pthread_t pthread_id) {
+-#if BUILDFLAG(IS_OPENBSD)
++#if BUILDFLAG(IS_HAIKU)
++  thread_info info;
++  if (get_thread_info(get_pthread_thread_id(pthread_id), &info) != B_OK) {
++    return 0;
++  }
++  // Stacks grow down: the base is the highest address.
++  return reinterpret_cast<uintptr_t>(info.stack_end);
++#elif BUILDFLAG(IS_OPENBSD)
+   stack_t ss;
+   void *address;
+   size_t size;
+@@ -86,8 +95,10 @@ uintptr_t GetThreadStackBaseAddressImpl(pthread_t pthread_id) {
+                       << logging::SystemErrorCodeToString(result);
+   pthread_attr_destroy(&attr);
+ #endif
++#if !BUILDFLAG(IS_HAIKU)
+   const uintptr_t base_address = reinterpret_cast<uintptr_t>(address) + size;
+   return base_address;
++#endif
+ }
+ #endif  // !BUILDFLAG(IS_LINUX)
+ 
+diff --git a/src/3rdparty/chromium/base/rand_util_posix.cc b/src/3rdparty/chromium/base/rand_util_posix.cc
+index 4f00144..7c2d074 100644
+--- a/src/3rdparty/chromium/base/rand_util_posix.cc
++++ b/src/3rdparty/chromium/base/rand_util_posix.cc
+@@ -13,7 +13,9 @@
+ #include <fcntl.h>
+ #include <stddef.h>
+ #include <stdint.h>
++#if !defined(__HAIKU__)
+ #include <sys/syscall.h>
++#endif
+ #include <sys/utsname.h>
+ #include <unistd.h>
+ 
+diff --git a/src/3rdparty/chromium/net/dns/address_sorter_posix.cc b/src/3rdparty/chromium/net/dns/address_sorter_posix.cc
+index 41448b5..5cee5b3 100644
+--- a/src/3rdparty/chromium/net/dns/address_sorter_posix.cc
++++ b/src/3rdparty/chromium/net/dns/address_sorter_posix.cc
+@@ -24,7 +24,9 @@
+ #include <net/if.h>
+ #include <string.h>
+ #include <sys/ioctl.h>
+-#if BUILDFLAG(IS_IOS)
++#if BUILDFLAG(IS_HAIKU)
++// Haiku has no in6_ifreq/SIOCGIFAFLAG_IN6 to read address flags with.
++#elif BUILDFLAG(IS_IOS)
+ // The code in the following header file is copied from [1]. This file has the
+ // minimum definitions needed to retrieve the IP attributes, since iOS SDK
+ // doesn't include a necessary header <netinet/in_var.h>.
+@@ -442,6 +444,7 @@ void AddressSorterPosix::OnIPAddressChanged() {
+     SourceAddressInfo& info = source_map_[src.address()];
+     // Note: no known way to fill in |native| and |home|.
+     info.native = info.home = info.deprecated = false;
++#if !BUILDFLAG(IS_HAIKU)
+     if (ifa->ifa_addr->sa_family == AF_INET6) {
+       struct in6_ifreq ifr = {};
+       strncpy(ifr.ifr_name, ifa->ifa_name, sizeof(ifr.ifr_name) - 1);
+@@ -454,6 +457,7 @@ void AddressSorterPosix::OnIPAddressChanged() {
+         LOG(WARNING) << "SIOCGIFAFLAG_IN6 failed " << rv;
+       }
+     }
++#endif  // !BUILDFLAG(IS_HAIKU)
+     if (ifa->ifa_netmask) {
+       IPEndPoint netmask;
+       if (netmask.FromSockAddr(ifa->ifa_netmask, ifa->ifa_addr->sa_len)) {
+diff --git a/src/3rdparty/chromium/third_party/webrtc/rtc_base/byte_order.h b/src/3rdparty/chromium/third_party/webrtc/rtc_base/byte_order.h
+index 99e5b02..f2fc3e4 100644
+--- a/src/3rdparty/chromium/third_party/webrtc/rtc_base/byte_order.h
++++ b/src/3rdparty/chromium/third_party/webrtc/rtc_base/byte_order.h
+@@ -90,7 +90,7 @@
+ #error WEBRTC_ARCH_BIG_ENDIAN or WEBRTC_ARCH_LITTLE_ENDIAN must be defined.
+ #endif  // defined(WEBRTC_ARCH_LITTLE_ENDIAN)
+ 
+-#elif defined(WEBRTC_BSD)
++#elif defined(WEBRTC_BSD) && !defined(__HAIKU__)
+ #include <sys/endian.h>
+ #elif defined(WEBRTC_POSIX)
+ #include <endian.h>
+diff --git a/src/3rdparty/chromium/third_party/webrtc/rtc_base/platform_thread_types.cc b/src/3rdparty/chromium/third_party/webrtc/rtc_base/platform_thread_types.cc
+index f15842f..497f91f 100644
+--- a/src/3rdparty/chromium/third_party/webrtc/rtc_base/platform_thread_types.cc
++++ b/src/3rdparty/chromium/third_party/webrtc/rtc_base/platform_thread_types.cc
+@@ -14,8 +14,10 @@
+ #if !defined(WEBRTC_BSD)
+ #include <sys/prctl.h>
+ #endif
++#if !defined(__HAIKU__)
+ #include <sys/syscall.h>
+ #endif
++#endif
+ 
+ #if defined(WEBRTC_WIN)
+ #include "rtc_base/arraysize.h"
+-- 
+2.53.0
+
+
+From 2ae2a305f546b4f78fca65355a48f88fa85499b7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 00:48:35 -0300
+Subject: Haiku: file watcher stub, stat times, base/ constants, WebRTC, nasm
+
+No EVFILT_VNODE on Haiku, so FilePathWatcher is the stub. File times come
+from st_mtim/st_atim/st_ctim as on Linux, and futimens stands in for
+futimes. Constants Haiku lacks or names differently: NZERO, PF_X
+(PF_EXECUTE), CLOCK_BOOTTIME (its monotonic clock), kFDDir and
+kSystemDefaultMaxFds. WebRTC gets placeholder numbers for IPV6_TCLASS and
+SO_TIMESTAMP (the calls fail and are handled) and IFF_LINK for
+IFF_RUNNING. nasm uses its own strsep.
+---
+ src/3rdparty/chromium/base/BUILD.gn           | 20 +++++++++++++------
+ .../chromium/base/debug/stack_trace_posix.cc  |  2 ++
+ .../chromium/base/files/file_posix.cc         |  5 +++--
+ .../chromium/base/posix/can_lower_nice_to.cc  |  5 +++++
+ .../chromium/base/process/launch_posix.cc     |  4 ++++
+ .../base/process/process_metrics_posix.cc     |  2 ++
+ .../base/profiler/module_cache_posix.cc       |  5 +++++
+ .../chromium/base/tracing/trace_time.cc       |  3 +++
+ .../third_party/nasm/config/config-linux.h    |  3 +++
+ .../third_party/webrtc/rtc_base/network.cc    |  5 +++++
+ .../webrtc/rtc_base/physical_socket_server.cc | 14 +++++++++++++
+ 11 files changed, 60 insertions(+), 8 deletions(-)
+
+diff --git a/src/3rdparty/chromium/base/BUILD.gn b/src/3rdparty/chromium/base/BUILD.gn
+index 4875f3b..73cf56a 100644
+--- a/src/3rdparty/chromium/base/BUILD.gn
++++ b/src/3rdparty/chromium/base/BUILD.gn
+@@ -2359,12 +2359,20 @@ jumbo_component("base") {
+       "stack_canary_linux.cc",
+       "stack_canary_linux.h",
+     ]
+-    sources += [
+-      "files/file_path_watcher_kqueue.cc",
+-      "files/file_path_watcher_kqueue.h",
+-      "files/file_path_watcher_bsd.cc",
+-      "threading/platform_thread_bsd.cc",
+-    ]
++    if (is_haiku) {
++      # Haiku's kqueue has no EVFILT_VNODE to watch files with.
++      sources += [
++        "files/file_path_watcher_stub.cc",
++        "threading/platform_thread_bsd.cc",
++      ]
++    } else {
++      sources += [
++        "files/file_path_watcher_kqueue.cc",
++        "files/file_path_watcher_kqueue.h",
++        "files/file_path_watcher_bsd.cc",
++        "threading/platform_thread_bsd.cc",
++      ]
++    }
+   }
+ 
+   if (use_blink) {
+diff --git a/src/3rdparty/chromium/base/debug/stack_trace_posix.cc b/src/3rdparty/chromium/base/debug/stack_trace_posix.cc
+index 88aff50..c77fb75 100644
+--- a/src/3rdparty/chromium/base/debug/stack_trace_posix.cc
++++ b/src/3rdparty/chromium/base/debug/stack_trace_posix.cc
+@@ -19,7 +19,9 @@
+ #include <string.h>
+ #include <sys/param.h>
+ #include <sys/stat.h>
++#if !defined(__HAIKU__)
+ #include <sys/syscall.h>
++#endif
+ #include <sys/types.h>
+ #include <unistd.h>
+ 
+diff --git a/src/3rdparty/chromium/base/files/file_posix.cc b/src/3rdparty/chromium/base/files/file_posix.cc
+index 1863746..d643273 100644
+--- a/src/3rdparty/chromium/base/files/file_posix.cc
++++ b/src/3rdparty/chromium/base/files/file_posix.cc
+@@ -91,7 +91,7 @@ int CallFtruncate(PlatformFile file, int64_t length) {
+ }
+ 
+ int CallFutimes(PlatformFile file, const struct timeval times[2]) {
+-#ifdef __USE_XOPEN2K8
++#if defined(__USE_XOPEN2K8) || defined(__HAIKU__)
+   // futimens should be available, but futimes might not be
+   // http://pubs.opengroup.org/onlinepubs/9699919799/
+ 
+@@ -186,7 +186,8 @@ void File::Info::FromStat(const stat_wrapper_t& stat_info) {
+   // creation time. However, other than on Mac & iOS where the actual file
+   // creation time is included as st_birthtime, the rest of POSIX platforms have
+   // no portable way to get the creation time.
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_FUCHSIA)
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_FUCHSIA) || \
++    BUILDFLAG(IS_HAIKU)
+   time_t last_modified_sec = stat_info.st_mtim.tv_sec;
+   int64_t last_modified_nsec = stat_info.st_mtim.tv_nsec;
+   time_t last_accessed_sec = stat_info.st_atim.tv_sec;
+diff --git a/src/3rdparty/chromium/base/posix/can_lower_nice_to.cc b/src/3rdparty/chromium/base/posix/can_lower_nice_to.cc
+index 2b84413..05f9a3d 100644
+--- a/src/3rdparty/chromium/base/posix/can_lower_nice_to.cc
++++ b/src/3rdparty/chromium/base/posix/can_lower_nice_to.cc
+@@ -23,6 +23,11 @@
+ #define RLIMIT_NICE 20
+ #endif
+ 
++// Haiku's limits.h leaves NZERO out; POSIX says it is at least 20.
++#if !defined(NZERO)
++#define NZERO 20
++#endif
++
+ namespace base::internal {
+ 
+ bool CanLowerNiceTo(int nice_value) {
+diff --git a/src/3rdparty/chromium/base/process/launch_posix.cc b/src/3rdparty/chromium/base/process/launch_posix.cc
+index 595e579..79f2196 100644
+--- a/src/3rdparty/chromium/base/process/launch_posix.cc
++++ b/src/3rdparty/chromium/base/process/launch_posix.cc
+@@ -240,6 +240,10 @@ static const char kFDDir[] = "/proc/self/fd";
+ static const char kFDDir[] = "/dev/fd";
+ #elif BUILDFLAG(IS_FREEBSD)
+ static const char kFDDir[] = "/dev/fd";
++#elif BUILDFLAG(IS_HAIKU)
++// Haiku has no such directory: opening it fails and every descriptor up to
++// the limit is closed instead.
++static const char kFDDir[] = "/dev/fd";
+ #elif BUILDFLAG(IS_OPENBSD)
+ static const char kFDDir[] = "/dev/fd";
+ #elif BUILDFLAG(IS_ANDROID)
+diff --git a/src/3rdparty/chromium/base/process/process_metrics_posix.cc b/src/3rdparty/chromium/base/process/process_metrics_posix.cc
+index 56906b9..fe28cdb 100644
+--- a/src/3rdparty/chromium/base/process/process_metrics_posix.cc
++++ b/src/3rdparty/chromium/base/process/process_metrics_posix.cc
+@@ -52,6 +52,8 @@ static const rlim_t kSystemDefaultMaxFds = 256;
+ static const rlim_t kSystemDefaultMaxFds = 8192;
+ #elif BUILDFLAG(IS_FREEBSD)
+ static const rlim_t kSystemDefaultMaxFds = 8192;
++#elif BUILDFLAG(IS_HAIKU)
++static const rlim_t kSystemDefaultMaxFds = 1024;
+ #elif BUILDFLAG(IS_NETBSD)
+ static const rlim_t kSystemDefaultMaxFds = 1024;
+ #elif BUILDFLAG(IS_OPENBSD)
+diff --git a/src/3rdparty/chromium/base/profiler/module_cache_posix.cc b/src/3rdparty/chromium/base/profiler/module_cache_posix.cc
+index 54c48a1..498ccfa 100644
+--- a/src/3rdparty/chromium/base/profiler/module_cache_posix.cc
++++ b/src/3rdparty/chromium/base/profiler/module_cache_posix.cc
+@@ -7,6 +7,11 @@
+ #include <dlfcn.h>
+ #include <elf.h>
+ 
++#if !defined(PF_X) && defined(PF_EXECUTE)
++// Haiku's elf.h names the flag PF_EXECUTE.
++#define PF_X PF_EXECUTE
++#endif
++
+ #include <optional>
+ #include <string_view>
+ 
+diff --git a/src/3rdparty/chromium/base/tracing/trace_time.cc b/src/3rdparty/chromium/base/tracing/trace_time.cc
+index b1c86d1..f337cc1 100644
+--- a/src/3rdparty/chromium/base/tracing/trace_time.cc
++++ b/src/3rdparty/chromium/base/tracing/trace_time.cc
+@@ -10,6 +10,9 @@
+ 
+ #if BUILDFLAG(IS_FREEBSD)
+ #define CLOCK_BOOTTIME CLOCK_UPTIME
++#elif BUILDFLAG(IS_HAIKU)
++// Haiku's monotonic clock does not stop in suspend: it is boot time.
++#define CLOCK_BOOTTIME CLOCK_MONOTONIC
+ #endif
+ 
+ namespace base::tracing {
+diff --git a/src/3rdparty/chromium/third_party/nasm/config/config-linux.h b/src/3rdparty/chromium/third_party/nasm/config/config-linux.h
+index 799ce9f..25be37a 100644
+--- a/src/3rdparty/chromium/third_party/nasm/config/config-linux.h
++++ b/src/3rdparty/chromium/third_party/nasm/config/config-linux.h
+@@ -405,7 +405,10 @@
+ /* #undef HAVE_STRRCHRNUL */
+ 
+ /* Define to 1 if you have the `strsep' function. */
++#ifndef __HAIKU__
++/* strsep is in Haiku's libbsd, which nasm does not link: use its own. */
+ #define HAVE_STRSEP 1
++#endif
+ 
+ /* Define to 1 if the system has the type `struct stat'. */
+ #define HAVE_STRUCT_STAT 1
+diff --git a/src/3rdparty/chromium/third_party/webrtc/rtc_base/network.cc b/src/3rdparty/chromium/third_party/webrtc/rtc_base/network.cc
+index f3c84e3..985cdae 100644
+--- a/src/3rdparty/chromium/third_party/webrtc/rtc_base/network.cc
++++ b/src/3rdparty/chromium/third_party/webrtc/rtc_base/network.cc
+@@ -10,6 +10,11 @@
+ 
+ #include "rtc_base/network.h"
+ 
++#if defined(__HAIKU__) && !defined(IFF_RUNNING)
++// Haiku calls an interface with a link IFF_LINK.
++#define IFF_RUNNING IFF_LINK
++#endif
++
+ #include "absl/strings/string_view.h"
+ #include "rtc_base/experiments/field_trial_parser.h"
+ 
+diff --git a/src/3rdparty/chromium/third_party/webrtc/rtc_base/physical_socket_server.cc b/src/3rdparty/chromium/third_party/webrtc/rtc_base/physical_socket_server.cc
+index 9cd445c..07cf371 100644
+--- a/src/3rdparty/chromium/third_party/webrtc/rtc_base/physical_socket_server.cc
++++ b/src/3rdparty/chromium/third_party/webrtc/rtc_base/physical_socket_server.cc
+@@ -9,6 +9,20 @@
+  */
+ #include "rtc_base/physical_socket_server.h"
+ 
++#if defined(__HAIKU__)
++// Haiku has none of these options. Numbers it does not know make
++// setsockopt()/getsockopt() fail, which the code below already handles.
++#ifndef IPV6_TCLASS
++#define IPV6_TCLASS 0x7f01
++#endif
++#ifndef SO_TIMESTAMP
++#define SO_TIMESTAMP 0x7f02
++#endif
++#ifndef SCM_TIMESTAMP
++#define SCM_TIMESTAMP SO_TIMESTAMP
++#endif
++#endif
++
+ #include <cstdint>
+ #include <cstring>
+ #include <utility>
+-- 
+2.53.0
+
+
+From 548c6065c8061345ddda49ecc232ac529a867ef0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 01:26:30 -0300
+Subject: Haiku: base/ thread ids are kernel thread ids (find_thread)
+
+---
+ .../chromium/base/threading/platform_thread_posix.cc       | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/3rdparty/chromium/base/threading/platform_thread_posix.cc b/src/3rdparty/chromium/base/threading/platform_thread_posix.cc
+index be1af8e..f67d89c 100644
+--- a/src/3rdparty/chromium/base/threading/platform_thread_posix.cc
++++ b/src/3rdparty/chromium/base/threading/platform_thread_posix.cc
+@@ -32,6 +32,10 @@
+ #include "base/posix/can_lower_nice_to.h"
+ #endif
+ 
++#if BUILDFLAG(IS_HAIKU)
++#include <OS.h>
++#endif
++
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+ #include <sys/syscall.h>
+ 
+@@ -270,6 +274,9 @@ PlatformThreadId PlatformThreadBase::CurrentId() {
+   return reinterpret_cast<int32_t>(pthread_self());
+ #elif BUILDFLAG(IS_POSIX) && BUILDFLAG(IS_AIX)
+   return pthread_self();
++#elif BUILDFLAG(IS_HAIKU)
++  // A kernel thread id, unique across the system, unlike pthread_self().
++  return static_cast<uint64_t>(find_thread(nullptr));
+ #elif BUILDFLAG(IS_BSD)
+   return reinterpret_cast<uint64_t>(pthread_self());
+ #elif BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_AIX)
+-- 
+2.53.0
+
+
+From 845f2303463eabb9342adf42d051349a5f5e2e66 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 01:37:23 -0300
+Subject: Haiku: process_posix without sysctl, update params OS name, proc_util
+
+process_posix keeps the BSD kqueue wait for non-child processes (Haiku's
+libbsd has EVFILT_PROC) but has no sysctl.h. The update client names the
+OS "haiku". The sandbox's proc_util skips its d_type check.
+---
+ src/3rdparty/chromium/base/process/process_posix.cc          | 2 +-
+ .../chromium/components/update_client/update_query_params.cc | 2 ++
+ src/3rdparty/chromium/sandbox/linux/services/proc_util.cc    | 5 +++++
+ 3 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/3rdparty/chromium/base/process/process_posix.cc b/src/3rdparty/chromium/base/process/process_posix.cc
+index 1dc302d..26e3d19 100644
+--- a/src/3rdparty/chromium/base/process/process_posix.cc
++++ b/src/3rdparty/chromium/base/process/process_posix.cc
+@@ -27,7 +27,7 @@
+ #include <sys/event.h>
+ #endif
+ 
+-#if BUILDFLAG(IS_BSD)
++#if BUILDFLAG(IS_BSD) && !BUILDFLAG(IS_HAIKU)
+ #include <sys/types.h>
+ #include <sys/sysctl.h> 
+ #endif
+diff --git a/src/3rdparty/chromium/components/update_client/update_query_params.cc b/src/3rdparty/chromium/components/update_client/update_query_params.cc
+index 2e70a2d..4b25996 100644
+--- a/src/3rdparty/chromium/components/update_client/update_query_params.cc
++++ b/src/3rdparty/chromium/components/update_client/update_query_params.cc
+@@ -37,6 +37,8 @@ const char kOs[] =
+     "linux";
+ #elif BUILDFLAG(IS_FUCHSIA)
+     "fuchsia";
++#elif BUILDFLAG(IS_HAIKU)
++    "haiku";
+ #elif BUILDFLAG(IS_OPENBSD)
+     "openbsd";
+ #elif defined(OS_FREEBSD)
+diff --git a/src/3rdparty/chromium/sandbox/linux/services/proc_util.cc b/src/3rdparty/chromium/sandbox/linux/services/proc_util.cc
+index de8198f..404822f 100644
+--- a/src/3rdparty/chromium/sandbox/linux/services/proc_util.cc
++++ b/src/3rdparty/chromium/sandbox/linux/services/proc_util.cc
+@@ -103,7 +103,12 @@ bool ProcUtil::HasOpenDirectory(int proc_fd) {
+     // Check for stale symlinks and skip them if they meet certain criteria.
+     // See crbug.com/362595425
+     char filename[PATH_MAX] = {};  // Initialize for robustness
++#if defined(__HAIKU__)
++    // Haiku's dirent has no d_type; it has no /proc/self/fd either.
++    if (false &&
++#else
+     if (stat_res == -1 && errno == ESTALE && de->d_type == DT_LNK &&
++#endif
+         readlinkat(proc_self_fd, de->d_name, filename, sizeof(filename)) !=
+             -1) {
+       static constexpr std::string_view kStalePrefix = "/google/cog/";
+-- 
+2.53.0
+
+
+From 006e652a76b4ef23bb734ade7da1afc370324c35 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 02:29:03 -0300
+Subject: Haiku: V8 sampler reads registers from Haiku's struct vregs
+
+---
+ src/3rdparty/chromium/v8/src/libsampler/sampler.cc | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/3rdparty/chromium/v8/src/libsampler/sampler.cc b/src/3rdparty/chromium/v8/src/libsampler/sampler.cc
+index 88884fa..b8875c8 100644
+--- a/src/3rdparty/chromium/v8/src/libsampler/sampler.cc
++++ b/src/3rdparty/chromium/v8/src/libsampler/sampler.cc
+@@ -16,7 +16,7 @@
+ #include <sys/time.h>
+ #include <atomic>
+ 
+-#if !V8_OS_QNX && !V8_OS_AIX && !V8_OS_ZOS
++#if !V8_OS_QNX && !V8_OS_AIX && !V8_OS_ZOS && !V8_OS_HAIKU
+ #include <sys/syscall.h>
+ #endif
+ 
+@@ -489,6 +489,13 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
+ #error Unexpected iOS target architecture.
+ #endif  // V8_TARGET_ARCH_ARM64
+ 
++#elif V8_OS_HAIKU
++#if V8_HOST_ARCH_X64
++  // Haiku's mcontext_t is struct vregs.
++  state->pc = reinterpret_cast<void*>(mcontext.rip);
++  state->sp = reinterpret_cast<void*>(mcontext.rsp);
++  state->fp = reinterpret_cast<void*>(mcontext.rbp);
++#endif  // V8_HOST_ARCH_X64
+ #elif V8_OS_DARWIN
+ #if V8_HOST_ARCH_X64
+   state->pc = reinterpret_cast<void*>(mcontext->__ss.__rip);
+-- 
+2.53.0
+
+
+From 169bc939bd03ee722cb508730a614536a7645ad0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 02:42:01 -0300
+Subject: Haiku: Blink and ANGLE thread stacks/names, memory instrumentation
+
+Blink's stack size and start (used to scan the stack for GC) come from
+get_thread_info; ANGLE names threads with rename_thread; the memory
+instrumentation service gets os_metrics_haiku.cc, the team's area RAM.
+---
+ .../cpp/memory_instrumentation/BUILD.gn       |  4 +-
+ .../os_metrics_haiku.cc                       | 47 +++++++++++++++++++
+ .../angle/src/common/system_utils_linux.cpp   |  8 +++-
+ .../blink/renderer/platform/wtf/stack_util.cc | 16 ++++++-
+ 4 files changed, 72 insertions(+), 3 deletions(-)
+ create mode 100644 src/3rdparty/chromium/services/resource_coordinator/public/cpp/memory_instrumentation/os_metrics_haiku.cc
+
+diff --git a/src/3rdparty/chromium/services/resource_coordinator/public/cpp/memory_instrumentation/BUILD.gn b/src/3rdparty/chromium/services/resource_coordinator/public/cpp/memory_instrumentation/BUILD.gn
+index d071c41..0cb9cad 100644
+--- a/src/3rdparty/chromium/services/resource_coordinator/public/cpp/memory_instrumentation/BUILD.gn
++++ b/src/3rdparty/chromium/services/resource_coordinator/public/cpp/memory_instrumentation/BUILD.gn
+@@ -31,7 +31,9 @@ component("memory_instrumentation") {
+     sources += [ "os_metrics_linux.cc" ]
+   }
+ 
+-  if (is_bsd) {
++  if (is_haiku) {
++    sources += [ "os_metrics_haiku.cc" ]
++  } else if (is_bsd) {
+     sources += [ "os_metrics_bsd.cc" ]
+   }
+ 
+diff --git a/src/3rdparty/chromium/services/resource_coordinator/public/cpp/memory_instrumentation/os_metrics_haiku.cc b/src/3rdparty/chromium/services/resource_coordinator/public/cpp/memory_instrumentation/os_metrics_haiku.cc
+new file mode 100644
+index 0000000..0b68f57
+--- /dev/null
++++ b/src/3rdparty/chromium/services/resource_coordinator/public/cpp/memory_instrumentation/os_metrics_haiku.cc
+@@ -0,0 +1,47 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "services/resource_coordinator/public/cpp/memory_instrumentation/os_metrics.h"
++
++#include <OS.h>
++
++#include <vector>
++
++#include "base/notreached.h"
++#include "base/process/process.h"
++
++namespace memory_instrumentation {
++
++// static
++bool OSMetrics::FillOSMemoryDump(base::ProcessId pid,
++                                 mojom::RawOSMemDump* dump) {
++  const team_id team =
++      pid == base::kNullProcessId ? B_CURRENT_TEAM : static_cast<team_id>(pid);
++  // The RAM behind the team's areas is its resident set.
++  uint64_t resident = 0;
++  area_info area;
++  ssize_t cookie = 0;
++  bool any = false;
++  while (get_next_area_info(team, &cookie, &area) == B_OK) {
++    resident += area.ram_size;
++    any = true;
++  }
++  if (!any) {
++    return false;
++  }
++
++  dump->resident_set_kb = static_cast<uint32_t>(resident / 1024);
++  dump->platform_private_footprint->rss_anon_bytes = resident;
++  dump->platform_private_footprint->vm_swap_bytes = 0;
++  return true;
++}
++
++// static
++std::vector<mojom::VmRegionPtr> OSMetrics::GetProcessMemoryMaps(
++    base::ProcessId) {
++  NOTIMPLEMENTED();
++  return std::vector<mojom::VmRegionPtr>();
++}
++
++}  // namespace memory_instrumentation
+diff --git a/src/3rdparty/chromium/third_party/angle/src/common/system_utils_linux.cpp b/src/3rdparty/chromium/third_party/angle/src/common/system_utils_linux.cpp
+index 856d0b7..f61f86e 100644
+--- a/src/3rdparty/chromium/third_party/angle/src/common/system_utils_linux.cpp
++++ b/src/3rdparty/chromium/third_party/angle/src/common/system_utils_linux.cpp
+@@ -19,6 +19,10 @@
+ #include <pthread_np.h>
+ #endif
+ 
++#if defined(__HAIKU__)
++#include <OS.h>
++#endif
++
+ #include <array>
+ 
+ namespace angle
+@@ -65,7 +69,9 @@ void SetCurrentThreadName(const char *name)
+     // There's a 15-character (16 including '\0') limit.  If the name is too big (and ERANGE is
+     // returned), name will be ignored.
+     ASSERT(strlen(name) < 16);
+-#if ANGLE_PLATFORM_OPENBSD
++#if defined(__HAIKU__)
++    rename_thread(find_thread(nullptr), name);
++#elif ANGLE_PLATFORM_OPENBSD
+     pthread_set_name_np(pthread_self(), name);
+ #else
+     pthread_setname_np(pthread_self(), name);
+diff --git a/src/3rdparty/chromium/third_party/blink/renderer/platform/wtf/stack_util.cc b/src/3rdparty/chromium/third_party/blink/renderer/platform/wtf/stack_util.cc
+index 36461af..f1533d2 100644
+--- a/src/3rdparty/chromium/third_party/blink/renderer/platform/wtf/stack_util.cc
++++ b/src/3rdparty/chromium/third_party/blink/renderer/platform/wtf/stack_util.cc
+@@ -23,7 +23,9 @@
+ extern "C" void* __libc_stack_end;  // NOLINT
+ #endif
+ 
+-#if BUILDFLAG(IS_BSD)
++#if BUILDFLAG(IS_HAIKU)
++#include <OS.h>
++#elif BUILDFLAG(IS_BSD)
+ #include <sys/signal.h>
+ #include <pthread_np.h>
+ #endif
+@@ -72,6 +74,13 @@ size_t GetUnderestimatedStackSize() {
+   //    low as 512k.
+   //
+   return 512 * 1024;
++#elif BUILDFLAG(IS_HAIKU)
++  thread_info info;
++  if (get_thread_info(find_thread(nullptr), &info) != B_OK) {
++    return 512 * 1024;
++  }
++  return static_cast<uint8_t*>(info.stack_end) -
++         static_cast<uint8_t*>(info.stack_base);
+ #elif BUILDFLAG(IS_OPENBSD)
+   return 512 * 1024;
+ #elif BUILDFLAG(IS_APPLE)
+@@ -140,6 +149,11 @@ void* GetStackStart() {
+   NOTREACHED() << "pthread_getattr_np() failed for stack end and no "
+                   "glibc __libc_stack_end is present.";
+ #endif
++#elif BUILDFLAG(IS_HAIKU)
++  // Stacks grow down: the start is the highest address.
++  thread_info info;
++  CHECK_EQ(get_thread_info(find_thread(nullptr), &info), B_OK);
++  return info.stack_end;
+ #elif BUILDFLAG(IS_APPLE)
+   return pthread_get_stackaddr_np(pthread_self());
+ #elif BUILDFLAG(IS_WIN) && defined(COMPILER_MSVC)
+-- 
+2.53.0
+
+
+From 35295c94bd823e85bdcb8f12ece2479d513a6108 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 02:46:00 -0300
+Subject: Haiku: mojom is_bsd/is_haiku features, no USB service
+
+Mojom enables is_bsd for Haiku so generated bindings match the C++ side,
+which treats Haiku as BSD. The device service has no USB backend on
+Haiku: UsbService::Create() returns null.
+---
+ src/3rdparty/chromium/mojo/public/tools/bindings/mojom.gni | 6 ++++++
+ src/3rdparty/chromium/services/device/usb/BUILD.gn         | 2 +-
+ src/3rdparty/chromium/services/device/usb/usb_service.cc   | 5 ++++-
+ 3 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/src/3rdparty/chromium/mojo/public/tools/bindings/mojom.gni b/src/3rdparty/chromium/mojo/public/tools/bindings/mojom.gni
+index 27d84bb..69cffdf 100644
+--- a/src/3rdparty/chromium/mojo/public/tools/bindings/mojom.gni
++++ b/src/3rdparty/chromium/mojo/public/tools/bindings/mojom.gni
+@@ -797,6 +797,12 @@ template("mojom") {
+       enabled_features += [ "is_bsd" ]
+     }
+ 
++    # Haiku follows the BSD paths, as in //build/config/BUILDCONFIG.gn.
++    if (is_haiku) {
++      enabled_features += [ "is_haiku" ]
++      enabled_features += [ "is_bsd" ]
++    }
++
+     action_outputs = []
+     foreach(base_path, output_file_base_paths) {
+       filename = get_path_info(base_path, "file")
+diff --git a/src/3rdparty/chromium/services/device/usb/BUILD.gn b/src/3rdparty/chromium/services/device/usb/BUILD.gn
+index b46a286..3e67e8c 100644
+--- a/src/3rdparty/chromium/services/device/usb/BUILD.gn
++++ b/src/3rdparty/chromium/services/device/usb/BUILD.gn
+@@ -113,7 +113,7 @@ static_library("usb") {
+     deps += [ "//third_party/libusb" ]
+   }
+ 
+-  if (is_freebsd) {
++  if (is_freebsd || is_haiku) {
+     sources += [
+       "usb_service_fake.cc",
+       "usb_service_fake.h",
+diff --git a/src/3rdparty/chromium/services/device/usb/usb_service.cc b/src/3rdparty/chromium/services/device/usb/usb_service.cc
+index 3dd8293..f366c54 100644
+--- a/src/3rdparty/chromium/services/device/usb/usb_service.cc
++++ b/src/3rdparty/chromium/services/device/usb/usb_service.cc
+@@ -29,7 +29,7 @@
+ #include "services/device/usb/usb_service_win.h"
+ #elif BUILDFLAG(IS_OPENBSD)
+ #include "services/device/usb/usb_service_impl.h"
+-#elif BUILDFLAG(IS_FREEBSD)
++#elif BUILDFLAG(IS_FREEBSD) || BUILDFLAG(IS_HAIKU)
+ #include "services/device/usb/usb_service_fake.h"
+ #endif
+ 
+@@ -59,6 +59,9 @@ std::unique_ptr<UsbService> UsbService::Create() {
+   return base::WrapUnique(new UsbServiceWin());
+ #elif BUILDFLAG(IS_MAC)
+   return base::WrapUnique(new UsbServiceImpl());
++#elif BUILDFLAG(IS_HAIKU)
++  // No USB access from the browser on Haiku.
++  return nullptr;
+ #elif BUILDFLAG(IS_BSD)
+   return base::WrapUnique(new UsbServiceImpl());
+ #else
+-- 
+2.53.0
+
+
+From 6536fb46219f84e65de6281f6b72415b09a1977c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 02:58:21 -0300
+Subject: Haiku: V8 trap handler header compiles (the handler stays off)
+
+---
+ .../chromium/v8/src/trap-handler/handler-inside-posix.h       | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/3rdparty/chromium/v8/src/trap-handler/handler-inside-posix.h b/src/3rdparty/chromium/v8/src/trap-handler/handler-inside-posix.h
+index ef2f4ee..a177dc9 100644
+--- a/src/3rdparty/chromium/v8/src/trap-handler/handler-inside-posix.h
++++ b/src/3rdparty/chromium/v8/src/trap-handler/handler-inside-posix.h
+@@ -17,6 +17,10 @@ namespace trap_handler {
+ constexpr int kOobSignal = SIGSEGV;
+ #elif V8_OS_DARWIN
+ constexpr int kOobSignal = SIGBUS;
++#elif V8_OS_HAIKU
++// No trap handler on Haiku (V8_TRAP_HANDLER_SUPPORTED is false); the
++// constant only keeps the declarations below compiling.
++constexpr int kOobSignal = SIGSEGV;
+ #else
+ #error Posix trap handlers are only supported on Linux, MacOSX and FreeBSD.
+ #endif
+-- 
+2.53.0
+
+
+From ccbad9ac38cda049e291a2cc0489381c8b7af3d2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 03:25:53 -0300
+Subject: Haiku: every DevTools rollup config gives terser a worker count
+
+---
+ .../models/live-metrics/web-vitals-injected/rollup.config.mjs  | 3 ++-
+ .../src/front_end/panels/recorder/injected/rollup.config.mjs   | 3 ++-
+ .../src/front_end/third_party/codemirror.next/rollup.config.js | 3 ++-
+ .../src/front_end/third_party/lit/rollup.config.mjs            | 3 ++-
+ 4 files changed, 8 insertions(+), 4 deletions(-)
+
+diff --git a/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/models/live-metrics/web-vitals-injected/rollup.config.mjs b/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/models/live-metrics/web-vitals-injected/rollup.config.mjs
+index 87d831e..e35efcd 100644
+--- a/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/models/live-metrics/web-vitals-injected/rollup.config.mjs
++++ b/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/models/live-metrics/web-vitals-injected/rollup.config.mjs
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ import terser from '@rollup/plugin-terser';
++import {cpus} from 'node:os';
+ 
+ /**
+  * Checks if an env variable is true.
+@@ -17,5 +18,5 @@ function isEnvVarTrue(envVar) {
+ export default {
+   treeshake: true,
+   output: [{format: 'iife'}],
+-  plugins: isEnvVarTrue(process.env.DEBUG_INJECTED) ? [] : [terser()]
++  plugins: isEnvVarTrue(process.env.DEBUG_INJECTED) ? [] : [terser({maxWorkers: cpus().length || 4})]
+ };
+diff --git a/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/panels/recorder/injected/rollup.config.mjs b/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/panels/recorder/injected/rollup.config.mjs
+index e844c48..ca3a710 100644
+--- a/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/panels/recorder/injected/rollup.config.mjs
++++ b/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/panels/recorder/injected/rollup.config.mjs
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ import terser from '@rollup/plugin-terser';
++import {cpus} from 'node:os';
+ 
+ /**
+  * Checks if an env variable is true.
+@@ -17,5 +18,5 @@ function isEnvVarTrue(envVar) {
+ export default {
+   treeshake: false,
+   output: [{format: 'iife'}],
+-  plugins: !isEnvVarTrue(process.env.DEBUG_INJECTED) ? [terser()] : []
++  plugins: !isEnvVarTrue(process.env.DEBUG_INJECTED) ? [terser({maxWorkers: cpus().length || 4})] : []
+ };
+diff --git a/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/third_party/codemirror.next/rollup.config.js b/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/third_party/codemirror.next/rollup.config.js
+index ba896bb..5d67dc4 100644
+--- a/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/third_party/codemirror.next/rollup.config.js
++++ b/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/third_party/codemirror.next/rollup.config.js
+@@ -1,5 +1,6 @@
+ import {nodeResolve} from '@rollup/plugin-node-resolve';
+ import terser from '@rollup/plugin-terser';
++import {cpus} from 'node:os';
+ import dts from 'rollup-plugin-dts';
+ 
+ export default [{
+@@ -27,7 +28,7 @@ export default [{
+   },
+   plugins: [
+     nodeResolve(),
+-    terser()
++    terser({maxWorkers: cpus().length || 4})
+   ]
+ }, {
+   input: './bundle.d.ts',
+diff --git a/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/third_party/lit/rollup.config.mjs b/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/third_party/lit/rollup.config.mjs
+index cb3f12c..87684e2 100644
+--- a/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/third_party/lit/rollup.config.mjs
++++ b/src/3rdparty/chromium/third_party/devtools-frontend/src/front_end/third_party/lit/rollup.config.mjs
+@@ -1,5 +1,6 @@
+ import { nodeResolve } from "@rollup/plugin-node-resolve";
+ import terser from "@rollup/plugin-terser";
++import {cpus} from "node:os";
+ import dts from "rollup-plugin-dts";
+ 
+ export default ['directive', 'directives', 'decorators', 'lit', 'static-html'].flatMap(filename => ([
+@@ -10,7 +11,7 @@ export default ['directive', 'directives', 'decorators', 'lit', 'static-html'].f
+       file: `lib/${filename}.js`,
+       sourcemap: true,
+     },
+-    plugins: [nodeResolve(), terser()],
++    plugins: [nodeResolve(), terser({maxWorkers: cpus().length || 4})],
+   },
+   {
+     input: `./src/${filename}.d.ts`,
+-- 
+2.53.0
+
+
+From 32384b850a19bdaa2295243e1598052cc35e379a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 03:38:56 -0300
+Subject: Haiku: net/ sockets and errors, SecureAllocator ==, sampler include
+
+UDP multicast uses an ip_mreqn laid out like Haiku's ip_mreq (no interface
+index); IPv6 traffic-class options get numbers the kernel rejects; peer
+credentials via SO_PEERCRED; no EUSERS; IFF_LINK for IFF_RUNNING.
+crypto::SecureAllocator gets operator==, which the copy-on-write
+std::string of Haiku's GCC needs. V8's sampler takes ucontext_t from
+signal.h.
+---
+ .../chromium/crypto/process_bound_string.h    |  8 +++++
+ .../chromium/net/base/net_errors_posix.cc     |  2 ++
+ .../net/base/network_interfaces_getifaddrs.cc |  5 ++++
+ .../chromium/net/socket/udp_socket_posix.cc   | 30 +++++++++++++++++--
+ .../socket/unix_domain_server_socket_posix.cc |  3 +-
+ .../chromium/v8/src/libsampler/sampler.cc     |  3 +-
+ 6 files changed, 46 insertions(+), 5 deletions(-)
+
+diff --git a/src/3rdparty/chromium/crypto/process_bound_string.h b/src/3rdparty/chromium/crypto/process_bound_string.h
+index 3da58b0..e276ba0 100644
+--- a/src/3rdparty/chromium/crypto/process_bound_string.h
++++ b/src/3rdparty/chromium/crypto/process_bound_string.h
+@@ -67,6 +67,14 @@ struct CRYPTO_EXPORT SecureAllocator {
+   };
+ };
+ 
++// The allocator holds no state, so any two compare equal. Allocator
++// requirements ask for this; libstdc++'s copy-on-write std::string (Haiku's
++// GCC uses the old string ABI) actually calls it.
++template <typename T, typename U>
++bool operator==(const SecureAllocator<T>&, const SecureAllocator<U>&) noexcept {
++  return true;
++}
++
+ // On supported platforms, a process bound string cannot have its content read
+ // by other processes on the system. On unsupported platforms it provides no
+ // difference over a native string except it does more copies.
+diff --git a/src/3rdparty/chromium/net/base/net_errors_posix.cc b/src/3rdparty/chromium/net/base/net_errors_posix.cc
+index df49829..71ea8f7 100644
+--- a/src/3rdparty/chromium/net/base/net_errors_posix.cc
++++ b/src/3rdparty/chromium/net/base/net_errors_posix.cc
+@@ -107,8 +107,10 @@ Error MapSystemError(logging::SystemErrorCode os_error) {
+       return ERR_ACCESS_DENIED;
+     case ETXTBSY:  // Text file busy.
+       return ERR_ACCESS_DENIED;
++#if defined(EUSERS)  // Haiku has no EUSERS.
+     case EUSERS:  // Too many users.
+       return ERR_INSUFFICIENT_RESOURCES;
++#endif
+     case EMFILE:  // Too many open files.
+       return ERR_INSUFFICIENT_RESOURCES;
+     case ENOPROTOOPT:  // Protocol option not supported.
+diff --git a/src/3rdparty/chromium/net/base/network_interfaces_getifaddrs.cc b/src/3rdparty/chromium/net/base/network_interfaces_getifaddrs.cc
+index cec5c39..0e923a3 100644
+--- a/src/3rdparty/chromium/net/base/network_interfaces_getifaddrs.cc
++++ b/src/3rdparty/chromium/net/base/network_interfaces_getifaddrs.cc
+@@ -144,7 +144,12 @@ bool IfaddrsToNetworkInterfaceList(int policy,
+     if (!(IFF_UP & interface->ifa_flags)) {
+       continue;
+     }
++#if defined(IFF_RUNNING)
+     if (!(IFF_RUNNING & interface->ifa_flags))
++#else
++    // Haiku calls an interface with a link IFF_LINK.
++    if (!(IFF_LINK & interface->ifa_flags))
++#endif
+       continue;
+     if (IFF_LOOPBACK & interface->ifa_flags)
+       continue;
+diff --git a/src/3rdparty/chromium/net/socket/udp_socket_posix.cc b/src/3rdparty/chromium/net/socket/udp_socket_posix.cc
+index 4e596f9..11ba32d 100644
+--- a/src/3rdparty/chromium/net/socket/udp_socket_posix.cc
++++ b/src/3rdparty/chromium/net/socket/udp_socket_posix.cc
+@@ -71,6 +71,30 @@
+ #include "base/mac/mac_util.h"
+ #endif  // BUILDFLAG(IS_MAC)
+ 
++#if BUILDFLAG(IS_HAIKU)
++// Haiku has ip_mreq but no ip_mreqn. This one starts with ip_mreq's two
++// fields, and the calls below pass the kernel sizeof(ip_mreq), so the
++// interface index is dropped: the interface is chosen by address (any).
++struct ip_mreqn {
++  struct in_addr imr_multiaddr;
++  struct in_addr imr_address;
++  int imr_ifindex;
++};
++constexpr socklen_t kIpMreqnSize = sizeof(struct ip_mreq);
++// Options Haiku lacks: unknown numbers make the calls fail, which is handled.
++#ifndef IPV6_TCLASS
++#define IPV6_TCLASS 0x7f01
++#endif
++#ifndef IPV6_RECVTCLASS
++#define IPV6_RECVTCLASS 0x7f03
++#endif
++#ifndef IP_DEFAULT_MULTICAST_TTL
++#define IP_DEFAULT_MULTICAST_TTL 1
++#endif
++#else
++constexpr socklen_t kIpMreqnSize = sizeof(ip_mreqn);
++#endif
++
+ namespace net {
+ 
+ namespace {
+@@ -864,7 +888,7 @@ int UDPSocketPosix::SetMulticastOptions() {
+         mreq.imr_ifindex = multicast_interface_;
+         mreq.imr_address.s_addr = htonl(INADDR_ANY);
+         int rv = setsockopt(socket_, IPPROTO_IP, IP_MULTICAST_IF,
+-                            reinterpret_cast<const char*>(&mreq), sizeof(mreq));
++                            reinterpret_cast<const char*>(&mreq), kIpMreqnSize);
+         if (rv)
+           return MapSystemError(errno);
+         break;
+@@ -931,7 +955,7 @@ int UDPSocketPosix::JoinGroup(const IPAddress& group_address) const {
+       memcpy(&mreq.imr_multiaddr, group_address.bytes().data(),
+              IPAddress::kIPv4AddressSize);
+       int rv = setsockopt(socket_, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+-                          &mreq, sizeof(mreq));
++                          &mreq, kIpMreqnSize);
+       if (rv < 0)
+         return MapSystemError(errno);
+       return OK;
+@@ -970,7 +994,7 @@ int UDPSocketPosix::LeaveGroup(const IPAddress& group_address) const {
+       memcpy(&mreq.imr_multiaddr, group_address.bytes().data(),
+              IPAddress::kIPv4AddressSize);
+       int rv = setsockopt(socket_, IPPROTO_IP, IP_DROP_MEMBERSHIP,
+-                          &mreq, sizeof(mreq));
++                          &mreq, kIpMreqnSize);
+       if (rv < 0)
+         return MapSystemError(errno);
+       return OK;
+diff --git a/src/3rdparty/chromium/net/socket/unix_domain_server_socket_posix.cc b/src/3rdparty/chromium/net/socket/unix_domain_server_socket_posix.cc
+index e27a6cb..0e400cf 100644
+--- a/src/3rdparty/chromium/net/socket/unix_domain_server_socket_posix.cc
++++ b/src/3rdparty/chromium/net/socket/unix_domain_server_socket_posix.cc
+@@ -34,8 +34,9 @@ UnixDomainServerSocket::~UnixDomainServerSocket() = default;
+ // static
+ bool UnixDomainServerSocket::GetPeerCredentials(SocketDescriptor socket,
+                                                 Credentials* credentials) {
++// Haiku has SO_PEERCRED and struct ucred, as Linux does.
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID) || \
+-    BUILDFLAG(IS_FUCHSIA)
++    BUILDFLAG(IS_FUCHSIA) || BUILDFLAG(IS_HAIKU)
+   struct ucred user_cred;
+   socklen_t len = sizeof(user_cred);
+   if (getsockopt(socket, SOL_SOCKET, SO_PEERCRED, &user_cred, &len) < 0)
+diff --git a/src/3rdparty/chromium/v8/src/libsampler/sampler.cc b/src/3rdparty/chromium/v8/src/libsampler/sampler.cc
+index b8875c8..383a95b 100644
+--- a/src/3rdparty/chromium/v8/src/libsampler/sampler.cc
++++ b/src/3rdparty/chromium/v8/src/libsampler/sampler.cc
+@@ -28,7 +28,8 @@
+ #include <mach/mach.h>
+ // OpenBSD doesn't have <ucontext.h>. ucontext_t lives in <signal.h>
+ // and is a typedef for struct sigcontext. There is no uc_mcontext.
+-#elif !V8_OS_OPENBSD
++// Haiku's ucontext_t is in <signal.h> too.
++#elif !V8_OS_OPENBSD && !V8_OS_HAIKU
+ #include <ucontext.h>
+ #endif
+ 
+-- 
+2.53.0
+
+
+From 98a9e2d238c439d33ecd320a6e6a0ceffa5dedc8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 03:50:17 -0300
+Subject: Haiku: drive metrics without major()/minor()
+
+---
+ .../components/metrics/drive_metrics_provider_linux.cc      | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/3rdparty/chromium/components/metrics/drive_metrics_provider_linux.cc b/src/3rdparty/chromium/components/metrics/drive_metrics_provider_linux.cc
+index 2907f15..d9ff1cf 100644
+--- a/src/3rdparty/chromium/components/metrics/drive_metrics_provider_linux.cc
++++ b/src/3rdparty/chromium/components/metrics/drive_metrics_provider_linux.cc
+@@ -4,7 +4,11 @@
+ 
+ #include "components/metrics/drive_metrics_provider.h"
+ 
+-#if BUILDFLAG(IS_BSD)
++#if defined(__HAIKU__)
++// Haiku has no major/minor device numbers; no SCSI disk will match below.
++#define MAJOR(dev) (static_cast<unsigned>(dev) >> 8)
++#define MINOR(dev) (static_cast<unsigned>(dev) & 0xff)
++#elif BUILDFLAG(IS_BSD)
+ #include <sys/types.h>
+ #define MAJOR(dev) major(dev)
+ #define MINOR(dev) minor(dev)
+-- 
+2.53.0
+
+
+From 2d66b8bb69dd460ad0456d0526ff34226596149a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 04:05:37 -0300
+Subject: Haiku: media without V4L2 or first-DTS, audio backend default
+
+No camera on Haiku: the V4L2 sources stay out and the platform factory
+is a fake one with no devices. Haiku's system FFmpeg does not export
+Chromium's av_stream_get_first_dts, so the demuxer treats it as unknown.
+The audio backend parameter defaults to auto, as on FreeBSD.
+---
+ src/3rdparty/chromium/media/base/media_switches.cc    |  2 +-
+ src/3rdparty/chromium/media/capture/BUILD.gn          |  5 +++--
+ .../video/create_video_capture_device_factory.cc      | 11 +++++++++--
+ .../video_capture_buffer_tracker_factory_impl.cc      |  4 ++--
+ src/3rdparty/chromium/media/filters/ffmpeg_demuxer.cc |  9 +++++++++
+ 5 files changed, 24 insertions(+), 7 deletions(-)
+
+diff --git a/src/3rdparty/chromium/media/base/media_switches.cc b/src/3rdparty/chromium/media/base/media_switches.cc
+index c29c7d0..41c01bb 100644
+--- a/src/3rdparty/chromium/media/base/media_switches.cc
++++ b/src/3rdparty/chromium/media/base/media_switches.cc
+@@ -401,7 +401,7 @@ const base::FeatureParam<AudioBackend>
+         &kAudioBackend, "audio-backend",
+ #if BUILDFLAG(IS_OPENBSD)
+         AudioBackend::kSndio,
+-#elif BUILDFLAG(IS_FREEBSD)
++#elif BUILDFLAG(IS_FREEBSD) || BUILDFLAG(IS_HAIKU)
+         AudioBackend::kAuto,
+ #endif
+         &kAudioBackendOptions};
+diff --git a/src/3rdparty/chromium/media/capture/BUILD.gn b/src/3rdparty/chromium/media/capture/BUILD.gn
+index 995b1b7..3ede64d 100644
+--- a/src/3rdparty/chromium/media/capture/BUILD.gn
++++ b/src/3rdparty/chromium/media/capture/BUILD.gn
+@@ -239,7 +239,8 @@ jumbo_component("capture_lib") {
+     public_deps += [ "video/win" ]
+   }
+ 
+-  if (is_linux || is_chromeos) {
++  # Haiku has no V4L2: it gets no camera (see create_video_capture_device_factory.cc).
++  if ((is_linux || is_chromeos) && !is_haiku) {
+     sources += [
+       "video/linux/scoped_v4l2_device_fd.cc",
+       "video/linux/scoped_v4l2_device_fd.h",
+@@ -266,7 +267,7 @@ jumbo_component("capture_lib") {
+     deps += [ "//gpu/command_buffer/client" ]
+   }
+ 
+-  if (is_linux) {
++  if (is_linux && !is_haiku) {
+     sources += [
+       "video/linux/v4l2_capture_delegate_gpu_helper.cc",
+       "video/linux/v4l2_capture_delegate_gpu_helper.h",
+diff --git a/src/3rdparty/chromium/media/capture/video/create_video_capture_device_factory.cc b/src/3rdparty/chromium/media/capture/video/create_video_capture_device_factory.cc
+index 39c59cb..69987fc 100644
+--- a/src/3rdparty/chromium/media/capture/video/create_video_capture_device_factory.cc
++++ b/src/3rdparty/chromium/media/capture/video/create_video_capture_device_factory.cc
+@@ -13,7 +13,9 @@
+ #include "media/capture/video/fake_video_capture_device_factory.h"
+ #include "media/capture/video/file_video_capture_device_factory.h"
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS_LACROS) || BUILDFLAG(IS_BSD)
++#if BUILDFLAG(IS_HAIKU)
++// No camera support on Haiku.
++#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS_LACROS) || BUILDFLAG(IS_BSD)
+ #include "media/capture/video/linux/video_capture_device_factory_linux.h"
+ #elif BUILDFLAG(IS_CHROMEOS_ASH)
+ #include "media/capture/video/chromeos/public/cros_features.h"
+@@ -56,7 +58,12 @@ CreateFakeVideoCaptureDeviceFactory() {
+ std::unique_ptr<VideoCaptureDeviceFactory>
+ CreatePlatformSpecificVideoCaptureDeviceFactory(
+     scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner) {
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS_LACROS) || BUILDFLAG(IS_BSD)
++#if BUILDFLAG(IS_HAIKU)
++  // A fake factory with no devices: pages see no camera.
++  auto factory = std::make_unique<FakeVideoCaptureDeviceFactory>();
++  factory->SetToCustomDevicesConfig({});
++  return std::move(factory);
++#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS_LACROS) || BUILDFLAG(IS_BSD)
+   return std::make_unique<VideoCaptureDeviceFactoryLinux>(ui_task_runner);
+ #elif BUILDFLAG(IS_CHROMEOS_ASH)
+   if (base::SysInfo::IsRunningOnChromeOS())
+diff --git a/src/3rdparty/chromium/media/capture/video/video_capture_buffer_tracker_factory_impl.cc b/src/3rdparty/chromium/media/capture/video/video_capture_buffer_tracker_factory_impl.cc
+index a9b1d8c..b84af69 100644
+--- a/src/3rdparty/chromium/media/capture/video/video_capture_buffer_tracker_factory_impl.cc
++++ b/src/3rdparty/chromium/media/capture/video/video_capture_buffer_tracker_factory_impl.cc
+@@ -14,7 +14,7 @@
+ #include "media/capture/video/chromeos/gpu_memory_buffer_tracker_cros.h"
+ #elif BUILDFLAG(IS_APPLE)
+ #include "media/capture/video/apple/gpu_memory_buffer_tracker_apple.h"
+-#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_BSD)
++#elif (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_BSD)) && !BUILDFLAG(IS_HAIKU)
+ #include "media/capture/video/linux/v4l2_gpu_memory_buffer_tracker.h"
+ #elif BUILDFLAG(IS_WIN)
+ #include "media/capture/video/win/gpu_memory_buffer_tracker_win.h"
+@@ -42,7 +42,7 @@ VideoCaptureBufferTrackerFactoryImpl::CreateTracker(
+       return std::make_unique<GpuMemoryBufferTrackerCros>();
+ #elif BUILDFLAG(IS_APPLE)
+       return std::make_unique<GpuMemoryBufferTrackerApple>();
+-#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_BSD)
++#elif (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_BSD)) && !BUILDFLAG(IS_HAIKU)
+       return std::make_unique<V4L2GpuMemoryBufferTracker>();
+ #elif BUILDFLAG(IS_WIN)
+       if (!dxgi_device_manager_) {
+diff --git a/src/3rdparty/chromium/media/filters/ffmpeg_demuxer.cc b/src/3rdparty/chromium/media/filters/ffmpeg_demuxer.cc
+index 90fb46e..ea79444 100644
+--- a/src/3rdparty/chromium/media/filters/ffmpeg_demuxer.cc
++++ b/src/3rdparty/chromium/media/filters/ffmpeg_demuxer.cc
+@@ -65,6 +65,15 @@ namespace {
+ 
+ constexpr int64_t kInvalidPTSMarker = static_cast<int64_t>(0x8000000000000000);
+ 
++#if BUILDFLAG(IS_HAIKU)
++// Chromium's FFmpeg exports the first DTS of a stream; Haiku's system FFmpeg
++// does not, and keeps it in private data. Report it as unknown, which the
++// callers below already handle (start times then come from PTS alone).
++int64_t av_stream_get_first_dts(const AVStream*) {
++  return kInvalidPTSMarker;
++}
++#endif
++
+ void SetAVStreamDiscard(AVStream* stream, AVDiscard discard) {
+   DCHECK(stream);
+   stream->discard = discard;
+-- 
+2.53.0
+
+
+From 0053dfff98b1a0bbfa63cd07a878894566554305 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 04:25:30 -0300
+Subject: Haiku: no sandbox, through FreeBSD's SandboxLinux stand-in
+
+sandbox/policy builds freebsd/sandbox_freebsd.cc on Haiku too (without
+its //ui/gfx/x dependency): a SandboxLinux that only tracks state, as
+Haiku has nothing to sandbox processes with.
+---
+ src/3rdparty/chromium/sandbox/policy/BUILD.gn  | 10 ++++++++++
+ src/3rdparty/chromium/sandbox/policy/sandbox.h |  2 +-
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/src/3rdparty/chromium/sandbox/policy/BUILD.gn b/src/3rdparty/chromium/sandbox/policy/BUILD.gn
+index cda1360..2f32721 100644
+--- a/src/3rdparty/chromium/sandbox/policy/BUILD.gn
++++ b/src/3rdparty/chromium/sandbox/policy/BUILD.gn
+@@ -137,6 +137,16 @@ component("policy") {
+       "//ui/gfx/x",
+     ]
+   }
++
++  # Haiku has no sandbox either; it takes FreeBSD's SandboxLinux, which only
++  # tracks state, without its X11 dependency.
++  if (is_haiku) {
++    sources += [
++      "freebsd/sandbox_freebsd.cc",
++      "freebsd/sandbox_freebsd.h",
++    ]
++    deps += [ "//sandbox:sandbox_buildflags" ]
++  }
+   if (is_chromeos_ash) {
+     sources += [
+       "linux/bpf_ime_policy_linux.cc",
+diff --git a/src/3rdparty/chromium/sandbox/policy/sandbox.h b/src/3rdparty/chromium/sandbox/policy/sandbox.h
+index 44f331a..26cf692 100644
+--- a/src/3rdparty/chromium/sandbox/policy/sandbox.h
++++ b/src/3rdparty/chromium/sandbox/policy/sandbox.h
+@@ -14,7 +14,7 @@
+ 
+ #if BUILDFLAG(IS_OPENBSD)
+ #include "sandbox/policy/openbsd/sandbox_openbsd.h"
+-#elif BUILDFLAG(IS_FREEBSD)
++#elif BUILDFLAG(IS_FREEBSD) || BUILDFLAG(IS_HAIKU)
+ #include "sandbox/policy/freebsd/sandbox_freebsd.h"
+ #endif
+ 
+-- 
+2.53.0
+
+
+From d1f8c87fb64138b2d1b717490fd69e722e873cd2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 04:38:46 -0300
+Subject: Haiku: kVideoCapture sandbox type, peer pid, dlopen without NODELETE
+
+---
+ .../chromium/net/socket/unix_domain_server_socket_posix.h    | 2 +-
+ src/3rdparty/chromium/sandbox/policy/mojom/sandbox.mojom     | 3 +++
+ .../video_effects/video_effects_sandbox_hook_linux.cc        | 5 +++++
+ 3 files changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/3rdparty/chromium/net/socket/unix_domain_server_socket_posix.h b/src/3rdparty/chromium/net/socket/unix_domain_server_socket_posix.h
+index 2f3ef75..e5a48e3 100644
+--- a/src/3rdparty/chromium/net/socket/unix_domain_server_socket_posix.h
++++ b/src/3rdparty/chromium/net/socket/unix_domain_server_socket_posix.h
+@@ -30,7 +30,7 @@ class NET_EXPORT UnixDomainServerSocket : public ServerSocket {
+   // Credentials of a peer process connected to the socket.
+   struct NET_EXPORT Credentials {
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID) || \
+-    BUILDFLAG(IS_FUCHSIA)
++    BUILDFLAG(IS_FUCHSIA) || BUILDFLAG(IS_HAIKU)
+     // Linux and Fuchsia provide more information about the connected peer
+     // than Windows/OS X. It's useful for permission-based authorization on
+     // Android.
+diff --git a/src/3rdparty/chromium/sandbox/policy/mojom/sandbox.mojom b/src/3rdparty/chromium/sandbox/policy/mojom/sandbox.mojom
+index a02b7f9..123a6f2 100644
+--- a/src/3rdparty/chromium/sandbox/policy/mojom/sandbox.mojom
++++ b/src/3rdparty/chromium/sandbox/policy/mojom/sandbox.mojom
+@@ -80,6 +80,9 @@ enum Sandbox {
+   [EnableIf=is_freebsd]
+   kVideoCapture,
+ 
++  [EnableIf=is_haiku]
++  kVideoCapture,
++
+   // Allows access to file contents and Windows APIs for parsing icons from PE
+   // files.
+   [EnableIf=is_win] kIconReader,
+diff --git a/src/3rdparty/chromium/services/video_effects/video_effects_sandbox_hook_linux.cc b/src/3rdparty/chromium/services/video_effects/video_effects_sandbox_hook_linux.cc
+index 5f6318f..882c65d 100644
+--- a/src/3rdparty/chromium/services/video_effects/video_effects_sandbox_hook_linux.cc
++++ b/src/3rdparty/chromium/services/video_effects/video_effects_sandbox_hook_linux.cc
+@@ -24,7 +24,12 @@ bool VideoEffectsPreSandboxHook(
+   const auto path = ml::GetChromeMLPath();
+   // We don't want to unload the library so not using `ChromeMLHolder` here.
+   void* ml =
++#if defined(RTLD_NODELETE)
+       dlopen(path.value().c_str(), RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE);
++#else
++      // Haiku has no RTLD_NODELETE; the handle is never closed anyway.
++      dlopen(path.value().c_str(), RTLD_NOW | RTLD_GLOBAL);
++#endif
+   if (!ml) {
+     // The library may be missing on developer builds, we should tolerate that.
+     // The features in Video Effects Service that require the library will not
+-- 
+2.53.0
+
+
+From 6d29bff9cb1c6bde0c88c64f9f613fd4e0ff81cb Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 04:54:13 -0300
+Subject: Haiku: the inspector overlay's rollup run gives terser a worker count
+
+---
+ .../src/scripts/build/build_inspector_overlay.py             | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/3rdparty/chromium/third_party/devtools-frontend/src/scripts/build/build_inspector_overlay.py b/src/3rdparty/chromium/third_party/devtools-frontend/src/scripts/build/build_inspector_overlay.py
+index ea82170..1a07173 100644
+--- a/src/3rdparty/chromium/third_party/devtools-frontend/src/scripts/build/build_inspector_overlay.py
++++ b/src/3rdparty/chromium/third_party/devtools-frontend/src/scripts/build/build_inspector_overlay.py
+@@ -56,7 +56,10 @@ def rollup(input_path, output_path, filename, max_size, rollup_plugin):
+         [devtools_paths.node_path(),
+          devtools_paths.rollup_path()] +
+         ['--format', 'iife', '-n', 'InspectorOverlay'] + ['--input', target] +
+-        ['--plugin', rollup_plugin, '--plugin', 'terser'],
++        # Node on Haiku lists no CPUs, which leaves terser with no workers:
++        # say how many there are.
++        ['--plugin', rollup_plugin, '--plugin',
++         'terser={maxWorkers: %d}' % (os.cpu_count() or 4)],
+         stdout=subprocess.PIPE,
+         stderr=subprocess.PIPE,
+         universal_newlines=True,
+-- 
+2.53.0
+
+
+From 55406b4855ce3989c8a81a138e4efb1616c2c8d8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 16:49:53 -0300
+Subject: Haiku: GPU pre-sandbox hook opens libraries without RTLD_NODELETE
+
+---
+ .../chromium/content/common/gpu_pre_sandbox_hook_bsd.cc      | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/3rdparty/chromium/content/common/gpu_pre_sandbox_hook_bsd.cc b/src/3rdparty/chromium/content/common/gpu_pre_sandbox_hook_bsd.cc
+index 41ac445..bfb1860 100644
+--- a/src/3rdparty/chromium/content/common/gpu_pre_sandbox_hook_bsd.cc
++++ b/src/3rdparty/chromium/content/common/gpu_pre_sandbox_hook_bsd.cc
+@@ -30,7 +30,12 @@
+ namespace content {
+ namespace {
+ 
++#if defined(RTLD_NODELETE)
+ constexpr int dlopen_flag = RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE;
++#else
++// Haiku has no RTLD_NODELETE; these libraries are never closed anyway.
++constexpr int dlopen_flag = RTLD_NOW | RTLD_GLOBAL;
++#endif
+ 
+ void LoadVulkanLibraries() {
+   // Try to preload Vulkan libraries. Failure is not an error as not all may be
+-- 
+2.53.0
+
+
+From 1f06b0f05b5a9200a857daae14795a300673e38c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Thu, 12 Nov 2026 22:23:54 -0300
+Subject: content: no process limit from getrlimit on Haiku (it has no
+ RLIMIT_NPROC)
+
+---
+ .../content/browser/renderer_host/render_process_host_impl.cc  | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/3rdparty/chromium/content/browser/renderer_host/render_process_host_impl.cc b/src/3rdparty/chromium/content/browser/renderer_host/render_process_host_impl.cc
+index 6c8fd1e..90c7112 100644
+--- a/src/3rdparty/chromium/content/browser/renderer_host/render_process_host_impl.cc
++++ b/src/3rdparty/chromium/content/browser/renderer_host/render_process_host_impl.cc
+@@ -1090,7 +1090,8 @@ static constexpr size_t kUnknownPlatformProcessLimit = 0;
+ // to indicate failure and std::numeric_limits<size_t>::max() to indicate
+ // unlimited.
+ size_t GetPlatformProcessLimit() {
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_BSD)
++#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_BSD)) && \
++    defined(RLIMIT_NPROC)
+   struct rlimit limit;
+   if (getrlimit(RLIMIT_NPROC, &limit) != 0)
+     return kUnknownPlatformProcessLimit;
+-- 
+2.53.0
+
+
+From 0253358d490b82da40d66259b6a22d2bd12b1476 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Fri, 13 Nov 2026 01:38:42 -0300
+Subject: content: the file system access watcher is the stub on Haiku (no
+ EVFILT_VNODE)
+
+---
+ src/3rdparty/chromium/content/browser/BUILD.gn | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/3rdparty/chromium/content/browser/BUILD.gn b/src/3rdparty/chromium/content/browser/BUILD.gn
+index 906df00..ec35c7a 100644
+--- a/src/3rdparty/chromium/content/browser/BUILD.gn
++++ b/src/3rdparty/chromium/content/browser/BUILD.gn
+@@ -2529,7 +2529,8 @@ jumbo_source_set("browser") {
+     ]
+   }
+ 
+-  if (is_bsd) {
++  # Haiku's kqueue has no EVFILT_VNODE: it keeps the stub.
++  if (is_bsd && !is_haiku) {
+     sources += [
+       "file_system_access/file_path_watcher/file_path_watcher_bsd.cc",
+       "file_system_access/file_path_watcher/file_path_watcher_kqueue.cc",
+@@ -2592,6 +2593,10 @@ jumbo_source_set("browser") {
+       "sandbox_ipc_linux.h",
+     ]
+   }
++  if (is_haiku) {
++    sources +=
++        [ "file_system_access/file_path_watcher/file_path_watcher_stub.cc" ]
++  }
+ 
+   if (is_chromeos) {
+     sources += [
+-- 
+2.53.0
+
+
+From f151acb2e5532687e18d162cce441c262b1d24f3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Fri, 13 Nov 2026 03:07:15 -0300
+Subject: Link libnetwork on Haiku (sockets live there); dav1d without thread
+ affinity
+
+---
+ src/3rdparty/chromium/base/BUILD.gn              | 1 +
+ src/3rdparty/chromium/third_party/dav1d/BUILD.gn | 3 ++-
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/3rdparty/chromium/base/BUILD.gn b/src/3rdparty/chromium/base/BUILD.gn
+index 73cf56a..1d65644 100644
+--- a/src/3rdparty/chromium/base/BUILD.gn
++++ b/src/3rdparty/chromium/base/BUILD.gn
+@@ -2185,6 +2185,7 @@ jumbo_component("base") {
+     libs += [
+       "bsd",
+       "execinfo",
++      "network",
+     ]
+   } else if (is_freebsd) {
+     sources += [
+diff --git a/src/3rdparty/chromium/third_party/dav1d/BUILD.gn b/src/3rdparty/chromium/third_party/dav1d/BUILD.gn
+index 22a80ef..0623011 100644
+--- a/src/3rdparty/chromium/third_party/dav1d/BUILD.gn
++++ b/src/3rdparty/chromium/third_party/dav1d/BUILD.gn
+@@ -57,7 +57,8 @@ config("public_dav1d_config") {
+     defines = [ "CONFIG_LOG=1" ]
+   }
+ 
+-  if (!is_android && !is_apple && !is_win) {
++  # Haiku has no thread affinity.
++  if (!is_android && !is_apple && !is_win && !is_haiku) {
+     defines += [
+       "HAVE_PTHREAD_GETAFFINITY_NP=1",
+       "HAVE_PTHREAD_SETAFFINITY_NP=1",
+-- 
+2.53.0
+
+
+From 912505672c77adfeb73e69de3a156fda4d4c8eba Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Fri, 13 Nov 2026 03:31:57 -0300
+Subject: network sandbox hook and crashpad handler take the BSD branch on
+ Haiku
+
+---
+ .../components/crash/core/app/chrome_crashpad_handler.cc        | 2 +-
+ .../chromium/services/network/network_sandbox_hook_linux.h      | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/3rdparty/chromium/components/crash/core/app/chrome_crashpad_handler.cc b/src/3rdparty/chromium/components/crash/core/app/chrome_crashpad_handler.cc
+index 9aa752e..d5e39bc 100644
+--- a/src/3rdparty/chromium/components/crash/core/app/chrome_crashpad_handler.cc
++++ b/src/3rdparty/chromium/components/crash/core/app/chrome_crashpad_handler.cc
+@@ -6,7 +6,7 @@
+ extern "C" int CrashpadHandlerMain(int argc, char* argv[]);
+ 
+ int main(int argc, char* argv[]) {
+-#if defined(__OpenBSD__) || defined(__FreeBSD__)
++#if defined(__OpenBSD__) || defined(__FreeBSD__) || defined(__HAIKU__)
+   return -1;
+ #else
+   return CrashpadHandlerMain(argc, argv);
+diff --git a/src/3rdparty/chromium/services/network/network_sandbox_hook_linux.h b/src/3rdparty/chromium/services/network/network_sandbox_hook_linux.h
+index 9d39bb7..3e60dd5 100644
+--- a/src/3rdparty/chromium/services/network/network_sandbox_hook_linux.h
++++ b/src/3rdparty/chromium/services/network/network_sandbox_hook_linux.h
+@@ -6,7 +6,7 @@
+ #define SERVICES_NETWORK_NETWORK_SANDBOX_HOOK_LINUX_H_
+ 
+ #include "base/component_export.h"
+-#if defined(__OpenBSD__) || defined(__FreeBSD__)
++#if defined(__OpenBSD__) || defined(__FreeBSD__) || defined(__HAIKU__)
+ #include "sandbox/policy/sandbox.h"
+ #else
+ #include "sandbox/policy/linux/sandbox_linux.h"
+-- 
+2.53.0
+
+
+From 99d2fe412a29bc6ae8f384ce5d44cf322f295e1e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Fri, 13 Nov 2026 04:25:23 -0300
+Subject: Haiku default fonts by name when Qt's platform has no style-hint
+ families (offscreen)
+
+---
+ src/core/web_engine_settings.cpp | 34 ++++++++++++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/src/core/web_engine_settings.cpp b/src/core/web_engine_settings.cpp
+index a6147af..5566440 100644
+--- a/src/core/web_engine_settings.cpp
++++ b/src/core/web_engine_settings.cpp
+@@ -25,10 +25,29 @@
+ #include <QFont>
+ #include <QTimer>
+ 
++#if defined(Q_OS_HAIKU)
++#include <QFontDatabase>
++#endif
++
+ using namespace Qt::StringLiterals;
+ 
+ namespace QtWebEngineCore {
+ 
++#if defined(Q_OS_HAIKU)
++// Qt's offscreen platform on Haiku answers every style hint with the same
++// family, and Haiku's fontconfig has no aliases for its Noto fonts: take the
++// first installed of the families Haiku's own platform plugin would give.
++static QString haikuFamily(std::initializer_list<const char *> candidates, const QString &fallback)
++{
++    for (const char *candidate : candidates) {
++        const QString family = QString::fromLatin1(candidate);
++        if (QFontDatabase::hasFamily(family))
++            return family;
++    }
++    return fallback;
++}
++#endif
++
+ QHash<QWebEngineSettings::WebAttribute, bool> WebEngineSettings::s_defaultAttributes;
+ QHash<QWebEngineSettings::FontFamily, QString> WebEngineSettings::s_defaultFontFamilies;
+ QHash<QWebEngineSettings::FontSize, int> WebEngineSettings::s_defaultFontSizes;
+@@ -313,6 +332,21 @@ void WebEngineSettings::initDefaults()
+ 
+         defaultFont.setStyleHint(QFont::Monospace);
+         s_defaultFontFamilies.insert(QWebEngineSettings::FixedFont, defaultFont.defaultFamily());
++
++#if defined(Q_OS_HAIKU)
++        if (s_defaultFontFamilies.value(QWebEngineSettings::SansSerifFont)
++            == s_defaultFontFamilies.value(QWebEngineSettings::FixedFont)) {
++            const auto fill = [](QWebEngineSettings::FontFamily which,
++                                 std::initializer_list<const char *> candidates) {
++                s_defaultFontFamilies.insert(
++                        which, haikuFamily(candidates, s_defaultFontFamilies.value(which)));
++            };
++            fill(QWebEngineSettings::StandardFont, { "Noto Serif", "DejaVu Serif" });
++            fill(QWebEngineSettings::SerifFont, { "Noto Serif", "DejaVu Serif" });
++            fill(QWebEngineSettings::SansSerifFont, { "Noto Sans", "DejaVu Sans" });
++            fill(QWebEngineSettings::FixedFont, { "Noto Sans Mono", "DejaVu Sans Mono" });
++        }
++#endif
+     }
+ 
+     if (s_defaultFontSizes.isEmpty()) {
+-- 
+2.53.0
+
+
+From 6c3cc9a6ba90216cf4de733abeb9444fda5dd738 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonat=C3=A3=20Bolzan=20Loss?= <jonata@jonata.org>
+Date: Fri, 13 Nov 2026 04:34:36 -0300
+Subject: net: AddressSorterPosix skips interfaces without an address (Haiku
+ lists them)
+
+---
+ src/3rdparty/chromium/net/dns/address_sorter_posix.cc | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/3rdparty/chromium/net/dns/address_sorter_posix.cc b/src/3rdparty/chromium/net/dns/address_sorter_posix.cc
+index 5cee5b3..cb56fa9 100644
+--- a/src/3rdparty/chromium/net/dns/address_sorter_posix.cc
++++ b/src/3rdparty/chromium/net/dns/address_sorter_posix.cc
+@@ -438,6 +438,9 @@ void AddressSorterPosix::OnIPAddressChanged() {
+   }
+ 
+   for (struct ifaddrs* ifa = addrs; ifa != nullptr; ifa = ifa->ifa_next) {
++    // Haiku lists interfaces without an address too.
++    if (!ifa->ifa_addr)
++      continue;
+     IPEndPoint src;
+     if (!src.FromSockAddr(ifa->ifa_addr, ifa->ifa_addr->sa_len))
+       continue;
+-- 
+2.53.0
+
