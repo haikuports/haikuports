@@ -1,6 +1,6 @@
-From a2cb18ed9c092eef7674d9326f4e7452397eca15 Mon Sep 17 00:00:00 2001
+From eeb4b520dc7236b4e02129d713fdc6f44011e64a Mon Sep 17 00:00:00 2001
 From: Gerasim Troeglazov <3dEyes@gmail.com>
-Date: Thu, 12 Nov 2026 15:45:30 +1000
+Date: Fri, 20 Nov 2026 13:04:58 +1000
 Subject: Add Haiku platform support with dual-backend build
 
 Based on patches sourced from:
@@ -41,7 +41,7 @@ Based on patches sourced from:
     nrappkit, SCTP, and quinn-udp for Haiku network stack.
   * Fixed type collisions (int64) and compatibility issues in vendored
     Rust crates (glslopt, iana-time-zone-haiku, lmdb-rkv-sys).
-
+  * Ported and enabled mozjemalloc on Haiku as the primary allocator.
 
 diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
 index 15a12b67bd..db366ec685 100644
@@ -614,6 +614,19 @@ index 05b178a8c5..78f0cd00ef 100644
  @depends(target)
  def target_is_solaris(target):
      if target.kernel == "SunOS":
+diff --git a/build/moz.configure/memory.configure b/build/moz.configure/memory.configure
+index 4540ca7f86..b4ff844614 100644
+--- a/build/moz.configure/memory.configure
++++ b/build/moz.configure/memory.configure
+@@ -7,7 +7,7 @@
+ def jemalloc_default(target, js_package):
+     if js_package:
+         return False
+-    return target.kernel in ("Darwin", "Linux", "WINNT")
++    return target.kernel in ("Darwin", "Linux", "WINNT", "Haiku")
+ 
+ 
+ # mozjemalloc doesn't work with these sanitisers, it mostly-works with ubsan
 diff --git a/dom/base/Navigator.cpp b/dom/base/Navigator.cpp
 index 2019f1f1ab..365bf19128 100644
 --- a/dom/base/Navigator.cpp
@@ -1739,10 +1752,10 @@ index 1d7e5cf18f..975c24abc3 100644
  #endif
 diff --git a/gfx/gl/GLContextProviderBGL.cpp b/gfx/gl/GLContextProviderBGL.cpp
 new file mode 100644
-index 0000000000..2641416602
+index 0000000000..78a0562b02
 --- /dev/null
 +++ b/gfx/gl/GLContextProviderBGL.cpp
-@@ -0,0 +1,235 @@
+@@ -0,0 +1,230 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1919,12 +1932,7 @@ index 0000000000..2641416602
 +
 +  ulong options = BGL_RGB | BGL_ALPHA | BGL_DEPTH | BGL_DOUBLE;
 +
-+  BScreen screen(B_MAIN_SCREEN_ID);
-+  BRect frame = screen.IsValid() ? screen.Frame() : BRect(0, 0, 1023, 767);
-+  int32 width = std::max(512, static_cast<int32>(frame.Width() + 1));
-+  int32 height = std::max(512, static_cast<int32>(frame.Height() + 1));
-+
-+  BRect bounds(0, 0, width - 1, height - 1);
++  BRect bounds(0, 0, 15, 15);
 +  auto* glView = new BGLView(bounds, "GeckoWebGLOffscreen", B_FOLLOW_NONE,
 +                             B_WILL_DRAW, options);
 +  if (!glView) {
@@ -1991,7 +1999,7 @@ index 3f2a9803db..ec725bdb3e 100644
  
  namespace mozilla {
 diff --git a/gfx/gl/GLContextTypes.h b/gfx/gl/GLContextTypes.h
-index 548ee08373..2a6b0c75f3 100644
+index f1e8595df7..d089e4d741 100644
 --- a/gfx/gl/GLContextTypes.h
 +++ b/gfx/gl/GLContextTypes.h
 @@ -14,7 +14,7 @@ namespace gl {
@@ -2036,20 +2044,6 @@ index d3da2796aa..a70f8ce354 100644
  UNIFIED_SOURCES += [
      "AndroidSurfaceTexture.cpp",
      "Colorspaces.cpp",
-diff --git a/gfx/layers/wr/IpcResourceUpdateQueue.cpp b/gfx/layers/wr/IpcResourceUpdateQueue.cpp
-index 2796129937..f09544bdf9 100644
---- a/gfx/layers/wr/IpcResourceUpdateQueue.cpp
-+++ b/gfx/layers/wr/IpcResourceUpdateQueue.cpp
-@@ -52,7 +52,8 @@ layers::OffsetRange ShmSegmentsWriter::Write(Range<uint8_t> aBytes) {
-   const size_t start = mCursor;
-   const size_t length = aBytes.length();
- 
--  if (length >= mChunkSize * 4) {
-+//  if (length >= mChunkSize * 4) {
-+  if (length > 0) {
-     auto range = AllocLargeChunk(length);
-     if (range.length()) {
-       // Allocation was successful
 diff --git a/gfx/skia/moz.build b/gfx/skia/moz.build
 index 5dacf12c57..48b8b0e0be 100644
 --- a/gfx/skia/moz.build
@@ -3649,10 +3643,10 @@ index c47d4b804d..59cf02d96f 100644
  #endif
 diff --git a/media/libcubeb/src/cubeb_haiku.cpp b/media/libcubeb/src/cubeb_haiku.cpp
 new file mode 100644
-index 0000000000..28a1998c54
+index 0000000000..e29c8fd8bd
 --- /dev/null
 +++ b/media/libcubeb/src/cubeb_haiku.cpp
-@@ -0,0 +1,1699 @@
+@@ -0,0 +1,1694 @@
 +/*
 + * Copyright © 2024-2026 Gerasim Troeglazov
 + *
@@ -4207,7 +4201,7 @@ index 0000000000..28a1998c54
 +  cubeb_stream_params output_params;
 +  BSoundPlayer * sound_player;
 +  media_raw_audio_format output_format_haiku;
-+  uint64_t output_position;
++  std::atomic<uint64_t> output_position{0};
 +  std::atomic<bool> output_pause;
 +  float output_volume;
 +
@@ -4395,9 +4389,7 @@ index 0000000000..28a1998c54
 +    memset((char *)buffer + offset_bytes, 0, remaining * output_bytes_per_frame);
 +  }
 +
-+  pthread_mutex_lock(&stm->mutex);
-+  stm->output_position += frames_read;
-+  pthread_mutex_unlock(&stm->mutex);
++  stm->output_position.fetch_add(frames_read, std::memory_order_relaxed);
 +
 +  if (stm->output_sem >= B_OK) {
 +    release_sem_etc(stm->output_sem, 1, B_DO_NOT_RESCHEDULE);
@@ -4718,7 +4710,7 @@ index 0000000000..28a1998c54
 +  stm->data_callback = data_callback;
 +  stm->state_callback = state_callback;
 +  stm->output_volume = 1.0f;
-+  stm->output_position = 0;
++  stm->output_position.store(0, std::memory_order_relaxed);
 +  stm->output_pause.store(true);
 +  stm->sound_player = nullptr;
 +  stm->output_ring_buffer = nullptr;
@@ -5161,10 +5153,7 @@ index 0000000000..28a1998c54
 +  if (!stm || !position)
 +    return CUBEB_ERROR_INVALID_PARAMETER;
 +
-+  pthread_mutex_lock(&stm->mutex);
-+  *position = stm->output_position;
-+  pthread_mutex_unlock(&stm->mutex);
-+
++  *position = stm->output_position.load(std::memory_order_relaxed);
 +  return CUBEB_OK;
 +}
 +
@@ -5388,6 +5377,92 @@ index 124908573c..590157cb28 100644
  CFLAGS += CONFIG['MOZ_PULSEAUDIO_CFLAGS']
  
  # We allow warnings for third-party code that can be updated from upstream.
+diff --git a/memory/build/Constants.h b/memory/build/Constants.h
+index 9f79d8ac05..4fcbaff05e 100644
+--- a/memory/build/Constants.h
++++ b/memory/build/Constants.h
+@@ -37,7 +37,7 @@
+ #  define MALLOC_DOUBLE_PURGE
+ #endif
+ 
+-#ifdef XP_WIN
++#if defined(XP_WIN) || defined(XP_HAIKU)
+ #  define MALLOC_DECOMMIT
+ #endif
+ 
+diff --git a/memory/build/malloc_decls.h b/memory/build/malloc_decls.h
+index 342ebc795d..616a69d9fa 100644
+--- a/memory/build/malloc_decls.h
++++ b/memory/build/malloc_decls.h
+@@ -39,7 +39,7 @@
+ // consistent declare certain functions as `throw()`, though.
+ 
+ // Bionic and OS X don't seem to care about `throw()`ness.
+-#  if defined(ANDROID) || defined(XP_DARWIN)
++#  if defined(ANDROID) || defined(XP_DARWIN) || defined(XP_HAIKU)
+ #    undef NOTHROW_MALLOC_DECL
+ #    define NOTHROW_MALLOC_DECL MALLOC_DECL
+ // Some places don't care about the distinction.
+diff --git a/memory/build/mozjemalloc.cpp b/memory/build/mozjemalloc.cpp
+index f1351e96df..9cf5dfad1c 100644
+--- a/memory/build/mozjemalloc.cpp
++++ b/memory/build/mozjemalloc.cpp
+@@ -3491,7 +3491,7 @@ static bool malloc_init_hard() {
+   // Dummy call so that the function is not removed by dead-code elimination
+   Debug::jemalloc_ptr_info(nullptr);
+ 
+-#if !defined(XP_WIN) && !defined(XP_DARWIN)
++#if !defined(XP_WIN) && !defined(XP_DARWIN) && !defined(XP_HAIKU)
+   // Prevent potential deadlock on malloc locks after fork.
+   pthread_atfork(_malloc_prefork, _malloc_postfork_parent,
+                  _malloc_postfork_child);
+@@ -4253,6 +4253,17 @@ void _malloc_postfork_child(void) {
+   gArenas.mLock.Init();
+ }
+ 
++#  ifdef XP_HAIKU
++__attribute__((constructor)) static void mozjemalloc_haiku_register_atfork() {
++  static bool sRegistered = false;
++  if (!sRegistered && malloc_init()) {
++    sRegistered = true;
++    pthread_atfork(_malloc_prefork, _malloc_postfork_parent,
++                   _malloc_postfork_child);
++  }
++}
++#  endif  // XP_HAIKU
++
+ #  ifdef XP_DARWIN
+ FORK_HOOK
+ void _malloc_postfork(void) {
+diff --git a/memory/build/mozmemory_wrap.cpp b/memory/build/mozmemory_wrap.cpp
+index 54d9956b2e..8228c4974f 100644
+--- a/memory/build/mozmemory_wrap.cpp
++++ b/memory/build/mozmemory_wrap.cpp
+@@ -21,6 +21,12 @@
+ #undef strdup
+ 
+ MOZ_MEMORY_API char* strndup_impl(const char* src, size_t len) {
++#ifdef XP_HAIKU
++  if (!src) {
++    return nullptr;
++  }
++  len = strnlen(src, len);
++#endif
+   char* dst = (char*)malloc_impl(len + 1);
+   if (dst) {
+     strncpy(dst, src, len);
+@@ -30,6 +36,11 @@ MOZ_MEMORY_API char* strndup_impl(const char* src, size_t len) {
+ }
+ 
+ MOZ_MEMORY_API char* strdup_impl(const char* src) {
++#ifdef XP_HAIKU
++  if (!src) {
++    return nullptr;
++  }
++#endif
+   size_t len = strlen(src);
+   return strndup_impl(src, len);
+ }
 diff --git a/mfbt/Assertions.h b/mfbt/Assertions.h
 index b26a32f2e3..3a15f62e5b 100644
 --- a/mfbt/Assertions.h
@@ -5442,7 +5517,7 @@ index c5e1d9b454..3a1f82baef 100644
    if (fd < 0) {
      return false;
 diff --git a/modules/libpref/init/StaticPrefList.yaml b/modules/libpref/init/StaticPrefList.yaml
-index 17f9237d1f..e17e3dee5b 100644
+index 4261b6733f..b1e767a8a9 100644
 --- a/modules/libpref/init/StaticPrefList.yaml
 +++ b/modules/libpref/init/StaticPrefList.yaml
 @@ -8065,7 +8065,7 @@
@@ -5562,7 +5637,7 @@ index 17f9237d1f..e17e3dee5b 100644
  # Only GtkTextView (native multiline text viewer/editor) supports "select-all"
  # signal so that we cannot know "select-all" key bindings only with GtkEntry.
  # When this pref is set to true, if a key combination does not cause any
-@@ -21816,6 +21834,8 @@
+@@ -21822,6 +21840,8 @@
    type: bool
  #if defined(XP_MACOSX)
    value: true
@@ -8174,10 +8249,10 @@ index af13050adf..f32fb728b5 100644
    if (!pendingAsyncOperations) {
 diff --git a/toolkit/components/processtools/ProcInfo_haiku.cpp b/toolkit/components/processtools/ProcInfo_haiku.cpp
 new file mode 100644
-index 0000000000..6c0873224a
+index 0000000000..fc93648ee0
 --- /dev/null
 +++ b/toolkit/components/processtools/ProcInfo_haiku.cpp
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,107 @@
 +/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 +/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 +/* This Source Code Form is subject to the terms of the Mozilla Public
@@ -8187,16 +8262,33 @@ index 0000000000..6c0873224a
 +#include "mozilla/ProcInfo.h"
 +
 +#include <kernel/OS.h>
++#include <cstring>
 +
 +namespace mozilla {
 +
 +nsresult GetCurrentProcessMemoryUsage(uint64_t* aResult) {
-+  return NS_ERROR_NOT_IMPLEMENTED;
++  if (!aResult) {
++    return NS_ERROR_INVALID_ARG;
++  }
++
++  uint64_t totalRam = 0;
++  ssize_t cookie = 0;
++  area_info info;
++
++  while (get_next_area_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
++    totalRam += info.ram_size;
++  }
++
++  *aResult = totalRam;
++  return NS_OK;
 +}
 +
 +int GetCycleTimeFrequencyMHz() { return 0; }
 +
 +nsresult GetCpuTimeSinceProcessStartInMs(uint64_t* aResult) {
++  if (!aResult) {
++    return NS_ERROR_INVALID_ARG;
++  }
 +  team_usage_info usage;
 +  if (B_OK != get_team_usage_info(B_CURRENT_TEAM, B_TEAM_USAGE_SELF, &usage)) {
 +    return NS_ERROR_FAILURE;
@@ -8247,12 +8339,13 @@ index 0000000000..6c0873224a
 +    int32 cookie_thread = 0;
 +    thread_info thread;
 +    while (B_OK == get_next_thread_info(request.pid, &cookie_thread, &thread)) {
-+      const bigtime_t microseconds = thread.user_time + thread.kernel_time;
-+      const uint64_t  nanoseconds  = microseconds * 1000;
++      const bigtime_t thread_micros = thread.user_time + thread.kernel_time;
++      const uint64_t  thread_nanos  = thread_micros * 1000;
 +      
 +      ThreadInfo threadInfo;
 +      threadInfo.tid = thread.thread;
-+      threadInfo.cpuTime = nanoseconds;
++      threadInfo.cpuTime = thread_nanos;
++      threadInfo.name.AssignASCII(thread.name, strlen(thread.name));
 +      info.threads.AppendElement(threadInfo);
 +    }
 +    
@@ -8262,7 +8355,6 @@ index 0000000000..6c0873224a
 +    }
 +  }
 +
-+  // ... and we're done!
 +  result.SetResolve(std::move(gathered));
 +  return result;
 +}
@@ -18629,7 +18721,7 @@ index 5aaa7796e1..9e777f77a6 100644
          "nsNativeTheme.cpp",
      ]
 diff --git a/xpcom/base/nsSystemInfo.cpp b/xpcom/base/nsSystemInfo.cpp
-index 64a42ed18f..f2edfe29fd 100644
+index 64a42ed18f..e6c2d32a3d 100644
 --- a/xpcom/base/nsSystemInfo.cpp
 +++ b/xpcom/base/nsSystemInfo.cpp
 @@ -86,6 +86,11 @@
@@ -18702,7 +18794,7 @@ index 64a42ed18f..f2edfe29fd 100644
 +
 +          uint32_t family = cpuInfo.eax_1.family;
 +          uint32_t model = cpuInfo.eax_1.model;
- 
++
 +          if (family == 0xf) {
 +            family += cpuInfo.eax_1.extended_family;
 +          }
@@ -18715,7 +18807,7 @@ index 64a42ed18f..f2edfe29fd 100644
 +        }
 +      }
 +    }
-+
+ 
 +    cpuid_info extInfo;
 +    if (get_cpuid(&extInfo, 0x80000000, 0) == B_OK) {
 +      if (extInfo.eax_0.max_eax >= 0x80000004) {
@@ -18747,7 +18839,24 @@ index 64a42ed18f..f2edfe29fd 100644
  #else
    info.cpuCount = PR_GetNumberOfProcessors();
    if (XRE_IsParentProcess()) {
-@@ -1807,6 +1907,15 @@ nsresult nsSystemInfo::Init() {
+@@ -1559,7 +1659,16 @@ nsresult nsSystemInfo::Init() {
+   SetInt32Property(u"pagesize"_ns, PR_GetPageSize());
+   SetInt32Property(u"pageshift"_ns, PR_GetPageShift());
+   SetInt32Property(u"memmapalign"_ns, PR_GetMemMapAlignment());
++#if defined(XP_HAIKU)
++  uint64_t haikuMemSize = 0;
++  system_info sys;
++  if (get_system_info(&sys) == B_OK) {
++    haikuMemSize = static_cast<uint64_t>(sys.max_pages) * B_PAGE_SIZE;
++  }
++  SetUint64Property(u"memsize"_ns, haikuMemSize > 0 ? haikuMemSize : PR_GetPhysicalMemorySize());
++#else
+   SetUint64Property(u"memsize"_ns, PR_GetPhysicalMemorySize());
++#endif
+   SetUint32Property(u"umask"_ns, nsSystemInfo::gUserUmask);
+ 
+ #ifdef HAVE_64BIT_BUILD
+@@ -1807,6 +1916,15 @@ nsresult nsSystemInfo::Init() {
    }
  #endif  // XP_LINUX && MOZ_SANDBOX
  
