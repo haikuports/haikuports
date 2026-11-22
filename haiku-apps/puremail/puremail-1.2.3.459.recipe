@@ -1,0 +1,134 @@
+SUMMARY="Native Haiku IMAP/SMTP mail client with calendar and address book"
+DESCRIPTION="PureMail is a native mail client for Haiku: parallel IMAP \
+synchronization with an SQLite-backed local index and full text search, \
+copy/move between folders and accounts (drag and drop), drafts, priority and \
+receipt options, an HTML composer and viewer (HTML Component Library engine, \
+spell checking with hunspell), rules, templates, previews of office documents \
+and source code attachments, S/MIME and OpenPGP, a CalDAV calendar with \
+invitations, and an address book with CardDAV integration."
+HOMEPAGE="https://codeberg.org/pmandalian/PureMail"
+COPYRIGHT="2021-2026 Pawel Mandalian"
+LICENSE="MIT"
+REVISION="1"
+srcGitRev="f1328fb10db6499b4b08da7aaf1b32960e204e76"
+SOURCE_URI="$HOMEPAGE/archive/$srcGitRev.tar.gz"
+CHECKSUM_SHA256="b12c6faa2252a72e7ce0ebd907f99e284fa356daa9ad457d61211a79007e82b7"
+SOURCE_DIR="puremail"
+
+ARCHITECTURES="all !x86_gcc2"
+SECONDARY_ARCHITECTURES="x86"
+
+PROVIDES="
+	puremail$secondaryArchSuffix = $portVersion
+	app:PureMail = $portVersion
+	app:PureMailNotifier = $portVersion
+	"
+REQUIRES="
+	haiku$secondaryArchSuffix
+	cmd:curl
+	noto_emoji_color
+	lib:libcrypto$secondaryArchSuffix
+	lib:libfreetype$secondaryArchSuffix
+	harfbuzz$secondaryArchSuffix
+	lib:libhpdf$secondaryArchSuffix
+	lib:libhunspell_1.7$secondaryArchSuffix
+	lib:libicui18n$secondaryArchSuffix
+	lib:libicuuc$secondaryArchSuffix
+	lib:libjpeg$secondaryArchSuffix
+	lib:libopenjp2$secondaryArchSuffix
+	lib:libpng16$secondaryArchSuffix
+	lib:libsqlite3$secondaryArchSuffix
+	lib:libssl$secondaryArchSuffix
+	lib:libz$secondaryArchSuffix
+	"
+
+BUILD_REQUIRES="
+	haiku${secondaryArchSuffix}_devel
+	devel:libcrypto$secondaryArchSuffix
+	devel:libfreetype$secondaryArchSuffix
+	devel:libhpdf$secondaryArchSuffix
+	devel:libhunspell_1.7$secondaryArchSuffix
+	devel:libicui18n$secondaryArchSuffix
+	devel:libicuuc$secondaryArchSuffix
+	devel:libjpeg$secondaryArchSuffix
+	devel:libopenjp2$secondaryArchSuffix
+	devel:libpng16$secondaryArchSuffix
+	devel:libsqlite3$secondaryArchSuffix
+	devel:libssl$secondaryArchSuffix
+	devel:libz$secondaryArchSuffix
+	"
+BUILD_PREREQUIRES="
+	makefile_engine
+	cmd:awk
+	cmd:g++$secondaryArchSuffix
+	cmd:make
+	cmd:mkdepend
+	"
+
+BUILD()
+{
+	v=$(tr -d ' \r\n' < PureMail/VERSION)
+	major=${v%%.*}; rest=${v#*.}
+	middle=${rest%%.*}; rest=${rest#*.}
+	minor=${rest%%.*}; build=${rest#*.}
+	cat > PureMail/src/Version.h <<HEADER
+#ifndef PUREMAIL_VERSION_H
+#define PUREMAIL_VERSION_H
+#define PUREMAIL_VERSION_MAJOR	$major
+#define PUREMAIL_VERSION_MIDDLE	$middle
+#define PUREMAIL_VERSION_MINOR	$minor
+#define PUREMAIL_VERSION_BUILD	$build
+#define PUREMAIL_VERSION_STRING	"$v"
+#define PUREMAIL_VERSION_LONG	"PureMail $v - IMAP/SMTP e-mail client for Haiku"
+#define PUREREADER_VERSION_LONG	"PureReader $v - document reader and editor for Haiku"
+#endif
+HEADER
+
+	rdef=PureMail/PureMail.rdef
+	sed -n 's/^[[:space:]]*"types" = "\([^"]*\)".*/\1/p' $rdef | while read t; do
+		[ -e "/boot/system/data/mime_db/$(echo "$t" | tr 'A-Z' 'a-z')" ] && echo "$t"
+	done > installedTypes || true
+	awk -v keepFile=installedTypes '
+		BEGIN { while ((getline t < keepFile) > 0) keep[t] = 1 }
+		/^resource file_types message/ { block = 1; n = 0; next }
+		block && /"types"/ { split($0, q, "\""); if (q[4] in keep) types[++n] = q[4]; next }
+		block && /^};/ {
+			block = 0
+			if (n > 0) {
+				print "resource file_types message {"
+				for (i = 1; i <= n; i++)
+					printf "\t\"types\" = \"%s\"%s\n", types[i], (i < n ? "," : "")
+				print "};"
+			}
+			next
+		}
+		{ print }' $rdef > $rdef.new
+	mv $rdef.new $rdef
+
+	make -C PureMail $jobArgs OBJ_DIR=objects MIMESET=true
+	make -C PureMail/notifier $jobArgs OBJ_DIR=objects MIMESET=true
+	case "$effectiveTargetArchitecture" in
+		x86|x86_gcc2)
+			;;
+		*)
+			make -C PureMail/addons -f Makefile.send $jobArgs OBJ_DIR=objects-send MIMESET=true
+			make -C PureMail/addons -f Makefile.email $jobArgs OBJ_DIR=objects-email MIMESET=true
+			;;
+	esac
+}
+
+INSTALL()
+{
+	appDir=$appsDir/PureMail
+	mkdir -p $appDir/Translations
+	cp PureMail/objects/PureMail PureMail/notifier/objects/PureMailNotifier $appDir/
+	cp PureMail/SyntaxLanguages.json PureMail/license*.txt $appDir/
+	cp PureMail/Translations/*.txt.po $appDir/Translations/
+	if [ -f PureMail/addons/objects-send/SendWithPureMail ]; then
+		mkdir -p $appDir/add-ons
+		cp PureMail/addons/objects-send/SendWithPureMail "$appDir/add-ons/Send with PureMail"
+		cp PureMail/addons/objects-email/UseAsTextInPureMail \
+			"$appDir/add-ons/Use as text in PureMail"
+	fi
+	addAppDeskbarSymlink $appDir/PureMail
+}
