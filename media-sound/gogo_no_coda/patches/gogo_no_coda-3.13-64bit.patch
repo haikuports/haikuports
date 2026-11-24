@@ -1,0 +1,367 @@
+diff --git a/engine/common.h b/engine/common.h
+index a48b0f8..45c6d50 100644
+--- a/engine/common.h
++++ b/engine/common.h
+@@ -14,6 +14,7 @@
+ #endif
+ 
+ #include <stdio.h>
++#include <stdint.h>
+ #include <stdlib.h>
+ #ifdef __unix__
+ 	#include <unistd.h>
+@@ -34,7 +35,12 @@
+ ////////////////////////////////////////////////////////////
+ 
+ /* 全然一般的でない */
+-#if defined(WIN32) || defined(__linux__) || defined(DOS) || defined(_M_IX86) || defined(__os2__) || defined(_X86_) || defined(__FreeBSD__)
++#if defined(__x86_64__)
++	#define CPU_GENERIC
++	#define MIE_LITTLE_ENDIAN
++#	undef	USE_VECTOR4_FHT
++#	undef	USE_GOGO2_FHT
++#elif defined(WIN32) || defined(__linux__) || defined(DOS) || defined(_M_IX86) || defined(__os2__) || defined(_X86_) || defined(__FreeBSD__)
+ 	#define CPU_I386
+ 	#define MIE_LITTLE_ENDIAN
+ #elif defined(__MWERKS__) || defined(__ppc__)
+diff --git a/engine/generic/cpu.c b/engine/generic/cpu.c
+new file mode 100644
+index 0000000..41a9e90
+--- /dev/null
++++ b/engine/generic/cpu.c
+@@ -0,0 +1,24 @@
++/*
++ *   Copyright(C) 2026 Scott McCreary
++ *   Distributed under the GNU LGPL v2, same as gogo_no_coda.
++ */
++
++#include "../cpu.h"
++#include "../gogo.h"
++#include "../global.h"
++
++/* assume at least an FPU is available */
++int haveUNIT(void)
++{
++	return MU_tFPU;
++}
++
++void initCPU(void){}
++
++void termCPU(void){}
++
++void clkbegin(void){}
++
++void clkend(void){}
++
++void clkput(void){}
+diff --git a/engine/get_audio.c b/engine/get_audio.c
+index c1530e2..ac0f449 100644
+--- a/engine/get_audio.c
++++ b/engine/get_audio.c
+@@ -58,10 +58,12 @@ dist_mfbuf_C(float (*mfbuf)[4][576])
+ 			}
+ 		}else{
+ 			for(i = 0; i < 1152; i++){
+-				*buf_L++ = 0.5*((float)(*fr0++) + (float)(*fr0++));
++				*buf_L++ = 0.5*((float)fr0[0] + (float)fr0[1]);
++				fr0 += 2;
+ 			}
+ 			for(i = 0; i < (BLKSIZE-224-MDCTDELAY)/* 752 */; i++){
+-				*buf_L++ = 0.5*((float)(*fr1++) + (float)(*fr1++));
++				*buf_L++ = 0.5*((float)fr1[0] + (float)fr1[1]);
++				fr1 += 2;
+ 			}
+ 		}
+ 	}else{
+@@ -91,13 +93,16 @@ dist_mfbuf_C(float (*mfbuf)[4][576])
+ 			}
+ 		}else{
+ 			for(i = 0; i < 576; i++){
+-				*buf_L++ = 0.5*((float)(*fr0++) + (float)(*fr0++));
++				*buf_L++ = 0.5*((float)fr0[0] + (float)fr0[1]);
++				fr0 += 2;
+ 			}
+ 			for(i = 0; i < 576; i++){
+-				*buf_L++ = 0.5*((float)(*fr1++) + (float)(*fr1++));
++				*buf_L++ = 0.5*((float)fr1[0] + (float)fr1[1]);
++				fr1 += 2;
+ 			}
+ 			for(i = 0; i < (BLKSIZE-224-MDCTDELAY-576)/* 176 */; i++){
+-				*buf_L++ = 0.5*((float)(*fr2++) + (float)(*fr2++));
++				*buf_L++ = 0.5*((float)fr2[0] + (float)fr2[1]);
++				fr2 += 2;
+ 			}
+ 		}
+ 	}
+diff --git a/engine/gogo.c b/engine/gogo.c
+index 0e447e8..e811714 100644
+--- a/engine/gogo.c
++++ b/engine/gogo.c
+@@ -430,7 +430,7 @@ initializeThread(void)
+ 		if(unaligned == NULL) return ME_NOMEMORY;
+ 
+ 		/* align to 16 byte boundary */
+-		aligned = (void *)(((int)unaligned + 15) & -16);
++		aligned = (void *)(((uintptr_t)unaligned + 15) & -16);
+ 
+ 		/* initialize */
+ 		memset(aligned, 0, sizeof(gogo_thread_data));
+diff --git a/engine/newmdct.c b/engine/newmdct.c
+index 66e7672..a1481dc 100644
+--- a/engine/newmdct.c
++++ b/engine/newmdct.c
+@@ -424,7 +424,7 @@ order[] =
+ 
+ /* enwindow[0]...enwindow[269] を参照する(269=18*15-1) */
+ /* 3000clk@河童, 2600clk@じーおん, 2000clk@明日論 */
+-static void window_subband_sub1_C(const float *x1, float *a)
++void window_subband_sub1_C(const float *x1, float *a)
+ {
+ 	int i;
+ 	const float *x2 = &x1[238 - 14 - 286];/* x2 = &x1[-62] */
+@@ -1334,7 +1334,7 @@ mdct(float (*xr)[576], float (*subband0)[576], float (*subband1)[576], int *bloc
+ {
+ 	int	k, ch, band;
+ 	char work__[18*4+16];
+-	float *work = (float *)((((int)work__) + 15) & ~15);
++	float *work = (float *)((((uintptr_t)work__) + 15) & ~15);
+ 
+ 	for (ch = 0; ch < RO.channels_out; ch++) {
+ 		float *mdct_enc = xr[ch];
+diff --git a/engine/psymodel.c b/engine/psymodel.c
+index e53d2d6..cfedc89 100644
+--- a/engine/psymodel.c
++++ b/engine/psymodel.c
+@@ -446,10 +446,10 @@ void inner_psy_sub3_C( float *eb, float *cb, float *thr )
+ 		th1 = Max(thr[b*4+1], ath);
+ 		th2 = Max(thr[b*4+2], ath);
+ 		th3 = Max(thr[b*4+3], ath);
+-		th0 = (eb[b*4+0]) ? th0 /= eb[b*4+0] : 1.0;
+-		th1 = (eb[b*4+1]) ? th1 /= eb[b*4+1] : 1.0;
+-		th2 = (eb[b*4+2]) ? th2 /= eb[b*4+2] : 1.0;
+-		th3 = (eb[b*4+3]) ? th3 /= eb[b*4+3] : 1.0;
++		th0 = (eb[b*4+0]) ? th0 / eb[b*4+0] : 1.0;
++		th1 = (eb[b*4+1]) ? th1 / eb[b*4+1] : 1.0;
++		th2 = (eb[b*4+2]) ? th2 / eb[b*4+2] : 1.0;
++		th3 = (eb[b*4+3]) ? th3 / eb[b*4+3] : 1.0;
+ 		th0 = Min(th0, 1.0);
+ 		th1 = Min(th1, 1.0);
+ 		th2 = Min(th2, 1.0);
+diff --git a/engine/quantize.c b/engine/quantize.c
+index c4c85fb..24ef1d5 100644
+--- a/engine/quantize.c
++++ b/engine/quantize.c
+@@ -690,7 +690,7 @@ VBR_encode_granule (
+             bst_cod_info = *cod_info;
+             bst_scalefac = *scalefac;
+ 			bst_xrpow_max = xrpow_max;
+-            memcpy(bst_xrpow, xrpow, ixend * sizeof(xrpow));
++            memcpy(bst_xrpow, xrpow, ixend * sizeof(xrpow[0]));
+             memcpy(bst_l3_enc, l3_enc, ixend * sizeof(l3_enc[0]));
+ 
+             /*  try with fewer bits
+diff --git a/engine/setup.c b/engine/setup.c
+index 7cba446..7a41ab9 100644
+--- a/engine/setup.c
++++ b/engine/setup.c
+@@ -9,7 +9,7 @@
+ 
+ #include "cpu.h"
+ 
+-#if   defined(CPU_PPC)
++#if   defined(CPU_PPC) || defined(CPU_GENERIC)
+ 	extern void setup_fft( int unit );
+ 	extern void setup_pow075( int unit );
+ #elif defined(CPU_I386)
+@@ -29,7 +29,7 @@
+ void
+ setupUNIT(int unit)
+ {
+-#if   defined(CPU_PPC)
++#if   defined(CPU_PPC) || defined(CPU_GENERIC)
+ 	setup_fft( unit );
+ 	setup_pow075( unit );
+ #elif defined(CPU_I386)
+diff --git a/engine/tool.c b/engine/tool.c
+index c038e72..f253969 100644
+--- a/engine/tool.c
++++ b/engine/tool.c
+@@ -20,25 +20,25 @@
+ 
+ /* RIFF_DATA_CHUNK */
+ struct CK_RIFF {
+-	long	chunk;				/* "RIFF" */
+-	long	size;				/* sizeof "RIFF" */
++	int		chunk;				/* "RIFF" */
++	int		size;				/* sizeof "RIFF" */
+ } ;
+ 
+ struct CK_FMT {
+-	long	chunk;				/* "WAVE" */
+-	long	form;				/* "fmt " */
+-	long	size;				/* 16 */
++	int		chunk;				/* "WAVE" */
++	int		form;				/* "fmt " */
++	int		size;				/* 16 */
+ 	short	formatID;			/*  1 = RAW WAVE */
+ 	short	num_of_channel;		/* 1 or 2 */
+-	long	freqHz;				/* 44100 etc. */
+-	long	avg_bytes_par_sec;	/* freq * elementsize */
++	int		freqHz;				/* 44100 etc. */
++	int		avg_bytes_par_sec;	/* freq * elementsize */
+ 	short	block_size;			/* byte per element */
+ 	short	bits_par_sample;	/* 16 */
+ } ;
+ 
+ struct CK_DATA {
+-	long	chunk;				/* "DATA" */
+-	long	size;				/* sizeof "DATA" */
++	int		chunk;				/* "DATA" */
++	int		size;				/* sizeof "DATA" */
+ } ;
+ 
+ struct CK_WAVE {
+@@ -61,7 +61,7 @@ int getWaveInfo(unsigned int *size, int *bit, int *freq, int *channel){
+ 	memset(prevbuf, 0, sizeof(prevbuf));
+ 
+ 	do{
+-		memcpy(prevbuf, prevbuf+1, sizeof(prevbuf) - 1);
++		memmove(prevbuf, prevbuf+1, sizeof(prevbuf) - 1);
+ 		if(readData(&prevbuf[sizeof(prevbuf)-1], 1) != 1) return ERR;
+ 	}while(memcmp(prevbuf, "data", 4));
+ 
+diff --git a/engine/vfta.h b/engine/vfta.h
+index 9e88f7e..53092b1 100644
+--- a/engine/vfta.h
++++ b/engine/vfta.h
+@@ -7,7 +7,7 @@
+ 
+ #include "quantize_pvt.h"
+ 
+-#if   defined(CPU_PPC)
++#if   defined(CPU_PPC) || defined(CPU_GENERIC)
+ 	extern void ms_convert_C(FLOAT8* srcl, FLOAT8* srcr, int n);
+ 	#define ms_convert ms_convert_C
+ 	extern void pow075_C(float xr[576], float xrpow[576], float *psum, float *pmax, uint32 *xr_sign);
+diff --git a/file_io/gogo_io.c b/file_io/gogo_io.c
+index 873d18a..aa25bcf 100644
+--- a/file_io/gogo_io.c
++++ b/file_io/gogo_io.c
+@@ -17,6 +17,7 @@
+ #include "vbrtag.h"
+ #include "filehead.h"
+ #include "cpu.h"
++#include "util.h"
+ 
+ #if defined(WIN32) || defined(__os2__)
+  	#define	STR_NOCASECOMP		stricmp
+@@ -424,12 +425,14 @@ MERET open_output_stdout(DEVICE_HANDLE* handle, const char* file_name, IO_DEVICE
+ //	wav 形式入力
+ MERET open_input_wav_format(DEVICE_HANDLE* handle, const char* file_name, PCM_FORMAT* pcm_format, IO_DEVICE_FUNC* read, CLOSE_DEVICE_FUNC* close)
+ {
++	unsigned int size;
+ 	assert(*handle != NULL);
+ 
+-	if (getWaveInfo(&(pcm_format->nSize), &(pcm_format->nBit), &(pcm_format->nFreq), &(pcm_format->nChn)) != NOERR) {
++	if (getWaveInfo(&size, &(pcm_format->nBit), &(pcm_format->nFreq), &(pcm_format->nChn)) != NOERR) {
+ 		return ME_WAVETYPE_ERR;
+ 	}
+ 
++	pcm_format->nSize = size;
+ 	return ME_NOERR;
+ }
+ 
+diff --git a/linux/Makefile b/linux/Makefile
+index 006b9a2..bcfb128 100644
+--- a/linux/Makefile
++++ b/linux/Makefile
+@@ -15,13 +15,21 @@ BINDIR = $(prefix)/bin
+ 
+ #PROF = -g -pg
+ CC   = gcc $(PROF) -pipe -c -I../engine -I../file_io/libsnd 
+-AS   = nasm -i../engine/i386/
+ LD   = gcc
+ MAKECFG = makecfg
+-VPATH = ../engine:../engine/i386:../file_io
++
++MACH := $(shell $(LD) -dumpmachine)
++ifneq ($(findstring x86_64,$(MACH)),)
++    VPATH = ../engine:../engine/generic:../file_io
++    AOBJS = cpu.o
++else
++    VPATH = ../engine:../engine/i386:../file_io
++    AOBJS = clka.o cpua.o cpu.o choose_table.o quantizea.o quant3dn.o vars.o psymodela.o psysse.o psy3dn.o gogo2_fht.o fftsse.o mdctsse.o mdct3dn.o sbandfpu.o sbandsse.o sband3dn.o sbandtbl.o
++    AS   = nasm -i../engine/i386/
++    AFLAGS = -f elf -D__unix__ $(E3DN)
++endif
+ 
+ LDFLAGS = $(PROF)
+-AFLAGS = -f elf -D__unix__ $(E3DN)
+ CFLAGS = -Wall $(PROF) -D__unix__
+ #CFLAGS += -Wpointer-arith -Wshadow -Wwrite-strings -Wconversion -Waggregate-return -Wstrict-prototypes -Wmissing-prototypes -Wmissing-declarations -Wredundant-decls -Wnested-externs
+ 
+@@ -49,8 +57,6 @@ COBJS =	bitstream.o get_audio.o \
+ 	tool.o vbrtag.o \
+ 	main.o gogo_io.o setup.o
+ 
+-AOBJS = clka.o cpua.o cpu.o choose_table.o quantizea.o quant3dn.o vars.o psymodela.o psysse.o psy3dn.o gogo2_fht.o fftsse.o mdctsse.o mdct3dn.o sbandfpu.o sbandsse.o sband3dn.o sbandtbl.o
+-
+ LIBSNDCOBJS = \
+ 	libsnd_io.o \
+ 	au.o \
+@@ -170,4 +176,3 @@ vbrtag.o:	vbrtag.c       config.h global.h common.h gogo.h l3side.h encoder.h ma
+ 
+ main.o:		../main.c common.h gogo.h global.h tool.h cpu.h
+ 	$(CC) $(CFLAGS) -I../engine $< -o $@
+-
+diff --git a/linux/thread.c b/linux/thread.c
+index 8bfbf46..e61eb8e 100644
+--- a/linux/thread.c
++++ b/linux/thread.c
+@@ -14,16 +14,24 @@
+ #if defined(__FreeBSD__)
+ #	include <sys/sysctl.h> // for sysctl
+ #endif
++#if defined(__HAIKU__)
++#	include <unistd.h>
++#endif
+ 
+ int
+ gogo_get_cpu_count(int* pCPUs, int *pTHREADs)
+ {
+ 	int		nCPU = 0;
++#if !defined(__HAIKU__)
+ 	FILE	*cpuinfo;
+ 	char	buffer[256];
++#endif
+ 
+ 	if(*pCPUs == 0){
+ 		/* auto */
++#if defined(__HAIKU__)
++		nCPU = sysconf(_SC_NPROCESSORS_ONLN);
++#else
+ 		if((cpuinfo = fopen("/proc/cpuinfo", "r")) != NULL){
+ 			while(fgets(buffer, sizeof buffer, cpuinfo) != NULL){
+ 				if(memcmp(buffer, "processor", (sizeof "processor") - 1) == 0){
+@@ -42,6 +50,7 @@ gogo_get_cpu_count(int* pCPUs, int *pTHREADs)
+ 			}
+ 			fclose(cpuinfo);
+ 		}
++#endif
+ 		*pCPUs = nCPU <= 1 ? 1 : nCPU;
+ 		*pTHREADs = *pCPUs;
+ #if 0
+diff --git a/main.c b/main.c
+index f98fa71..df26649 100644
+--- a/main.c
++++ b/main.c
+@@ -37,6 +37,9 @@
+ #  define	FALSE 0
+ #endif
+ 
++MERET	init_bench_input(struct MCP_INPDEV_USERFUNC* user_in);
++MERET	init_bench_output(MPGE_USERFUNC* user_out);
++
+ static void usage(void);
+ static void opening(void);
+ static void putConfig(void);
