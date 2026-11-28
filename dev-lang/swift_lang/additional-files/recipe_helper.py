@@ -13,8 +13,8 @@ script_dir = Path(__file__).resolve().parent
 SWIFT_SOURCE_ROOT = Path('/boot/home/src/swift-build/swift-haiku-build/swift').resolve() #script_dir / '../work-5.9/sources/swift'
 # 2. Change the following release/tag name related update-checkout-config.json
 #    to the version of Swift to build.
-RELEASE_NAME_IN_CONFIG = 'release/5.9'
-SWIFT_RELEASE_TAG_NAME = 'swift-5.9.2-RELEASE'
+RELEASE_NAME_IN_CONFIG = 'release/5.10'
+SWIFT_RELEASE_TAG_NAME = 'swift-5.10.1-RELEASE'
 # 3. Run `python3 path/to/recipe_helper.py`
 # 4. Block unused or unsupported dependency if it breaks the build.
 BLOCKLIST = [
@@ -27,33 +27,36 @@ BLOCKLIST = [
 # 5. Update SHA256 checksums if you changed the versions to build.
 SHA256 = {
 	'apple/indexstore-db': '358399fb0f9ecfb75ef83c41cc95756e529d65c867ed445882d5e9f4727aa4df',
-	'apple/llvm-project': '9197f0a60129cc00fe85e85c53bd70ac5ca114b74a9253f9d1f5385032c3a85e',
-	'apple/sourcekit-lsp': '80508b04e2ad168d6ecfbb520e6f8d6bae220329d33faceac775d8b93bf8cdd7',
-	'apple/swift': 'bd7902c8f31868ad58c3dae01d38252c0467071506a5c73f0538cdce974581b1',
-	'apple/swift-cmark': '220849e92440ba3c106736d19e2ea6e2bd92f26a961493c081f7621b03d5a5e1',
-	'apple/swift-corelibs-foundation': '6effbb7d5d73a5abb712268e1d29358491a45b73ee101d2f7ea3794f1ec4909f',
-	'apple/swift-corelibs-libdispatch': '4bbcca5964e6c035aa0afda42f86be496f8bdcc683cd0686f3535e584b06bfdb',
-	'apple/swift-corelibs-xctest': '93ebdfd9b6f485256fad4669970313ae352bf93cc86d7e1fd969ca0162dcb8b5',
-	'apple/swift-docc': 'e5cd5d087eedf98c30a0e3cc3f67da63afcff32ef4e9a9f4db36be8294a6461e',
-	'apple/swift-docc-symbolkit': '74d5f3427ea95632fb820ff81e24332f5832ebfd48d2985406affcaf3691871f',
-	'apple/swift-driver': 'd11564193d30a8c77f2d74fcb3fa5d24c837bd062e559809fa3d3b2c0354e309',
-	'apple/swift-experimental-string-processing': 'f91f4de1e36acb54ce833a0a7f63a8fe3c33ce6e9fbe04a4e0ca807ef024ae35',
-	'apple/swift-format': '1502a99e595c19d0047f7b1eb6bf21807b30842d6232f6e27f4dd54e5d382293',
-	'apple/swift-llbuild': '3487305dc724c957c68dfa833e91dec9cf72f6231ea53478b0c78826d0c01835',
+	'apple/llvm-project': 'de3ac94e93fb4cea9b95212b773e3fd09bf6e702d7a2dab884b089a7a617f658',
+	'apple/sourcekit-lsp': 'ae4cc80ad4a3f83334a1e7894a2d3216ee8d6ea18f53fd9939f1162a8466d12f',
+	'apple/swift': '004d639f0f0d16cdc866f8599efc986bdec01a91b1cf31a06aacb941bf67633d',
+	'apple/swift-cmark': 'c899b76929800af4f3eb4e9ddbcd7bca032e736149e2b22c0f94a4a9466f0696',
+	'apple/swift-corelibs-foundation': '4b144a35a401d042f711a8e1dd888512ab2363d626869973c2a0a5f14d2e059f',
+	'apple/swift-corelibs-libdispatch': '21343f1034b25cefc7a7e9af08189a0863ae466cf77c3c274736be1c8dfde657',
+	'apple/swift-corelibs-xctest': '07f9ca8214f51a81e2a78463bde179d990c6ad47b8ea34907d317638f34a4860',
+	'apple/swift-docc': '8d71a7cbec7785347751d08dd85a3b8be2485dd4717c0e4ffdb6c96facf906eb',
+	'apple/swift-docc-symbolkit': '600c13f09328d20bc4623f1ab2bdea53fd0d1a68b1b5ea6bf0521bf19d071b7e',
+	'apple/swift-driver': '505c8146a01b2d0f07bd4be6c3f7fc4139e013a9dc90c63d4d52509d480cdc85',
+	'apple/swift-experimental-string-processing': '2093c54878d6532740e684c82c64277bcae9da759b640458ec6b1eaf6196edaa',
+	'apple/swift-format': 'fbd36184a549edb94b932ac88f707e89c23956c65e2960db58665cdaa188ddcc',
+	'apple/swift-llbuild': '3dd5c5637d345b48f6050bc1850b15dcbe892c142ee00dca6909876ef40f20cb',
 	'apple/swift-lmdb': '48043a374d9b6b901c56b80e01be9be065f24aa784e8ff7441c54003955052f2',
-	'apple/swift-markdown': '81fe9eb712a0880e706c83166b220399d9a76a0f75a808191c8dda5f5b2ddc70',
-	'apple/swift-package-manager': 'ec77d6240e370d7a2b309a64953562bf8db7bb5647088a69ad7b5e81d0117707',
-	'apple/swift-stress-tester': 'ce29e8b9b60199a9e17abf90ab04de629d69dc5fc49fa3ba97f9599aede8da99',
-	'apple/swift-syntax': 'b76f08e97efd62e62650ebd2422b4fca502082740041c4572b292cc1f4ede135	',
-	'apple/swift-tools-support-core': 'cbfa7d6e2ff080ff9238ed6d3e01368d222137d2e4e5e91b9d7d2e73f86218f0',
-	'apple/swift-argument-parser': '8efd2e7b887d430a6991200ee7b5b1838fb6b594fad1a626915b4dcd3e798816',
-	'apple/swift-asn1': '379869dcc7fe0f2a7bb27f1c7ea4fa253edf9ca52ededa8739f1e114a4a0f49b',
-	'apple/swift-certificates': 'e2c72c81f405e850c6d85c7c8399a16f97b92db9963bbaa37e7e012c5fd1aed3',
-	'apple/swift-collections': '39c7fd6c336579de57b0f9aaf9c6600205f4c1456017293c1fe63ad0f04ca888',
-	'apple/swift-crypto': '1074ee5c25f99e704e14139cb132cfcbcb5834ef598b978070be60057f2dc7c0',
+	'apple/swift-markdown': 'a6af867d6dc5dce116da4982639292b8bbbf873bbb4203f08195d11d0329b5e9',
+	'apple/swift-package-manager': '2a0b97f861e6e2a459f60ae2a948e79722a8737e3f5eb90c478187d6ebab1da4',
+	'apple/swift-stress-tester': '59952334c2299a56ab39c54b0d6ad3bdac5a5c17293344f26619623068c83a64',
+	'apple/swift-syntax': '9be23f477eaf490f50300c6b73498ed4ea2d71bc981735b79e3823eea6e500aa',
+	'apple/swift-tools-support-core': '78f8a0d2a0973511ff4b2afe5ccde63a80bac1fc951752d0c29ba12ba7584f0b',
+	'apple/swift-argument-parser': '0d743740f5c3334d341e7ab21d84743fb6eb29f0c8d1714cc2660e37c6dafa29',
+	'apple/swift-asn1': 'ef64dfd704ffb2647daa5593c01e255353580227254a2573aa3343164253a648',
+	'apple/swift-certificates': '99b9851e8fea9ddba059ce038c42c586f7b5420a835c56d923aa863e5305cadc',
+	'apple/swift-collections': 'e585af81e01cbe76e34ede84c3bd8c59324e88bf082656aaba6b3941c1d90722',
+	'apple/swift-crypto': '2d87a855b0b6f40cef11613da692aa36697646803dd9b25366cce9eddd879d71',
 	'apple/swift-nio': 'ad7dfe035f6b1a019ff3f5a0beb896f3284d2cc0dbe60905bb8ef7a62d4a9535',
 	'apple/swift-system': '8594cd0d701240b140941034a8fd7ca438ddc7ed01c59bc2bd26db5de8e58da4',
 	'jpsim/Yams': '8b85c226bf7db141a853abae576a4966d2b82d0180f63d3da5d91988beac9bf1',
+	'curl/curl': 'b973b0a860c85c7832570c0fb938eb63d31c6c7450925b80ac25b44efa521526',
+	'gnome/libxml2': 'cf2753336207666ed850ba606da4a3eb5f0aad955fa8d225dbb9506316b25319',
+	'madler/zlib': '261f21433160bf1a78770d628c7548afd0e04c0cfaa7c1b2fb30d28aa8c408a3',
 }
 
 def main():
